@@ -97,7 +97,13 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
             "object": "chat.completion",
             "created": 0,
             "model": expected_model,
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '{"passed": true, "reasoning": "test verdict"}'}}],
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": '{"passed": true, "reasoning": "test verdict"}'},
+                }
+            ],
         }
     )
     with TestClient(server.setup_webserver()) as transport:
@@ -130,7 +136,11 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
                 parsed, _ = await resource._binary_call(
                     judge,
                     "Produce the requested artifact.",
-                    {"check_description": "Check it.", "score_1_criteria": "Correct.", "score_0_criteria": "Incorrect."},
+                    {
+                        "check_description": "Check it.",
+                        "score_1_criteria": "Correct.",
+                        "score_0_criteria": "Incorrect.",
+                    },
                     [{"type": "text", "text": "Submitted artifact"}],
                 )
             assert parsed == {"passed": True, "reasoning": "test verdict"}

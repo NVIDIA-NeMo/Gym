@@ -77,8 +77,8 @@ also append either
 `++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=binary`
 or
 `++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=pairwise`.
-Use these config overrides rather than `EXECUTE_ONLY`, `JUDGE_ONLY`, or
-`AA_BRIEFCASE_REWARD_MODE` environment variables.
+Alternatively, set `EXECUTE_ONLY`, `JUDGE_ONLY`, or `AA_BRIEFCASE_REWARD_MODE`
+environment variables. Explicit Gym config overrides take precedence.
 
 Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately,
 alongside their counts and `aa_lite/rows_valid` / `aa_lite/rows_total`. Invalid
@@ -93,3 +93,9 @@ adapter fixes the upstream model. Override the three model names with
 `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
 Claude uses a local 16,384-token output limit in both binary and pairwise judging; AA's judge output budget is
 not disclosed.
+
+Binary judging uses the released AA prompts with an added JSON-format instruction
+on the first call and the existing formatting retry. This is a local formatting
+adaptation, not an exact reproduction of the unpublished AA judging harness.
+SRT support lives in the shared GDPval file reader, so GDPval submissions that
+contain SRT files also include their subtitle text in judge inputs.
