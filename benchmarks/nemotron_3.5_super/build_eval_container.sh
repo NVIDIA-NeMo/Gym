@@ -45,6 +45,8 @@ export UV_LINK_MODE=hardlink
 uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
 uv pip show --system vllm-router
 
+uv pip install --system fastokens==0.3.1
+
 apt-get update
 apt-get install -y --no-install-recommends \
     git
