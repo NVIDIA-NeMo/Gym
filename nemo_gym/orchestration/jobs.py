@@ -38,8 +38,6 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from nemo_gym import __version__
-
 
 SCHEMA_VERSION = 1
 
@@ -88,7 +86,6 @@ class SubmissionRecord(BaseModel):
     submitted_by: str
     benchmarks: list[BenchmarkJob]
     hostname: str | None = None
-    config_path: str | None = None
     schema_version: int = SCHEMA_VERSION
 
     @property
@@ -112,10 +109,6 @@ def new_gym_job_id(now: datetime) -> str:
     second submit silently erases the first's staged scripts.
     """
     return f"gym-job-{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
-
-
-def gym_version() -> str:
-    return __version__
 
 
 def local_index_dir() -> Path:

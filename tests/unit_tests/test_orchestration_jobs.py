@@ -47,7 +47,6 @@ def _record(**overrides) -> SubmissionRecord:
         executor="slurm",
         hostname="login-01",
         submitted_by="wprazuch",
-        config_path="/tmp/submit.yaml",
         benchmarks=[
             BenchmarkJob(
                 benchmark="gsm8k",

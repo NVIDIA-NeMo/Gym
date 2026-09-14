@@ -18,11 +18,6 @@ import functools
 from rich.console import Console
 
 
-# The warning is a diagnostic about the command, not part of its answer, so it
-# belongs on stderr. On stdout it would sit in front of a machine-readable
-# payload -- `gym eval submit --json` is parsed by its callers -- and make the
-# whole stream unparseable. Console resolves `sys.stderr` per write, so
-# redirection in tests and in pipelines still applies.
 _stderr = Console(stderr=True)
 
 

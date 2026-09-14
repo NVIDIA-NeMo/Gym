@@ -20,6 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from nemo_gym import __version__
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
@@ -29,7 +30,6 @@ from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
     SubmissionRecord,
     dumps,
-    gym_version,
     new_gym_job_id,
     utc_timestamp,
     write_local_index,
@@ -218,7 +218,7 @@ class SlurmExecutor(BaseExecutor):
             )
         return SubmissionRecord(
             gym_job_id=gym_job_id,
-            gym_version=gym_version(),
+            gym_version=__version__,
             submitted_at=utc_timestamp(now),
             run_dir=str(remote_run_dir),
             cluster=cluster,

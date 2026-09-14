@@ -143,51 +143,21 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        # Clone outside the working directory, and never `cd` into it. Both
-        # matter, and both were learned from a failed run:
+        # Clone to /tmp rather than the job directory -- a checkout plus its
+        # .venv inside every benchmark's rundir is slow on lustre and noise in
+        # the artifacts -- then `cd` in, because a benchmark's prepare_script
+        # and jsonl_fpath resolve against cwd. Artifacts are unaffected: the
+        # driver's output path is absolute.
         #
-        # * The driver's cwd is the job directory, so cloning here would put a
-        #   second copy of every built-in asset under it. Gym resolves named
-        #   assets against cwd AND the install root, so `--model-type
-        #   openai_model` then matches twice and the run aborts as ambiguous.
-        # * `cd`-ing into the clone and staying there would silently redirect
-        #   every relative output path -- `+output_jsonl_fpath=artifacts/...` --
-        #   into the clone instead of the job directory, which is the same
-        #   artifact loss the container workdir exists to prevent.
-        #
-        # `uv pip install -e <path>` installs from a path, so no `cd` is needed.
+        # `uv venv` rather than `--system`, which takes whatever interpreter is
+        # on PATH and fails when that is older than nemo-gym's requires-python.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            # Clone OUT of the working directory. The driver's cwd is the job
-            # directory, so cloning into it would leave a full Gym checkout plus
-            # its .venv inside every benchmark's rundir on lustre -- slow to
-            # write and noise in the artifacts. /tmp is node-local and the
-            # driver's output path is absolute, so nothing depends on the clone
-            # being reachable afterwards.
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             f'git clone {shlex.quote(repo)} "$GYM_SRC/gym"',
             f'git -C "$GYM_SRC/gym" checkout {shlex.quote(ref)}',
-            # Run from the install root. A benchmark's prepare_script and
-            # jsonl_fpath are relative and resolved against cwd, not through the
-            # install-root search that config_paths gets, so from anywhere else
-            # `gym eval prepare` reports the benchmark as "missing a valid
-            # prepare script" for a file that is right there. A runtime image
-            # bakes no Gym, so without this there is no cwd where it resolves.
-            # It also puts cwd and the install root in the same directory, so a
-            # named asset resolves once rather than ambiguously.
             'cd "$GYM_SRC/gym"',
-            # A real venv, not --system: --system targets whatever
-            # interpreter happens to be on the container's PATH, which
-            # sidesteps uv's own project-aware Python selection entirely --
-            # `uv venv` run inside this checkout instead reads
-            # requires-python from its pyproject.toml and auto-downloads a
-            # satisfying interpreter if the container's own Python doesn't
-            # qualify (e.g. a container shipping Python 3.12 against a
-            # nemo-gym pin requiring >=3.13.14 -- --system fails outright
-            # there, this doesn't). A fresh venv is also never
-            # EXTERNALLY-MANAGED (PEP 668), so this needs no
-            # --break-system-packages override either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             "uv pip install -e .",
