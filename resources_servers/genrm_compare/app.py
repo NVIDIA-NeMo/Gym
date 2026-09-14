@@ -34,11 +34,13 @@ import hashlib
 import json
 import logging
 import time
-import warnings
+from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
+from functools import lru_cache
 from math import isfinite
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -47,19 +49,24 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import (
+    COHORT_FAILURE_MODE_KEY_NAME,
     GROUP_ATTEMPT_KEY_NAME,
     GROUP_ID_KEY_NAME,
+    GROUP_MEMBER_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.judge import JudgeError, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -71,6 +78,11 @@ from resources_servers.genrm_compare.utils import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _warn_legacy_attempt() -> None:
+    logger.warning("GenRM group attempt omitted; treating legacy requests as group attempt zero")
 
 
 class CohortEvaluationError(RuntimeError):
@@ -91,6 +103,8 @@ class _CohortState:
     """Process-local state for one prompt cohort."""
 
     prompt_digest: str
+    key: str = ""
+    failure_kind: Optional[str] = None
     group_id: Optional[str] = None
     group_attempt: int = 0
     members: Dict[int, _CohortMember] = field(default_factory=dict)
@@ -137,6 +151,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
     name: str = "genrm_compare"
     genrm_model_server: ModelServerRef  # Default: genrm_model (see config)
@@ -210,6 +226,8 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     group_id: Optional[str] = Field(default=None, alias=GROUP_ID_KEY_NAME, min_length=1, max_length=256)
     group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0, strict=True)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME, ge=0, strict=True)
+    group_member_index: Optional[int] = Field(default=None, alias=GROUP_MEMBER_INDEX_KEY_NAME, ge=0, strict=True)
+    cohort_failure_mode: Literal["http", "row"] = Field(default="http", alias=COHORT_FAILURE_MODE_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
     @model_validator(mode="before")
@@ -221,12 +239,7 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
         group_id = data.get(GROUP_ID_KEY_NAME, data.get("group_id"))
         has_group_attempt = GROUP_ATTEMPT_KEY_NAME in data or "group_attempt" in data
         if group_id is not None and not has_group_attempt:
-            warnings.warn(
-                f"{GROUP_ATTEMPT_KEY_NAME} was omitted for {GROUP_ID_KEY_NAME}={group_id!r}; "
-                "treating this legacy request as group attempt zero",
-                UserWarning,
-                stacklevel=2,
-            )
+            _warn_legacy_attempt()
         return data
 
 
@@ -237,6 +250,7 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
 
     group_id: Optional[str] = Field(default=None, alias=GROUP_ID_KEY_NAME, min_length=1, max_length=256)
     group_attempt: int = Field(alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
+    group_member_index: Optional[int] = Field(default=None, alias=GROUP_MEMBER_INDEX_KEY_NAME, ge=0, strict=True)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME, ge=0, strict=True)
 
 
@@ -259,8 +273,12 @@ class GenRMCompareResponse(BaseModel):
 def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
     """Convert Response API input messages to conversation_history list of {role, content}."""
     out: List[Dict[str, str]] = []
-    items = list(input_messages) if input_messages else []
+    items = (
+        [{"role": "user", "content": input_messages}] if isinstance(input_messages, str) else input_messages
+    ) or []
     for m in items:
+        if hasattr(m, "model_dump"):
+            m = m.model_dump()
         if isinstance(m, dict):
             role = m.get("role", "user")
             content = m.get("content", "")
@@ -271,7 +289,7 @@ def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
             content = "".join(
                 part.get("text", "")
                 for part in content
-                if isinstance(part, dict) and part.get("type") == "output_text"
+                if isinstance(part, dict) and part.get("type") in ("input_text", "output_text")
             )
         out.append({"role": str(role), "content": str(content)})
     return out
@@ -290,6 +308,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     config: GenRMCompareConfig
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
+    _terminal_cohorts: OrderedDict[str, _CohortState] = PrivateAttr(default_factory=OrderedDict)
+    _group_cohort_counts: Counter[str] = PrivateAttr(default_factory=Counter)
     _cohort_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _closed: bool = PrivateAttr(default=False)
 
@@ -306,16 +326,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cfg.num_rollouts_per_prompt <= 1:
             return self._verify_response(body, cfg.default_score)
         self._validate_logical_coordinates(body)
-        input_messages = list(body.responses_create_params.input or [])
+        input_messages = body.responses_create_params.input or []
         prompt_key = self._get_verify_cohort_key(body, input_messages, body.principle)
         prompt_digest = get_prompt_key_from_input(input_messages, body.principle)
         response_digest = self._response_digest(body.response)
-        index = body.rollout_index
+        index = self._member_index(body)
         assert index is not None
         cohort = self._resolve_verify_cohort(body, prompt_key, prompt_digest)
         self._expire_verify_cohort(cohort)
         if cohort.phase == "failed":
-            raise HTTPException(status_code=503, detail=cohort.failure)
+            self._raise_cohort_failure(body, cohort)
         member = cohort.members.get(index)
         if member is not None:
             if member.response_digest != response_digest:
@@ -337,7 +357,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         member.waiters.append(future)
         if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
             cohort.phase = "evaluating"
-            task = asyncio.create_task(self._evaluate_verify_cohort(cohort), name="genrm-cohort-evaluation")
+            task = asyncio.create_task(
+                self._evaluate_verify_cohort(cohort), name="genrm-cohort-evaluation", context=Context()
+            )
             cohort.evaluation_task = task
             self._cohort_tasks.add(task)
             task.add_done_callback(self._cohort_tasks.discard)
@@ -350,8 +372,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         try:
             reward = await asyncio.shield(future)
-        except CohortEvaluationError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
+        except CohortEvaluationError:
+            self._raise_cohort_failure(body, cohort)
         finally:
             # Only detach this HTTP waiter. The accepted logical answer remains
             # available to its siblings and identical retransmissions until expiry.
@@ -369,16 +391,29 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             group_id=body.group_id,
             group_attempt=body.group_attempt,
             rollout_index=body.rollout_index,
+            group_member_index=body.group_member_index,
         )
 
+    @staticmethod
+    def _member_index(body: GenRMCompareVerifyRequest) -> Optional[int]:
+        return body.group_member_index if body.group_member_index is not None else body.rollout_index
+
+    @staticmethod
+    def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
+        # Only callers that explicitly understand failure rows opt in. RL callers
+        # retain HTTP failures, rather than consuming the failsafe's placeholder reward.
+        if body.cohort_failure_mode == "row":
+            raise JudgeError(cohort.failure, failure_kind=cohort.failure_kind)
+        raise HTTPException(status_code=503, detail=cohort.failure)
+
     def _validate_logical_coordinates(self, body: GenRMCompareVerifyRequest) -> None:
-        if body.task_index is None and not body.group_id:
+        if body.task_index is None and not body.group_id and not body.prompt_id:
             raise HTTPException(
-                status_code=422, detail=f"either {TASK_INDEX_KEY_NAME} or {GROUP_ID_KEY_NAME} is required"
+                status_code=422, detail=f"either {TASK_INDEX_KEY_NAME}, {GROUP_ID_KEY_NAME}, or prompt_id is required"
             )
-        if body.rollout_index is None:
+        if self._member_index(body) is None:
             raise HTTPException(status_code=422, detail=f"{ROLLOUT_INDEX_KEY_NAME} is required")
-        if not 0 <= body.rollout_index < self.config.num_rollouts_per_prompt:
+        if not 0 <= self._member_index(body) < self.config.num_rollouts_per_prompt:
             raise HTTPException(
                 status_code=422,
                 detail=f"{ROLLOUT_INDEX_KEY_NAME} must be in [0, {self.config.num_rollouts_per_prompt})",
@@ -391,7 +426,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         # Legacy task-scoped callers get the same attempt fencing. They must not
         # reuse task indices across concurrent runs on the same server; explicit
         # group ids are the migration path for callers sharing a server.
-        group_id = body.group_id if body.group_id is not None else f"task_idx::{body.task_index}::{prompt_digest}"
+        legacy_id = f"task_idx::{body.task_index}" if body.task_index is not None else f"prompt_id::{body.prompt_id}"
+        group_id = body.group_id if body.group_id is not None else f"{legacy_id}::{prompt_digest}"
         # Prefix the identity so an explicit id cannot collide with a legacy id.
         identity = ("explicit::" if body.group_id is not None else "legacy::") + group_id
         now = time.monotonic()
@@ -419,11 +455,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort is None:
             cohort = _CohortState(
                 prompt_digest=prompt_digest,
+                key=prompt_key,
                 group_id=identity,
                 group_attempt=body.group_attempt,
                 deadline=now + self.config.cohort_timeout_s,
             )
             self._verify_cohorts[prompt_key] = cohort
+            self._group_cohort_counts[identity] += 1
             cohort.timeout_handle = asyncio.get_running_loop().call_later(
                 self.config.cohort_timeout_s, self._expire_verify_cohort, cohort
             )
@@ -447,7 +485,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             return False
         return self._fail_verify_cohort(
             cohort,
-            f"GenRM cohort deadline exceeded with {len(cohort.members)}/{self.config.num_rollouts_per_prompt} members during {cohort.phase}",
+            f"GenRM cohort deadline exceeded with {len(cohort.members)}/"
+            f"{self.config.num_rollouts_per_prompt} members during {cohort.phase}",
             "cohort_incomplete" if cohort.phase == "collecting" else "judge_timeout",
         )
 
@@ -492,12 +531,18 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.phase not in ("collecting", "evaluating"):
             return False
         cohort.failure = message
+        cohort.failure_kind = {
+            "judge_timeout": "transport_timeout",
+            "evaluation_failed": "judge_failed",
+            "superseded": "cancelled",
+        }.get(reason, reason)
         self._finish_verify_cohort(cohort, "failed", reason)
         return True
 
     def _finish_verify_cohort(self, cohort: _CohortState, phase: Literal["completed", "failed"], reason: str) -> None:
         cohort.phase = phase
         cohort.terminal_at = time.monotonic()
+        self._terminal_cohorts[cohort.key] = cohort
         if cohort.timeout_handle is not None:
             cohort.timeout_handle.cancel()
             cohort.timeout_handle = None
@@ -527,20 +572,22 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     def _prune_terminal_cohorts(self) -> None:
         now = time.monotonic()
-        terminal = sorted(
-            ((key, value) for key, value in self._verify_cohorts.items() if value.terminal_at is not None),
-            key=lambda item: item[1].terminal_at,
-        )
-        excess = len(terminal) - self.config.max_terminal_cohorts
-        for position, (key, cohort) in enumerate(terminal):
-            if position < excess or now - cohort.terminal_at >= self.config.cohort_result_ttl_s:
-                self._verify_cohorts.pop(key, None)
-        # Keep the watermark for as long as any retained attempt references it.
-        # In particular, eviction of an old attempt must not un-fence a newer one.
-        retained_ids = {cohort.group_id for cohort in self._verify_cohorts.values()}
-        for identity in list(self._latest_group_attempts):
-            if identity not in retained_ids:
-                self._latest_group_attempts.pop(identity)
+        # Terminal transitions append in monotonic order. Each entry is removed
+        # once; a request within the retention budget only examines the oldest.
+        while self._terminal_cohorts:
+            key, cohort = next(iter(self._terminal_cohorts.items()))
+            if (
+                len(self._terminal_cohorts) <= self.config.max_terminal_cohorts
+                and now - cohort.terminal_at < self.config.cohort_result_ttl_s
+            ):
+                break
+            self._terminal_cohorts.popitem(last=False)
+            self._verify_cohorts.pop(key, None)
+            identity = cohort.group_id
+            self._group_cohort_counts[identity] -= 1
+            if self._group_cohort_counts[identity] == 0:
+                del self._group_cohort_counts[identity]
+                self._latest_group_attempts.pop(identity, None)
 
     async def aclose(self) -> None:
         """Settle waiters and drain owned scoring tasks on server shutdown."""
@@ -550,6 +597,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         await asyncio.gather(*self._cohort_tasks, return_exceptions=True)
         self._verify_cohorts.clear()
         self._latest_group_attempts.clear()
+        self._terminal_cohorts.clear()
+        self._group_cohort_counts.clear()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -721,48 +770,31 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         responses_create_params.input = messages
         responses_create_params.metadata = metadata
 
-        try:
-            # Retry logic for parse failures (not connection errors, which are handled elsewhere)
-            max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
+        async def call():
+            response = await self.server_client.post(
+                server_name=cfg.genrm_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+            )
+            await raise_for_status(response)
+            return await response.json()
 
-            for attempt_idx in range(max_attempts):
-                # Call the GenRM model via /v1/responses endpoint (server name from config, e.g. genrm_model)
-                response = await self.server_client.post(
-                    server_name=cfg.genrm_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
+        max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
+        for attempt_idx in range(max_attempts):
+            raw_response = await reraise_judge_errors(call())
+            genrm_answer = extract_output_text(raw_response)
+            try:
+                return parse_genrm_output(genrm_answer, cfg.default_score, cfg.default_ranking, raise_on_fail=True)
+            except GenRMOutputParseError:
+                if attempt_idx < max_attempts - 1:
+                    await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
+                    continue
+                logger.warning(
+                    "[GenRM] Parse failed for pair %s after %s attempts; falling back to defaults.",
+                    pair_idx,
+                    max_attempts,
                 )
-                raw_response = await response.json()
-
-                # Extract output_text from GenRM response (skip reasoning, only parse the final JSON scores)
-                genrm_answer = extract_output_text(raw_response)
-
-                try:
-                    score_1, score_2, ranking = parse_genrm_output(
-                        genrm_answer,
-                        cfg.default_score,
-                        cfg.default_ranking,
-                        raise_on_fail=True,
-                    )
-                    return score_1, score_2, ranking
-
-                except GenRMOutputParseError:
-                    if attempt_idx < max_attempts - 1:
-                        await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
-                        continue
-
-                    # Give up: fall back to defaults
-                    logger.warning(
-                        f"[GenRM] Parse failed for pair {pair_idx} after {max_attempts} attempts; "
-                        f"falling back to defaults."
-                    )
-                    return cfg.default_score, cfg.default_score, cfg.default_ranking
-
-            return cfg.default_score, cfg.default_score, cfg.default_ranking
-
-        except Exception as e:
-            logger.error(f"[GenRM] Error in comparison for pair {pair_idx}: {e}")
-            return cfg.default_score, cfg.default_score, cfg.default_ranking
+        return cfg.default_score, cfg.default_score, cfg.default_ranking
 
 
 if __name__ == "__main__":

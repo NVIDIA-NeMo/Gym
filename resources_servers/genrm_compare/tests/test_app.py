@@ -243,12 +243,15 @@ class TestGenRMCompareResourcesServer:
 
         assert request.group_attempt == 3
 
-    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self):
+    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self, caplog):
         payload = self._verify_request(0, task_index=None, group_id="legacy-group").model_dump(by_alias=True)
         payload.pop(GROUP_ATTEMPT_KEY_NAME)
 
-        with pytest.warns(UserWarning, match="treating this legacy request as group attempt zero"):
-            request = GenRMCompareVerifyRequest.model_validate(payload)
+        from resources_servers.genrm_compare.app import _warn_legacy_attempt
+
+        _warn_legacy_attempt.cache_clear()
+        request = GenRMCompareVerifyRequest.model_validate(payload)
+        assert "treating legacy requests as group attempt zero" in caplog.text
 
         assert request.group_attempt == 0
 

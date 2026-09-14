@@ -66,6 +66,13 @@ from nemo_gym.rollout_reverification import (
 )
 
 
+@pytest.fixture(autouse=True)
+def non_cohort_global_config(monkeypatch):
+    # These existing tests exercise independent verifiers. GenRM's separate
+    # tests provide its group configuration and exercise the hard guard.
+    monkeypatch.setattr("nemo_gym.rollout_reverification.get_global_config_dict", lambda: {})
+
+
 class TestRolloutReverificationConfig:
     """Field-level validation on RolloutReverificationConfig."""
 
