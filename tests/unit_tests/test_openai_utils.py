@@ -1686,3 +1686,21 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+def test_chat_completion_accepts_provider_specific_service_tier() -> None:
+    """Gateways to Vertex AI or Anthropic answer with service_tier values outside OpenAI's enum."""
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gemini-2.5-flash",
+            "service_tier": "standard",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"},
+            ],
+        }
+    )
+    assert completion.service_tier == "standard"
+    assert completion.choices[0].message.content == "ok"
