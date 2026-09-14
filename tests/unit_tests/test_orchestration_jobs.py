@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
+from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.jobs import (
     SCHEMA_VERSION,
     BenchmarkJob,
@@ -162,6 +163,42 @@ def test_executor_metadata_carries_whatever_an_executor_needs():
         "namespace": "frontier-eval",
         "context": "prod",
     }
+
+
+def test_persist_writes_the_local_index_even_when_the_manifest_fails(tmp_path, monkeypatch: MonkeyPatch):
+    """The ordering is the whole point of persist() living in the base class.
+
+    The index is written before the manifest precisely so that a failed manifest
+    write still leaves a parseable record behind -- the by-hand recovery the
+    error message asks for has to have something to recover from.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    class _Executor(BaseExecutor):
+        def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
+            raise NotImplementedError
+
+    def _explode(path, text):
+        raise OSError("remote is read-only")
+
+    record = _record()
+    with pytest.raises(RuntimeError, match="Record these by hand"):
+        _Executor().persist(record, _explode)
+
+    index = tmp_path / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
+    assert SubmissionRecord.load(json.loads(index.read_text())) == record
+
+
+def test_persist_names_the_queued_jobs_when_the_manifest_fails(tmp_path, monkeypatch: MonkeyPatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    class _Executor(BaseExecutor):
+        def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
+            raise NotImplementedError
+
+    record = _record()
+    with pytest.raises(RuntimeError, match=r"Already queued: .*gsm8k=12345"):
+        _Executor().persist(record, lambda path, text: (_ for _ in ()).throw(OSError("nope")))
 
 
 def test_jobs_module_is_executor_agnostic():

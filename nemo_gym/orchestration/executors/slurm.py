@@ -26,7 +26,6 @@ from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
-    MANIFEST_NAME,
     BenchmarkJob,
     SubmissionRecord,
     new_gym_job_id,
@@ -164,23 +163,10 @@ class SlurmExecutor(BaseExecutor):
                     [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
-                # Best-effort local copy first: it cannot itself fail the submit,
-                # and if the manifest write below fails, this is what preserves a
-                # parseable record for the by-hand recovery that error asks for.
-                record.write_local_index()
-                # Inside the connection: the manifest is the durable copy, and a
-                # run directory without one is the state this all exists to remove.
-                # The jobs are already queued by now, so the error has to name them
-                # or they are stranded with no record anywhere.
-                try:
-                    conn.write_text(remote_run_dir / MANIFEST_NAME, record.dumps())
-                except Exception as error:
-                    queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
-                    raise RuntimeError(
-                        f"Submitted jobs but could not write the manifest to "
-                        f"{remote_run_dir / MANIFEST_NAME}: {error}. "
-                        f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
-                    ) from error
+                # Inside the connection, because that is the transport persist()
+                # needs and reopening one would cost a second connection per
+                # submit. Ordering and failure handling live in the base class.
+                self.persist(record, conn.write_text)
 
         return record
 
