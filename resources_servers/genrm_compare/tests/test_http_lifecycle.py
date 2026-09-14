@@ -8,7 +8,9 @@ Uvicorn shutdown cross real HTTP connections through Gym's ServerClient.
 """
 
 import asyncio
+import json
 import socket
+import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
@@ -60,9 +62,12 @@ async def services(config, monkeypatch):
     # Each test owns the loop and the global client; restore any enclosing fixture.
     monkeypatch.setattr(http, "_GLOBAL_AIOHTTP_CLIENT", None)
     session = http.set_global_aiohttp_client(http.GlobalAIOHTTPAsyncClientConfig())
-    client = http.ServerClient.model_construct(global_config_dict=OmegaConf.create({}))
+    client = http.ServerClient.model_construct(
+        global_config_dict=OmegaConf.create({"agent": {"responses_api_agents": {"simple_agent": {}}}})
+    )
     config.num_rollouts_per_prompt = 4
-    config.cohort_timeout_s = 3
+    config.cohort_collection_timeout_s = 3
+    config.cohort_evaluation_timeout_s = 3
     resource = GenRMCompareResourcesServer(config=config, server_client=client)
     state = SimpleNamespace(
         policy_calls=0, judge_calls=0, judge_status=200, judge_empty=False, judge_release=asyncio.Event()
@@ -140,65 +145,137 @@ async def run(services, index, *, group="group", attempt=0):
 
 
 @pytest.mark.parametrize("judge_failure", [False, True])
-async def test_run_returns_503_without_reward_on_incomplete_or_judge_failure(services, judge_failure):
+async def test_run_fails_without_reward_and_preserves_reason(services, judge_failure):
     if judge_failure:
         services.judge_status = 500
     else:
-        services.resource.config.cohort_timeout_s = 0.05
+        services.resource.config.cohort_collection_timeout_s = 0.05
     results = await asyncio.gather(*(run(services, i) for i in range(4 if judge_failure else 1)))
-    assert all(status == 503 and "reward" not in body for status, body in results)
-    assert all(not c.members and c.phase == "failed" for c in services.resource._verify_cohorts.values())
+    assert all(status == 500 and "reward" not in body for status, body in results)
+    reason = "judge offline" if judge_failure else "did not collect 4 unique rollout indices"
+    if judge_failure:
+        assert all("500" in body for _, body in results)
+    else:
+        assert all(reason in body for _, body in results)
+    assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
 
 
-async def test_empty_http_200_judge_fails_through_run(services):
+async def test_empty_http_200_judge_retries_then_fails_through_run(services):
     services.judge_empty = True
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
-    assert all(status == 503 and "reward" not in body for status, body in results)
+    assert all(status == 500 and "no completed answer after 4 attempts" in body for status, body in results)
+    assert services.judge_calls == 16
 
 
-async def test_run_completion_replay_and_invalid_member_preserve_status(services):
+async def test_run_resampling_conflicts_while_exact_verify_replays(services):
     results = await asyncio.gather(*(run(services, i) for i in (3, 0, 2, 1)))
     assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
     assert [body["_ng_rollout_index"] for _, body in results] == [3, 0, 2, 1]
     assert services.judge_calls == 4
-    assert (await run(services, 0))[0] == 409
-    assert (await run(services, 4, group="invalid"))[0] == 422
+    for _, body in results:
+        response = await services.client.post(server_name="resource", url_path="/verify", json=body)
+        assert response.status == 200 and (await response.json())["reward"] == body["reward"]
+    status, body = await run(services, 0)
+    assert status == 500 and "different response" in body
     assert services.judge_calls == 4
 
 
 @pytest.mark.parametrize("during_judging", [False, True])
-async def test_run_disconnect_fails_group_then_new_attempt_succeeds(services, during_judging):
+async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, during_judging):
     services.judge_release.clear()
-    count = 3 if during_judging else 1
-    requests = [asyncio.create_task(run(services, i)) for i in range(count)]
+    payloads = []
+    for i in range(4):
+        body = member(i).model_dump(mode="json", by_alias=True)
+        policy = await services.client.post(server_name="policy", url_path="/v1/responses", json={})
+        body["response"] = await policy.json()
+        payloads.append(body)
+
+    async def verify(i):
+        response = await services.client.post(server_name="resource", url_path="/verify", json=payloads[i])
+        return response.status, await response.json()
+
+    count = 4 if during_judging else 1
+    requests = [asyncio.create_task(verify(i)) for i in range(count)]
     await until(lambda: any(len(c.members) == count for c in services.resource._verify_cohorts.values()))
     if during_judging:
-        await until(lambda: services.judge_calls > 0)
+        await until(lambda: services.judge_calls == 4)
     old = next(iter(services.resource._verify_cohorts.values()))
     requests[0].cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await requests[0]
-    await until(lambda: old.phase == "failed")
-    assert all(status == 503 for status, _ in await asyncio.gather(*requests[1:]))
-    # A transport retry of /run generates another answer. It must not be judged
-    # against abandoned answers or keep its siblings waiting for the deadline.
-    previous_policy_calls = services.policy_calls
-    assert (await run(services, 0))[0] == 503
-    assert services.policy_calls == previous_policy_calls + 1
-    assert not old.members and not old.rewards
+    await asyncio.gather(requests[0], return_exceptions=True)
+    await until(lambda: not old.members[0].waiters)
+    assert old.phase in ("collecting", "evaluating") and old.members[0].body is not None
+    requests[0] = asyncio.create_task(verify(0))
+    requests += [asyncio.create_task(verify(i)) for i in range(count, 4)]
     services.judge_release.set()
-    results = await asyncio.gather(*(run(services, i, attempt=1) for i in range(4)))
+    results = await asyncio.gather(*requests)
     assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
+    assert services.policy_calls == services.judge_calls == 4
+
+
+async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    # Keep the unlistening port reserved so another service cannot reuse it.
+    services.client._server_base_urls["judge"] = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    try:
+        started = time.monotonic()
+        results = await asyncio.gather(*(run(services, i) for i in range(4)))
+        assert time.monotonic() - started < 2
+        assert all(status == 500 and "TimeoutError" in body for status, body in results)
+    finally:
+        sock.close()
 
 
 async def test_production_graceful_shutdown_releases_active_state(services):
     services.judge_release.clear()
-    requests = [asyncio.create_task(run(services, i)) for i in range(3)]
+    requests = [asyncio.create_task(run(services, i)) for i in range(4)]
     await until(lambda: services.judge_calls > 0)
     services.resource_http_server.should_exit = True
     await asyncio.wait_for(services.resource_http_task, 3)
-    # Uvicorn cancels handlers after its production 0.5s grace, before lifespan
-    # cleanup. The connections can fail, but none may receive a successful score.
     results = await asyncio.wait_for(asyncio.gather(*requests, return_exceptions=True), 3)
     assert all(isinstance(result, Exception) or result[0] >= 500 for result in results)
     assert not services.resource._verify_cohorts and not services.resource._cohort_tasks
+
+
+@pytest.mark.parametrize("judge_failure", [False, True])
+async def test_collector_saves_actual_cohort_failure_class_and_reason(services, tmp_path, monkeypatch, judge_failure):
+    import nemo_gym.rollout_collection as collection
+
+    monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
+    # Use the real collector, agent, resource and aggregate endpoints. Only the
+    # config/head-server discovery is replaced by the fixture's bound addresses.
+    body = member(0).model_dump(mode="json", by_alias=True)
+    del body["response"]
+    body["agent_ref"] = {"name": "agent"}
+    input_path, output_path = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
+    input_path.write_text(json.dumps(body) + "\n")
+    if judge_failure:
+        services.judge_status = 500
+    else:
+        services.resource.config.cohort_collection_timeout_s = 0.05
+    config = collection.RolloutCollectionConfig(
+        input_jsonl_fpath=str(input_path),
+        output_jsonl_fpath=str(output_path),
+        num_repeats=4 if judge_failure else 1,
+        num_samples_in_parallel=4,
+        route_failures_to_sidecar=True,
+        disable_health_check=True,
+        count_failure_classes_as_zero=["agent_run_error"],
+    )
+    with pytest.raises(RuntimeError, match="produced a result"):
+        await collection.RolloutCollectionHelper().run_from_config(config)
+    assert not output_path.read_text().strip()
+    failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    assert len(failures) == (4 if judge_failure else 1)
+    for row in failures:
+        assert row["_ng_failure_class"] == "agent_run_error"
+        assert row["_ng_failure_http_status"] == 500
+        assert "reward" not in row and "response" not in row
+        assert row["_ng_group_id"] == "group"
+        assert (
+            "evaluation failed" in row["_ng_failure_response_body"]
+            if judge_failure
+            else "did not collect" in row["_ng_failure_response_body"]
+        )
+    assert not (tmp_path / "output_aggregate_metrics.json").exists()

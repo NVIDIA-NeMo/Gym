@@ -25,17 +25,20 @@ genrm_compare_resources_server:
         type: responses_api_models
         name: genrm_model
       
-      # The caller supplies this many identified members per group and enough concurrency
-      # to let them all reach verification. Comparisons overlap generation; rewards
-      # are published only after every member and comparison finishes.
+      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
+      # When > 1, every task needs a fresh _ng_group_id shared by exactly this many members.
+      # Use local _ng_rollout_index slots 0..15 and enough concurrency to admit the whole group.
       num_rollouts_per_prompt: 16
 
-      # Absolute deadline from the first /verify arrival through reward publication.
-      # Increase for long rollouts; incomplete groups fail without a reward.
-      cohort_timeout_s: 1800
+      # Separate finite deadlines: collection starts at first arrival; evaluation
+      # starts only when all members are present. Increase for long tool rollouts.
+      cohort_collection_timeout_s: 1800
+      cohort_evaluation_timeout_s: 1800
+      # Includes the HTTP client's connection retries for each judge call.
+      judge_request_timeout_s: 300
 
-      # Retain compact terminal dispositions for bounded duplicate/stale-attempt rejection.
-      # No answers or rewards are cached; fencing across eviction/restart belongs to the caller.
+      # Retain compact rewards/digests for idempotent late retries. The cache is also
+      # bounded, so disabling the TTL does not make terminal state unbounded.
       cohort_result_ttl_s: 21600
       max_terminal_cohorts: 4096
       

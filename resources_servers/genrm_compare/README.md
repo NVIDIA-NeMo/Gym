@@ -236,8 +236,9 @@ Compare multiple candidate responses.
 ### POST `/verify`
 
 Cohort verification requires caller-owned group and member identities and a finite deadline.
-Comparisons start as answers arrive; rewards are published only for a complete group. Missing members,
-judge failures, or loss of a member's last waiter fail the group with HTTP 503 and no reward.
+Comparisons start after every member arrives; rewards are published only for a complete group. Missing
+members or failed judging end the group with HTTP 503 and no reward. A disconnect detaches its waiter;
+the same answer can reattach or receive its cached reward after completion.
 The caller coordinates complete replacement attempts; collector scheduling and resume are unchanged.
 
 See [GenRM Comparison Groups](../../fern/versions/latest/pages/evaluation/genrm-cohorts.mdx) for

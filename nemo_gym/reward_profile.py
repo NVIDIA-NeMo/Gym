@@ -38,7 +38,6 @@ from nemo_gym.global_config import (
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
     CI_LOW_95_PREFIX,
     GROUP_ATTEMPT_KEY_NAME,
-    GROUP_MEMBER_INDEX_KEY_NAME,
     HISTOGRAM_STAT_NAME,
     MAX_ACROSS_REPEATS_PREFIX,
     MAX_PREFIX,
@@ -193,7 +192,6 @@ class RewardProfiler:
                 TASK_INDEX_KEY_NAME,
                 ROLLOUT_INDEX_KEY_NAME,
                 GROUP_ATTEMPT_KEY_NAME,
-                GROUP_MEMBER_INDEX_KEY_NAME,
                 "reward",
                 "response",
             }:
@@ -434,7 +432,7 @@ class RewardProfiler:
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
-                if k in {GROUP_ATTEMPT_KEY_NAME, GROUP_MEMBER_INDEX_KEY_NAME}:
+                if k == GROUP_ATTEMPT_KEY_NAME:
                     continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)

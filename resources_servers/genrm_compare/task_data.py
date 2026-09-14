@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the genrm_compare server.
 
-Task-owned data contains the optional provenance label ``dataset``. Cohort verification
-also requires caller-owned identity: a group ID, task index or prompt_id, and a member
-slot. Callers supply group IDs, shared attempts and local member indices; the existing
-rollout index is a fallback when it already identifies a slot within this group.
-Anonymous prompt-only verification is unsupported because transport retries cannot be counted as new group members.
-These wire fields remain on ``GenRMCompareVerifyRequest``; see the GenRM cohort guide
-for the distinction between a global rollout index and a comparison-group slot.
+Task-owned data contains the optional provenance label ``dataset``. Multi-member
+verification also requires caller-owned ``_ng_group_id`` and ``_ng_rollout_index``
+coordinates. The group ID must distinguish runs and prompt occurrences; rollout
+indices are local group slots 0..N-1. A shared ``_ng_group_attempt`` distinguishes
+replacement groups and defaults to zero. Prompt/task labels alone cannot isolate
+independent runs. See the GenRM cohort guide for the wire contract and migration.
 """
 
 from typing import Optional

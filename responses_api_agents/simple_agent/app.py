@@ -17,8 +17,7 @@ from collections.abc import Mapping
 from time import perf_counter, time
 from typing import Any, List
 
-from aiohttp import ClientResponseError
-from fastapi import HTTPException, Request, Response
+from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -341,10 +340,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 json=verify_request.model_dump(),
                 cookies=cookies,
             )
-            try:
-                await raise_for_status(verify_response)
-            except ClientResponseError as error:
-                raise HTTPException(status_code=error.status, detail="Resources server verification failed") from error
+            await raise_for_status(verify_response)
             result = await get_response_json(verify_response)
         if trajectory is not None:
             resolved = result.get("resolved")

@@ -33,7 +33,10 @@ def config():
         genrm_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         num_rollouts_per_prompt=2,
-        cohort_timeout_s=1.0,
+        cohort_collection_timeout_s=1.0,
+        cohort_evaluation_timeout_s=1.0,
+        judge_request_timeout_s=0.2,
+        genrm_parse_retry_sleep_s=0,
     )
 
 
@@ -42,3 +45,19 @@ async def server(config):
     server = genrm.GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
     yield server
     await server.aclose()
+
+
+@pytest.fixture(autouse=True)
+async def close_owned_cohorts(monkeypatch):
+    """Legacy tests construct servers directly; close every server that owned tasks."""
+    owners = {}
+    own_task = genrm.GenRMCompareResourcesServer._own_task
+
+    def track(self, *args, **kwargs):
+        owners[id(self)] = self
+        return own_task(self, *args, **kwargs)
+
+    monkeypatch.setattr(genrm.GenRMCompareResourcesServer, "_own_task", track)
+    yield
+    for server in owners.values():
+        await server.aclose()

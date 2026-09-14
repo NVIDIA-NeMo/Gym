@@ -57,6 +57,8 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -1393,6 +1395,10 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if GROUP_ID_KEY_NAME in row:
+                result[GROUP_ID_KEY_NAME] = row[GROUP_ID_KEY_NAME]
+            if GROUP_ATTEMPT_KEY_NAME in row:
+                result[GROUP_ATTEMPT_KEY_NAME] = row[GROUP_ATTEMPT_KEY_NAME]
             if TASK_SOURCE_KEY_NAME in row:
                 result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:

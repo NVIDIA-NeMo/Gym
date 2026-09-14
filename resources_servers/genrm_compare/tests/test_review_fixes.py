@@ -59,9 +59,8 @@ async def test_unsuccessful_http_200_judge_is_failure(server, payload):
     server.server_client.post = AsyncMock(return_value=response)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
     assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
-    with pytest.raises(HTTPException) as error:
+    with pytest.raises(genrm.JudgeError):
         await server.compare(genrm.GenRMCompareRequest(conversation_history=[], response_objs=[{}, {}]))
-    assert error.value.status_code == 503
 
 
 @pytest.mark.parametrize("recovers", [False, True])
@@ -82,11 +81,11 @@ async def test_nonempty_parse_retries_preserve_existing_fallback(server, recover
     assert server.server_client.post.await_count == 2
 
 
-async def test_global_rollout_indices_and_local_slots_are_separate(server):
+async def test_group_attempt_metadata_is_not_a_reward_metric(server):
     server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
-    rows = [member(16 + i).model_copy(update={"group_member_index": i}) for i in range(2)]
+    rows = [member(i, attempt=2) for i in range(2)]
     results = await asyncio.gather(*(server.verify(row) for row in reversed(rows)))
-    assert [r.rollout_index for r in results] == [17, 16]
+    assert [r.rollout_index for r in results] == [1, 0]
     assert [r.reward for r in results] == [3.0, 3.0]
     for result in results:
         data = result.model_dump(by_alias=True) | {"_ng_task_index": 0}
@@ -94,11 +93,15 @@ async def test_global_rollout_indices_and_local_slots_are_separate(server):
         assert "_ng_group_member_index" not in metrics and "_ng_group_attempt" not in metrics
 
 
-async def test_prompt_id_with_member_slots_remains_supported(server):
+async def test_legacy_task_or_prompt_identity_fails_before_registration(server):
     server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
     rows = [member(i).model_copy(update={"group_id": None, "prompt_id": "legacy-prompt"}) for i in range(2)]
-    results = await asyncio.gather(*(server.verify(row) for row in rows))
-    assert [result.reward for result in results] == [3.0, 3.0]
+    for row in rows:
+        with pytest.raises(HTTPException) as error:
+            await server.verify(row)
+        assert error.value.status_code == 422
+        assert "unique across runs" in error.value.detail
+    assert not server._verify_cohorts
 
 
 @pytest.mark.parametrize(
@@ -164,3 +167,48 @@ async def test_batch_compare_returns_pair_metadata_and_cancels_failed_siblings(s
     with pytest.raises(ValueError, match="pair failed"):
         await server._run_compare([], [{}, {}])
     assert cancelled.is_set()
+
+
+@pytest.mark.parametrize("first", ["empty", "incomplete"])
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_empty_or_incomplete_judge_uses_configured_retries(server, first, recovers):
+    server.config.genrm_parse_retries = 1
+    valid = {
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}]}
+        ]
+    }
+    failed = {"output": []} if first == "empty" else valid | {"status": "incomplete"}
+    response = MagicMock(ok=True)
+    response.json = AsyncMock(side_effect=[failed, valid if recovers else failed])
+    server.server_client.post = AsyncMock(return_value=response)
+    if recovers:
+        assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    else:
+        with pytest.raises(genrm.JudgeError, match="after 2 attempts"):
+            await server._run_single_comparison([], {}, {})
+    assert server.server_client.post.await_count == 2
+
+
+def test_reasoning_is_not_a_fake_user_message():
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"type": "reasoning", "id": "r", "summary": []},
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Earlier answer", "annotations": []}],
+                "type": "message",
+                "id": "a",
+                "status": "completed",
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "Follow up"}]},
+        ]
+    )
+    assert genrm._input_to_conversation_history(params.input) == [
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "Follow up"},
+    ]
+
+
+def test_response_digest_accepts_surrogates():
+    assert genrm.GenRMCompareResourcesServer._response_digest({"text": "\ud800"})
