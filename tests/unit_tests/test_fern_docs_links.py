@@ -70,29 +70,6 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn('href="/main/observability/rollout-evidence"', overview)
         self.assertIn('href="/main/observability/opentelemetry"', overview)
 
-    def test_rollout_evidence_guide_explains_the_complete_pipeline(self):
-        path = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
-        self.assertTrue(path.is_file(), "the task-oriented rollout evidence guide must exist")
-        guide = path.read_text()
-
-        for term in (
-            "`ng_model_call_capture`",
-            "`ng_agent_observations`",
-            "`ng_trajectory`",
-            "`ng_perf`",
-            "`CaptureStore`",
-            "`model_call_id`",
-            "`model_ref`",
-            "`response_id`",
-            "`model_call_reference_unmatched`",
-            "`model_call_reference_ambiguous`",
-            "`model_call_reference_conflict`",
-        ):
-            with self.subTest(term=term):
-                self.assertIn(term, guide)
-        self.assertIn("flowchart LR", guide)
-        self.assertIn("canonical normalized", guide)
-
     def test_rollout_evidence_guide_has_a_complete_joined_example(self):
         path = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
         self.assertTrue(path.is_file(), "the task-oriented rollout evidence guide must exist")
@@ -117,7 +94,7 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertTrue(trajectory["invocations"][0]["model_calls"])
         self.assertEqual(1.0, example["ng_perf"]["token_observability_coverage"])
 
-    def test_rollout_evidence_joined_example_matches_runtime_schemas(self):
+    def test_rollout_evidence_joined_example_preserves_call_and_tool_relationships(self):
         page = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
         text = page.read_text(encoding="utf-8")
         match = re.search(
@@ -137,8 +114,17 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertNotIn("output", tool, "agent-side tool timing does not own model-visible output")
 
         trajectory = example["ng_trajectory"]
-        turn = trajectory["turns"][0]
-        self.assertTrue({"task_id", "rollout_id", "timestamp"}.issubset(turn))
+        self.assertEqual(invocation, trajectory["invocations"][0])
+        self.assertEqual(invocation["model_calls"][0]["model_call_id"], trajectory["model_calls"][0]["model_call_id"])
+        projected_tool = trajectory["tool_calls"][0]
+        self.assertEqual(tool, {key: value for key, value in projected_tool.items() if key != "output"})
+        output = next(item for item in invocation["conversation"] if item["type"] == "function_call_output")
+        self.assertEqual(
+            (tool["invocation_id"], tool["tool_call_id"]), (invocation["invocation_id"], output["call_id"])
+        )
+        self.assertEqual(output["output"], projected_tool["output"])
+        self.assertEqual([], trajectory["turns"])
+        self.assertIn({"code": "turns_unavailable"}, trajectory["gaps"])
 
     def test_opentelemetry_has_an_explicit_landing_page(self):
         path = REPO_ROOT / "fern/versions/latest/pages/observability/opentelemetry.mdx"

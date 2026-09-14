@@ -1,49 +1,28 @@
 ---
 title: "Observability"
-description: "Choose between persisted rollout evidence and OpenTelemetry operational signals"
+description: "Collect rollout evidence and monitor Gym services."
 position: 1
 ---
 
-# Observability
+NeMo Gym provides two independent observability features:
 
-NeMo Gym has two complementary observability families. **Rollout evidence** explains what an
-agent and its models did in one saved evaluation attempt. **OpenTelemetry** explains how the
-distributed Gym services behaved while they ran. Enable either family independently according to
-the question you need to answer.
+| Feature | Use it to | Enable with |
+| --- | --- | --- |
+| Rollout evidence | Inspect model calls, agent activity, and saved trajectory health | `observability_enabled` and `model_call_capture_dir` |
+| OpenTelemetry | Trace requests across services and monitor runtime metrics and logs | `telemetry.enabled` or `NEMO_GYM_OTEL_ENABLED=1` |
 
-```mermaid
-flowchart LR
-    R[Evaluation rollout]
-    R -->|persisted artifacts| E[Rollout evidence]
-    R -->|runtime signals| O[OpenTelemetry]
-    E --> T[Calls, turns, tools, gaps, and ng_perf]
-    O --> S[Traces, metrics, and correlated logs]
-    T --> Q[Debug result quality and verify evidence]
-    S --> P[Debug latency, failures, and service behavior]
-```
+Each feature has its own configuration. You can enable either or both.
 
-| If you need to answer... | Use | Enable with | Primary output |
-| --- | --- | --- | --- |
-| Which model calls and tools produced this rollout? Is its evidence complete? | Rollout evidence | `observability_enabled: true` and `model_call_capture_dir` | Attachments in rollout JSONL plus raw `CaptureStore` files |
-| Which service was slow or failed? How did a request cross processes? | OpenTelemetry | `telemetry.enabled: true` or `NEMO_GYM_OTEL_ENABLED=1` | Traces, metrics, and optional logs in an OTLP backend or console |
-
-<Note>
-The switches and outputs are separate. Enabling `telemetry.enabled` does not create rollout
-attachments, and enabling `observability_enabled` does not export OpenTelemetry signals.
-</Note>
-
-## Choose a path
+## Get Started
 
 <Cards>
 
-<Card title="Rollout evidence" href="/main/observability/rollout-evidence">
-Follow evidence from model-call capture and agent observations into `ng_trajectory`, `ng_perf`, and
-rollout health checks.
+<Card title="Rollout Evidence" href="/main/observability/rollout-evidence">
+Collect and inspect model-call capture, agent observations, and normalized trajectories.
 </Card>
 
 <Card title="OpenTelemetry" href="/main/observability/opentelemetry">
-Trace requests across Gym services, export runtime metrics, and correlate application logs with
-`nemo-lens`.
+Export distributed traces, metrics, and correlated logs through nemo-lens.
 </Card>
 
 </Cards>

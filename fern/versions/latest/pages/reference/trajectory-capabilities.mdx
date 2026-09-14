@@ -1,146 +1,103 @@
 ---
-title: "Trajectory capability matrix"
-description: "Evaluated rollout-evidence coverage by producer and execution path"
+title: "Trajectory Capability Matrix"
+description: "Rollout-evidence coverage by agent and execution path."
 position: 5
 ---
 
-# Trajectory capability matrix
+Use this reference to check which evidence an agent path provides. Start with
+[Rollout Evidence](/main/observability/rollout-evidence) for collection and artifact relationships.
 
-This matrix is a status snapshot of evidence emitted by current agent paths, not a list of fields
-that the schema could theoretically represent. Coverage is path-dependent: an agent can route some
-requests through a Gym model server and others directly to a provider.
+**Full** means complete for the documented path; **Partial** means some fields or paths are missing;
+**Unavailable** means the path does not supply that evidence. These are manually maintained coverage
+claims, not guarantees for every configuration.
 
-For the data flow, source-of-truth rules, and join behavior, start with
-[Rollout evidence](/main/observability/rollout-evidence).
+<Note>
+The statuses below retain the coverage reported in [main at 1e668906](https://github.com/NVIDIA-NeMo/Gym/blob/1e668906d2e69a9e8ee9aaafc60050a4025d9688/fern/versions/latest/pages/reference/trajectory-capabilities.mdx).
+That source does not record a full runtime-validation date or per-row test configuration.
+Contributors changing an agent should update its row with the config, execution path, and validation
+evidence in the same pull request.
+</Note>
 
-## How to read the tables
+## Model Calls and History
 
-| Status | Meaning |
-| --- | --- |
-| **Full** | Complete for the evaluated path under the documented observability configuration |
-| **Partial** | Some executions or fields are captured; inspect configuration and `ng_trajectory.gaps` before relying on them |
-| **Unavailable** | The evaluated producer path does not currently supply this evidence |
+Capture requires `observability_enabled`, a shared `model_call_capture_dir`, and a rollout-prefixed
+Gym Model Server URL. Direct-provider routes bypass capture. Token counts depend on provider usage
+fields. History may come from captured payloads or harness conversations.
 
-Model-server evidence requires `observability_enabled: true`, a shared
-`model_call_capture_dir`, and calls routed through a `/ng-rollout/<rollout_id>` Gym model-server
-prefix. Direct-provider calls bypass that boundary. Token fields are nullable because providers do
-not all report the same usage details.
+| Agent | Per-call metadata | Token counts | Model-visible history |
+| --- | --- | --- | --- |
+| `anyswe_agent` | Unavailable | Unavailable | Unavailable |
+| `anyterminal_agent` | Full | Full | Full |
+| `aviary_agent` | Full | Full | Full |
+| `browsecomp_agent` | Full | Full | Full |
+| `claude_code_agent` | Full | Full | Full |
+| `cline_agent` | Full | Full | Full |
+| `codex_agent` | Full | Full | Full |
+| `critpt_agent` | Full | Full | Full |
+| `cvdp_agent` | Partial | Partial | Partial |
+| `finance_agent` | Unavailable | Partial | Unavailable |
+| `gymnasium_agent` | Full | Full | Full |
+| `harbor_agent` | Unavailable | Unavailable | Unavailable |
+| `hermes_agent` | Full | Full | Full |
+| `kilocode_agent` | Full | Full | Full |
+| `labbench2_vlm_agent` | Full | Full | Partial |
+| `langgraph_agent` | Unavailable | Unavailable | Unavailable |
+| `mini_swe_agent` | Unavailable | Unavailable | Unavailable |
+| `mini_swe_agent_2` | Full | Full | Full |
+| `non_executing_simple_agent` | Full | Full | Full |
+| `openclaw_agent` | Full | Full | Partial |
+| `opencode_agent` | Full | Full | Full |
+| `opencode_sandboxed_agent` | Full | Full | Full |
+| `osworld_agent` | Partial | Partial | Partial |
+| `pi_agent` | Full | Full | Full |
+| `proof_refinement_agent` | Full | Full | Full |
+| `remote_agent` | Unavailable | Partial | Unavailable |
+| `scicode_agent` | Unavailable | Unavailable | Unavailable |
+| `simple_agent` | Full | Full | Full |
+| `speed_bench_agent` | Full | Full | Full |
+| `stirrup_agent` | Partial | Partial | Partial |
+| `swe_agents` / OpenCode (legacy) | Full | Full | Full |
+| `swe_agents` / OpenHands (legacy) | Unavailable | Unavailable | Partial |
+| `tau2` | Full | Full | Full |
+| `tool_simulation_agent` | Full | Full | Full |
+| `toolsandbox_agent` | Full | Full | Full |
+| `verifiers_agent` | Unavailable | Unavailable | Unavailable |
 
-Agent-side evidence is emitted by harness integrations. Model HTTP capture alone cannot establish
-semantic turns, tool execution timing, parallel-tool relationships, or sandbox structure.
+## Agent Activity
 
-## Model-server evidence
+Turns require explicit semantic-turn records. Tool execution covers output, status, and timestamps;
+parallel timing requires independent tool intervals. Resource/sandbox coverage means that the
+benchmark path emits standardized agent evidence, not that every resource metric is available.
 
-**Calls and tokens** covers response metadata plus prompt, completion, reasoning, total, and cached
-token counts when the provider reports them. **Model-visible history** means request and response
-history can be reconstructed from persisted rollout evidence.
-
-| Agent | Calls and tokens | Model-visible history |
-| --- | --- | --- |
-| `anyswe_agent` | Unavailable | Unavailable |
-| `anyterminal_agent` | Full | Full |
-| `aviary_agent` | Full | Full |
-| `browsecomp_agent` | Full | Full |
-| `claude_code_agent` | Full | Full |
-| `cline_agent` | Full | Full |
-| `codex_agent` | Full | Full |
-| `critpt_agent` | Full | Full |
-| `cvdp_agent` | Partial | Partial |
-| `finance_agent` | Partial | Unavailable |
-| `gymnasium_agent` | Full | Full |
-| `harbor_agent` | Unavailable | Unavailable |
-| `hermes_agent` | Full | Full |
-| `kilocode_agent` | Full | Full |
-| `labbench2_vlm_agent` | Full | Partial |
-| `langgraph_agent` | Unavailable | Unavailable |
-| `mini_swe_agent` | Unavailable | Unavailable |
-| `mini_swe_agent_2` | Full | Full |
-| `non_executing_simple_agent` | Full | Full |
-| `openclaw_agent` | Full | Partial |
-| `opencode_agent` | Full | Full |
-| `opencode_sandboxed_agent` | Full | Full |
-| `osworld_agent` | Partial | Partial |
-| `pi_agent` | Full | Full |
-| `proof_refinement_agent` | Full | Full |
-| `remote_agent` | Partial | Unavailable |
-| `scicode_agent` | Unavailable | Unavailable |
-| `simple_agent` | Full | Full |
-| `speed_bench_agent` | Full | Full |
-| `stirrup_agent` | Partial | Partial |
-| `swe_agents` / OpenCode (legacy) | Full | Full |
-| `swe_agents` / OpenHands (legacy) | Unavailable | Partial |
-| `tau2` | Full | Full |
-| `tool_simulation_agent` | Full | Full |
-| `toolsandbox_agent` | Full | Full |
-| `verifiers_agent` | Unavailable | Unavailable |
-
-## Agent-side evidence
-
-**Semantic turns** covers task and rollout identity, turn number, question, answer, reasoning,
-resolution, and step count. **Tool execution** covers output, status, and timing. **Parallel timing**
-requires independent intervals for concurrent tools. **Resource or sandbox path** means the
-evaluated resource-server-backed or custom sandbox path emits standardized agent-side evidence.
-
-| Agent | Semantic turns | Tool execution | Parallel timing | Resource or sandbox path |
+| Agent | Semantic turns | Tool execution | Parallel timing | Resource/sandbox path |
 | --- | --- | --- | --- | --- |
-| `anyswe_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `anyterminal_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `aviary_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `browsecomp_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `claude_code_agent` | Unavailable | Full | Full | Full |
-| `cline_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `codex_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `critpt_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `cvdp_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `finance_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `gymnasium_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `harbor_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `hermes_agent` | Unavailable | Full | Full | Full |
-| `kilocode_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `labbench2_vlm_agent` | Partial | Partial | Unavailable | Full |
-| `langgraph_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `mini_swe_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `mini_swe_agent_2` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `non_executing_simple_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `openclaw_agent` | Unavailable | Full | Full | Full |
 | `opencode_agent` | Unavailable | Full | Full | Full |
 | `opencode_sandboxed_agent` | Unavailable | Full | Full | Full |
-| `osworld_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `pi_agent` | Unavailable | Full | Full | Full |
-| `proof_refinement_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `remote_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `scicode_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `simple_agent` | Partial | Partial | Unavailable | Full |
-| `speed_bench_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `stirrup_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 | `swe_agents` / OpenCode (legacy) | Unavailable | Unavailable | Unavailable | Full |
 | `swe_agents` / OpenHands (legacy) | Unavailable | Unavailable | Unavailable | Full |
-| `tau2` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `tool_simulation_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `toolsandbox_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
-| `verifiers_agent` | Unavailable | Unavailable | Unavailable | Unavailable |
 
-## Path-specific caveats
+The other agents listed above report these four dimensions as unavailable. Model HTTP capture
+alone does not establish tool execution or sandbox activity.
 
-- Simple and LabBench semantic-turn support is partial because verifier responses can omit
-  resolution status.
-- Other partial values cover CVDP's Simple path, Finance and Remote aggregate usage, LabBench image
-  redaction, OSWorld M3 and Pointer direct-provider routes, raised failures omitted by
-  Simple-derived agents, and Stirrup calls outside its policy path.
-- LabBench rows with `multimodal_history_redacted` omit request and response payload copies from
-  `ng_trajectory`.
-- OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox path.
-- OpenCode coverage includes its standalone producer and `opencode_sandboxed_agent`; the decoupled
-  path composes harness observations with verifier-sandbox evidence returned by the resources
-  server.
-- Legacy OpenHands retains one cumulative root conversation, so its model-visible history is
-  partial. Its pinned fork does not route calls through a rollout-prefixed Gym model-server endpoint.
-- Aggregate-metrics requests omit `ng_trajectory`, `ng_model_call_capture`, and
-  `ng_agent_observations` attachments.
+## Path Qualifications
 
-## Maintenance contract
+| Path | Qualification |
+| --- | --- |
+| CVDP | Partial capture on the Simple path |
+| Finance and Remote | Aggregate usage only; no standardized per-call metadata |
+| Simple | Resolution can be missing; raised tool failures can be omitted |
+| LabBench | Resolution and tool evidence can be partial; `multimodal_history_redacted` omits trajectory payload copies |
+| OSWorld | M3 and Pointer routes call providers directly |
+| Stirrup | Calls outside the policy path are not fully captured |
+| OpenClaw | Includes standalone resources and PinchBench sandbox paths; history is partial |
+| OpenCode | Includes standalone and sandboxed agents; the sandboxed path combines harness and verifier-sandbox evidence |
+| Legacy OpenHands | One cumulative root conversation; pinned fork bypasses rollout-prefixed capture |
 
-This snapshot was validated against `main` on 2026-09-02. A change to an agent producer, model-call
-routing path, or trajectory projection must update the affected row and its integration test in the
-same pull request. The Gym observability maintainers review the matrix against those executable
-producer tests; schema support by itself is not sufficient to mark a cell **Full**.
+Inspect `ng_trajectory.gaps` before relying on partial coverage. Aggregate-metrics requests omit
+the trajectory and source attachments.
