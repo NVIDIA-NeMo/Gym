@@ -666,6 +666,83 @@ class TestModelCausedFaultsAreNotExcused:
         assert res.failure_reason == "setup_code_failed"
 
 
+class TestVerifyEndpoint:
+    """The four verdicts as seen over HTTP, mirroring bigcodebench's TestClient tests.
+
+    Everything else drives ``run_task`` in-process, which skips extraction, the
+    request/response models, and the short-circuits in ``verify`` entirely.
+    """
+
+    META = {
+        "task_id": "alignment/python/1",
+        "entry_point": "add",
+        "setup_code": "",
+        "test": "def check(candidate):\n    assert candidate(2, 3) == 5\n",
+    }
+
+    _DEFAULT = object()
+
+    def _post(self, client, text, meta=_DEFAULT):
+        from app import SciCodePileVerifyRequest, SciCodePileVerifyResponse
+
+        req = SciCodePileVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "add"}]},
+            response=_make_response(text),
+            # Sentinel, not `None`: `verifier_metadata=None` is itself a case under test.
+            verifier_metadata=self.META if meta is self._DEFAULT else meta,
+        )
+        resp = client.post("/verify", json=req.model_dump())
+        assert resp.status_code == 200, resp.text
+        return SciCodePileVerifyResponse.model_validate(resp.json())
+
+    def test_pass(self, short_timeout_client):
+        res = self._post(short_timeout_client, "```python\ndef add(a, b):\n    return a + b\n```")
+        assert res.reward == 1.0
+        assert res.status == "pass"
+        assert res.task_id == "alignment/python/1"
+        assert "def add" in res.extracted_model_code
+        assert res.failure_reason is None
+
+    def test_fail(self, short_timeout_client):
+        res = self._post(short_timeout_client, "```python\ndef add(a, b):\n    return a - b\n```")
+        assert res.reward == 0.0
+        assert res.status == "fail"
+        assert res.details["type"] == "AssertionError"
+
+    def test_entry_point_missing(self, short_timeout_client):
+        """No calibration prefix here, so a bare body is a non-answer, not a pass."""
+        res = self._post(short_timeout_client, "```python\ndef not_add(a, b):\n    return a + b\n```")
+        assert res.reward == 0.0
+        assert res.status == "entry_point_missing"
+
+    def test_empty_output(self, short_timeout_client):
+        res = self._post(short_timeout_client, "   \n  ")
+        assert res.reward == 0.0
+        assert res.status == "empty_output"
+        assert res.extracted_model_code is None
+
+    def test_no_code_block(self, short_timeout_client):
+        """Untagged fence with trailing prose — the one non-attempt the status catches."""
+        res = self._post(short_timeout_client, "Here:\n```\ndef add(a, b): return a + b\n```\nHope that helps!")
+        assert res.reward == 0.0
+        assert res.status == "no_code_block"
+
+    def test_prose_is_not_isolated_as_a_non_attempt(self, short_timeout_client):
+        """Documented limitation: with no fence the whole text is compiled."""
+        res = self._post(short_timeout_client, "I cannot solve this without more information.")
+        assert res.status == "error"
+        assert res.details["reason"] == "syntax_error"
+        assert res.failure_reason is None, "a refusal is the model's, not a harness fault"
+
+    @pytest.mark.parametrize("meta", [{"entry_point": "add"}, {"test": "def check(c): pass"}, None])
+    def test_a_malformed_row_does_not_abort_the_run(self, short_timeout_client, meta):
+        """KeyError here was an HTTP 500, and a 500 ends the whole rollout run."""
+        res = self._post(short_timeout_client, "```python\ndef add(a, b):\n    return a + b\n```", meta=meta)
+        assert res.reward == 0.0
+        assert res.status == "malformed_task"
+        assert res.failure_reason == "malformed_task"
+
+
 class TestUnserializableText:
     """Model-controlled text must never be able to 500 the endpoint.
 

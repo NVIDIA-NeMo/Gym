@@ -11,7 +11,7 @@ import sys
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from code_extraction import preprocess_code_completion
 
@@ -19,6 +19,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -28,6 +29,12 @@ from nemo_gym.reward_profile import (
 
 
 class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
+    # `verify` is a pure function of the persisted row: each task gets a fresh process,
+    # a fresh module namespace and a throwaway CWD, so nothing carries between calls.
+    # Declaring this is what lets `gym eval reverify` run without `++force`. Verified
+    # by re-verifying 40 tasks forward, reversed and again — identical verdicts.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     num_processes: int = 8
     # Upstream reports no per-task time limit for the runnable stratum; 120s is
     # generous for these functions and still bounds a hung rollout.
@@ -108,6 +115,7 @@ class FailureCode(str, Enum):
     TEST_CODE_FAILED = "test_code_failed"
     TEST_DEFINES_NO_CHECK = "test_defines_no_check"
     RUNNER_CRASHED = "runner_crashed"
+    MALFORMED_TASK = "malformed_task"
 
 
 class SciCodePileVerifyRequest(BaseVerifyRequest):
@@ -200,6 +208,29 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
                 task_id=task_id,
             )
 
+        # A row without `test`/`entry_point` cannot be scored. Indexing it raised
+        # KeyError, which is an HTTP 500, and with the default
+        # `route_failures_to_sidecar=False` that aborts the whole run — so one bad row
+        # would end the job. Report it as the harness fault it is: the run continues
+        # and the `harness_failure` metric shows exactly how many rows are unusable.
+        missing = [key for key in ("test", "entry_point") if not meta.get(key)]
+        if missing:
+            return self._respond(
+                body,
+                reward=0.0,
+                extracted_model_output=model_out,
+                extracted_model_code=extracted,
+                status="malformed_task",
+                details={
+                    "reason": "malformed_task",
+                    "missing": missing,
+                    "phase": "dataset",
+                    "harness_fault": True,
+                },
+                task_id=task_id,
+                failure_reason=FailureCode.MALFORMED_TASK,
+            )
+
         async with self._semaphore:
             result = await self._run_task(
                 setup_code=meta.get("setup_code", ""),
@@ -234,6 +265,8 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         if not details.get("harness_fault"):
             return None
         phase = details.get("phase")
+        if phase == "dataset":
+            return FailureCode.MALFORMED_TASK
         if phase == "setup":
             return FailureCode.SETUP_CODE_FAILED
         if phase == "test":

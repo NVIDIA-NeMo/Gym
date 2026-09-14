@@ -97,7 +97,17 @@ verdict. Trust a verdict only to the extent you trust the code that produced it.
 ### Statuses
 
 `pass`, `fail` (check raised), `entry_point_missing`, `error`, `timeout`,
-`empty_output`, `no_code_block`. Only `pass` earns reward.
+`empty_output`, `no_code_block`, `malformed_task`. Only `pass` earns reward.
+
+`malformed_task` is a dataset fault, not a model one: a row missing `test` or
+`entry_point` cannot be scored. It is reported as a harness failure rather than
+raised, because an exception here is an HTTP 500 and a 500 aborts the whole run.
+
+The statuses do **not** cleanly isolate non-attempts. With no fence at all the
+extractor returns the whole text, so a prose answer or a refusal is compiled and lands
+as `error`/`syntax_error` — indistinguishable from a genuine attempt with a syntax
+error. `no_code_block` catches only the untagged-fence case. Counting non-attempts
+means looking at the text, not the status.
 
 `error` carries a `details.reason` distinguishing `syntax_error`, `exec_failed`
 (the module body raised, typically a missing import), `test_defines_no_check`,
@@ -166,9 +176,28 @@ part of the non-attempt rate that choice costs.
 ### Validation
 
 The 200 upstream `canonical_solution` values were run through `scp_runner.py`:
-**200/200 pass**. Negative controls over 30 tasks behave as required — a stub
-returning `None` and a raising implementation both score `fail`, a renamed function
-scores `entry_point_missing`, and unparseable code scores `error`.
+**200/200 pass**. Negative controls were run over all 200 tasks (not a 30-task
+sample) and behave as required:
+
+| Control | Result |
+| --- | --- |
+| raising implementation | `fail` 200/200 |
+| unparseable code | `error` 200/200 |
+| stub returning `None` | `fail` 197/200, **`pass` 3/200** |
+| renamed function | `entry_point_missing` 199/200, `fail` 1/200 |
+| empty answer | `entry_point_missing` 199/200, `fail` 1/200 |
+
+Two caveats fall out of running the controls over the whole set:
+
+- **`alignment/python/144`, `178` and `273` pass with a stub that returns `None`.**
+  Their tests only assert that the return value is `None` or that some object was
+  produced, so they cannot distinguish a real implementation from an empty one.
+  Three tasks out of 200 are worth 1.5 percentage points of any score reported here.
+- **`alignment/python/76` defines its own entry point (`gsea`) in `setup_code`.** The
+  function therefore exists even when the model returns nothing, which is why the
+  renamed-function and empty-answer controls score `fail` rather than
+  `entry_point_missing` on that one task. It does not pass, so nothing is scored
+  wrongly — but `entry_point_missing` is not a reliable non-attempt signal there.
 
 Re-run this whenever the runner changes; it validates the harness with no model
 involved, which is the only check here that cannot be confounded by model quality.

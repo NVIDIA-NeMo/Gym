@@ -22,7 +22,6 @@ that choice are in this benchmark's README.
 """
 
 import argparse
-import ast
 from pathlib import Path
 
 import orjson
@@ -53,10 +52,15 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
     """Download and prepare the SciCodePile runnable benchmark. Returns the JSONL path."""
     from datasets import load_dataset
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
 
     print(f"Downloading {HF_DATASET} from HuggingFace...")
-    hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
+    # `maybe_`, not `get_`: the latter falls through to a full Hydra CLI parse, which
+    # re-reads argv and rejects this script's own `--output` with "unrecognized
+    # arguments". Here we only want to consult a config if one already exists — under
+    # `gym eval prepare` it does, and standalone the dataset is public anyway.
+    global_config = maybe_get_global_config_dict()
+    hf_token = global_config.get(HF_TOKEN_KEY_NAME) if global_config is not None else None
     dataset = load_dataset(HF_DATASET, split=HF_SPLIT, token=hf_token)
 
     if len(dataset) != EXPECTED_ROWS:
@@ -67,7 +71,6 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_written = 0
-    n_meta_unparsed = 0
     with open(output_path, "wb") as f:
         for row in dataset:
             if not row["runnable"]:
@@ -75,17 +78,16 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
                 # upstream authors marked unrunnable.
                 continue
 
+            # `load_dataset` decodes this column to a dict on all 200 rows. If upstream
+            # ever ships it as a serialized string instead, every row would silently
+            # lose its provenance fields, so fail loudly rather than emit null
+            # `audit_flags` with no explanation.
             meta = row.get("benchmark_meta") or {}
-            if isinstance(meta, str):
-                try:
-                    meta = ast.literal_eval(meta)
-                except (ValueError, SyntaxError):
-                    # Upstream ships a Python repr today. If that ever becomes JSON
-                    # (bare true/false/null), every row would silently lose its
-                    # provenance fields, so count it and report below rather than
-                    # emitting `audit_flags: null` with no explanation.
-                    meta = {}
-                    n_meta_unparsed += 1
+            if not isinstance(meta, dict):
+                raise TypeError(
+                    f"Expected `benchmark_meta` to be a dict, got {type(meta).__name__} on {row['task_id']}; "
+                    "upstream may have changed serialization format."
+                )
 
             out = {
                 "question": _build_question(row["prompt"]),
@@ -101,12 +103,6 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
             f.write(orjson.dumps(out) + b"\n")
             n_written += 1
 
-    if n_meta_unparsed:
-        print(
-            f"WARNING: could not parse `benchmark_meta` on {n_meta_unparsed} of {n_written} rows; "
-            "their `audit_flags` and `primary_score_eligible` are null. Upstream may have changed "
-            "serialization format."
-        )
     print(f"Wrote {n_written} problems to {output_path}")
     return output_path
 

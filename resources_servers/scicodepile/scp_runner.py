@@ -41,7 +41,6 @@ verdict as trustworthy only to the extent the executed code is.
 
 import contextlib
 import faulthandler
-import io
 import json
 import os
 import platform
@@ -239,9 +238,14 @@ def main() -> None:
     os.close(devnull_fd)
 
     try:
-        with _working_directory(req.get("workdir")):
-            # Task code prints freely; stdout is the result channel, so capture both streams.
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with _working_directory(req.get("workdir")), open(os.devnull, "w") as sink:
+            # Task code prints freely and stdout is the result channel, so both Python
+            # streams are rebound away from it. They go to /dev/null rather than a
+            # StringIO: nothing ever reads the captured text, and buffering it in
+            # memory charges a chatty task's output against the RLIMIT_AS cap — which
+            # would then be scored as the model's `exec_failed`. The descriptors are
+            # already pointed at /dev/null above; this covers `sys.stdout` writes.
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 result = run_task(req)
     except BaseException as exc:  # pragma: no cover - defensive
         with contextlib.suppress(BaseException):
