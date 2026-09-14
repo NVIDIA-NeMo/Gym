@@ -13,16 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+)
 from nemo_gym.orchestration.executors.slurm_script import (
+    _RAY_SERVE_GATEWAY_SOURCE_PATH,
+    _build_service_command,
     _build_vllm_command,
     _build_vllm_ray_command,
+    _build_vllm_ray_serve_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -275,6 +284,13 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
 
 
+def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_service):
+    # Default 30s node-join wait is too short for slow image pulls; must be exported before use.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=" in cmd
+    assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - multiple instances (data parallel) span nodes
 # ---------------------------------------------------------------------------
@@ -308,6 +324,191 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
     assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
     assert "--data-parallel-rpc-port 13345" in cmd
     assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_serve_command / Ray Serve gateway selection
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert "ray_serve_gateway.py" in cmd
+    assert "base64 -d" in cmd
+    assert "git clone" not in cmd  # no gym_install needed - the gateway's source is embedded
+    assert "ray symmetric-run" not in cmd
+    assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
+
+
+def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service):
+    # The base64 blob must decode back to the real, current ray_serve_gateway.py source.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    match = re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > ray_serve_gateway\.py", cmd)
+    assert match, cmd
+    decoded = base64.b64decode(match.group(1)).decode()
+    assert decoded == _RAY_SERVE_GATEWAY_SOURCE_PATH.read_text()
+
+
+def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):
+    # Regression test: the single-node path invokes python3 directly, so ray isn't guaranteed
+    # importable there unlike the multi-node path (gated via `ray symmetric-run`/`ray start`).
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default]\\"' in cmd
+    assert cmd.index("command -v ray") < cmd.index("python3 ray_serve_gateway.py")
+
+
+def test_build_vllm_ray_serve_command_single_node_ray_guard_does_not_bypass_earlier_failure(vllm_service, tmp_path):
+    # Regression test: without parens around the ray guard, && and || precedence would let an
+    # earlier step's failure be masked by the ray-install fallback, launching the gateway anyway.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+
+    inner = cmd.replace("pip install --quiet aiohttp", "false").replace(
+        "python3 ray_serve_gateway.py", "echo GATEWAY_LAUNCHED"
+    )
+    script = 'command() { [ "$2" = ray ] && return 1 || builtin command "$@"; }\nexport -f command\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
+
+    assert result.returncode != 0
+    assert "GATEWAY_LAUNCHED" not in result.stdout
+
+
+def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting(tmp_path):
+    # Regression test: shlex.quote() wraps a model name with a space in literal single quotes,
+    # which would terminate the outer bash -lc '...' wrapper early if not double-quote-escaped.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
+
+    inner = cmd.replace("pip install --quiet aiohttp", "true").replace("python3 ray_serve_gateway.py", "fake_gateway")
+    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert "--model" in args, f"corrupted command, got args: {args}"
+    assert args[args.index("--model") + 1] == "org/my model"
+
+
+def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert "ray_serve_gateway.py" in cmd
+    assert "base64 -d" in cmd
+
+
+def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_deadline(vllm_service):
+    # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops; must be
+    # exported before `ray start`/`ray symmetric-run` runs so every node's raylet has it from birth.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=" in cmd
+    assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
+
+
+def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
+    # Regression test: the whole write-then-install-then-launch chain must reach `ray symmetric-run`
+    # as one opaque token, not get split by the outer bash -lc live-parsing its own && operators.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+
+    script = cmd.replace(
+        "ray symmetric-run",
+        'fake_symmetric_run() { for a in "$@"; do echo "ARG:$a"; done; }; fake_symmetric_run',
+    ).replace("if ray symmetric-run --help", "if true")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert args[-3:-1] == ["bash", "-c"]
+    chain = args[-1]
+    assert "base64 -d" in chain
+    assert "&&" in chain
+    assert "python3 ray_serve_gateway.py" in chain
+
+
+def test_build_vllm_ray_serve_command_passes_gpus_per_node():
+    cmd = _build_vllm_ray_serve_command(
+        VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model"),
+        total_nodes=2,
+        gpus_per_node_values=[8],
+    )
+    assert "--gpus-per-node 8" in cmd
+
+
+def test_build_vllm_ray_serve_command_omits_gpus_per_node_when_unknown(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert "--gpus-per-node" not in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_flags():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        port=9000,
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+        trust_remote_code=True,
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gpus_per_node_values=[8])
+    assert "--model org/model" in cmd
+    assert "--port 9000" in cmd
+    assert "--tensor-parallel-size 8" in cmd
+    assert "--pipeline-parallel-size 2" in cmd
+    assert "--number-of-instances 2" in cmd
+    assert "--trust-remote-code" in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_served_model_name_and_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        served_model_name="my-model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
+    assert "--served-model-name my-model" in cmd
+    assert "--extra-args '--max-model-len 8192'" in cmd
+
+
+def test_build_service_command_uses_ray_serve_when_opted_in(vllm_service):
+    vllm_service.use_ray_serve = True
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_default_ignores_ray_serve_single_node(vllm_service):
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
+    # TP*PP=16 > 8 GPUs/node forces Ray Serve on automatically, with no use_ray_serve set.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+    )
+    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8])
+    assert "ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_default_multi_instance_multi_node_unchanged():
+    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=4,
+    )
+    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "--headless" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +550,13 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_installs_git_if_missing():
+    # The driver container (e.g. a minimal python image) may not bundle git.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in out
+    assert out.index("command -v git") < out.index("git clone")
 
 
 def test_render_driver_entrypoint_with_prepare():
