@@ -28,7 +28,7 @@ from enum import Enum
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, ClientTimeout, web
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -299,7 +299,10 @@ async def start_turn_counter_proxy(
     advertise_path = "/v1" if upstream_path.endswith("/v1") else upstream_path
 
     state = {"turns_used": 0}
-    session = ClientSession()
+    # A queued policy request can exceed aiohttp's implicit five-minute total
+    # deadline. Let the harness/task own that deadline so the proxy does not
+    # generate timeouts whose retries consume extra turns. Bound connection setup.
+    session = ClientSession(timeout=ClientTimeout(total=None, sock_connect=30))
 
     async def health(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "turns_used": state["turns_used"], "max_turns": max_turns})
