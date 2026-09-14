@@ -1,6 +1,7 @@
 hotpotqa_aviary_resources_server:
   resources_servers:
     aviary:
+      allowed_agents: [aviary_agent]
       entrypoint: hotpotqa_app.py
       domain: agent
       verified: false

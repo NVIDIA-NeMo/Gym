@@ -89,10 +89,24 @@ class TelemetryConfig(BaseModel, extra="allow"):
     """Bridge Python logging to OTel logs, exported with trace correlation."""
 
     exporter: str = "otlp"
-    """Exporter backend: ``otlp`` | ``console``. The OTLP endpoint, headers and protocol
-    come from the standard ``OTEL_EXPORTER_OTLP_*`` env vars, so any OTLP-compatible
-    backend or an OpenTelemetry Collector works. ``console`` writes one JSON object per
+    """Exporter backend: ``otlp`` | ``console``. ``console`` writes one JSON object per
     line to stdout, which is what the local validation flow greps."""
+
+    otlp_endpoint: Optional[str] = None
+    """``OTEL_EXPORTER_OTLP_ENDPOINT`` for the ``otlp`` exporter, e.g.
+    ``https://api.honeycomb.io``. Optional: the standard env var still works and always
+    wins (``setdefault``), so any OTLP-compatible backend or collector that expects the
+    raw env var keeps working unchanged. Setting it here just means a run's destination is
+    committed with the rest of the config instead of exported by hand every time."""
+
+    otlp_protocol: Optional[str] = None
+    """``OTEL_EXPORTER_OTLP_PROTOCOL``: ``grpc`` (the OTel SDK default) or
+    ``http/protobuf``."""
+
+    otlp_headers: Optional[str] = None
+    """``OTEL_EXPORTER_OTLP_HEADERS``, e.g. ``x-honeycomb-team=...``. Prefer
+    ``${oc.env:MY_API_KEY}`` interpolation for the secret portion so the raw credential
+    does not live in a committed YAML file."""
 
     instrument_aiohttp: bool = True
     """Use nemo-lens's aiohttp auto-instrumentation for outbound calls, which produces a

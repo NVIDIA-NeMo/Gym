@@ -6,7 +6,7 @@ nemo_fabric_mini_swe_agent:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.mini-swe-agent
-      model_provider: openai
+      model_provider: anthropic
       harness_settings: {}
       fabric_config:
         environment:

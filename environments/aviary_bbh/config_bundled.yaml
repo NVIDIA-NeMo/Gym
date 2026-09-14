@@ -1,6 +1,7 @@
 bbh_aviary_resources_server:
   resources_servers:
     aviary:
+      allowed_agents: [aviary_agent]
       entrypoint: hypotest_app.py
       domain: coding
       dataset:

@@ -15,17 +15,6 @@ OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
 
-# The checkout this script ships in; a caller running a copy of it names its own.
-gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
-if [[ "${1:-}" == "--gym-root" ]]; then
-    if [[ -z "${2:-}" ]]; then
-        echo "--gym-root needs a path" >&2
-        exit 2
-    fi
-    gym_root=$2
-    shift 2
-fi
-
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
@@ -46,6 +35,10 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
+ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
+ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
+ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -55,6 +48,8 @@ cd /opt/Gym
 
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
+
+source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
@@ -69,8 +64,11 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # ++upload_rollouts=false: Rollouts file is massive. We leave on the cluster.
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
+# We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
     $@ \
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
@@ -87,7 +85,8 @@ gym eval run \
     ++upload_rollouts=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
-    ++port_range_high=64000
+    ++port_range_high=64000 \
+    "\${GYM_MODEL_PARAMS[@]}"
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -114,6 +113,7 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
@@ -135,16 +135,15 @@ this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
     read -r -a nodes <<< "\$ALL_NODES"
 
-    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
-        --prefill-policy cache_aware \
-        --decode-policy cache_aware \
+        --prefill-policy $ROUTER_PREFILL_POLICY \
+        --decode-policy $ROUTER_DECODE_POLICY \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1 \
+        --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
         --request-timeout-secs 86400 \
         --log-level error
     )
@@ -161,6 +160,12 @@ if (( SLURM_PROCID == 0 )); then
 
     router_pid=\$!
     trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+
+    sleep 5
+    if ! kill -0 "\$router_pid" 2>/dev/null; then
+        echo "vllm-router exited during startup" >&2
+        exit 1
+    fi
 fi
 
 # Split nodes here by index
@@ -189,17 +194,17 @@ set -euo pipefail
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
-srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
-    bash -lc '
+    bash -c '
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$vllm_command" &
+    ' bash bash -c "\$vllm_command" &
 server_step=\$!
 
 cleanup_server() {
@@ -233,10 +238,10 @@ if (( $should_run_eval )); then
         --container-mounts=$MOUNTS \
         --container-workdir="\$SLURM_SUBMIT_DIR" \
         --no-container-mount-home \
-        bash -lc '
+        bash -c '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$eval_command"
+            exec bash -c "\$eval_command"
         ' &
     eval_step=\$!
 
@@ -262,12 +267,14 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
+SEGMENT=${SEGMENT:-$NUM_NODES}
+
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
     cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
 else
-    cleanup_connection=(--connection-config "$gym_root/env.yaml")
+    cleanup_connection=(--connection-config "$submit_dir/env.yaml")
 fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
@@ -284,18 +291,20 @@ main_job_id=$(
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
-        --segment=$NUM_NODES \
-        --wrap 'exec bash -lc "$batch_command"'
+        --segment=$SEGMENT \
+        --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
 
 if (( should_run_eval )); then
+    # @bxyu-nvidia: Don't run cleanup job in reservation
+    unset SBATCH_RESERVATION
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \
             --dependency=afterany:"$main_job_id" \
             --partition=cpu \
-            --qos=cpu-short \
+            --qos=cpu-normal \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \
@@ -305,7 +314,7 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
             "${cleanup_connection[@]}" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \

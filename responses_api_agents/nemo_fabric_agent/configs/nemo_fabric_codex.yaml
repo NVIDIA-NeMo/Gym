@@ -6,5 +6,10 @@ nemo_fabric_codex:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.codex
-      harness_settings: {}
+      harness_settings:
+        config_overrides:
+          web_search: disabled
+          features:
+            multi_agent: false
+            code_mode: false
       fabric_config: {}

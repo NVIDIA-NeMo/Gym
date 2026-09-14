@@ -1,23 +1,39 @@
 ---
 title: "Trajectory capability matrix"
-description: "Standardized trajectory support by criterion and producer"
+description: "Observed trajectory coverage by criterion and producer"
 position: 5
 ---
 
 # Trajectory capability matrix
 
-`ng_trajectory` schema version `1.0` combines available model-call capture and agent observations in a rollout record. It
-contains task and rollout identity, model calls and token usage, semantic turns, invocation-scoped model-visible histories,
-tool attempts, resolution, step count, and explicit evidence gaps. Source attachments remain under `ng_model_call_capture` and
-`ng_agent_observations`; aggregate-metrics requests omit all three attachments.
+This matrix reports the trajectory evidence that current producers emit for the evaluated agent paths. It describes
+observed producer coverage, not everything that the schema can represent or an unconditional guarantee for every way of
+running an agent.
 
-Enable model-call evidence with `observability_enabled: true` and `model_call_capture_dir: /data/model-calls`. Calls must use
-a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See [Model-call capture](/model-server/model-call-capture).
-Captured request and response payloads are included in `ng_trajectory`. LabBench rows that report the
-`multimodal_history_redacted` gap omit those payload copies; direct provider calls are not captured. See
-[Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token fields are
-`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`. The fields are nullable, and
-provider-reported details are preserved when available.
+`ng_trajectory` schema version `1.0` combines available model-call capture and agent observations in a rollout record.
+Model-call capture records qualifying calls routed through the Gym Model Server, while agent observations provide
+harness-side turns and tool activity. The trajectory joins the available evidence from both sources. Direct-provider
+calls bypass Gym Model Server capture, so the trajectory cannot obtain Gym-captured model-call evidence for those calls
+even when agent observations are available.
+
+The trajectory can contain task and rollout identity, model calls and token usage, semantic turns, invocation-scoped
+model-visible histories, tool attempts, resolution, step count, and explicit evidence gaps. Source attachments remain
+under `ng_model_call_capture` and `ng_agent_observations`.
+
+## Key caveats
+
+- Coverage is path-dependent. A producer may use both captured Gym Model Server calls and uncaptured direct-provider
+  calls.
+- Model-call evidence requires `observability_enabled: true`, `model_call_capture_dir: /data/model-calls`, and calls
+  through a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See
+  [Model-call capture](/model-server/model-call-capture).
+- `O` and `X` describe current producer output, not fields that the `ng_trajectory` schema is unable to represent.
+- Token fields are nullable, and provider-reported details are preserved only when available. LabBench rows with the
+  `multimodal_history_redacted` gap omit captured request and response payload copies from `ng_trajectory`.
+- Aggregate-metrics requests omit `ng_trajectory`, `ng_model_call_capture`, and `ng_agent_observations` attachments.
+
+See [Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token
+fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`.
 
 ## Acceptance criteria
 
@@ -37,7 +53,10 @@ provider-reported details are preserved when available.
 - `O`: currently partial or path-dependent.
 - `X`: currently unavailable.
 
-For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
+In practice, rely on `V` for the evaluated path when observability is configured as documented, inspect configuration
+and trajectory gaps before relying on `O`, and do not expect the producer to supply `X` on the evaluated path. These
+symbols are not absolute agent capabilities: alternate execution paths can produce different evidence. For C1, C2, and
+C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
 
 | Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -78,13 +97,19 @@ For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-p
 | `toolsandbox_agent` | V | V | X | V | X | X | X |
 | `verifiers_agent` | X | X | X | X | X | X | X |
 
-Simple and LabBench C3 support is partial because verifier responses may omit resolution status. Current `O` values reflect the
-CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, OSWorld M3 and Pointer direct-provider routes,
-omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The matrix reports producer output,
-not schema capacity.
-OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
-OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The decoupled
-path composes agent observations with verifier-sandbox evidence returned by its resources server. Legacy OpenHands retains
-one cumulative root conversation, so its model-visible history remains partial; its pinned fork does not route model calls
-through a rollout-prefixed Gym Model Server endpoint.
-C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
+### Coverage notes
+
+- Simple and LabBench C3 support is partial because verifier responses may omit resolution status.
+- Other `O` values reflect the following paths or evidence gaps:
+  - The CVDP Simple path.
+  - Finance and Remote aggregate usage.
+  - LabBench image redaction.
+  - OSWorld M3 and Pointer direct-provider routes.
+  - Raised failures omitted by Simple-derived agents.
+  - Stirrup calls outside its policy path.
+- OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
+- OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The
+  decoupled path composes agent observations with verifier-sandbox evidence returned by its resources server.
+- Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
+  fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
+- C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.

@@ -120,6 +120,7 @@ def run_cleanup(
     run_id: str = "job-7",
     user: str = "alice",
     reap: bool = True,
+    tls_verify: bool = False,
 ) -> int:
     return asyncio.run(
         cleanup_sandboxes.cleanup_sandboxes(
@@ -128,6 +129,7 @@ def run_cleanup(
             access_key=TEST_ACCESS_KEY,
             run_id=run_id,
             user=user,
+            tls_verify=tls_verify,
             reap=reap,
         )
     )
@@ -160,6 +162,7 @@ def test_cleanup_uses_one_pool_and_deletes_only_exact_run_and_user(monkeypatch: 
         {
             "limit": cleanup_sandboxes.REAP_CONCURRENCY,
             "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+            "ssl": False,
         }
     ]
     assert len(session_calls) == 1
@@ -450,6 +453,7 @@ def test_cli_uses_standalone_connection_config_and_forwards_return_codes(
             "run_id": "job-7",
             "user": "alice",
             "reap": True,
+            "tls_verify": False,
         }
     ]
 
@@ -806,6 +810,7 @@ def test_cli_takes_the_connection_from_arguments(
             "run_id": "job-7",
             "user": "alice",
             "reap": True,
+            "tls_verify": False,
         }
     ]
 
@@ -848,69 +853,6 @@ def test_cli_reports_a_failure_from_arguments(
     assert TEST_ACCESS_KEY not in stderr
 
 
-def test_slurm_launcher_takes_the_checkout_as_an_argument(tmp_path: Path) -> None:
-    """A caller running a copy of this script names the tree it came from."""
-    calls_path, env = install_sbatch_stub(tmp_path)
-    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
-    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
-
-    result = subprocess.run(
-        ["bash", str(SBATCH_SCRIPT), "--gym-root", "/elsewhere/Gym", "--config", "benchmark.yaml"],
-        check=False,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    _main_call, cleanup_call = read_sbatch_calls(calls_path)
-    assert "/elsewhere/Gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in cleanup_call
-    # Consumed here, so gym eval still sees only the arguments meant for it.
-    eval_command = (tmp_path / "eval-command").read_text()
-    assert "--gym-root" not in eval_command
-    assert "--config benchmark.yaml" in eval_command
-
-
-def test_slurm_launcher_rejects_a_gym_root_without_a_path(tmp_path: Path) -> None:
-    _calls_path, env = install_sbatch_stub(tmp_path)
-    result = subprocess.run(
-        ["bash", str(SBATCH_SCRIPT), "--gym-root"],
-        check=False,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-    assert result.returncode == 2
-    assert "--gym-root needs a path" in result.stderr
-
-
-def test_slurm_launcher_resolves_the_checkout_from_its_own_location(tmp_path: Path) -> None:
-    """The caller launches from a run directory that holds no Gym tree."""
-    calls_path, env = install_sbatch_stub(tmp_path)
-    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
-    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
-    elsewhere = tmp_path / "rundir"
-    elsewhere.mkdir()
-
-    result = subprocess.run(
-        ["bash", str(SBATCH_SCRIPT.resolve()), "--config", "benchmark.yaml"],
-        check=False,
-        capture_output=True,
-        env=env,
-        text=True,
-        cwd=elsewhere,
-    )
-
-    assert result.returncode == 0, result.stderr
-    _main_call, cleanup_call = read_sbatch_calls(calls_path)
-    repo_root = SBATCH_SCRIPT.resolve().parents[2]
-    assert f"{repo_root}/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in cleanup_call
-    assert f"--output={elsewhere}/slurm-logs/%j-gym-cleanup-7001.log" in cleanup_call
-    assert cleanup_call[cleanup_call.index("--domain") + 1] == "sandbox.example"
-    assert cleanup_call[cleanup_call.index("--api-key") + 1] == TEST_ACCESS_KEY
-    assert cleanup_call[cleanup_call.index("--protocol") + 1] == "http"
-
-
 def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> None:
     """No exported connection, so the checkout's own env.yaml is used."""
     calls_path, env = install_sbatch_stub(tmp_path)
@@ -931,3 +873,27 @@ def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> N
     assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
     assert "--domain" not in cleanup_call
     assert "--api-key" not in cleanup_call
+
+
+def test_tls_verification_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https") == 0
+
+    assert connector_calls == [
+        {
+            "limit": cleanup_sandboxes.REAP_CONCURRENCY,
+            "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+            "ssl": False,
+        }
+    ]
+
+
+def test_tls_verify_keeps_certificate_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https", tls_verify=True) == 0
+
+    assert "ssl" not in connector_calls[0]

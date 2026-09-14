@@ -1,6 +1,3 @@
-config_paths:
-  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
-
 reasoning_gym:
   resources_servers:
     reasoning_gym:
@@ -11,15 +8,25 @@ reasoning_gym:
       value: Evaluate reasoning tasks with DeepAgents.
 
 nemo_fabric_deepagents_reasoning_gym_agent:
-  _inherit_from: nemo_fabric_agent
   responses_api_agents:
     nemo_fabric_agent:
+      entrypoint: app.py
+      description: Run any installed agent harness through the typed NeMo Fabric lifecycle.
       adapter_id: nvidia.fabric.langchain.deepagents
       resources_server:
+        type: resources_servers
         name: reasoning_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_provider: openai-compatible
+      model: gym-policy-model
+      model_api_key: local  # pragma: allowlist secret
+      concurrency: 32
+      timeout: 1800
+      cwd: null
       harness_settings: {}
       fabric_config: {}
-      timeout: 1800
       system_prompt: |
         Solve the problem carefully and return only the answer in the exact format requested.
       datasets:

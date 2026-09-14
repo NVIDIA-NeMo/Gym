@@ -1,6 +1,1 @@
-# hermes-agent hard-pins openai==2.24.0 as a supply-chain policy (exact pins repo-wide),
-# not a compatibility requirement. Gym core needs openai==2.44.0 for the
-# ChatCompletionModeration import in nemo_gym/openai_utils.py, so force hermes up to
-# core's pin rather than dragging the whole venv down to hermes's.
-# Must track the "openai==" pin in the root pyproject.toml.
 openai==2.44.0

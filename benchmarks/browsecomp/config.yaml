@@ -13,6 +13,7 @@ judge_model:
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
+      allowed_agents: [browsecomp_agent]
       entrypoint: app.py
       domain: agent
       debug: false

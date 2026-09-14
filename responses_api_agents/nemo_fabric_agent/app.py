@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run NeMo Fabric harness adapters as a NeMo Gym agent server."""
-
 import json
 import logging
 import tempfile
@@ -25,6 +23,8 @@ from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionCallOutput,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
@@ -88,6 +88,155 @@ def _extract_request_input(body_input: Any) -> tuple[Any, Optional[str]]:
     return request_input, "\n\n".join(instruction_parts) or None
 
 
+def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
+    items: list[Any] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "commandExecution":
+            call_id = str(event.get("id") or f"call_{uuid4().hex}")
+            arguments = {"command": event.get("command")}
+            if event.get("cwd"):
+                arguments["cwd"] = event["cwd"]
+            items.append(
+                NeMoGymResponseFunctionToolCall(
+                    id=f"fc_{uuid4().hex}",
+                    call_id=call_id,
+                    name="shell",
+                    arguments=json.dumps(arguments, ensure_ascii=False, sort_keys=True),
+                    status="completed",
+                )
+            )
+            items.append(
+                NeMoGymResponseFunctionCallOutput(
+                    id=f"fco_{uuid4().hex}",
+                    call_id=call_id,
+                    output=_content_text(event.get("aggregatedOutput")),
+                    status="completed",
+                    type="function_call_output",
+                )
+            )
+        elif isinstance(event.get("message"), dict) and isinstance(event["message"].get("content"), list):
+            for block in event["message"]["content"]:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("name") and "input" in block:
+                    call_id = str(block.get("id") or f"call_{uuid4().hex}")
+                    items.append(
+                        NeMoGymResponseFunctionToolCall(
+                            id=f"fc_{uuid4().hex}",
+                            call_id=call_id,
+                            name=str(block["name"]),
+                            arguments=json.dumps(block.get("input") or {}, ensure_ascii=False, sort_keys=True),
+                            status="completed",
+                        )
+                    )
+                elif block.get("tool_use_id"):
+                    items.append(
+                        NeMoGymResponseFunctionCallOutput(
+                            id=f"fco_{uuid4().hex}",
+                            call_id=str(block["tool_use_id"]),
+                            output=_content_text(block.get("content")),
+                            status="completed",
+                            type="function_call_output",
+                        )
+                    )
+                else:
+                    text = _content_text(block.get("text"))
+                    if text and text.strip() != response_text.strip():
+                        items.append(
+                            NeMoGymResponseOutputMessage(
+                                id=f"msg_{uuid4().hex}",
+                                content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                                role="assistant",
+                                status="completed",
+                                type="message",
+                            )
+                        )
+        elif etype == "agentMessage":
+            text = _content_text(event.get("text"))
+            if text and text.strip() != response_text.strip():
+                items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{uuid4().hex}",
+                        content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
+    return items
+
+
+def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any]:
+    messages = output.get("messages")
+    items: list[Any] = []
+    if not (isinstance(messages, list) and messages):
+        events = output.get("events")
+        if isinstance(events, list) and events:
+            items.extend(_fabric_event_items(events, response_text))
+    if isinstance(messages, list) and messages:
+        pending: list[str] = []
+        for message in messages[:-1]:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role") or message.get("type")
+            if role in {"human", "user", "system", "developer"}:
+                continue
+            if role == "tool":
+                call_id = pending.pop(0) if pending else str(message.get("tool_call_id") or message.get("id") or "")
+                items.append(
+                    NeMoGymResponseFunctionCallOutput(
+                        id=f"fco_{uuid4().hex}",
+                        call_id=call_id,
+                        output=_content_text(message.get("content")),
+                        status="completed",
+                        type="function_call_output",
+                    )
+                )
+                continue
+            text = _content_text(message.get("content"))
+            if text:
+                items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{uuid4().hex}",
+                        content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                call_id = str(tool_call.get("id") or tool_call.get("call_id") or f"call_{uuid4().hex}")
+                pending.append(call_id)
+                arguments = tool_call.get("args", tool_call.get("arguments", function.get("arguments")))
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+                items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        id=f"fc_{uuid4().hex}",
+                        call_id=call_id,
+                        name=str(tool_call.get("name") or function.get("name") or ""),
+                        arguments=arguments,
+                        status="completed",
+                    )
+                )
+    items.append(
+        NeMoGymResponseOutputMessage(
+            id=f"msg_{uuid4().hex}",
+            content=[NeMoGymResponseOutputText(text=response_text, annotations=[])],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+    )
+    return items
+
+
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
     if not skills_root:
         return []
@@ -135,6 +284,13 @@ def _turns_used(output: dict[str, Any]) -> int:
     ):
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
+    messages = output.get("messages")
+    if isinstance(messages, list):
+        turns = sum(
+            1 for message in messages if isinstance(message, dict) and message.get("role") in {"ai", "assistant"}
+        )
+        if turns:
+            return turns
     return 1
 
 
@@ -224,7 +380,11 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                     "provider": self.config.model_provider,
                     "model": self.config.model,
                     "api_key_env": _MODEL_API_KEY_ENV,
-                    "base_url": model_base_url,
+                    "base_url": (
+                        model_base_url.removesuffix("/v1")
+                        if self.config.model_provider == "anthropic"
+                        else model_base_url
+                    ),
                 }
             },
         }
@@ -297,6 +457,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         result_mapping = result.to_mapping()
         if result.status != "succeeded":
             error = result.error.message if result.error is not None else "unknown Fabric failure"
+            error_mapping = _mapping(result_mapping.get("error"))
+            details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
+            if details:
+                error = f"{error} ({json.dumps(details, default=str, sort_keys=True)})"
             raise RuntimeError(f"NeMo Fabric invocation failed: {error}")
 
         output = _mapping(result.output)
@@ -319,15 +483,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=str(output.get("model") or self.config.model),
             object="response",
-            output=[
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text=response_text, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            ],
+            output=_fabric_output_items(output, response_text),
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

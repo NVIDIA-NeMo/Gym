@@ -22,11 +22,14 @@ DeepSWE tasks (https://deepswe.datacurve.ai/) ship as Harbor task directories:
       instruction.md     # the prompt the agent sees (problem statement)
       tests/test.sh      # Harbor verifier entry point (graded at eval time)
       tests/test.patch   # hidden test additions, applied at grading time
+      tests/grader.py    # optional shared grading helper used by newer tasks
+      tests/config.json  # optional per-task grading contract
       solution/solution.patch   # reference (golden) patch, held out from agent
 
 This module converts those task directories into the JSONL schema the
 ``swe_agents`` wrapper consumes (one problem per line). The verifier artifacts
-(``test.sh``, ``test.patch``) and the golden ``solution.patch`` are packed into
+(``test.sh``, ``test.patch``, and optional grader fixtures) and the golden
+``solution.patch`` are packed into
 ``responses_create_params.metadata.instance_dict`` so that the eval container
 (see ``DeepSWEDatasetProcessor`` in ``app.py``) is fully self-contained and the
 golden-patch validation path (``verify_golden_patch``) has a ``patch`` to apply.
@@ -179,6 +182,8 @@ class DeepSWEDataProcessor:
             "patch": meta["solution_patch"],  # golden patch -> verify_golden_patch
             "test_patch": meta["test_patch"],
             "test_sh": meta["test_sh"],
+            "grader_py": meta["grader_py"],
+            "test_config_json": meta["test_config_json"],
             "workspace_path": DEEPSWE_WORKSPACE_PATH,
             # Optional env-repair command run before the verifier (empty for most).
             "baseline_fix": KNOWN_BASELINE_FIX.get(task_id, ""),
@@ -189,6 +194,8 @@ class DeepSWEDataProcessor:
         instruction_path = task_dir / "instruction.md"
         test_sh_path = task_dir / "tests" / "test.sh"
         test_patch_path = task_dir / "tests" / "test.patch"
+        grader_py_path = task_dir / "tests" / "grader.py"
+        test_config_path = task_dir / "tests" / "config.json"
         solution_patch_path = task_dir / "solution" / "solution.patch"
 
         for required in (toml_path, instruction_path, test_sh_path, test_patch_path, solution_patch_path):
@@ -216,6 +223,10 @@ class DeepSWEDataProcessor:
             "problem_statement": self._read(instruction_path),
             "test_sh": self._read(test_sh_path),
             "test_patch": self._read(test_patch_path),
+            # DeepSWE v1.1 delegates preparation and scoring to these files.
+            # Keep them optional so older Harbor task bundles still convert.
+            "grader_py": self._read(grader_py_path) if grader_py_path.is_file() else "",
+            "test_config_json": self._read(test_config_path) if test_config_path.is_file() else "",
             "solution_patch": self._read(solution_patch_path),
         }
 
@@ -245,6 +256,8 @@ class DeepSWEDataProcessor:
             "base_commit": meta["base_commit_hash"],
             "patch": meta["solution_patch"],
             "test_patch": meta["test_patch"],
+            "grader_py": meta["grader_py"],
+            "test_config_json": meta["test_config_json"],
             "problem_statement": meta["problem_statement"],
             "language": meta["language"],
         }

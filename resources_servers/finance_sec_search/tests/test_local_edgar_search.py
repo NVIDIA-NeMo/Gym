@@ -20,8 +20,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
+from resources_servers.finance_sec_search import local_edgar_search
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -29,6 +31,7 @@ from resources_servers.finance_sec_search.app import (
 )
 from resources_servers.finance_sec_search.local_edgar_search import (
     LocalEdgarSearch,
+    canonical_url_key,
     default_sidecar_path,
     normalize_request,
     translate_query,
@@ -39,6 +42,10 @@ from resources_servers.finance_sec_search.scripts.convert_questions import (
     PROMPT,
     convert_entry,
 )
+
+
+# Indexed paths are container-absolute; only the part below data/ is portable.
+DUMP_PREFIX = "/workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download/data"
 
 
 def _index(path: Path) -> Path:
@@ -56,8 +63,11 @@ def _index(path: Path) -> Path:
             document_type TEXT NOT NULL,
             filing_date TEXT NOT NULL,
             url TEXT NOT NULL,
+            canonical_url_key TEXT NOT NULL,
+            source_path TEXT NOT NULL,
             body TEXT NOT NULL
         );
+        CREATE UNIQUE INDEX documents_url_key ON documents(canonical_url_key);
         CREATE VIRTUAL TABLE documents_fts USING fts5(
             body,
             content='documents',
@@ -77,6 +87,8 @@ def _index(path: Path) -> Path:
             "10-K",
             "2024-11-01",
             "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/aapl.htm",
+            "320193:000032019324000001:aapl.htm",
+            f"{DUMP_PREFIX}/AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
             "quantum pineapple net income",
         ),
         (
@@ -90,6 +102,8 @@ def _index(path: Path) -> Path:
             "EX-99.1",
             "2025-04-08",
             "https://www.sec.gov/Archives/edgar/data/789019/000078901925000001/msft-ex991.htm",
+            "789019:000078901925000001:msft-ex991.htm",
+            f"{DUMP_PREFIX}/MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
             "quantum pineapple guidance",
         ),
     ]
@@ -97,8 +111,9 @@ def _index(path: Path) -> Path:
         """
         INSERT INTO documents (
             id, accession_number, cik, company_name, ticker, description,
-            form_type, document_type, filing_date, url, body
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            form_type, document_type, filing_date, url, canonical_url_key,
+            source_path, body
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -252,6 +267,50 @@ async def test_server_routes_edgar_search_to_local_index(tmp_path: Path) -> None
     assert "completed_at_unix_seconds" in metric
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://www.sec.gov/Archives/edgar/data/0000066740/000006674026000246/MMM-20260630.htm",
+            "66740:000006674026000246:mmm-20260630.htm",
+        ),
+        (
+            "https://www.sec.gov/Archives/edgar/data/66740/000006674026000246/ex%2010-1.htm",
+            "66740:000006674026000246:ex 10-1.htm",
+        ),
+        ("https://example.test/not-edgar.htm", None),
+        ("https://www.sec.gov/Archives/edgar/data/66740/000006674026000246/", None),
+    ],
+)
+def test_canonical_url_key_normalizes_cik_and_filename(url: str, expected: str | None) -> None:
+    assert canonical_url_key(url) == expected
+
+
+def test_dump_paths_cover_primary_documents_and_exhibits(tmp_path: Path) -> None:
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+
+    resolved = search.dump_paths_for_urls(
+        [
+            "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/aapl.htm",
+            "https://www.sec.gov/Archives/edgar/data/789019/000078901925000001/msft-ex991.htm",
+            "https://www.sec.gov/Archives/edgar/data/1/000000000000000001/absent.htm",
+        ]
+    )
+
+    assert resolved == {
+        "320193:000032019324000001:aapl.htm": "AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
+        "789019:000078901925000001:msft-ex991.htm": "MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
+    }
+
+
+def test_dump_paths_are_unavailable_without_the_columns(tmp_path: Path) -> None:
+    """An index built before source_path existed degrades instead of erroring."""
+    search = LocalEdgarSearch(_varied_index(tmp_path / "legacy.sqlite", documents=4))
+
+    assert search.supports_dump_paths is False
+    assert search.dump_paths_for_urls(["https://www.sec.gov/Archives/edgar/data/1/2/a.htm"]) == {}
+
+
 def _varied_index(path: Path, documents: int = 400) -> Path:
     """An index broad enough that filters, paging and ranking all have work to do."""
     connection = sqlite3.connect(path)
@@ -362,8 +421,80 @@ def test_sidecar_built_from_another_index_is_rejected(tmp_path: Path) -> None:
     other = _varied_index(tmp_path / "other.sqlite", documents=200)
     build(other, default_sidecar_path(other))
 
-    with pytest.raises(ValueError, match="Rebuild it"):
+    with pytest.raises(ValueError, match="covers 200 documents"):
         LocalEdgarSearch(index, metadata_path=default_sidecar_path(other))
+
+
+def test_sidecar_is_rejected_when_the_index_changed_underneath_it(tmp_path: Path) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    build(index, default_sidecar_path(index))
+
+    # id 1 is always sampled by the fingerprint, so this edit is caught deterministically
+    # rather than with the sampling probability a random row would carry.
+    connection = sqlite3.connect(index)
+    connection.execute("UPDATE documents SET accession_number = '000-999999' WHERE id = 1")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="built from a different index"):
+        LocalEdgarSearch(index, max_end_date="2030-01-01")
+
+
+def test_large_index_without_a_sidecar_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+
+    with pytest.raises(ValueError, match="no\nmetadata sidecar|no metadata sidecar"):
+        LocalEdgarSearch(index, max_end_date="2030-01-01")
+
+    build(index, default_sidecar_path(index))
+    assert LocalEdgarSearch(index, max_end_date="2030-01-01").uses_metadata_sidecar
+
+
+def test_server_refuses_to_boot_when_the_sidecar_is_required(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+    config = _server_config(
+        tmp_path,
+        local_edgar_index_path=str(_index(tmp_path / "index.sqlite")),
+    )
+
+    # Must fail the whole server, not degrade edgar_search to unavailable.
+    with pytest.raises(ValidationError, match="no metadata sidecar"):
+        FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_index_missing_a_metadata_column_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY,
+            cik TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            body,
+            content='documents',
+            content_rowid='id'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        LocalEdgarSearch(path)
+
+
+def test_server_refuses_to_boot_on_a_malformed_index(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    sqlite3.connect(path).close()
+    config = _server_config(tmp_path, local_edgar_index_path=str(path))
+
+    # Must fail the whole server, not degrade edgar_search to unavailable.
+    with pytest.raises(ValidationError, match="missing required tables"):
+        FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
