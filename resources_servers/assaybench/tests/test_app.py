@@ -356,7 +356,7 @@ class TestAssayBenchApp:
             }
 
         responses = [
-            rollout(0, 0, 0.2, "fitness_proliferation_viability", metrics={"precision@100": 0.5}),
+            rollout(0, 0, 0.2, "fitness_proliferation_viability", metrics={"normalized_precision@100": 0.5}),
             rollout(0, 1, 0.4, "fitness_proliferation_viability"),
             rollout(1, 0, 0.1, "host_pathogen_infection_response", dspy_parse_failed=True),
             rollout(1, 1, 0.3, "host_pathogen_infection_response", num_predicted=0, truncated=True),
@@ -367,8 +367,8 @@ class TestAssayBenchApp:
         # Per-screen mean over runs, then mean over screens, times 100: (0.3 + 0.2) / 2.
         assert metrics["pass@1[avg-of-2]/adjusted_ndcg@100"] == pytest.approx(25.0)
         assert metrics["pass@2/adjusted_ndcg@100"] == pytest.approx(35.0)  # max over runs
-        # precision@100 is only present on one rollout; the others do not drag it down.
-        assert metrics["pass@1[avg-of-2]/precision@100"] == pytest.approx(50.0)
+        # normalized_precision@100 is only present on one rollout; the others do not drag it down.
+        assert metrics["pass@1[avg-of-2]/normalized_precision@100"] == pytest.approx(50.0)
         assert metrics["pass@1[avg-of-2]/dspy_parse_failed"] == pytest.approx(25.0)
         assert metrics["pass@1[avg-of-2]/truncated"] == pytest.approx(25.0)
         assert metrics["pass@1[avg-of-2]/empty_prediction"] == pytest.approx(25.0)
@@ -377,7 +377,7 @@ class TestAssayBenchApp:
 
         key = result.key_metrics
         assert key["pass@1[avg-of-2]/adjusted_ndcg@100"] == pytest.approx(25.0)
-        assert key["pass@1[avg-of-2]/precision@100"] == pytest.approx(50.0)
+        assert key["pass@1[avg-of-2]/normalized_precision@100"] == pytest.approx(50.0)
         assert key["pass@1[avg-of-2]/hallucination_rate"] == pytest.approx(10.0)
         assert "pass@1[avg-of-2]/truncated" not in key
 

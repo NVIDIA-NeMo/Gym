@@ -273,7 +273,11 @@ class AssayBenchResourcesServer(SimpleResourcesServer):
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Headline: token counts and the paper's three Table 2 columns at the highest k."""
+        """Headline: token counts and the paper's three Table 2 columns at the highest k.
+
+        The paper's "Precision@k" is normalized by ``min(k, G+)`` (its §3.2), which is the package's
+        ``normalized_precision@k``; its "dFDR@k" is the plain ``fdr@k``.
+        """
         key: Dict[str, Any] = {}
 
         for name in ("mean/input_tokens", "mean/output_tokens"):
@@ -284,7 +288,12 @@ class AssayBenchResourcesServer(SimpleResourcesServer):
             highest_k_metrics(
                 agent_metrics,
                 "pass@1[avg-of-{k}]",
-                score_names=["adjusted_ndcg@100", "precision@100", "fdr@100", "hallucination_rate"],
+                score_names=[
+                    "adjusted_ndcg@100",
+                    "normalized_precision@100",  # the paper's "Precision@100" (divides by min(k, #hits))
+                    "fdr@100",  # the paper's "dFDR@100"
+                    "hallucination_rate",
+                ],
             )
         )
         return key

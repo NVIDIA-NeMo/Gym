@@ -144,8 +144,10 @@ Zero-shot rows only (the SFT / GRPO / GEPA / few-shot / ensemble rows need train
 | Qwen3.5-2B | 0.0237 / 0.0695 / 0.0216 | 0.0284 / 0.0755 / 0.0216 | 0.0324 / 0.1342 / NA | **yes** |
 | Gene-frequency baseline | 0.1691 / 0.4103 / 0.0606 | 0.1334 / 0.2204 / 0.0292 | 0.0888 / 0.1866 / NA | — |
 
-The table prints `precision@100`, not the normalized variant (`journal_figures_common.py::METRICS` upstream
-labels `precision@100` as "Precision@100"). Read `pass@1[avg-of-5]/adjusted_ndcg@100` and divide by 100.
+The table's "Precision@100" is the package's `normalized_precision@100`: the paper's §3.2 formula divides by
+`min(k, G+)`, the number of hits when a screen has fewer than 100, and that is what the published numbers match
+(a GPT-OSS-120B rerun gave 0.184 normalized vs 0.119 raw against the printed 0.1757). "dFDR@100" is the raw
+`fdr@100`. Read `pass@1[avg-of-5]/<metric>` and divide by 100.
 
 ### Sampling settings (upstream `benchmarking/configs/collect-*.yaml`)
 
