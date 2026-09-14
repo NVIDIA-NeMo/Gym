@@ -1,0 +1,99 @@
+{
+    "reactions": [
+        {
+            "reaction_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC(C)(C)Cl",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "C=C(C)C",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH3+]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "conditions": [
+                {
+                    "role": "solvent",
+                    "text": "H2O",
+                    "reaction_step": "1"
+                },
+                {
+                    "role": "temperature",
+                    "text": "\u0394",
+                    "reaction_step": "1"
+                }
+            ]
+        }
+    ],
+    "mechanism": [
+        {
+            "mechanism_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC(C)(C)Cl",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "C[C+](C)C",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[Cl-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        },
+        {
+            "mechanism_id": "2",
+            "reactants": [
+                {
+                    "smiles": "C[C+](C)C",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[Cl-]",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "C=C(C)C",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH3+]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        }
+    ]
+}

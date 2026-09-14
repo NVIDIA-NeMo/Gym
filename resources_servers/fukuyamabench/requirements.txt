@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+rdkit==2025.9.6
