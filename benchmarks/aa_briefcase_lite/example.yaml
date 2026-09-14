@@ -12,6 +12,9 @@ aa_briefcase_lite_resources_server:
 aa_briefcase_lite_stirrup_agent:
   responses_api_agents:
     stirrup_agent:
+      resources_server:
+        type: resources_servers
+        name: aa_briefcase_lite_resources_server
       judge_only: true
       execute_only: false
       rerun_incomplete: false
