@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from collections.abc import Mapping
 from http.cookiejar import CookieJar
-from typing import Any
+from typing import Any, Optional
 
 import verifiers as vf
 from fastapi import Body, Request, Response
@@ -206,7 +207,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _get_client(self, body: Any = None) -> NeMoRLChatCompletionsClient:
+    def _rollout_id_for(self, body: Any = None, request: Optional[Request] = None) -> Optional[str]:
+        """The capture id for this call, from the run body or the request path.
+
+        ``rollout_id_from_run`` only covers ``/run``, where rollout collection
+        injects ``_ng_rollout_id`` into the body. A direct
+        ``/ng-rollout/<id>/v1/responses`` call carries the id in the path
+        instead, and agents get no ``RolloutContextMiddleware`` -- that is
+        installed on resources servers, not here -- so the contextvar is unset
+        on that route. Without reading the path, a supported prefixed call
+        builds an unprefixed client and its model calls are never correlated,
+        which is the same silent capture loss this agent already had.
+
+        Gated on the same ``_capture_correlation_enabled`` as the body path, so
+        a run with capture off keeps the shared unprefixed client.
+        """
+        if body is not None and (from_body := self.rollout_id_from_run(body)):
+            return from_body
+        if request is None or not self._capture_correlation_enabled():
+            return None
+        path_params = getattr(request, "path_params", None)
+        if not isinstance(path_params, Mapping):
+            return None
+        return path_params.get("rollout_id") or None
+
+    def _get_client(self, body: Any = None, request: Optional[Request] = None) -> NeMoRLChatCompletionsClient:
         """Return a rollout-prefixed client over one shared policy transport.
 
         The vllm_model server picks a vLLM engine per session
@@ -251,7 +276,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
         shared_client = self.client_cache[cache_key]
-        rollout_id = self.rollout_id_from_run(body) if body is not None else None
+        rollout_id = self._rollout_id_for(body, request)
         if rollout_id is None:
             return shared_client
 
@@ -335,7 +360,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_client(body)
+            client = self._get_client(body, request)
 
             # prefer NeMo RL generation config set in responses_create_params
             # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
