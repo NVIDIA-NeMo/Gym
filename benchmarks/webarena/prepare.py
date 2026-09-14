@@ -118,7 +118,7 @@ def write_env(
         "num_samples_in_parallel: 1",
         "upload_rollouts: false",
         "responses_create_params:",
-        "  max_output_tokens: 16384",
+        "  max_output_tokens: null",
         "  temperature: 0.1",
         "  top_p: 0.95",
         "policy_base_url: ${oc.env:POLICY_BASE_URL,http://127.0.0.1:8000/v1}",

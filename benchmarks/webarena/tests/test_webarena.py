@@ -75,10 +75,21 @@ def test_nano_omni_profile_composes_without_output_repair() -> None:
     assert "nano_omni_action_recovery" not in agent
     assert "nano_omni_tool_alias_recovery" not in agent
     assert agent.max_parse_retries == 2
+    assert agent.nano_omni_max_tool_calls is None
+    assert agent.nano_omni_retry_invalid_tool_calls is False
+    # Reference parse retries repeat the same request after one second. They
+    # do not inject correction messages or raise the sampling temperature.
+    assert agent.nano_omni_parse_retry_feedback is False
+    assert agent.nano_omni_parse_retry_temperature is None
+    assert agent.nano_omni_parse_retry_delay_secs == 1.0
     assert agent.datasets[0].jsonl_fpath == "benchmarks/webarena/data/webarena.jsonl"
     model = resolved.policy_model.responses_api_models.vllm_model
     assert model.base_url == "http://127.0.0.1:8000/v1"
     assert model.chat_template_kwargs == {"truncate_history_thinking": False}
+    resource = resolved.webarena_environment.resources_servers.webarena_browser
+    assert resource.terminate_on_action_error is True
+    assert resource.max_tool_calls is None
+    assert resource.max_computer_actions == agent.nano_omni_max_computer_actions
 
 
 def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
@@ -91,6 +102,12 @@ def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
     content = env_path.read_text()
     assert "benchmarks/webarena/configs/nano_omni.yaml" in content
     assert "agent_name: webarena_benchmark_agent" in content
+    # The reference omits max_tokens from actual requests. Its constructor's
+    # 16384 default is not an instruction to impose an output cap here.
+    generated = OmegaConf.create(content)
+    assert generated.responses_create_params.max_output_tokens is None
+    overridden = OmegaConf.merge(generated, {"responses_create_params": {"max_output_tokens": 1024}})
+    assert overridden.responses_create_params.max_output_tokens == 1024
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
     with pytest.raises(ValueError, match="one DISPLAY"):
