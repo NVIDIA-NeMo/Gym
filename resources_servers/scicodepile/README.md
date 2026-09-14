@@ -204,9 +204,18 @@ involved, which is the only check here that cannot be confounded by model qualit
 
 ### Reported upstream result
 
-The paper reports the strongest evaluated model at **12.30% Pass@1** on this
-stratum. That number was produced by the upstream harness, not this server, and
-this repository has not reproduced it.
+[The paper](https://arxiv.org/abs/2607.19104) evaluates 15 models on this stratum
+and reports Pass@1 and Pass@5 using the HumanEval estimator (Table 3). The strongest
+is **GPT-5.4-mini at 12.30% Pass@1 / 15.50% Pass@5**, followed by o3-mini
+(10.50% / 12.00%) and DeepSeek-R1 (8.50% / 12.50%); the weakest reported are
+StarCoder2-7B/15B at 0.30% Pass@1.
+
+Models are evaluated zero-shot on the task `prompt` alone — "HumanEval-style task
+prompts, each consisting of a function signature and its natural-language
+specification". The paper publishes no system prompt, no decoding parameters, and no
+sample count per task.
+
+These figures were produced by the upstream harness, not by this server.
 
 ### Example
 

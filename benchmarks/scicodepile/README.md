@@ -53,9 +53,20 @@ in the config, not a train/test split.
 ## Prompting
 
 The upstream `prompt` field — a function signature plus docstring — is passed to the
-model unmodified, HumanEval-style. Upstream publishes no prompt of its own, so any
-instruction wrapper would be invention that changes what is measured, and would make
-results incomparable with the published figures.
+model unmodified, HumanEval-style, with **no system message**.
+
+That matches the only prompting the paper specifies: models are evaluated zero-shot on
+"HumanEval-style task prompts, each consisting of a function signature and its
+natural-language specification". The paper publishes no system prompt and no
+instruction wrapper. (Its Appendix K.5 is titled "Prompt Design for Executable
+Benchmark *Construction*" — the prompt used to generate the test artifacts, not the
+one given to evaluated models.) Any wrapper added here would be invention that changes
+what is measured.
+
+Note that `system: ""` is not the same as no system message: `nemo_gym/prompt.py`
+emits a system turn whenever the key is present, and an empty one is
+template-dependent — Qwen templates drop their built-in default system prompt when
+any system message is supplied. The key is therefore omitted entirely.
 
 **This carries a cost worth knowing.** With no instruction, a chat model sometimes
 answers conversationally instead of writing code — *"It looks like you've pasted a
