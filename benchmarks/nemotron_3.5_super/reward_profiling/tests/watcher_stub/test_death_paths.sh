@@ -38,5 +38,35 @@ grep -q 'compgen -G' "$SCRIPT" \
   && ok "D6 missing shard dirs is an error, not success" \
   || bad "D6 missing shard dirs is an error, not success" "merges an empty sweep and exits 0"
 
+# X2: never re-deal while shard files are being written. Behavioural, not a grep: the first
+# attempt used `find -newermt`, which this cluster's bfs rejects, so the guard silently never fired.
+_pred=$(sed -n 's/.*find "\$SHARDS_DIR" \(.*\) 2>\/dev\/null.*/\1/p' "$SCRIPT" | head -1)
+if [[ -z "$_pred" ]]; then
+    bad "X2 refuses to reshard while shard files are live" "no live-file guard at all"
+else
+    bash "$HERE/mkfixture.sh" /tmp/x2t 2 5 >/dev/null
+    touch /tmp/x2t/shards/shard_000/rollouts.jsonl
+    fresh=$(eval find /tmp/x2t/shards "$_pred" 2>/dev/null | head -1)
+    touch -d '3 hours ago' /tmp/x2t/shards/shard_*/rollouts.jsonl
+    stale=$(eval find /tmp/x2t/shards "$_pred" 2>/dev/null | head -1)
+    [[ -n "$fresh" && -z "$stale" ]] \
+      && ok "X2 live-file guard actually fires (fresh yes, stale no)" \
+      || bad "X2 live-file guard actually fires" "fresh='$fresh' stale='$stale' pred='$_pred'"
+fi
+
+# J4: a federated sbatch prints "Submitted batch job N on cluster foo"
+grep -q "grep -oE '\[0-9\]+' <<<" "$SCRIPT" \
+  && ok "J4 job-id capture is not anchored to end-of-line" \
+  || bad "J4 job-id capture is not anchored to end-of-line" "breaks on trailing text"
+
+# D7/D8: a merge or split hiccup must not hide the INCOMPLETE report
+grep -q 'WARNING: merge failed' "$SCRIPT" && grep -q 'WARNING: split failed' "$SCRIPT" \
+  && ok "D7 merge/split failure does not suppress the report" \
+  || bad "D7 merge/split failure does not suppress the report" "set -e exits before the banner"
+
+# startup: the manifest probe must not abort the run
+grep -q '_manifest_shards=\$(python - "\$SWEEP_DIR" 2>/dev/null' "$SCRIPT" \
+  && ok "D5 startup manifest probe is guarded" || bad "D5 startup manifest probe is guarded" "torn report aborts startup"
+
 echo "  --- $pass passed, $fail failed"
 exit $(( fail > 0 ))

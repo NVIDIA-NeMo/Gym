@@ -68,7 +68,9 @@ done
 
 # num_shards from the manifest when this environment does not set it. Nodes = NUM_SHARDS x
 # (vllm.prefill_nodes + vllm.decode_nodes), so 16 shards at the default 1+2 is 48 nodes.
-_manifest_shards=$(python - "$SWEEP_DIR" <<'PY_SHARDS'
+# 2>/dev/null || true to match 02_shard.sh:28, which guards the identical block. Without it a torn
+# sweep_report.json or a missing python aborts the whole run at startup.
+_manifest_shards=$(python - "$SWEEP_DIR" 2>/dev/null <<'PY_SHARDS'
 import json, sys
 from pathlib import Path
 try:
@@ -76,7 +78,7 @@ try:
 except OSError:
     print("")
 PY_SHARDS
-)
+) || _manifest_shards=""
 NUM_SHARDS=${NUM_SHARDS:-${_manifest_shards:-16}}
 SHARDS_DIR=${SHARDS_DIR:-$SWEEP_DIR/shards}
 RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -132,7 +134,17 @@ INNER
     [[ "$verdict" != "skip" ]]
 }
 
-if need_reshard "$SHARDS_DIR" "$NUM_SHARDS"; then
+# Independent of the count check: if any shard's rollouts.jsonl was written in the last hour, a job
+# is almost certainly live and re-dealing would truncate it (shard.py:239 opens them "w"). This
+# matters because NUM_SHARDS resolves to the manifest value (16) when the environment does not set
+# it -- so restarting a NUM_SHARDS=8 run without that variable would otherwise compare 8 against 16,
+# decide to deal, and truncate eight live shards.
+# -mmin, not -newermt: this cluster's `find` is bfs, which rejects -newermt '-60 minutes' as an
+# invalid timestamp -- and with stderr discarded that silently matched nothing, disabling the guard.
+_recent=$(find "$SHARDS_DIR" -maxdepth 2 -name rollouts.jsonl -mmin -60 2>/dev/null | head -1) || _recent=""
+if [[ -n "$_recent" ]]; then
+    echo ">>> $SHARDS_DIR has rollouts written in the last hour; refusing to reshard (jobs are live)"
+elif need_reshard "$SHARDS_DIR" "$NUM_SHARDS"; then
     echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
     SWEEP_DIR="$SWEEP_DIR" NUM_SHARDS="$NUM_SHARDS" SHARDS_DIR="$SHARDS_DIR" \
         bash "$RP_DIR/scripts/02_shard.sh"
@@ -253,7 +265,8 @@ while :; do
             submitted=$((submitted + 1))   # not done, so the round must not count as finished
             continue                       # and a failed submit is not an attempt
         fi
-        job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1) || job_id=""
+        # No $ anchor: a federated sbatch prints "Submitted batch job N on cluster foo".
+        job_id=$(grep -oE '[0-9]+' <<<"$submit_output" | tail -1) || job_id=""
         if [[ -z "$job_id" ]]; then
             echo "    $shard_name: no job id in submit output; retrying next round" >&2
             submitted=$((submitted + 1))
@@ -286,10 +299,11 @@ done
 
 echo ">>> merging shard rollouts back into $SWEEP_DIR"
 SWEEP_DIR="$SWEEP_DIR" SHARDS_DIR="$SHARDS_DIR" OUTPUT="$SWEEP_DIR/rollouts.jsonl" \
-    bash "$RP_DIR/scripts/04_merge_shards.sh"
+    bash "$RP_DIR/scripts/04_merge_shards.sh" || echo "WARNING: merge failed" >&2
 
 echo ">>> splitting by manifest entry"
-PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra split "$SWEEP_DIR"
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra split "$SWEEP_DIR" \
+    || echo "WARNING: split failed" >&2
 
 echo
 echo "Merged rollouts : $SWEEP_DIR/rollouts.jsonl"
