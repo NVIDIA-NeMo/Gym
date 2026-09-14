@@ -176,6 +176,22 @@ def test_prefix_record_does_not_complete_or_stage_the_live_call() -> None:
     assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
 
 
+def test_generation_chunk_record_contains_only_new_generated_tokens() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_root())
+
+    chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+    )
+
+    assert chunk.token_ids_delta == [13, 14]
+    assert chunk.token_mask_delta == [1.0, 1.0]
+    assert chunk.generation_log_probs_delta == [-0.5, -0.75]
+    assert chunk.weight_version == 7
+
+
 def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
     capture, sink = _capture()
     original = capture.begin_call(_root())
@@ -192,7 +208,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
         generation_cut=GenerationCutContinuation(
             source_capture_key="rollout-1",
             source_model_call_id="c1",
-            staging_key="__generation_cut__/checkpoint-1/rollout-1/c1",
+            staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
             generation_token_count=1,
             digest=cut.digest,
         ),
@@ -201,7 +217,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
         admission,
         prefix_token_ids=[],
         generation_cut=cut,
-        generation_cut_staging_key=admission.generation_cut.staging_key,
+        generation_cut_staging_keys=admission.generation_cut.staging_keys,
     )
 
     coords = capture.complete_call(
