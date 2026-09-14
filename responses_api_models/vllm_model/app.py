@@ -55,6 +55,30 @@ from nemo_gym.token_id_capture import current_capture_context
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 
+
+def _is_context_length_error(error: ClientResponseError) -> bool:
+    """Recognize request overflow without swallowing runtime KV-cache failures."""
+    if error.status != 400:
+        return False
+
+    message = error.response_content.decode(errors="replace")
+    if "context length" in message or "max_tokens" in message:
+        return True
+
+    # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        payload = payload.get("error", payload)
+    if isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error":
+        return True
+
+    # Retain compatibility when a proxy forwards only llama.cpp's message.
+    return "exceeds the available context size" in message or "is larger than the max context size" in message
+
+
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
@@ -827,12 +851,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            if _is_context_length_error(e):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -1141,11 +1160,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
-            result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            if _is_context_length_error(e):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
