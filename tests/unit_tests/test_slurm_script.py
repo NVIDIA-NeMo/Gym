@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -21,10 +22,13 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
+    _build_vllm_ray_command,
+    _node_totals,
     _render_directives,
     _render_pool_directives,
     _render_service_command,
     _resolve_env,
+    _with_default_capture_dir,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -175,7 +179,6 @@ def test_build_vllm_command_multi_instance():
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
-        distributed_backend={"type": "mp"},
     )
     cmd = _build_vllm_command(service)
     assert "--data-parallel-size 4" in cmd
@@ -195,6 +198,116 @@ def test_build_vllm_command_pipeline_parallel():
 def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
     cmd = _build_vllm_command(vllm_service)
     assert "--pipeline-parallel-size" not in cmd
+
+
+def test_build_vllm_command_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--max-model-len 8192" in cmd
+
+
+def test_build_vllm_command_no_extra_args_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert cmd.endswith("--tensor-parallel-size 1")
+
+
+def test_build_vllm_command_served_model_name():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="super-bf16",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name super-bf16" in cmd
+
+
+def test_build_vllm_command_no_served_model_name_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--served-model-name" not in cmd
+
+
+def test_build_vllm_command_served_model_name_quoted_if_needed():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="name with spaces",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name 'name with spaces'" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_command_uses_ray_distributed_executor(vllm_service):
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "--distributed-executor-backend ray" in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_vllm_ray_command_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert '--address "$RAY_HEAD_NODE_IP"' in cmd
+
+
+def test_build_vllm_ray_command_not_ray_serve_library():
+    # Sanity check the plan constraint: this must not shell out to `serve` / ray.serve.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model")
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert "ray.serve" not in cmd
+    assert "serve.run" not in cmd
+
+
+def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
+    # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_command - multiple instances (data parallel) span nodes
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_command_dp_does_not_use_ray():
+    # Multi-node DP uses vLLM's own --data-parallel-address/--headless coordination, not Ray.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert "ray" not in cmd
+    assert "symmetric-run" not in cmd
+
+
+def test_build_vllm_ray_command_dp_head_and_worker_branches():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert 'if [ "$SLURM_NODEID" = "0" ]; then' in cmd
+    assert "--headless" in cmd
+    assert "--data-parallel-size 4" in cmd
+    assert "--data-parallel-size-local 2" in cmd
+    assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
+    assert "--data-parallel-rpc-port 13345" in cmd
+    assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +342,11 @@ def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     assert "git checkout main" in out
-    assert "uv pip install -e . --system" in out
+    assert "uv venv --seed .venv" in out
+    assert "source .venv/bin/activate" in out
+    assert "uv pip install -e ." in out
+    assert "--system" not in out
+    assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
@@ -248,9 +365,107 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert 'exec "$@"' in out
 
 
+def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
+    # The trivial path isn't wrapped in bash -c at all, so there's no
+    # preamble for a failure to silently fall through in the first place.
+    out = render_driver_entrypoint(None, None, None)
+    assert "set -euo pipefail" not in out
+
+
+def test_render_driver_entrypoint_with_gym_install_sets_e():
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "set -euo pipefail" in out
+    # Must be the first statement, ahead of the clone/checkout/install, so a
+    # failure anywhere in the preamble aborts instead of falling through to
+    # exec "$@" against whatever was already on disk/PATH.
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[0] == "bash -c '"
+    assert lines[1] == "set -euo pipefail"
+
+
+def test_render_driver_entrypoint_with_prepare_sets_e():
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
+    assert "set -euo pipefail" in out
+
+
+# ---------------------------------------------------------------------------
+# _with_default_capture_dir
+# ---------------------------------------------------------------------------
+
+
+def test_with_default_capture_dir_injects_when_observability_on():
+    run = {"observability_enabled": True}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
+
+
+def test_with_default_capture_dir_explicit_value_wins():
+    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/custom/path"
+
+
+def test_with_default_capture_dir_no_injection_when_observability_off():
+    run = {"split": "benchmark"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in out
+
+
+def test_with_default_capture_dir_does_not_mutate_input():
+    run = {"observability_enabled": True}
+    _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in run
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
+
+
+def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {
+                    "gsm8k": {"run": {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}}
+                },
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+model_call_capture_dir=/custom/path" in script
+    assert "model-calls" not in script
+
+
+def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "model_call_capture_dir" not in script
 
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
@@ -493,6 +708,61 @@ def test_render_service_command_empty_mounts_omits_flag():
     assert "--container-mounts" not in out
 
 
+# ---------------------------------------------------------------------------
+# _render_service_command — pre_command
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_no_pre_command_by_default():
+    out = _render_service_command("svc", "img:latest", "vllm serve model")
+    assert "bash -c" not in out
+    assert (
+        "srun --overlap --no-container-mount-home --container-image=img:latest --output=logs/svc.log vllm serve model &"
+        in out
+    )
+
+
+def test_render_service_command_pre_command_wraps_in_bash_c():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert "bash -c 'export FOO=bar\nexec vllm serve model'" in out
+
+
+def test_render_service_command_pre_command_still_backgrounded():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert out.rstrip().endswith("&\nSVC_PID=$!")
+
+
+def test_render_service_command_pre_command_multi_statement_round_trips():
+    # Round-trip through shlex, like bash would: the bash -c argument (after
+    # shell-unquoting) must be exactly pre_command + a newline + exec <command>,
+    # regardless of what quote characters pre_command itself contains.
+    pre_command = "export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')\nunset RAY_ADDRESS"
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command=pre_command)
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 1] == "-c"
+    assert tokens[tokens.index("bash") + 2] == f"{pre_command}\nexec vllm serve model"
+    assert out.count("&\n") == 1  # one srun invocation, not split by the embedded newline
+
+
+def test_render_service_command_pre_command_quoting_survives_single_quotes():
+    # pre_command containing a single quote must not break out of the bash -c
+    # quoting or split into a second shell word.
+    out = _render_service_command("svc", "img:latest", "cmd", pre_command="echo 'hi'")
+    assert out.count("bash -c") == 1
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "echo 'hi'\nexec cmd"
+
+
+def test_render_service_command_pre_command_and_extra_args_coexist():
+    # extra_args lands inside `command` (already appended by the caller before
+    # _render_service_command is invoked); pre_command wraps the whole thing.
+    out = _render_service_command(
+        "svc", "img:latest", "vllm serve model --max-model-len 8192", pre_command="unset RAY_ADDRESS"
+    )
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "unset RAY_ADDRESS\nexec vllm serve model --max-model-len 8192"
+
+
 def test_build_sbatch_script_service_mounts(bench_dir):
     config = SubmitConfig.model_validate(
         {
@@ -621,6 +891,221 @@ def test_validate_mounts_no_mounts_passes():
     conn = MagicMock()
     _validate_mounts(config, conn)
     conn.run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _render_service_command — multi-node flags
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_multi_node_adds_nodes_and_ntasks():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=4, ntasks=4)
+    assert "--nodes=4" in out
+    assert "--ntasks=4" in out
+
+
+def test_render_service_command_multi_node_flags_before_container_image():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=4, ntasks=4)
+    assert out.index("--nodes=4") < out.index("--container-image=")
+
+
+def test_render_service_command_single_node_omits_node_flags():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=1, ntasks=1)
+    assert "--nodes=" not in out
+    assert "--ntasks=" not in out
+
+
+def test_render_service_command_no_nodes_kwarg_omits_node_flags():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model")
+    assert "--nodes=" not in out
+    assert "--ntasks=" not in out
+
+
+# ---------------------------------------------------------------------------
+# _node_totals
+# ---------------------------------------------------------------------------
+
+
+def test_node_totals_empty_pools():
+    compute = SlurmComputeConfig(type="slurm", account="acct")
+    assert _node_totals(compute) == (0, 0)
+
+
+def test_node_totals_single_pool():
+    compute = SlurmComputeConfig(
+        type="slurm",
+        account="acct",
+        node_pools={"main": NodePool(partition="gpu", nodes=4, ntasks_per_node=2)},
+    )
+    assert _node_totals(compute) == (4, 8)
+
+
+def test_node_totals_multiple_pools():
+    compute = SlurmComputeConfig(
+        type="slurm",
+        account="acct",
+        node_pools={
+            "gpu": NodePool(partition="gpu", nodes=4, ntasks_per_node=1),
+            "cpu": NodePool(partition="cpu", nodes=2, ntasks_per_node=2),
+        },
+    )
+    assert _node_totals(compute) == (6, 8)
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — multi-node srun flags
+# ---------------------------------------------------------------------------
+
+
+def _multi_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_build_sbatch_script_multi_node_selects_ray_by_node_count(bench_dir):
+    # Node count alone is enough to span the vLLM service via ray - no explicit config needed.
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "ray symmetric-run" in script
+
+
+def test_build_sbatch_script_multi_node_vllm_srun_gets_node_flags(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "--ntasks=4" in vllm_line
+
+
+def test_build_sbatch_script_multi_node_driver_srun_gets_nodes_1(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
+    assert "--nodes=1" in driver_line
+    assert "--ntasks=1" in driver_line
+
+
+def test_build_sbatch_script_multi_node_node_flags_before_container_image(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert vllm_line.index("--nodes=4") < vllm_line.index("--container-image=")
+
+
+def test_build_sbatch_script_single_node_pool_omits_node_flags_from_srun(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 1, "ntasks_per_node": 4}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
+    assert "--nodes=" not in vllm_line
+    assert "--nodes=" not in driver_line
+
+
+def test_build_sbatch_script_non_vllm_service_omits_node_flags_in_multi_node_job(bench_dir):
+    # A plain Ray head service doesn't span nodes itself, even when the vLLM service alongside it
+    # does - it must not get the whole allocation's --nodes/--ntasks (that would launch
+    # `ray start --head` once per node instead of once).
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                },
+                "ray_head": {"type": "ray", "container": "ray:latest"},
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    ray_line = next(line for line in script.splitlines() if "ray:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "--nodes=" not in ray_line
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — ray prelude
+# ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_ray_backend_adds_head_node_prelude(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "scontrol show hostnames" in script
+    assert "ray symmetric-run" in script
+    # Must be exported: it's read inside a separate `srun ... bash -lc` subprocess, which only
+    # inherits *exported* environment variables, not plain shell variables from the parent script.
+    assert 'export RAY_HEAD_NODE_IP="$head_node_ip:6379"' in script
+
+
+def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "scontrol show hostnames" not in script
+    assert "ray symmetric-run" not in script
 
 
 # ---------------------------------------------------------------------------

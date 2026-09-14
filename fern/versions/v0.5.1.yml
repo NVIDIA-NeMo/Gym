@@ -1,0 +1,67 @@
+tabs:
+  docs:
+    display-name: Documentation
+    slug: ""
+  api:
+    display-name: API Reference
+    slug: api
+
+navigation:
+  - tab: docs
+    layout:
+      - folder: ./v0.5.1/pages/about
+        title: "About"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/get-started
+        title: "Get Started"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/data
+        title: "Prepare Data"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/agent-server
+        title: "Configure Agents"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/model-server
+        title: "Configure Models"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/build-verifiers
+        title: "Build Verifiers"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/evaluation
+        title: "Evaluate"
+        title-source: frontmatter
+      - section: Tutorials
+        contents:
+          - folder: ./v0.5.1/pages/training-tutorials
+            title: "Training Tutorials"
+            title-source: frontmatter
+          - folder: ./v0.5.1/pages/evaluation-tutorials
+            title: "Evaluation Tutorials"
+            title-source: frontmatter
+      - folder: ./v0.5.1/pages/environment-tutorials
+        title: "Build Environments"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/model-recipes
+        title: "Model Recipes"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/infrastructure
+        title: "Infrastructure"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/reference
+        title: "Reference"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/troubleshooting
+        title: "Troubleshooting"
+        title-source: frontmatter
+      - folder: ./v0.5.1/pages/contribute
+        title: "Contribute"
+        title-source: frontmatter
+  - tab: api
+    layout:
+      - section: API Reference
+        slug: reference/api-reference
+        contents:
+          - page: Overview
+            path: ./v0.5.1/pages/api-reference/index.mdx
+            slug: ""
+          - folder: ../product-docs/nemo-gym/Full-Library-Reference

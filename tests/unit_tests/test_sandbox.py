@@ -1472,13 +1472,16 @@ async def test_pty_exec_on_existing_session() -> None:
     session = _LiveShellSession(stderr=[b"warn\r\n"], rc=7)
     result = await sandbox.pty.exec("make all", session=session)
     assert result.return_code == 7
-    assert "live-output" in result.stdout
+    # Echoed input, prompts, and the marker lines must all be stripped: the
+    # slice between the start and status markers is the command output alone.
+    assert result.stdout == "live-output\r\n"
     assert result.stderr == "warn\r\n"
-    # The marker must not be matchable from the shell's echo of the typed line.
+    # Neither marker may be matchable from the shell's echo of the typed lines.
     typed = session.written[0].decode()
-    quoted = typed.split("'")
-    token = quoted[3] + quoted[5]
-    assert f"{token}:" not in typed
+    lines = typed.splitlines()
+    start_quoted, end_quoted = lines[0].split("'"), lines[-2].split("'")
+    assert start_quoted[3] + start_quoted[5] not in typed
+    assert f"{end_quoted[3] + end_quoted[5]}:" not in typed
     # The session's stdin never reaches EOF, so the command group must run
     # with stdin redirected or a stdin-reading command blocks forever.
     assert "</dev/null" in typed
@@ -1509,9 +1512,16 @@ class _LiveShellSession:
         if self._die or self._hang:
             return
         typed = data.decode()
-        quoted = typed.splitlines()[-1].split("'")
+        quoted = typed.splitlines()[-2].split("'")
         token = quoted[3] + quoted[5]
-        self._pending = [typed.encode(), b"live-output\r\n", f"{token}:{self._rc}\r\n".encode()]
+        # Echo of all typed lines, then the start marker, output, end marker —
+        # the order a real shell produces for the brace-group discipline.
+        self._pending = [
+            typed.encode(),
+            f"{token}S\r\n".encode(),
+            b"live-output\r\n",
+            f"{token}:{self._rc}\r\n".encode(),
+        ]
 
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         if self._hang:
@@ -1699,7 +1709,7 @@ async def test_pty_exec_marker_edges() -> None:
             self.closed = False
 
         async def write(self, data: bytes) -> None:
-            quoted = data.decode().split("'")
+            quoted = data.decode().splitlines()[-2].split("'")
             token = quoted[3] + quoted[5]
             line = f"{token}:{self._reply}\r\n".encode()
             self._chunks = [line[:8], line[8:]] if self._split else [line]
@@ -1741,4 +1751,98 @@ async def test_pty_exec_marker_edges() -> None:
     for kwargs in ({"cwd": "/tmp"}, {"env": {"A": "1"}}, {"user": "root"}):
         with pytest.raises(ValueError, match="fixed at pty.create"):
             await sandbox.pty.exec("x", session=ScriptedSession("0"), **kwargs)
+    await sandbox.stop()
+
+
+class _DetachRunnerSession:
+    """Facade-level fake: records the detached run and returns a canned result."""
+
+    def __init__(self, *, hang: bool = False, exit_code: int | None = 7) -> None:
+        self.commands: list[str] = []
+        self.closed = False
+        self.reattaches = 0
+        self.mode = "pipe"
+        self._hang = hang
+        self._exit_code = exit_code
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        self.commands.append(command)
+        if self._hang:
+            await asyncio.sleep(3600)
+        return b"merged-output", self._exit_code
+
+    async def reattach(self) -> None:
+        self.reattaches += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_pty_exec_detach_returns_merged_output() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    session = _DetachRunnerSession()
+
+    result = await sandbox.pty.exec("make", session=session, detach=True, timeout_s=5)
+
+    assert (result.stdout, result.stderr, result.return_code) == ("merged-output", None, 7)
+    assert session.commands == ["make"]
+    assert not session.closed, "an explicit session stays the caller's"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_mangled_exit_maps_to_pty_error() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    result = await sandbox.pty.exec("make", session=_DetachRunnerSession(exit_code=None), detach=True, timeout_s=5)
+
+    assert (result.return_code, result.error_type) == (125, "pty")
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class DetachProvider(PlainSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions: list[_DetachRunnerSession] = []
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DetachRunnerSession:
+            assert spec.env == {"A": "1"}
+            session = _DetachRunnerSession(exit_code=0)
+            self.sessions.append(session)
+            return session
+
+    provider = DetachProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    result = await sandbox.pty.exec("make", detach=True, env={"A": "1"}, timeout_s=5)
+
+    assert result.return_code == 0
+    assert len(provider.sessions) == 1 and provider.sessions[0].closed
+    assert sandbox.pty._default_session is None, "a detached exec's private session must not become the default"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_timeout_mirrors_exec_and_repairs_session() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    session = _DetachRunnerSession(hang=True)
+
+    result = await sandbox.pty.exec("stuck", session=session, detach=True, timeout_s=0.05)
+
+    assert (result.return_code, result.error_type) == (125, "timeout")
+    assert not session.closed, "an explicit session is the caller's to discard"
+    assert session.reattaches == 1, "a timeout must leave the session attached"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_requires_a_capable_session() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    with pytest.raises(NotImplementedError, match="detached execution"):
+        await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()

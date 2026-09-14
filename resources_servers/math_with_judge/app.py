@@ -72,6 +72,25 @@ class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
     judge_evaluations: Optional[list[JudgeEvaluation]]
 
 
+def _extract_last_boxed_answer(response: str) -> Optional[str]:
+    r"""Extract the exact contents of the last complete ``\boxed{...}``."""
+    boxed_start = response.rfind("\\boxed{")
+    if boxed_start < 0:
+        return None
+
+    content_start = boxed_start + len("\\boxed{")
+    brace_depth = 1
+    for index in range(content_start, len(response)):
+        if response[index] == "{":
+            brace_depth += 1
+        elif response[index] == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                return response[content_start:index]
+
+    return None
+
+
 def _run_math_verify(
     library_verifier: Any, expected_answer: str, generated_answer: str
 ) -> tuple[float, Optional[str]]:
@@ -204,14 +223,17 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
+        boxed_answer = _extract_last_boxed_answer(generated_answer)
+        if boxed_answer is None or not boxed_answer.strip():
+            return 0.0, None, 0.0, None
+
         library_reward, extracted_answer = await self._verify_answer_with_library_async(
             expected_answer, generated_answer
         )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_answer = extracted_answer if extracted_answer else generated_answer
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, boxed_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod

@@ -6,13 +6,13 @@ config_paths:
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
 - benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
-- responses_api_models/vllm_model/configs/vllm_model.yaml
-# TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
 - benchmarks/swebench/verified/opencode.yaml
-# - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
-# SWE Bench Multilingual
-# SWE Bench Pro
-# Terminal Bench 2.1
+- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/deepswe/opencode.yaml
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+- benchmarks/swebench/pro/opencode.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- benchmarks/nemotron_3.5_super/sandbox_utils.yaml
 
 ########################################
 # START Secrets
@@ -33,6 +33,7 @@ sandbox:
 critpt_benchmark_resources_server:
   resources_servers:
     critpt:
+      allowed_agents: [critpt_agent]
       api_key: dummy  # pragma: allowlist secret
 
 ########################################
@@ -94,14 +95,26 @@ policy_model:
     vllm_model:
       num_workers: 16
 
-# TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated. This is a placeholder for container build.
-opencode_sandboxed_agent_swebench_verified:
-  _inherit_from: opencode_sandboxed_agent
+# TODO @bxyu-nvidia: Remove these overrides to turn on various benchmarks after we do batched eval studies. This is a placeholder for container build.
+swebench_verified_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      resources_server:
-        type: resources_servers
-        name: opencode_swebench_verified_resources_server
+      datasets: []
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+deepswe_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets: []
+swebench_pro_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
       datasets: []
 
 ########################################

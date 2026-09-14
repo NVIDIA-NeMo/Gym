@@ -32,6 +32,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
     SandboxResources,
@@ -44,6 +45,21 @@ from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 LOGGER = logging.getLogger(__name__)
 logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _MissingSandboxTerminateFilter(logging.Filter):
+    """Hide the SDK warning emitted when terminate reaches its desired state."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            record.levelno == logging.WARNING
+            and message.startswith("Failed to terminate sandbox ")
+            and "[KUBERNETES::SANDBOX_NOT_FOUND]" in message
+        )
+
+
+logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
 
 
 class OpenSandboxCreateError(SandboxCreateError):
@@ -260,8 +276,15 @@ def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] |
 
 
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
+    """Match kill errors meaning the sandbox is already gone (terminate's goal state).
+
+    Only the terminate path may treat this as success; other operations must
+    keep failing loudly on not-found.
+    """
+    if _exception_status_code(exception) == 404:
+        return True
     message = str(exception).lower()
-    return "sandbox" in message and "not found" in message
+    return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -370,7 +393,33 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
+def split_domain_scheme(domain: str) -> tuple[str, str | None]:
+    """Split a configured OpenSandbox domain into ``(domain, scheme)``.
+
+    ``"https://sandbox.example:8080/prefix/"`` -> ``("sandbox.example:8080/prefix", "https")``;
+    a bare host is returned unchanged with scheme ``None``. Surrounding whitespace
+    is stripped either way. Only ``scheme://host[:port][/path-prefix]`` is accepted:
+    other schemes, a missing host, or a query string / fragment raise ``ValueError``.
+    """
+    domain = domain.strip()
+    if "://" not in domain:
+        return domain, None
+    parts = urlsplit(domain)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"connection.domain {domain!r} has unsupported scheme {parts.scheme!r}; use http or https")
+    if not parts.netloc:
+        raise ValueError(f"connection.domain {domain!r} has no host")
+    if parts.query or parts.fragment:
+        raise ValueError(
+            f"connection.domain {domain!r} must not carry a query string or fragment; "
+            "use scheme://host[:port][/path-prefix]"
+        )
+    # Keep any path prefix (a reverse proxy may mount the server under one); the SDK appends /v1.
+    return parts.netloc + parts.path.rstrip("/"), scheme
+
+
+@dataclass
 class OpenSandboxConnectionConfig:
     """OpenSandbox server connection settings.
 
@@ -380,7 +429,17 @@ class OpenSandboxConnectionConfig:
     ``transport_backend`` is "httpx" or "aiohttp" (via the optional
     ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
-    operations per process; null means no cap.
+    operations per process; null means no cap. ``tls_verify`` applies to every
+    connection the provider opens (SDK transport and PTY sockets) and is off by
+    default; set it for endpoints whose certificate the client can verify.
+    ``domain`` may carry its scheme (``https://sandbox.example``). The scheme is
+    moved into ``protocol`` and takes precedence over a configured ``protocol``,
+    so every URL the provider builds itself (the PTY WebSocket target) agrees
+    with the SDK's base URL; the SDK receives the host plus any path prefix
+    (``sandbox.example:8080/prefix``). The SDK would accept a scheme in
+    ``domain`` on its own, but the provider reads ``protocol`` directly, hence
+    the normalization here. Only ``scheme://host[:port][/path-prefix]`` is
+    accepted: a query string or fragment is a configuration error.
     """
 
     domain: str | None = None
@@ -397,6 +456,14 @@ class OpenSandboxConnectionConfig:
     max_connections: int | None = 100
     connect_retries: int = 2
     transport_backend: str = "httpx"
+    tls_verify: bool = False
+
+    def __post_init__(self) -> None:
+        if self.domain is None:
+            return
+        self.domain, scheme = split_domain_scheme(self.domain)
+        if scheme is not None:
+            self.protocol = scheme
 
 
 @dataclass(frozen=True)
@@ -509,6 +576,11 @@ class OpenSandboxOperationConfig:
     # Backs off from initial to interval.
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
+    # Per-request budget for background-command status polls, which are small
+    # idempotent GETs: without their own short budget, each poll against an
+    # unreachable sandbox hangs for the shared request timeout (tuned for long
+    # submits) before failing. None falls back to that shared budget.
+    status_poll_timeout_s: float | None = 10.0
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -525,6 +597,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
             raise ValueError("operations.background_poll_initial_s must be > 0")
+        if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
+            raise ValueError("operations.status_poll_timeout_s must be > 0")
 
 
 @dataclass(frozen=True)
@@ -691,17 +765,18 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
+        verify = self._connection.tls_verify
         if self._connection.transport_backend == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
                     "is not installed; falling back to the httpx transport"
                 )
-        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+        return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -794,6 +869,10 @@ class OpenSandboxProvider:
         sandbox_id: str,
         timeout_s: float | None,
         retries: int | None = None,
+        # The default classifier treats per-call timeouts as terminal, which is
+        # right for mutating calls but wrong for short idempotent polls; those
+        # callers pass their own predicate.
+        is_retryable: Callable[[BaseException], bool] = _is_retryable_sdk_operation_error,
     ) -> Any:
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_count = self._operations.retries if retries is None else retries
@@ -803,7 +882,7 @@ class OpenSandboxProvider:
             _log_operation_retry(retry_state, operation=operation, sandbox_id=sandbox_id)
 
         retry_policy = AsyncRetrying(
-            retry=retry_if_exception(_is_retryable_sdk_operation_error),
+            retry=retry_if_exception(is_retryable),
             stop=stop_after_attempt(max_attempts),
             wait=wait_random_exponential(
                 multiplier=self._operations.retry_delay_s,
@@ -1246,9 +1325,17 @@ class OpenSandboxProvider:
             if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
                 return await _dispatch()
             hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+            # asyncio.timeout instead of wait_for: since Python 3.11
+            # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
+            # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
+            # exhausted status-poll budget) and relabel them as a hard-cap trip.
+            hard_cap = asyncio.timeout(hard_cap_s)
             try:
-                return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
-            except asyncio.TimeoutError as e:
+                async with hard_cap:
+                    return await _dispatch()
+            except TimeoutError as e:
+                if not hard_cap.expired():
+                    raise
                 raise TimeoutError(
                     f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
                     f"(sandbox_id={handle.sandbox_id!r})"
@@ -1256,36 +1343,47 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-
-            get_info = getattr(handle.raw, "get_info", None)
-            if get_info is not None:
-                deadline = asyncio.get_running_loop().time() + 5.0
-                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
-                    try:
-                        info = await self._await_sdk_call(
-                            get_info(),
-                            operation="get_info after exec 502",
-                            sandbox_id=handle.sandbox_id,
-                            timeout_s=min(2.0, remaining_s),
-                        )
-                    except Exception:
-                        break
-                    raw_status = getattr(info, "status", None)
-                    state = getattr(raw_status, "state", None)
-                    reason = getattr(raw_status, "reason", None)
-                    message = getattr(raw_status, "message", None)
-                    status_text = f"{reason} {message}"
-                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
-                        message = str(message or "")[:500]
-                        raise SandboxBackendUnreachableError(
-                            "Sandbox was OOM-killed. "
-                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
-                            f"sandbox_id={handle.sandbox_id!r}"
-                        ) from error
-                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                        break
-                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+            notice = await self._oom_death_notice(handle)
+            if notice is not None:
+                raise SandboxBackendUnreachableError(notice) from error
             raise
+
+    async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
+        """Briefly poll the sandbox status; describe an OOM kill, else None.
+
+        With ``any_death`` every terminal state is reported, not just an OOM
+        kill — for callers that need to know whether the sandbox is gone at
+        all, not specifically why. When the backend stops answering it usually
+        takes the control plane a moment to record why, so poll for up to 5s
+        before giving up."""
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return None
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+            try:
+                info = await self._await_sdk_call(
+                    get_info(),
+                    operation="get_info after backend loss",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=min(2.0, remaining_s),
+                )
+            except Exception:
+                return None
+            raw_status = getattr(info, "status", None)
+            state = getattr(raw_status, "state", None)
+            reason = getattr(raw_status, "reason", None)
+            message = getattr(raw_status, "message", None)
+            status_text = (
+                f"OpenSandbox status: state={state!r}, reason={reason!r}, message={str(message or '')[:500]!r}; "
+                f"sandbox_id={handle.sandbox_id!r}"
+            )
+            if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
+                return f"Sandbox was OOM-killed. {status_text}"
+            if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                return f"Sandbox is dead. {status_text}" if any_death else None
+            await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+        return None
 
     async def _exec_background(
         self,
@@ -1324,6 +1422,21 @@ class OpenSandboxProvider:
         poll_timeout_s = (
             float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
         )
+        # Status polls are sub-second GETs; against an unreachable sandbox each
+        # one would otherwise hang for the shared budget above (tuned for long
+        # submits) per retry before the typed failure fires.
+        status_timeout_s = self._operations.status_poll_timeout_s
+        if status_timeout_s is None:
+            status_timeout_s = poll_timeout_s
+
+        def _status_poll_is_retryable(exception: BaseException) -> bool:
+            # The short budget makes poll timeouts routine rather than fatal:
+            # re-polling a status is an idempotent GET, so unlike a submit
+            # (where a timeout stays terminal to avoid a double-run) a timed-out
+            # poll retries within the normal budget instead of killing the command.
+            if isinstance(exception, TimeoutError):
+                return True
+            return _is_retryable_sdk_operation_error(exception)
 
         # Poll fast at first so the many short commands an agent issues are
         # detected promptly, then back off so long ones do not spam requests.
@@ -1333,8 +1446,9 @@ class OpenSandboxProvider:
                 lambda: handle.raw.commands.get_command_status(execution_id),
                 operation="command status",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=poll_timeout_s,
+                timeout_s=status_timeout_s,
                 retries=self._operations.retries,
+                is_retryable=_status_poll_is_retryable,
             )
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
@@ -1398,8 +1512,11 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
+        """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
 
+        if not self._connection.tls_verify:
+            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
@@ -1433,6 +1550,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
+            diagnose=lambda: self._oom_death_notice(handle, any_death=True),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1447,18 +1565,50 @@ class OpenSandboxProvider:
         since: int | None = None,
     ) -> SandboxPtySession:
         """Re-attach to an existing execd PTY session by id."""
-        from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+        from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
-        session = await attach_pty_session(
-            client=self._pty_http_client(),
-            base_url=base_url,
-            headers=headers,
-            session_id=session_id,
-            takeover=takeover,
-            since=since,
-            request_timeout_s=request_timeout_s,
-        )
+        if takeover:
+            # Release our own live attachment first, so the takeover below has
+            # nothing to evict and cannot be refused as "already attached".
+            for stale in [s for s in self._pty_sessions if s.session_id == session_id and not s.closed]:
+                try:
+                    await stale.detach()
+                except SandboxPtyError:
+                    pass  # already dead; the retry loop below rides out eviction
+        # A takeover evicts the attached client, and execd waits for that
+        # client to acknowledge. A half-open peer (silently dropped along the
+        # proxy path) cannot answer, so execd's eviction times out and the
+        # attach comes back as a policy-violation close — reported as "already
+        # has an attached client" — while the stale client is torn down in the
+        # background. A fresh attempt then lands, so retry exactly that case.
+        for delay in (*_PTY_TAKEOVER_RETRY_DELAYS, None):
+            try:
+                session = await attach_pty_session(
+                    client=self._pty_http_client(),
+                    base_url=base_url,
+                    headers=headers,
+                    session_id=session_id,
+                    takeover=takeover,
+                    since=since,
+                    request_timeout_s=request_timeout_s,
+                    diagnose=lambda: self._oom_death_notice(handle, any_death=True),
+                )
+                break
+            except SandboxPtyError as e:
+                if not takeover or "already has an attached client" not in str(e):
+                    raise
+                if delay is None:
+                    # The eviction never completed across every retry. When the
+                    # sandbox itself is gone (node loss, OOM kill) the stale
+                    # attachment can never acknowledge its eviction, so the
+                    # takeover is refused forever — report the sandbox's death
+                    # instead of the refusal.
+                    notice = await self._oom_death_notice(handle, any_death=True)
+                    if notice is not None:
+                        raise SandboxPtyError(f"PTY attach takeover kept being refused: {notice}") from e
+                    raise
+            await asyncio.sleep(delay)
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
@@ -1496,22 +1646,28 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
+
+        async def kill_ignore_missing() -> None:
+            # Terminate is idempotent: not-found means the sandbox is already
+            # gone (double-termination race, or a previous run's leftover).
+            # Swallow it before the retry wrapper so the 404 is never retried.
+            try:
+                await handle.raw.kill()
+            except Exception as e:
+                if not _is_missing_sandbox_delete_error(e):
+                    raise
+                LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
+
         stop_error: Exception | None = None
         try:
             await self._await_sdk_operation(
-                lambda: handle.raw.kill(),
+                kill_ignore_missing,
                 operation="kill",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
         except Exception as e:
-            if not _is_missing_sandbox_delete_error(e):
-                stop_error = e
-            else:
-                LOGGER.info(
-                    "OpenSandbox sandbox %r was already deleted during close",
-                    handle.sandbox_id,
-                )
+            stop_error = e
 
         close_error: Exception | None = None
         try:

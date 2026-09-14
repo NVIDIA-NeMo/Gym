@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import sys
 from pathlib import Path
@@ -59,6 +60,7 @@ def _make_server(
     compute_comet: bool = False,
     strip_reasoning: bool = False,
     comet_num_shards: int = 8,
+    comet_batch_size: int = 16,
     language_consistency_backend: Optional[str] = "wmt24pp_cld2",
     language_consistency_warning_threshold: float = 50.0,
 ) -> WmtTranslationResourcesServer:
@@ -73,6 +75,7 @@ def _make_server(
         compute_comet=compute_comet,
         strip_reasoning=strip_reasoning,
         comet_num_shards=comet_num_shards,
+        comet_batch_size=comet_batch_size,
         language_consistency_backend=language_consistency_backend,
         language_consistency_warning_threshold=language_consistency_warning_threshold,
     )
@@ -398,6 +401,147 @@ class TestVerify:
         assert result.generation == ref
         assert result.sentence_chrf > 50.0
         assert result.sentence_spbleu > 50.0
+        assert result.comet_score is None
+
+    async def test_verify_leaves_comet_none_when_compute_comet_enabled(self) -> None:
+        """Generation stays on the chrF/spBLEU path; xCOMET runs in compute_metrics()."""
+        server = _make_server(compute_comet=True)
+        ref = "Der schnelle braune Fuchs springt über den faulen Hund."
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog.",
+            translation=ref,
+            generation=ref,
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.generation == ref
+        assert result.comet_score is None
+        assert server._comet_init_attempted is False
+        assert server._comet_actors == []
+
+
+class TestScoreMissingComet:
+    def _stub_pool(self, server: WmtTranslationResourcesServer, n_actors: int):
+        server._comet_init_attempted = True
+        calls: list = []
+        actors = []
+        for actor_i in range(n_actors):
+
+            class _ScoreProxy:
+                def __init__(self, idx: int):
+                    self.idx = idx
+
+                def remote(self, triples, batch_size):
+                    calls.append((self.idx, list(triples), batch_size))
+                    return ("ref", self.idx, list(triples), batch_size)
+
+            actor = MagicMock()
+            actor.score = _ScoreProxy(actor_i)
+            actors.append(actor)
+        server._comet_actors = actors
+        return calls
+
+    def test_batches_across_actors_and_checkpoints(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = _make_server(compute_comet=True, comet_num_shards=2, comet_batch_size=2)
+        calls = self._stub_pool(server, n_actors=2)
+        jsonl = tmp_path / "evaluator_rollouts.jsonl"
+        rows = []
+        tasks = []
+        de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        for i in range(5):
+            row = {
+                "_ng_task_index": i,
+                "_ng_rollout_index": 0,
+                "text": f"src {i}",
+                "translation": de_ref,
+                "generation": de_ref,
+                "source_language": "en",
+                "target_language": "de_DE",
+                "comet_score": None,
+            }
+            rows.append(row)
+            tasks.append([row])
+        jsonl.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        monkeypatch.setenv("WMT_COMET_CHECKPOINT_JSONL", str(jsonl))
+
+        def _fake_get(refs):
+            out = []
+            for ref in refs:
+                triples = ref[2]
+                out.append([0.91] * len(triples))
+            return out
+
+        import app as app_module
+
+        monkeypatch.setattr(app_module.ray, "get", _fake_get)
+        m = server.compute_metrics(tasks)
+        # 5 rows, batch=2, 2 actors → wave1: 2+2, wave2: 1
+        assert len(calls) == 3
+        assert calls[0][0] == 0 and len(calls[0][1]) == 2 and calls[0][2] == 2
+        assert calls[1][0] == 1 and len(calls[1][1]) == 2 and calls[1][2] == 2
+        assert calls[2][0] == 0 and len(calls[2][1]) == 1 and calls[2][2] == 2
+        assert all(task[0]["comet_score"] == 0.91 for task in tasks)
+        assert m["en->de_DE/comet"] == pytest.approx(91.0)
+        saved = [json.loads(line) for line in jsonl.read_text().splitlines()]
+        assert all(row["comet_score"] == 0.91 for row in saved)
+
+    def test_skips_already_scored_and_empty_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = _make_server(compute_comet=True, comet_num_shards=1, comet_batch_size=8)
+        calls = self._stub_pool(server, n_actors=1)
+        de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        tasks = [
+            [
+                {
+                    "text": "T0",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "comet_score": 0.5,
+                }
+            ],
+            [
+                {
+                    "text": "T1",
+                    "translation": de_ref,
+                    "generation": "",
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "comet_score": None,
+                }
+            ],
+        ]
+        import app as app_module
+
+        def _boom(_refs):
+            raise AssertionError("ray.get should not be called")
+
+        monkeypatch.setattr(app_module.ray, "get", _boom)
+        m = server.compute_metrics(tasks)
+        assert calls == []
+        assert m["en->de_DE/comet"] == pytest.approx(50.0)
+
+    def test_length_mismatch_fails_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = _make_server(compute_comet=True, comet_num_shards=1, comet_batch_size=8)
+        self._stub_pool(server, n_actors=1)
+        de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        tasks = [
+            [
+                {
+                    "text": "T0",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "comet_score": None,
+                }
+            ]
+        ]
+        import app as app_module
+
+        monkeypatch.setattr(app_module.ray, "get", lambda refs: [[0.91, 0.92]])
+        with pytest.raises(RuntimeError, match="length mismatch"):
+            server.compute_metrics(tasks)
 
 
 class TestComputeMetrics:
@@ -574,9 +718,8 @@ class TestComputeMetrics:
         }
 
     def test_per_row_comet_scores_emit_aggregate_metrics(self) -> None:
-        """When rollouts carry comet_score (from verify()'s actor pool await),
-        compute_metrics buckets those values directly into per-pair and
-        cross-pair aggregates."""
+        """When rollouts already carry comet_score, compute_metrics buckets
+        those values and does not re-score."""
         server = _make_server(compute_comet=True)
         de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
         fr_ref = "Le renard brun rapide saute par dessus le chien paresseux dans le beau jardin."
@@ -766,10 +909,9 @@ class TestComputeMetrics:
                 {
                     "text": "The quick brown fox jumps over the lazy dog in the beautiful garden.",
                     "translation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
-                    "generation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
+                    "generation": "",
                     "source_language": "en",
                     "target_language": "de_DE",
-                    # No comet_score field → simulates pool unavailable.
                 }
             ]
         ]
@@ -777,6 +919,7 @@ class TestComputeMetrics:
         assert "en->de_DE/chrF" in m
         assert "en->de_DE/spBLEU" in m
         assert not any(k.endswith("/comet") for k in m)
+        assert server._comet_init_attempted is False
 
 
 class TestBuildCometActorClass:
@@ -869,6 +1012,25 @@ class TestBuildCometActorClass:
         assert py_exec.endswith("bin/python3.12")
         # Mirror was performed on first invocation.
         assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
+
+    def test_worker_python_skips_python_mirror(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import shutil as shutil_mod
+
+        import app as app_module
+
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "does_not_exist"))
+        monkeypatch.setenv("HF_HOME", "/tmp/hf_home")
+        captured = {}
+        monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote(captured)))
+
+        with patch.object(shutil_mod, "copytree") as mock_copy:
+            _build_comet_actor_class(use_worker_python=True)
+            mock_copy.assert_not_called()
+
+        runtime_env = captured["decorator_kwargs"]["runtime_env"]
+        assert "py_executable" not in runtime_env
+        assert runtime_env["env_vars"]["HF_HOME"] == "/tmp/hf_home"
+        assert "PYTHONPATH" not in runtime_env["env_vars"]
 
     def test_reuses_existing_mirror_without_recopy(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Second invocation must skip copytree when the mirror already exists."""

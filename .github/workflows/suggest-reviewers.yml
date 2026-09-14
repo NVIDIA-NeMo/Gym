@@ -7,14 +7,26 @@ name: Suggest Reviewers
 # `# suggest:` entries are invisible to GitHub's own CODEOWNERS parser, since
 # it ignores comment lines entirely, so they can never become required.
 #
+# Triggers the same way cicd-main.yml does: on a push to the pull-request/N
+# mirror branch NVIDIA's copy-pr-bot creates only after a vetter has approved
+# the PR ("ok to test"). This is a deliberate human gate against prompt
+# injection via PR content (a crafted filename or CODEOWNERS entry) running
+# unreviewed. _suggest_reviewers.yml resolves the real PR number/base/head
+# sha from this branch name via nv-gha-runners/get-pr-info.
+#
 # Implementation lives in NVIDIA-NeMo/FW-CI-templates so any NeMo repo with a
 # CODEOWNERS file can reuse it the same way. See that repo's
 # .github/workflows/_suggest_reviewers.yml and .github/scripts/
 # codeowners-suggestions.js (+ its unit tests) for the matching logic.
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -23,9 +35,9 @@ permissions:
 jobs:
   suggest-reviewers:
     # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@0c40b98e0ecd93ee9da62db9e7ecd54e39a5b392
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@3a1034a1c493cc178e9e12efd423377c502cd561
     with:
-      workflow_ref: 0c40b98e0ecd93ee9da62db9e7ecd54e39a5b392
+      workflow_ref: 3a1034a1c493cc178e9e12efd423377c502cd561
       # nemo-automation-bot -- same App community-bot.yml uses -- confirmed
       # working live for team-reviewer resolution. No PAT needed.
       app-id: ${{ vars.BOT_ID }}

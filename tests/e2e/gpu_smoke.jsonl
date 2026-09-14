@@ -1,0 +1,1 @@
+{"responses_create_params":{"input":[{"role":"user","type":"message","content":[{"type":"input_text","text":"What is the capital of France? End your response with 'Final answer: <answer>'."}]}]},"expected_answer":"Paris","extraction_mode":"final_answer","case_sensitive":false}
