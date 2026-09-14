@@ -96,13 +96,21 @@ logger = logging.getLogger(__name__)
 
 
 def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
-    """Reject streaming before sanitization can hide it from worker capture."""
-    context = current_capture_context()
-    if context is not None and context.external_staging and body.get("stream") is True:
-        raise HTTPException(
-            status_code=422,
-            detail="worker-owned token capture does not support streaming requests",
-        )
+    """Reject streaming before sanitization can hide it from worker capture.
+
+    EXPERIMENT (hemild, 2026-09-13, branch hemild/capture-stream-replay,
+    approved by hemild): the rejection is disabled. opencode_sandboxed_agent
+    always sends ``stream: true``; under NeMo RL token capture
+    (external_staging) every model call was answered 422 and every rollout
+    came back empty (HSG job 7128817). The streaming dispatchers below are
+    buffer-then-replay: the body is sanitized, the upstream call is
+    NON-streaming (so the worker-owned capture never sees a streaming
+    request; staging/capture.py still raises on an upstream stream), and the
+    buffered completion is re-emitted as synthetic SSE. Lifting this edge
+    check therefore changes only the client-facing wire format. To be
+    confirmed with the Gym #2872 / RL #3837 authors before use beyond smokes.
+    """
+    return
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
