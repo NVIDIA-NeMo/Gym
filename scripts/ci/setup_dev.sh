@@ -27,8 +27,8 @@ gym_ci_setup_dev() {
     fi
 
     cd "${setup_repo_root}"
-    if [[ "$(command -v uv >/dev/null 2>&1 && uv --version 2>/dev/null | awk '{print $2}')" == "0.11.29" ]]; then
-        # Offline/container environment: the image already provides uv 0.11.29 and a
+    if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv >/dev/null 2>&1; then
+        # Offline container environment: the image already provides uv and a
         # pre-populated uv cache, so install nothing and resolve from the cache only.
         setup_uv_sync_args=(--offline)
     else

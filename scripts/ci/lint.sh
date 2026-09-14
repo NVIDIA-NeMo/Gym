@@ -17,8 +17,8 @@ gym_ci_sanitize_environment lint
 unset -f gym_ci_sanitize_environment
 
 cd "${repo_root}"
-if command -v pre-commit >/dev/null 2>&1; then
-    # Offline/container environment: the image already provides pre-commit, so install nothing.
+if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v pre-commit >/dev/null 2>&1; then
+    # Offline container environment: the image already provides pre-commit, so install nothing.
     pre_commit_bin="pre-commit"
 else
     # Online environment (e.g. GitHub Actions): install the pinned pre-commit into a tool venv.
