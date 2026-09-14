@@ -79,7 +79,6 @@ _REMOTE_MAX_TRIES = 3
 _REMOTE_RETRY_SLEEP_SECS = 0.5
 _FAILURE_PRINT_HEAD = 5
 _FAILURE_PRINT_INTERVAL = 100
-_AGGREGATE_PROXY_TIMEOUT_SECS = 600.0
 
 # Result/routing keys this server itself produces. Input rows may carry stale copies
 # (e.g. a rollouts or failures JSONL re-fed as a dataset); they must never collide with
@@ -490,22 +489,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Proxy aggregate_metrics to the resources server.
-
-        Bounded: the ServerClient hop otherwise retries connection errors forever, and a dead
-        resources server at end-of-run would hang the collector after all rollouts are on disk.
-        """
-
-        async def _proxy() -> AggregateMetrics:
-            response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/aggregate_metrics",
-                json=body,
-            )
-            await raise_for_status(response)
-            return AggregateMetrics.model_validate(await get_response_json(response))
-
-        return await asyncio.wait_for(_proxy(), timeout=_AGGREGATE_PROXY_TIMEOUT_SECS)
+        """Proxy aggregate_metrics to the resources server."""
+        return await self.proxy_aggregate_metrics(self.config.resources_server.name, body)
 
 
 if __name__ == "__main__":
