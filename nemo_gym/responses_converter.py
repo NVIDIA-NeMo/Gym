@@ -213,7 +213,8 @@ class ResponsesConverter(BaseModel):
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
-        responses_create_params.pop("include", None)
+        if responses_create_params.get("include") == []:
+            del responses_create_params["include"]
 
         # Codex serializes include=[] even when no additional fields are requested.
         # Only the empty list is equivalent to omission; nonempty includes still require Responses.
@@ -225,6 +226,7 @@ class ResponsesConverter(BaseModel):
                 "background",
                 "context_management",
                 "conversation",
+                "include",
                 "max_tool_calls",
                 "previous_response_id",
                 "prompt",
