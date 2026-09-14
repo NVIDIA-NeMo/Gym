@@ -131,6 +131,21 @@ EOF
 
 
 TEST_SH_PATCHES = {
+    "*": [
+        (
+            "curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh",
+            """verifier_uv_installer=$(mktemp) || exit $?
+if curl -fLsS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 30 --max-time 120 \\
+  -o "$verifier_uv_installer" https://astral.sh/uv/0.9.5/install.sh; then
+  sh "$verifier_uv_installer" && verifier_uv_status=0 || verifier_uv_status=$?
+else
+  verifier_uv_status=$?
+fi
+rm -f "$verifier_uv_installer"
+[ "$verifier_uv_status" -eq 0 ] || exit "$verifier_uv_status"
+""",
+        ),
+    ],
     "terminal-bench/qemu-startup": _verifier_apt_patches("curl expect", bullseye_snapshot=True),
     "terminal-bench/qemu-alpine-ssh": _verifier_apt_patches("curl sshpass", bullseye_snapshot=True),
     "terminal-bench/code-from-image": _verifier_apt_patches("curl"),
@@ -238,12 +253,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     def _patch_golden_patch_solve_sh(
         self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
     ):
-        if task_name not in patches or local_fpath.suffix != ".sh":
+        applicable_patches = [*patches.get("*", []), *patches.get(task_name, [])]
+        if not applicable_patches or local_fpath.suffix != ".sh":
             yield local_fpath
             return
 
         content = local_fpath.read_text()
-        for old, new in patches[task_name]:
+        for old, new in applicable_patches:
             content = content.replace(old, new)
 
         with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +19,63 @@ from resources_servers.terminal_bench_2_1.app import (
 
 
 class TestApp:
+    @pytest.mark.parametrize("recover", [True, False])
+    def test_verifier_installer_retries_without_executing_partial_downloads(
+        self, tmp_path: Path, recover: bool
+    ) -> None:
+        marker = tmp_path / "executed"
+        attempts = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                attempts.append(self.path)
+                complete = recover and len(attempts) > 1
+                content = f"printf {'complete' if complete else 'partial'} >> '{marker}'\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content) + (0 if complete else 100)))
+                self.end_headers()
+                self.wfile.write(content)
+                self.close_connection = True
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = Thread(target=http.serve_forever, daemon=True)
+        worker.start()
+        config = TerminalBench21ResourcesServerConfig(
+            sandbox_provider="", sandbox_config={}, host="", port=0, entrypoint="", name=""
+        )
+        server = TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        script = tmp_path / "test.sh"
+        script.write_text("curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\nprintf graded\n")
+        try:
+            with server._patch_golden_patch_solve_sh("unlisted-task", script, TEST_SH_PATCHES) as patched:
+                subprocess.run(["bash", "-n", str(patched)], check=True)
+                content = (
+                    Path(patched)
+                    .read_text()
+                    .replace(
+                        "https://astral.sh/uv/0.9.5/install.sh", f"http://127.0.0.1:{http.server_port}/install.sh"
+                    )
+                )
+                # Keep the real curl retry path while avoiding production backoff in this test.
+                content = content.replace("--retry-delay 2", "--retry-delay 0")
+                result = subprocess.run(["bash", "-c", content], capture_output=True, text=True, timeout=20)
+        finally:
+            http.shutdown()
+            http.server_close()
+            worker.join()
+        assert len(attempts) == (2 if recover else 4)
+        if recover:
+            assert result.returncode == 0
+            assert result.stdout == "graded"
+            assert marker.read_text() == "complete"
+        else:
+            assert result.returncode != 0
+            assert result.stdout == ""
+            assert not marker.exists()
+
     def test_verifier_receives_apt_lock_wait_and_preserves_exit_status(self, tmp_path: Path) -> None:
         script = tmp_path / "test.sh"
         script.write_text('cat "$APT_CONFIG"\nrm "$APT_CONFIG"\nexit 7\n')
