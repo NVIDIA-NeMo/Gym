@@ -25,9 +25,18 @@ gym eval prepare --benchmark scicodepile
 ```
 
 Downloads `SciCodePile/SciCode-Runnable-Benchmark-Reviewed` and writes
-`benchmarks/scicodepile/data/scicodepile_benchmark.jsonl`. The script asserts the
-expected 200 rows so an upstream change surfaces as a loud failure rather than as an
-unexplained score movement.
+`benchmarks/scicodepile/data/scicodepile_benchmark.jsonl`.
+
+The dataset revision is **pinned** to `9afb3a95c7fa8e470119cf6f74b44ec735c5a95b`, the
+snapshot every figure and control in these READMEs was produced against. Without a pin
+the benchmark would be whatever the Hub serves today: the row-count assertion catches
+only a change in size, so an edit to a prompt, test, canonical solution or entry point
+that keeps 200 rows would move every score with no failure at all. The row count is
+kept as an additional shape check.
+
+To move to a newer upstream snapshot, change `HF_REVISION`, re-run the harness
+validation in the [server README](../../resources_servers/scicodepile/README.md#validation),
+and update the figures that depend on it.
 
 ## Running servers
 

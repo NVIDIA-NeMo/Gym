@@ -135,7 +135,9 @@ def _phase_error(reason: str, exc: BaseException, phase: str) -> dict:
 
     ``phase`` is ``setup``, ``model`` or ``test``. Only ``model`` is the model's own
     code; the other two are dataset-owned, and the parent uses ``harness_fault`` to
-    keep them out of an accuracy figure instead of scoring them as wrong answers.
+    identify them. Note that it does not exclude them: such rollouts still score
+    ``accuracy`` 0, and the rate is published separately as ``harness_failure`` so it
+    is visible as its own metric rather than silently dropped.
 
     Nothing here may raise. It runs on the failure path, after arbitrary model code
     has executed, so it uses the builtins captured at import and degrades to a

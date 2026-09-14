@@ -34,6 +34,12 @@ OUTPUT_FPATH = DATA_DIR / "scicodepile_benchmark.jsonl"
 
 HF_DATASET = "SciCodePile/SciCode-Runnable-Benchmark-Reviewed"
 HF_SPLIT = "train"
+# Pinned so the benchmark is a fixed evaluation protocol rather than whatever the Hub
+# serves today. The row-count assertion below catches only a change in size: an edit to
+# a prompt, test, canonical solution, entry point or audit flag that keeps 200 rows
+# would silently change what is measured and move every score with no failure at all.
+# This is the snapshot every number and control in the READMEs was produced against.
+HF_REVISION = "9afb3a95c7fa8e470119cf6f74b44ec735c5a95b"
 # Upstream ships a single 200-row split. Assert it so a silent upstream change
 # surfaces here rather than as an unexplained score movement.
 EXPECTED_ROWS = 200
@@ -62,7 +68,7 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
     # `gym eval prepare` it does, and standalone the dataset is public anyway.
     global_config = maybe_get_global_config_dict()
     hf_token = global_config.get(HF_TOKEN_KEY_NAME) if global_config is not None else None
-    dataset = load_dataset(HF_DATASET, split=HF_SPLIT, token=hf_token)
+    dataset = load_dataset(HF_DATASET, split=HF_SPLIT, revision=HF_REVISION, token=hf_token)
 
     if len(dataset) != EXPECTED_ROWS:
         raise AssertionError(
