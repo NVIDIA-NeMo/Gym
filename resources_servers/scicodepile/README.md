@@ -65,7 +65,28 @@ verdict. Trust a verdict only to the extent you trust the code that produced it.
 
 `error` carries a `details.reason` distinguishing `syntax_error`, `exec_failed`
 (the module body raised, typically a missing import), `test_defines_no_check`,
-`runner_crashed`, and `unparseable_runner_output`.
+`runner_crashed`, and `unparseable_runner_output`. `details.phase` says which compile
+unit raised: `setup`, `model` or `test`.
+
+### Harness faults
+
+`failure_reason` is set only when `reward=0.0` does not reflect policy quality —
+dataset-owned `setup_code` raising, the task's own test failing to execute or defining
+no `check`, or the runner crashing before any model code ran. The rate is published as
+a `harness_failure` score, so it appears as its own metric line
+(`pass@1[avg-of-{k}]/harness_failure`) instead of needing a manual filter over the
+rollouts. Those rollouts still score `accuracy` 0: nothing is dropped silently.
+
+Outcomes the model can cause are **not** flagged, even though they never reach an
+assertion — a `timeout` (an infinite loop is the model's), an
+`unparseable_runner_output` (reachable by `os._exit` in the candidate), and a
+`runner_crashed` raised after the model's module body executed (model code can rebind
+a builtin the runner calls). Flagging any of these would inflate pass@1 and make
+hanging or exiting reward-neutral under RL.
+
+One hole remains open by construction: the model's code runs before the test's module
+body, so a model that deliberately breaks the test earns `test_code_failed`. Watch the
+`harness_failure` rate rather than assuming it is zero.
 
 ### The model must return a complete function
 

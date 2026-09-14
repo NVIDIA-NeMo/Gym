@@ -34,28 +34,34 @@ class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class FailureCode(str, Enum):
-    """Failures owned by the harness or the dataset rather than by the model.
+    """Failures owned by the dataset or the runner rather than by the model.
 
-    Set only where ``reward=0.0`` does not reflect policy quality, so these rollouts
-    can be filtered out of an accuracy figure instead of being counted as wrong
-    answers. Genuine model errors (``fail``, ``entry_point_missing``, ``syntax_error``,
-    ``exec_failed``) deliberately leave ``failure_reason`` unset.
+    Set only where ``reward=0.0`` does not reflect policy quality. The rate is also
+    published as its own ``harness_failure`` score (see ``_score_fn``) so it shows up
+    as a metric line rather than needing a manual filter over the rollouts.
+
+    Deliberately *not* set for outcomes the model can cause, even though each is a
+    zero-reward rollout that never reached an assertion:
+
+    - ``timeout`` — an infinite loop is the model's; flagging it would make hanging
+      reward-neutral under RL, and ``code_gen`` likewise scores TLE as a failure.
+    - ``unparseable_runner_output`` — reachable by ``os._exit`` in the candidate.
+    - ``runner_crashed`` raised after the model's module body executed — model code
+      can rebind a builtin or lower the recursion limit and break the runner's own
+      machinery. ``scp_runner`` attributes that to the ``model`` phase; only a crash
+      before any model code runs keeps ``phase="runner"``.
+
+    One residual hole: model code runs before the test's module body, so a model that
+    deliberately breaks the test can earn ``TEST_CODE_FAILED``. Separating the compile
+    units is what makes test-phase faults attributable at all, and the
+    ``harness_failure`` metric is what makes such a strategy visible as a rising rate
+    instead of a silent filter. Watch it; do not assume it is zero.
     """
 
-    TIMEOUT = "timeout"
-    UNPARSEABLE_RUNNER_OUTPUT = "unparseable_runner_output"
-    RUNNER_CRASHED = "runner_crashed"
-    TEST_DEFINES_NO_CHECK = "test_defines_no_check"
     SETUP_CODE_FAILED = "setup_code_failed"
     TEST_CODE_FAILED = "test_code_failed"
-
-
-# `details.reason` values that mean the harness or the task's own test is at fault.
-_HARNESS_FAILURE_REASONS = {
-    "unparseable_runner_output": FailureCode.UNPARSEABLE_RUNNER_OUTPUT,
-    "runner_crashed": FailureCode.RUNNER_CRASHED,
-    "test_defines_no_check": FailureCode.TEST_DEFINES_NO_CHECK,
-}
+    TEST_DEFINES_NO_CHECK = "test_defines_no_check"
+    RUNNER_CRASHED = "runner_crashed"
 
 
 class SciCodePileVerifyRequest(BaseVerifyRequest):
@@ -88,7 +94,13 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _score_fn(r: dict) -> Dict[str, float]:
-        return {"accuracy": float(r["reward"] > 0)}
+        # `harness_failure` rides alongside accuracy so the dataset/runner fault rate
+        # gets its own metric line. Those rollouts still score accuracy 0 — nothing is
+        # filtered out silently; this just says how much of the 0 is not the model's.
+        return {
+            "accuracy": float(r["reward"] > 0),
+            "harness_failure": float(r.get("failure_reason") is not None),
+        }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         return compute_pass_majority_metrics(
@@ -102,7 +114,9 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
-        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
+        key.update(
+            highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "harness_failure"])
+        )
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
         return key
 
@@ -147,23 +161,29 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             status=status,
             details=details,
             task_id=task_id,
-            failure_reason=self._failure_reason(status, details),
+            failure_reason=self._failure_reason(details),
         )
 
     @staticmethod
-    def _failure_reason(status: Optional[str], details: Optional[Dict[str, Any]]) -> Optional[FailureCode]:
-        if status == "timeout":
-            return FailureCode.TIMEOUT
+    def _failure_reason(details: Optional[Dict[str, Any]]) -> Optional[FailureCode]:
+        """Map a runner result onto a harness-fault code, or ``None`` for the model.
+
+        ``scp_runner`` owns the attribution: it sets ``harness_fault`` only on compile
+        units that are not the model's (dataset-owned ``setup_code``, the task's own
+        ``test``) and on crashes that happen before any model code runs. This method
+        only names the code; it never infers a fault from the status.
+        """
         details = details or {}
-        # The runner marks faults raised by dataset-owned setup_code or by the test's
-        # own module body. Those compile units are not the model's code, so a failure
-        # in them must not be charged to the model as a wrong answer.
-        if details.get("harness_fault"):
-            phase = details.get("phase")
-            if phase == "test":
-                return FailureCode.TEST_CODE_FAILED
+        if not details.get("harness_fault"):
+            return None
+        phase = details.get("phase")
+        if phase == "setup":
             return FailureCode.SETUP_CODE_FAILED
-        return _HARNESS_FAILURE_REASONS.get(details.get("reason"))
+        if phase == "test":
+            if details.get("reason") == "test_defines_no_check":
+                return FailureCode.TEST_DEFINES_NO_CHECK
+            return FailureCode.TEST_CODE_FAILED
+        return FailureCode.RUNNER_CRASHED
 
     async def _run_task(self, setup_code: str, code: str, test: str, entry_point: str) -> Dict[str, Any]:
         # The scratch CWD is created and removed here, not in the runner: a task that

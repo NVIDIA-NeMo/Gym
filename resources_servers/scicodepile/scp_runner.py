@@ -137,6 +137,18 @@ def run_task(req: dict) -> dict:
         except BaseException as exc:
             return _phase_error("exec_failed", exc, phase)
 
+    # Everything from here on runs *after* the model's module body. Model code can
+    # mutate interpreter-wide state — rebind a builtin, lower the recursion limit,
+    # install a trace hook — so a failure in the runner's own machinery below is no
+    # longer evidence that the runner is broken. Attribute it to the model rather
+    # than letting it escape to `main` and be reported as a harness fault.
+    try:
+        return _run_after_model(namespace, test, entry_point)
+    except BaseException as exc:
+        return _phase_error("runner_crashed", exc, "model")
+
+
+def _run_after_model(namespace: dict, test: str, entry_point: str) -> dict:
     candidate = namespace.get(entry_point)
     if candidate is None:
         return {"status": "entry_point_missing", "details": {"entry_point": entry_point}}
@@ -195,7 +207,19 @@ def main() -> None:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 result = run_task(req)
     except BaseException as exc:  # pragma: no cover - defensive
-        result = {"status": "error", "details": {"reason": "runner_crashed", "message": str(exc)[:500]}}
+        # Reached only for failures outside `run_task` — setting up the working
+        # directory or the stream redirection — i.e. before any model code runs.
+        # A crash *after* model code runs is attributed to the model inside
+        # `run_task`, because model code can corrupt the runner's own machinery.
+        result = {
+            "status": "error",
+            "details": {
+                "reason": "runner_crashed",
+                "message": str(exc)[:500],
+                "phase": "runner",
+                "harness_fault": True,
+            },
+        }
 
     # Written to the private duplicate, not fd 1. A task that calls `os._exit`
     # skips this entirely; if it wrote nothing to the channel first, the parent

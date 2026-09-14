@@ -203,6 +203,39 @@ def _make_server(subprocess_timeout: float = 120.0):
     )
 
 
+def _make_response(text: str):
+    """Minimal NeMoGymResponse carrying one assistant message."""
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    return NeMoGymResponse(
+        id="resp-1",
+        created_at=0,
+        model="test-model",
+        object="response",
+        output=[
+            {
+                "type": "message",
+                "id": "msg-1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+@pytest.fixture(scope="module")
+def short_timeout_client():
+    """Real ``/verify`` over the real runner, with a timeout short enough to test."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(_make_server(subprocess_timeout=5.0).setup_webserver()) as c:
+        yield c
+
+
 class TestScratchDirectoryLifecycle:
     """The scratch CWD is created and removed by the parent, never by the runner.
 
@@ -264,57 +297,145 @@ class TestFailureReason:
     """``failure_reason`` marks rollouts whose reward reflects the harness, not the model.
 
     Genuine model errors must leave it unset, or filtering on it would quietly discard
-    real failures and inflate accuracy.
+    real failures and inflate accuracy. The runner owns the attribution via
+    ``harness_fault``/``phase``; ``_failure_reason`` only names the code, and must never
+    infer a fault from the status alone.
     """
 
     @pytest.mark.parametrize(
-        "status,details,expected",
+        "details,expected",
         [
-            ("timeout", {"reason": "subprocess_timeout"}, "timeout"),
-            ("error", {"reason": "unparseable_runner_output"}, "unparseable_runner_output"),
-            ("error", {"reason": "runner_crashed"}, "runner_crashed"),
-            ("error", {"reason": "test_defines_no_check", "phase": "test", "harness_fault": True}, "test_code_failed"),
             # Dataset-owned code raising is not the model's fault. The same reason
             # strings appear for model-phase faults, so the phase is what decides.
-            (
-                "error",
-                {"reason": "exec_failed", "phase": "setup", "harness_fault": True},
-                "setup_code_failed",
-            ),
-            (
-                "error",
-                {"reason": "syntax_error", "phase": "setup", "harness_fault": True},
-                "setup_code_failed",
-            ),
-            (
-                "error",
-                {"reason": "exec_failed", "phase": "test", "harness_fault": True},
-                "test_code_failed",
-            ),
+            ({"reason": "exec_failed", "phase": "setup", "harness_fault": True}, "setup_code_failed"),
+            ({"reason": "syntax_error", "phase": "setup", "harness_fault": True}, "setup_code_failed"),
+            ({"reason": "exec_failed", "phase": "test", "harness_fault": True}, "test_code_failed"),
+            ({"reason": "syntax_error", "phase": "test", "harness_fault": True}, "test_code_failed"),
+            ({"reason": "test_defines_no_check", "phase": "test", "harness_fault": True}, "test_defines_no_check"),
+            # A crash before any model code ran is genuinely ours.
+            ({"reason": "runner_crashed", "phase": "runner", "harness_fault": True}, "runner_crashed"),
         ],
     )
-    def test_harness_failures_are_flagged(self, status, details, expected):
+    def test_harness_failures_are_flagged(self, details, expected):
         from app import SciCodePileResourcesServer
 
-        assert SciCodePileResourcesServer._failure_reason(status, details) == expected
+        assert SciCodePileResourcesServer._failure_reason(details) == expected
 
     @pytest.mark.parametrize(
-        "status,details",
+        "details",
         [
-            ("pass", {}),
-            ("fail", {"type": "AssertionError", "message": "boom"}),
-            ("entry_point_missing", {"entry_point": "add"}),
+            {},
+            {"type": "AssertionError", "message": "boom"},
+            {"entry_point": "add"},
+            None,
             # Same reason strings as the harness cases above, but raised by the
             # model's own compile unit, so they must stay unflagged.
-            ("error", {"reason": "syntax_error", "message": "bad", "phase": "model"}),
-            ("error", {"reason": "exec_failed", "type": "NameError", "phase": "model"}),
-            ("no_code_block", None),
+            {"reason": "syntax_error", "message": "bad", "phase": "model"},
+            {"reason": "exec_failed", "type": "NameError", "phase": "model"},
+            # Outcomes the model can cause at will. Flagging any of these would make
+            # hanging, exiting, or corrupting the runner reward-neutral under RL.
+            {"reason": "subprocess_timeout"},
+            {"reason": "unparseable_runner_output", "stderr": "", "stdout": ""},
+            {"reason": "runner_crashed", "type": "MemoryError", "phase": "model"},
         ],
     )
-    def test_model_owned_outcomes_are_not_flagged(self, status, details):
+    def test_model_owned_outcomes_are_not_flagged(self, details):
         from app import SciCodePileResourcesServer
 
-        assert SciCodePileResourcesServer._failure_reason(status, details) is None
+        assert SciCodePileResourcesServer._failure_reason(details) is None
+
+
+class TestModelCausedFaultsAreNotExcused:
+    """End-to-end: the three ways a model can dodge a wrong answer must all score 0.
+
+    Each drives the real ``/verify`` path (the timeout and the runner-output parse both
+    live in the server, not in ``run_task``), so these fail if the attribution moves
+    back into the status.
+    """
+
+    def _verify(self, client, code, meta_overrides=None):
+        from app import SciCodePileVerifyRequest, SciCodePileVerifyResponse
+
+        meta = {
+            "task_id": "alignment/python/1",
+            "entry_point": "add",
+            "setup_code": "",
+            "test": "def check(candidate):\n    assert candidate(2, 3) == 5\n",
+        }
+        meta.update(meta_overrides or {})
+        req = SciCodePileVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "add"}]},
+            response=_make_response(f"```python\n{code}\n```"),
+            verifier_metadata=meta,
+        )
+        return SciCodePileVerifyResponse.model_validate(client.post("/verify", json=req.model_dump()).json())
+
+    def test_a_hanging_solution_is_a_wrong_answer(self, short_timeout_client):
+        res = self._verify(short_timeout_client, "def add(a, b):\n    while True:\n        pass")
+        assert res.status == "timeout"
+        assert res.reward == 0.0
+        assert res.failure_reason is None, "an infinite loop is the model's, not the harness'"
+
+    def test_a_solution_that_exits_the_runner_is_a_wrong_answer(self, short_timeout_client):
+        res = self._verify(short_timeout_client, "import os\ndef add(a, b):\n    os._exit(0)")
+        assert res.status == "error"
+        assert res.details["reason"] == "unparseable_runner_output"
+        assert res.reward == 0.0
+        assert res.failure_reason is None, "os._exit must not buy a harness-fault exemption"
+
+    def test_a_solution_that_breaks_the_runner_is_a_wrong_answer(self):
+        """Model code runs first and can rebind a builtin the runner itself calls.
+
+        Driven out-of-process on purpose: rebinding ``builtins.callable`` in the test
+        interpreter corrupts pytest itself, which is the same reason it corrupts the
+        runner and the reason the outcome must be charged to the model.
+        """
+        code = (
+            "import builtins\n"
+            "def add(a, b):\n    return a + b\n"
+            "def _boom(x):\n    raise MemoryError('out of memory')\n"
+            "builtins.callable = _boom\n"
+        )
+        result = json.loads(_run_subprocess(_task(code)).stdout)
+        assert result["details"]["reason"] == "runner_crashed"
+        assert result["details"]["phase"] == "model"
+        assert "harness_fault" not in result["details"]
+
+    def test_a_genuine_harness_fault_is_still_flagged(self, short_timeout_client):
+        """The complement: narrowing the exemption must not delete it."""
+        res = self._verify(
+            short_timeout_client,
+            "def add(a, b):\n    return a + b",
+            {"setup_code": "raise RuntimeError('dataset bug')\n"},
+        )
+        assert res.reward == 0.0
+        assert res.failure_reason == "setup_code_failed"
+
+
+class TestHarnessFailureMetric:
+    """The fault rate is published as a score, so it needs no manual filter."""
+
+    def test_score_fn_reports_both_scores(self):
+        from app import SciCodePileResourcesServer as S
+
+        assert S._score_fn({"reward": 1.0, "failure_reason": None}) == {"accuracy": 1.0, "harness_failure": 0.0}
+        assert S._score_fn({"reward": 0.0, "failure_reason": None}) == {"accuracy": 0.0, "harness_failure": 0.0}
+        # A harness fault still scores accuracy 0 — nothing is filtered out silently.
+        assert S._score_fn({"reward": 0.0, "failure_reason": "setup_code_failed"}) == {
+            "accuracy": 0.0,
+            "harness_failure": 1.0,
+        }
+
+    def test_compute_metrics_emits_a_harness_failure_line(self):
+        server = _make_server()
+        tasks = [
+            [{"reward": 1.0, "failure_reason": None, "extracted_model_code": "a"}],
+            [{"reward": 0.0, "failure_reason": "setup_code_failed", "extracted_model_code": "b"}],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["pass@1[avg-of-1]/accuracy"] == 50.0
+        assert metrics["pass@1[avg-of-1]/harness_failure"] == 50.0
+        assert "pass@1[avg-of-1]/harness_failure" in server.get_key_metrics(metrics)
 
 
 class TestCodeExtraction:
