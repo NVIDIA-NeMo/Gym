@@ -1138,6 +1138,9 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
+    # Thinking-mode harnesses return reasoning alongside tool-call history.
+    reasoning_content: Optional[str]
+    reasoning: Optional[str]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -1171,6 +1174,10 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 ]
 
 
+class NeMoGymThinkingConfig(TypedDict):
+    type: Literal["enabled", "disabled"]
+
+
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1191,7 +1198,8 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     presence_penalty: Optional[float] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
-    reasoning_effort: Optional[ReasoningEffort] = None
+    reasoning_effort: Optional[Union[ReasoningEffort, Literal["max"]]] = None
+    thinking: Optional[NeMoGymThinkingConfig] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
     safety_identifier: Optional[str] = None
