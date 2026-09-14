@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import json
 from pathlib import Path
 
@@ -73,3 +74,19 @@ def test_writes_error_and_returns_nonzero(
     assert _verifier_runner.main(["--request", str(request_path), "--result", str(result_path)]) == 1
     assert json.loads(result_path.read_text(encoding="utf-8")) == {"ok": False, "error": "fixture failed"}
     assert capsys.readouterr().out == ""
+
+
+def test_absolute_path_rejects_relative_paths() -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="path must be absolute"):
+        _verifier_runner._absolute_path("relative/request.json")
+
+
+def test_run_rejects_non_bool_update_expected(tmp_path: Path) -> None:
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps({"spec": {"reward_range": [0.0, 1.0]}, "update_expected": "yes"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError, match="update_expected must be a boolean"):
+        _verifier_runner._run(request_path)
