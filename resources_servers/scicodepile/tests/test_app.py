@@ -296,6 +296,81 @@ class TestScratchDirectoryLifecycle:
         assert (workdir / "written_here.txt").is_file()
 
 
+class TestModuleNamespace:
+    """Task code executes in a real module, not a bare dict.
+
+    Every case here is ordinary Python that worked nowhere else but was charged to
+    the model, because ``sys.modules["__scicodepile__"]`` was ``None``.
+    """
+
+    def test_dataclass_under_postponed_annotations(self):
+        """``@dataclass`` resolves annotations through ``sys.modules[cls.__module__]``."""
+        result = run_task(
+            _task(
+                "from __future__ import annotations\n"
+                "from dataclasses import dataclass\n"
+                "@dataclass\n"
+                "class Point:\n    x: int\n"
+                "def add(a, b):\n    return Point(a).x + b\n"
+            )
+        )
+        assert result["status"] == "pass", result["details"]
+
+    def test_a_task_defined_function_can_be_pickled(self):
+        result = run_task(
+            _task(
+                "import pickle\n"
+                "def _helper(x):\n    return x\n"
+                "def add(a, b):\n"
+                "    assert pickle.loads(pickle.dumps(_helper))(1) == 1\n"
+                "    return a + b\n"
+            )
+        )
+        assert result["status"] == "pass", result["details"]
+
+    def test_multiprocessing_over_a_task_defined_function(self):
+        """The practical consequence of picklability; six upstream tasks use it."""
+        result = run_task(
+            _task(
+                "import multiprocessing as mp\n"
+                "def _square(x):\n    return x * x\n"
+                "def add(a, b):\n"
+                "    with mp.Pool(1) as pool:\n"
+                "        assert pool.map(_square, [3]) == [9]\n"
+                "    return a + b\n"
+            )
+        )
+        assert result["status"] == "pass", result["details"]
+
+    def test_dunder_file_is_defined_and_points_into_the_scratch_cwd(self, tmp_path):
+        code = (
+            "import os\n"
+            "def add(a, b):\n"
+            "    open(os.path.join(os.path.dirname(__file__), 'derived.txt'), 'w').write('x')\n"
+            "    return a + b\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, str(SERVER_DIR / "scp_runner.py")],
+            input=json.dumps({**_task(code), "max_as_limit": 0, "workdir": str(tmp_path)}),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert json.loads(proc.stdout)["status"] == "pass"
+        # Paths derived from __file__ must land in the throwaway CWD, not the repo.
+        assert (tmp_path / "derived.txt").is_file()
+
+    def test_module_name_is_not_main(self):
+        """Harvested sources guard side effects behind ``__main__``; they must not run."""
+        result = run_task(
+            _task(
+                "if __name__ == '__main__':\n    raise RuntimeError('side effect ran')\n"
+                "def add(a, b):\n    return a + b\n"
+            )
+        )
+        assert result["status"] == "pass", result["details"]
+
+
 class TestRunnerExitPath:
     """A written verdict must not be undone by how the runner exits.
 

@@ -9,7 +9,9 @@ Reads a JSON request on stdin and writes a JSON result on stdout:
 
 The task's own ``test`` field defines ``check(candidate)``. ``setup_code``, ``code``
 and ``test`` are compiled and executed as **three separate units sharing one
-namespace**, then ``check`` is called with the function named by ``entry_point``.
+namespace** — the ``__dict__`` of a real module registered in ``sys.modules``, see
+``_make_module_namespace`` — then ``check`` is called with the function named by
+``entry_point``.
 The separation is load-bearing, not stylistic: concatenating them into one unit let
 a trailing decorator in the model's code bind to the test's own ``def check`` and
 replace the assertions with a no-op, so a solution returning ``None`` passed all 200
@@ -46,6 +48,7 @@ import platform
 import sys
 import tempfile
 import traceback
+import types
 
 
 def _apply_limits(max_as_limit_mb: int) -> None:
@@ -92,6 +95,33 @@ def _working_directory(workdir):
             pass
 
 
+MODULE_NAME = "__scicodepile__"
+
+
+def _make_module_namespace() -> dict:
+    """Return the globals of a real module, registered in ``sys.modules``.
+
+    A bare dict is not a module, and several ordinary things look the module up by
+    name and get ``None``:
+
+    - ``@dataclass`` under ``from __future__ import annotations`` resolves its
+      annotations through ``sys.modules[cls.__module__]`` and raises
+      ``AttributeError: 'NoneType' object has no attribute '__dict__'``.
+    - ``pickle`` — and therefore ``multiprocessing`` — refuses any function defined by
+      the task with "import of module '__scicodepile__' failed".
+    - ``__file__`` is simply undefined, so touching it is a ``NameError``.
+
+    Each of those was scored against the model. ``__name__`` is deliberately not
+    ``"__main__"``: some harvested sources guard side effects behind a ``__main__``
+    check and must not run them here. ``__file__`` points into the task's throwaway
+    working directory, so code deriving paths from it stays inside the scratch area.
+    """
+    module = types.ModuleType(MODULE_NAME)
+    module.__file__ = os.path.join(os.getcwd(), f"{MODULE_NAME}.py")
+    sys.modules[MODULE_NAME] = module
+    return module.__dict__
+
+
 def _phase_error(reason: str, exc: BaseException, phase: str) -> dict:
     """Build an error result, recording which compile unit raised.
 
@@ -111,9 +141,7 @@ def run_task(req: dict) -> dict:
     test = req.get("test") or ""
     entry_point = req.get("entry_point") or ""
 
-    # `__name__` is deliberately not "__main__": some harvested sources guard
-    # side effects behind a __main__ check and must not run them here.
-    namespace: dict = {"__name__": "__scicodepile__"}
+    namespace = _make_module_namespace()
 
     # Three separate compile units sharing one namespace, never one concatenated
     # source. Concatenating lets a trailing decorator in the model's code bind to

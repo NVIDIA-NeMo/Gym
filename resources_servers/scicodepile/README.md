@@ -16,8 +16,16 @@ shipping its own test — not the corpus's completion/infilling tasks.
 ### Verification
 
 Each task ships a `test` that defines `check(candidate)`. The server executes
-`setup_code + model_code + test` in a single namespace, looks up the function named
-by `entry_point`, and calls `check` with it. This mirrors the upstream harness.
+`setup_code`, the model's code and `test` as three separate compile units sharing one
+namespace, looks up the function named by `entry_point`, and calls `check` with it.
+This mirrors the upstream harness. (The separation is load-bearing: concatenated, a
+trailing decorator in the model's code binds to the test's own `def check`.)
+
+That namespace is a real module registered in `sys.modules` as `__scicodepile__`,
+with `__file__` pointing into the task's throwaway working directory — not a bare
+dict. `@dataclass` under `from __future__ import annotations`, `pickle`, and
+`multiprocessing` all resolve a function's module by name, and all of them fail
+against a dict in ways that would be charged to the model.
 
 Execution happens in a subprocess (`scp_runner.py`). A fresh process per task is not
 just for isolation from the server: all 200 tasks carry the upstream `env_sensitive`
