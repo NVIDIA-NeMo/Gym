@@ -15,6 +15,11 @@
 
 """E2B provider package."""
 
+from nemo_gym.sandbox.providers.e2b._network import (
+    E2BEndpointConfig,
+    E2BNetworkingConfig,
+    E2BRuntimeRequirementsConfig,
+)
 from nemo_gym.sandbox.providers.e2b.provider import (
     E2BConnectionConfig,
     E2BCreateConfig,
@@ -30,6 +35,9 @@ __all__ = [
     "E2BCreateConfig",
     "E2BCreateError",
     "E2BExecConfig",
+    "E2BEndpointConfig",
+    "E2BNetworkingConfig",
+    "E2BRuntimeRequirementsConfig",
     "E2BOperationConfig",
     "E2BProvider",
 ]
