@@ -38,7 +38,9 @@ async def test_binary_request_preserves_valid_and_malformed_subtitles(
         server_client=MagicMock(spec=ServerClient),
     )
     server._aa_binary_system = "Inspect the submitted files."
-    server._aa_binary_user = "{task_markdown}\n{check_description}\n{score_1_criteria}\n{score_0_criteria}"
+    server._aa_binary_user = (
+        "{task_markdown}\n{check_description}\n{score_1_criteria}\n{score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
+    )
     judge = ResolvedJudge(
         name="judge",
         model="test-model",

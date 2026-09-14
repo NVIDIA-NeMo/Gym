@@ -102,3 +102,8 @@ contain SRT files also include their subtitle text in judge inputs.
 
 The 32,768-token Claude budget is under validation; it is not an AA-prescribed
 limit or a demonstrated reliability fix.
+
+For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
+starting Gym. This controls the client timeout, not upstream service deadlines.
+Binary requests permit two transport retries with SDK backoff, separately from
+the formatting retry. Exhausted requests remain evaluation errors.

@@ -127,7 +127,7 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
             )
         else:
             resource._aa_binary_system = "Judge the submitted artifact."
-            resource._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}"
+            resource._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.setup_webserver())) as http_client:
                 monkeypatch.setattr(
                     "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",

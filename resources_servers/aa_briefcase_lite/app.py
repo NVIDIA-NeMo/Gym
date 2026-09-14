@@ -31,7 +31,11 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
 from resources_servers.gdpval.comparison import (
     JUDGE_REQUEST_TIMEOUT_SECONDS,
+    MAX_SECTION_TEXT_CHARS_FOR_JUDGE,
+    MAX_TEXT_FILE_CHARS_FOR_JUDGE,
     Judge,
+    _bounded_text,
+    _load_raw_text,
     build_file_section,
     run_trials,
 )
@@ -208,6 +212,17 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             audio_capable=judge.handles_audio,
             video_capable=judge.handles_video,
         )
+        # GDPval renders unknown extensions through a sibling PDF. AA also grades
+        # the declared LaTeX source, so retain that source alongside the rendering.
+        text_used = sum(len(block.get("text", "")) for block in blocks)
+        for source in sorted(stage.glob("*.tex")):
+            remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+            label = _bounded_text(f"\n{source.name} (LaTeX source):\n", remaining)
+            text = await asyncio.to_thread(
+                _load_raw_text, source, min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining - len(label))
+            )
+            blocks.append({"type": "text", "text": label + text})
+            text_used += len(label) + len(text)
         blocks.extend({"type": "text", "text": f"[required submitted file missing: {name}]"} for name in missing)
         return blocks
 
@@ -224,9 +239,17 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             score_1_criteria=check["score_1_criteria"],
             score_0_criteria=check["score_0_criteria"],
         )
+        before_artifact, after_artifact = user_text.split("<<<SUBMISSION CONTENT MESSAGES>>>")
         messages = [
             {"role": "system", "content": self._aa_binary_system + "\n\n" + _BINARY_JSON_INSTRUCTION},
-            {"role": "user", "content": [{"type": "text", "text": user_text}, *artifact_blocks]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": before_artifact},
+                    *artifact_blocks,
+                    {"type": "text", "text": after_artifact},
+                ],
+            },
         ]
         client = AsyncOpenAI(
             base_url=judge.base_url,

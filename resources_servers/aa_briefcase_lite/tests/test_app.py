@@ -31,7 +31,9 @@ async def test_binary_call_requests_json_without_changing_grading_input(monkeypa
         config=AABriefcaseLiteResourcesServerConfig.model_construct(dataset_dir="unused")
     )
     server._aa_binary_system = "Original AA system prompt."
-    server._aa_binary_user = "{task_markdown}\n{check_description}\n{score_1_criteria}\n{score_0_criteria}"
+    server._aa_binary_user = (
+        "{task_markdown}\n{check_description}\n{score_1_criteria}\n{score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
+    )
     judge = ResolvedJudge(name="judge", model="model", base_url="http://upstream.invalid/v1", api_key="dummy")
     check = {
         "check_description": "Check totals.",
@@ -60,6 +62,7 @@ async def test_binary_call_requests_json_without_changing_grading_input(monkeypa
             "content": [
                 {"type": "text", "text": "Make a report.\nCheck totals.\nTotals agree.\nTotals differ."},
                 {"type": "text", "text": "Submitted total: 42"},
+                {"type": "text", "text": ""},
             ],
         },
     ]
@@ -132,7 +135,9 @@ async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover
         config=AABriefcaseLiteResourcesServerConfig.model_construct(dataset_dir="unused")
     )
     server._aa_binary_system = "Judge the artifact."
-    server._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}"
+    server._aa_binary_user = (
+        "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
+    )
     judge = ResolvedJudge(name="judge", model="model", base_url="http://upstream.invalid/v1", api_key="dummy")
     requests = []
 
