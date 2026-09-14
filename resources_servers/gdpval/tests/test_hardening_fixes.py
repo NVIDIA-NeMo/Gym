@@ -289,6 +289,9 @@ class TestJudgeNameCollision:
                 max_native_pdf_bytes_per_document=None,
                 raster_dpi_tiers=[],
                 max_serialized_request_bytes=None,
+                max_image_base64_bytes=None,
+                max_total_image_base64_bytes=None,
+                max_video_files=None,
                 model_server=SimpleNamespace(name="judge_server"),
             )
 

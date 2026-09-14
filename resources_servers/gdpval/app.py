@@ -184,6 +184,9 @@ class JudgePanelMember(BaseModel):
     # max_native_pdf_bytes eligibility ceiling, overflow mode rasterizes only
     # documents above this lossless representation threshold.
     max_native_pdf_bytes_per_document: Optional[int] = None
+    max_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_total_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_video_files: Optional[int] = Field(default=None, ge=0)
     # Tried in order for images_and_text. The first lossless projection below
     # max_serialized_request_bytes wins; otherwise this member is excluded.
     raster_dpi_tiers: Tuple[int, ...] = ()
@@ -242,6 +245,11 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # selected from fewer votes than the configured scientific contract.
     strict_comparison_trials: bool = False
 
+    # Stage 1 only: explicit imported task IDs with no finish marker may count
+    # as audited losses. Missing paths outside this list remain failures.
+    count_eval_missing_as_loss: bool = False
+    missing_eval_task_ids: List[str] = Field(default_factory=list)
+
     # ELO assigned to the (legacy single) reference model in pairwise mode.
     # Ignored when ``reference_models`` is set (each carries its own ``elo``).
     reference_elo: float = _DEFAULT_REFERENCE_ELO
@@ -269,6 +277,12 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
+    # Include nested task inputs while leaving submission directories shallow.
+    judge_reference_files_recursive: bool = False
+    # Use the eval tree's prepared copies of the original benchmark inputs,
+    # persisted from host downloads separately from model-authored submissions.
+    # Enable only after validating those inputs during preparation.
+    judge_reference_files_from_eval: bool = False
     # Whether the (single) local judge natively reads audio / video, tracked
     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
     # but NOT audio (its config has an image + video tower but no audio config). So
@@ -501,6 +515,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     max_native_pdf_documents=member.max_native_pdf_documents,
                     max_native_pdf_bytes=member.max_native_pdf_bytes,
                     max_native_pdf_bytes_per_document=member.max_native_pdf_bytes_per_document,
+                    max_image_base64_bytes=member.max_image_base64_bytes,
+                    max_total_image_base64_bytes=member.max_total_image_base64_bytes,
+                    max_video_files=member.max_video_files,
                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
                     max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
@@ -789,6 +806,44 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            if (
+                self.config.count_eval_missing_as_loss
+                and body.stage_index == 1
+                and body.task_id in self.config.missing_eval_task_ids
+            ):
+                per_reference = {
+                    ref_id: {
+                        "wins": 0,
+                        "losses": self.config.num_comparison_trials * len(dirs),
+                        "ties": 0,
+                        "reference_elo": self._references[ref_id].elo,
+                        "ref_repeat_count": len(dirs),
+                    }
+                    for ref_id, dirs in ref_dirs_by_id.items()
+                }
+                total_losses = sum(counts["losses"] for counts in per_reference.values())
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={
+                        "manual_imputation": "eval_missing_as_loss",
+                        "per_reference": per_reference,
+                        "total_wins": 0,
+                        "total_losses": total_losses,
+                        "total_ties": 0,
+                        "total_judged": total_losses,
+                        "total_invalid": 0,
+                        "ref_errors": {},
+                    },
+                    win=False,
+                    loss=True,
+                    tie=False,
+                    total_wins=0,
+                    total_losses=total_losses,
+                    total_ties=0,
+                    per_reference=per_reference,
+                )
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
             # Terminal for the same reason as reference_missing above: a
@@ -846,6 +901,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 max_native_pdf_documents=rj.max_native_pdf_documents,
                 max_native_pdf_bytes=rj.max_native_pdf_bytes,
                 max_native_pdf_bytes_per_document=rj.max_native_pdf_bytes_per_document,
+                max_image_base64_bytes=rj.max_image_base64_bytes,
+                max_total_image_base64_bytes=rj.max_total_image_base64_bytes,
+                max_video_files=rj.max_video_files,
                 raster_dpi_tiers=rj.raster_dpi_tiers,
                 max_serialized_request_bytes=rj.max_serialized_request_bytes,
             )
@@ -911,6 +969,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     include_text=self.config.judge_pdf_include_text,
                     audio_capable=audio_capable,
                     video_capable=video_capable,
+                    recursive=bool(
+                        self.config.judge_reference_files_recursive and path and path.name == "reference_files"
+                    ),
                 )
             return section_cache[key]
 
@@ -952,7 +1013,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 ref_wins = ref_losses = ref_ties = 0
                 ref_judged_repeats = 0
                 for ref_dir in dirs:
-                    refs_subdir = ref_dir / "reference_files"
+                    refs_root = eval_task_dir if self.config.judge_reference_files_from_eval else ref_dir
+                    refs_subdir = refs_root / "reference_files"
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
@@ -1459,6 +1521,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     extra[f"{prefix}/normalized_elo"] = stage_norm
                 extra[f"{prefix}/num_references"] = stage_nref
                 extra[f"{prefix}/num_tasks"] = len({vr.get("task_id") for vr in stage_responses})
+                imputed, judged_rows = [], []
+                for vr in stage_responses:
+                    judge_response = vr.get("judge_response")
+                    if (
+                        isinstance(judge_response, dict)
+                        and judge_response.get("manual_imputation") == "eval_missing_as_loss"
+                    ):
+                        imputed.append(vr)
+                    elif sum(_votes(vr)) > 0:
+                        judged_rows.append(vr)
+                extra[f"{prefix}/judged_tasks"] = len({vr.get("task_id") for vr in judged_rows})
+                extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
+                extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
+                extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None

@@ -352,6 +352,41 @@ class TestJudgeOnlyMode:
         assert result["skipped"] is True
         assert result["reward"] == 0.0
 
+    @pytest.mark.parametrize(
+        "stage,listed,forwarded", [(0, True, False), (None, True, False), (1, False, False), (1, True, True)]
+    )
+    @pytest.mark.asyncio
+    async def test_missing_candidate_policy_is_stage_one_only(self, tmp_path, stage, listed, forwarded) -> None:
+        config = _make_config(judge_only=True, rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        config.count_eval_missing_as_loss = True
+        config.missing_eval_task_ids = ["task-1"] if listed else []
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=client)
+        body = StirrupRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="ignored", metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"}
+            ),
+            task_id="task-1",
+            stage_index=stage,
+        )
+        synthetic = {"reward": 0.0, "judge_response": {"manual_imputation": "eval_missing_as_loss"}}
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()) as rollout,
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value=synthetic)),
+        ):
+            result = await wrapper.run(MagicMock(cookies={}), body)
+        rollout.assert_not_awaited()
+        verify_calls = [call for call in client.post.await_args_list if call.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == int(forwarded)
+        if forwarded:
+            assert verify_calls[0].kwargs["json"]["stage_index"] == 1
+            assert result == synthetic
+            assert not list(tmp_path.rglob("*verify_response*"))
+        else:
+            assert result["skipped"] is True
+
 
 class TestTaskFinished:
     def test_none_dir_is_unfinished(self) -> None:
@@ -1215,6 +1250,39 @@ class TestReferenceKeyedVerifyCache:
         verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
         assert verify_calls == []
         assert result == cached
+
+    @pytest.mark.parametrize("stage,marker", [(0, None), (0, "{}"), (1, "null"), (1, "{}")])
+    @pytest.mark.asyncio
+    async def test_synthetic_cache_is_rechecked_for_calibration_and_repaired_artifacts(
+        self, tmp_path, stage, marker
+    ) -> None:
+        directory = tmp_path / "task_task-1" / "repeat_0"
+        directory.mkdir(parents=True)
+        if marker is not None:
+            (directory / "finish_params.json").write_text(marker)
+        cache = _verify_cache_path(str(directory), ["ref"])
+        cache.write_text(json.dumps({"reward": 0.0, "judge_response": {"manual_imputation": "eval_missing_as_loss"}}))
+        config = _make_config(judge_only=True, rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        config.count_eval_missing_as_loss = True
+        config.missing_eval_task_ids = ["task-1"]
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=client)
+        body = self._body(["ref"])
+        body.stage_index = stage
+        fresh = {"reward": 0.5, "judge_response": {"total_judged": 4}}
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()) as rollout,
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value=fresh)),
+        ):
+            result = await wrapper.run(MagicMock(cookies={}), body)
+        rollout.assert_not_awaited()
+        verify_calls = [call for call in client.post.await_args_list if call.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["stage_index"] == stage
+        assert result == fresh
+        assert json.loads(cache.read_text()) == fresh
 
     @pytest.mark.asyncio
     async def test_different_reference_set_rejudges_and_caches_separately(self, tmp_path) -> None:

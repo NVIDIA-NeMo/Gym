@@ -1356,6 +1356,44 @@ class TestPartialStageCompletion:
 
         return run
 
+    @pytest.mark.parametrize("fail_one", [False, True])
+    async def test_full_calibration_floor_requires_45_judgments(self, fail_one: bool) -> None:
+        task_ids = [f"t{i}" for i in range(45)]
+        config = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 45,
+                        "partial_completion": {
+                            "min_success_fraction": 1.0,
+                            "min_per_reference_success_fraction": 0.8,
+                            "min_successful_rows_per_reference": 1,
+                            "tolerate_unresolved": True,
+                        },
+                    },
+                    {"num_tasks": 45, "num_models": 1},
+                ],
+                "seed": 0,
+            }
+        )
+        dispatched: List[int] = []
+        results, _ = await run_multistage_stages(
+            config,
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner(
+                {0} if fail_one else set(),
+                failure_class="transport_ineligible",
+                terminal=True,
+                dispatched_stages=dispatched,
+            ),
+            resume=self._balanced_resume(task_ids),
+        )
+        assert sum(row["stage_index"] == 0 for row in results) == 45 - int(fail_one)
+        assert set(dispatched) == ({0} if fail_one else {0, 1})
+
     async def test_four_retryable_timeouts_keep_default_retry_stage_open(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
         resume = self._balanced_resume(task_ids)
