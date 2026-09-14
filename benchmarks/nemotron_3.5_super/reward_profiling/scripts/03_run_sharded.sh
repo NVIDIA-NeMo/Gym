@@ -160,10 +160,12 @@ from pathlib import Path
 
 d, max_attempts = Path(sys.argv[1]), int(sys.argv[2])
 
-def rows(name):
+def rows(name, required=False):
     try:
         fh = open(d / name)
     except FileNotFoundError:
+        if required:
+            raise          # a missing inputs file must not read as "nothing left to do"
         return
     with fh:
         for line in fh:
@@ -188,53 +190,75 @@ for r in rows("rollouts_failures.jsonl"):
 gated |= terminal
 gated |= {k for k, n in attempts.items() if n >= max_attempts}
 
-print(sum(key(r) not in gated for r in rows("rollouts_materialized_inputs.jsonl")))
+print(sum(key(r) not in gated for r in rows("rollouts_materialized_inputs.jsonl", required=True)))
 INNER
 }
 
 declare -a incomplete=()      # shards that ran out of attempts, for the exit status
 declare -A shard_rounds
-declare -A shard_last_outstanding
 round=0
 while :; do
     round=$((round + 1))
     unset live_jobs; declare -A live_jobs=()
     submitted=0
 
+    # An unmatched glob leaves the literal pattern, every [[ -d ]] fails, submitted stays 0 and the
+    # loop "finishes" having done nothing. A Lustre blip or a wrong SHARDS_DIR must be an error.
+    compgen -G "$SHARDS_DIR/shard_*/" >/dev/null \
+        || { echo "ERROR: no shard directories under $SHARDS_DIR" >&2; exit 2; }
+
     for shard_dir in "$SHARDS_DIR"/shard_*/; do
         [[ -d "$shard_dir" ]] || continue
         shard_name="$(basename "$shard_dir")"
-        outstanding=$(shard_outstanding "$shard_dir")
+
+        # Every "$(cmd)" below is guarded. This loop runs for days under set -euo pipefail, where
+        # an unguarded assignment turns any transient failure into a silent end to the whole sweep:
+        # the watcher exits, the running jobs finish, and nothing ever resubmits them.
+        outstanding=$(shard_outstanding "$shard_dir") || outstanding=""
+        if [[ ! "$outstanding" =~ ^[0-9]+$ ]]; then
+            echo "    $shard_name: could not read outstanding; retrying next round" >&2
+            submitted=$((submitted + 1))
+            continue
+        fi
 
         if [[ "$outstanding" -eq 0 ]]; then
             echo "    $shard_name complete"
             continue
         fi
-        attempts=${shard_rounds[$shard_name]:-0}
 
-        # Report progress, but never act on it. An attempt that collected nothing is usually
-        # transient -- an engine dying during startup looks identical to a permanently broken
-        # shard, and the right response to both is to try again. Giving up on no-progress would
-        # abandon an unlucky shard and merge a partial sweep, which is the failure this whole
-        # loop exists to avoid. MAX_ROUNDS is the only stop condition.
-        prev=${shard_last_outstanding[$shard_name]:-}
-        if [[ -n "$prev" && "$outstanding" -ge "$prev" ]]; then
-            echo "    $shard_name: no progress last attempt ($outstanding outstanding); retrying" >&2
-        fi
-        shard_last_outstanding[$shard_name]=$outstanding
-
-        if [[ "$attempts" -ge "$MAX_ROUNDS" ]]; then
-            echo "    $shard_name still has $outstanding outstanding after $attempts attempts; giving up" >&2
-            incomplete+=("$shard_name:$outstanding")
+        # A restart -- the normal case over a multi-day run -- must not submit a second job for a
+        # shard that already has one. Two drivers appending to the same rollouts.jsonl interleave
+        # inside multi-KB records, and merge silently drops the torn lines.
+        _jobname="gym-${EXPERIMENT_NAME:-rp}-$shard_name-$USER"
+        _running=$(squeue -h -u "$USER" -n "$_jobname" -o "%i" 2>/dev/null | head -1) || _running=""
+        if [[ -z "${SBATCH_JOB_NAME:-}" && -n "$_running" ]]; then
+            echo "    $shard_name already has job $_running; adopting it"
+            live_jobs[$_running]=$shard_name
+            submitted=$((submitted + 1))
             continue
         fi
 
-        submit_output=$(
-            EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
-            SWEEP_DIR="$shard_dir" \
-            bash "$RP_DIR/scripts/03_run_single.sh"
-        )
-        job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1)
+        attempts=${shard_rounds[$shard_name]:-0}
+        if [[ "$attempts" -ge "$MAX_ROUNDS" ]]; then
+            echo "    $shard_name still has $outstanding outstanding after $attempts attempts; giving up" >&2
+            [[ " ${incomplete[*]-} " == *" $shard_name:"* ]] || incomplete+=("$shard_name:$outstanding")
+            continue
+        fi
+
+        if ! submit_output=$(
+                EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
+                SWEEP_DIR="$shard_dir" \
+                bash "$RP_DIR/scripts/03_run_single.sh" 2>&1); then
+            echo "    $shard_name: submit failed, retrying next round: $(tail -1 <<<"$submit_output")" >&2
+            submitted=$((submitted + 1))   # not done, so the round must not count as finished
+            continue                       # and a failed submit is not an attempt
+        fi
+        job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1) || job_id=""
+        if [[ -z "$job_id" ]]; then
+            echo "    $shard_name: no job id in submit output; retrying next round" >&2
+            submitted=$((submitted + 1))
+            continue
+        fi
         live_jobs[$job_id]=$shard_name
         shard_rounds[$shard_name]=$((attempts + 1))
         submitted=$((submitted + 1))
@@ -247,8 +271,13 @@ while :; do
     fi
 
     echo ">>> round $round: waiting on $submitted job(s)"
-    while :; do
-        live=$(squeue -h -j "$(IFS=,; echo "${!live_jobs[*]}")" -o "%i" 2>/dev/null | wc -l)
+    while (( ${#live_jobs[@]} > 0 )); do
+        # Count our ids among the user's live jobs rather than asking squeue about specific ones.
+        # `squeue -j <id>` exits 1 once an id is purged (MinJobAge=300 here), and with pipefail
+        # that status propagates past wc -l and kills the watcher -- which happens deterministically
+        # as soon as one shard finishes while its siblings are still running.
+        live=$(squeue -h -u "$USER" -o "%i" 2>/dev/null \
+               | grep -cxF -f <(printf '%s\n' "${!live_jobs[@]}")) || live=0
         [[ "$live" -eq 0 ]] && break
         sleep "$POLL_S"
     done
