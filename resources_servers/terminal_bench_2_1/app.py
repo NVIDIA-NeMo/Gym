@@ -165,6 +165,27 @@ rm -f "$verifier_uv_installer"
         # HTTPS verifier downloads require this explicit bootstrap dependency.
         ("apt-get install -y curl", "apt-get install -y curl ca-certificates || exit $?"),
     ],
+    "terminal-bench/headless-terminal": [
+        # PyPI metadata downloads can exhaust pip's own HTTP retries. Retry only
+        # the pinned dependency install; never rerun grading or continue without it.
+        (
+            "pip install pytest==8.4.1 requests==2.32.5 pytest-json-ctrf==0.3.5",
+            """for verifier_pip_attempt in 1 2 3 4; do
+  if pip install pytest==8.4.1 requests==2.32.5 pytest-json-ctrf==0.3.5; then
+    verifier_pip_status=0
+    break
+  else
+    verifier_pip_status=$?
+  fi
+  if [ "$verifier_pip_attempt" -lt 4 ]; then
+    printf 'Retrying verifier dependency install after pip failure (%s/4)\\n' "$verifier_pip_attempt" >&2
+    sleep 2
+  fi
+done
+[ "$verifier_pip_status" -eq 0 ] || exit "$verifier_pip_status"
+""",
+        ),
+    ],
     "terminal-bench/mcmc-sampling-stan": [
         ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
     ],
