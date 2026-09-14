@@ -1,1 +1,2 @@
+# Match Gym's SDK pin; NOOA's LiteLLM transport is not used by this adapter.
 openai==2.44.0
