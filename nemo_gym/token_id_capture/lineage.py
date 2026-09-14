@@ -42,6 +42,7 @@ Ambiguous matches remain unresolved rather than risking tokens from the wrong ca
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -89,6 +90,107 @@ _CUSTODY_FIELDS = (
     "fingerprint_version",
     "parent_manifest",
 )
+
+_GENERATION_CUT_EVENT = "generation_cut"
+
+
+def generation_cut_lineage_records(receipt: Any) -> tuple[Any, ...]:
+    """Return one typed, token-free lineage event per cut acknowledgement."""
+    from nemo_gym._checkpoint.model_control_contracts import GenerationCutLineageRecord
+
+    return tuple(
+        GenerationCutLineageRecord.from_prefix(
+            checkpoint_id=receipt.checkpoint_id,
+            server_name=receipt.inventory.server_name,
+            prefix=prefix,
+        )
+        for prefix in sorted(receipt.prefixes, key=lambda item: item.ticket_id)
+    )
+
+
+def generation_cut_receipts_from_lineage(
+    rows_by_capture_key: dict[str, list[dict[str, Any]]],
+    *,
+    checkpoint_id: str,
+    server_name: str,
+) -> tuple[Any, ...]:
+    """Rebuild the active-cut restore receipt authenticated by a ledger archive."""
+    from nemo_gym._checkpoint.model_control_contracts import (
+        GenerationCutInventory,
+        GenerationCutLineageRecord,
+        GenerationCutPrefix,
+        GenerationCutReceipt,
+    )
+
+    by_ticket: dict[str, GenerationCutLineageRecord] = {}
+    for capture_key, rows in sorted(rows_by_capture_key.items()):
+        committed_model_call_ids = {
+            row.get("model_call_id")
+            for row in rows
+            if row.get("event") != _GENERATION_CUT_EVENT
+            and row.get("failure_reason") is None
+            and isinstance(row.get("staging_key"), str)
+        }
+        for row in rows:
+            if row.get("event") != _GENERATION_CUT_EVENT:
+                continue
+            record = GenerationCutLineageRecord.model_validate(row)
+            if record.capture_key != capture_key:
+                raise ValueError(
+                    "generation-cut lineage event is stored under the wrong "
+                    f"capture key: expected={capture_key!r}, actual={record.capture_key!r}"
+                )
+            if record.checkpoint_id != checkpoint_id or record.server_name != server_name:
+                continue
+            # The response won the race with checkpoint commit.  Its ordinary
+            # lineage row is terminal for this logical call, so the older cut
+            # must not reopen it during restore.
+            if record.model_call_id in committed_model_call_ids:
+                continue
+            existing = by_ticket.get(record.ticket_id)
+            if existing is not None and existing != record:
+                raise ValueError(f"conflicting generation-cut lineage events for ticket {record.ticket_id!r}")
+            by_ticket.setdefault(record.ticket_id, record)
+    if not by_ticket:
+        return ()
+
+    records = [by_ticket[ticket_id] for ticket_id in sorted(by_ticket)]
+    prefixes = [record.prefix_ack() for record in records]
+    inventory = GenerationCutInventory.build(
+        checkpoint_id=checkpoint_id,
+        server_name=server_name,
+        active_prefixes=[
+            GenerationCutPrefix.model_validate(
+                prefix.model_dump(
+                    mode="json",
+                    include={
+                        "ticket_id",
+                        "rollout_id",
+                        "attempt_index",
+                        "model_call_id",
+                        "admitted_at",
+                    },
+                )
+            )
+            for prefix in prefixes
+        ],
+    )
+    evidence = json.dumps(
+        [record.model_dump(mode="json") for record in records],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    digest = hashlib.sha256(evidence).hexdigest()
+    return (
+        GenerationCutReceipt(
+            checkpoint_id=checkpoint_id,
+            cut_id=f"lineage-{digest}",
+            inventory_digest=inventory.inventory_digest,
+            inventory=inventory,
+            backend_snapshot_id=f"lineage-{digest}",
+            prefixes=tuple(prefixes),
+        ),
+    )
 
 
 def _custody_columns(
@@ -155,6 +257,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
         records_by_id.setdefault(record.model_call_id, record)
 
     for row in rows:
+        if row.get("event") == _GENERATION_CUT_EVENT:
+            continue
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -554,7 +658,14 @@ class InMemoryLineageStore:
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
         # full custody row, not just the columns the lineage index keeps.
-        existing = next((r for r in rows if r.get("model_call_id") == record.model_call_id), None)
+        existing = next(
+            (
+                row
+                for row in rows
+                if row.get("event") != _GENERATION_CUT_EVENT and row.get("model_call_id") == record.model_call_id
+            ),
+            None,
+        )
         if existing is not None:
             if existing != row:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
@@ -571,6 +682,23 @@ class InMemoryLineageStore:
             chain_hash=record.chain_hash,
         )
         rows.append(row)
+
+    async def record_generation_cut(self, receipt: Any) -> None:
+        for event in generation_cut_lineage_records(receipt):
+            rows = self._ledgers.setdefault(event.capture_key, [])
+            payload = event.model_dump(mode="json")
+            matches = [
+                row
+                for row in rows
+                if row.get("event") == _GENERATION_CUT_EVENT
+                and row.get("checkpoint_id") == event.checkpoint_id
+                and row.get("ticket_id") == event.ticket_id
+            ]
+            if matches:
+                if matches[0] != payload:
+                    raise ValueError(f"conflicting generation-cut lineage event for ticket {event.ticket_id!r}")
+                continue
+            rows.append(payload)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         rows = self._ledgers.setdefault(rollout_id, [])
@@ -1015,7 +1143,9 @@ class FileLineageStore(IncrementalLineageStore):
             records = [
                 record
                 for record in source_rows
-                if record.get("model_call_id") == parent_call_id and record.get("failure_reason") is None
+                if record.get("event") != _GENERATION_CUT_EVENT
+                and record.get("model_call_id") == parent_call_id
+                and record.get("failure_reason") is None
             ]
         if resolution.status != ParentResolutionStatus.RESOLVED:
             if len(records) != 1:
@@ -1118,12 +1248,37 @@ class FileLineageStore(IncrementalLineageStore):
         }
         with self._locked(commit.rollout_id):
             records = self._read(commit.rollout_id)
-            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            matches = [
+                existing
+                for existing in records
+                if existing.get("event") != _GENERATION_CUT_EVENT and existing["model_call_id"] == model_call_id
+            ]
             if matches:
                 if matches[0] != record:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
             self._append(commit.rollout_id, record, records)
+
+    async def record_generation_cut(self, receipt: Any) -> None:
+        await asyncio.to_thread(self._record_generation_cut, receipt)
+
+    def _record_generation_cut(self, receipt: Any) -> None:
+        for event in generation_cut_lineage_records(receipt):
+            payload = event.model_dump(mode="json")
+            with self._locked(event.capture_key):
+                records = self._read(event.capture_key)
+                matches = [
+                    row
+                    for row in records
+                    if row.get("event") == _GENERATION_CUT_EVENT
+                    and row.get("checkpoint_id") == event.checkpoint_id
+                    and row.get("ticket_id") == event.ticket_id
+                ]
+                if matches:
+                    if matches[0] != payload:
+                        raise ValueError(f"conflicting generation-cut lineage event for ticket {event.ticket_id!r}")
+                    continue
+                self._append(event.capture_key, payload, records)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)
