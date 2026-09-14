@@ -19,8 +19,10 @@ FukuyamaBench publishes no Hugging Face dataset: the 319 cases exist only as a
 directory tree in the upstream GitHub repository, so this fetches the source
 tarball at a pinned commit rather than calling `load_dataset`.
 
-Prompts are reproduced verbatim from upstream `eval/prompts/infer_pathway_prompts.yaml`
-at the same revision, so a run of this data exercises the shipped prompt. Note
+Prompts are copied from upstream `eval/prompts/infer_pathway_prompts.yaml` at the
+same revision, so a run of this data exercises the shipped prompt. The user
+template is byte-identical; the system prompt is content-identical but has
+trailing whitespace stripped by this repository's pre-commit hook. Note
 that the paper's Appendix C prints a longer prompt than the repository ships
 (it adds an output-guidelines block and a worked example), so neither this nor
 upstream's own harness is byte-identical to what produced the published tables.
@@ -44,8 +46,9 @@ REPO = "HaCTang/ReactionMechanismReasoning"
 REVISION = "63bb79f912f0b2de593996b80ffeea894f6f1a59"
 TARBALL_URL = f"https://codeload.github.com/{REPO}/tar.gz/{REVISION}"
 
-# Verbatim from upstream eval/prompts/infer_pathway_prompts.yaml, key
-# `pathway_student_system_prompt`.
+# From upstream eval/prompts/infer_pathway_prompts.yaml, key
+# `pathway_student_system_prompt`. Content-preserving copy: trailing whitespace
+# after three Markdown lines is stripped by this repository's whitespace hook.
 SYSTEM_PROMPT = """Role: You are an expert Computational Chemist and Mechanism Designer. You prioritize chemical validity and strict SMILES syntax.
 
 Task: Given the starting reactants (SMILES with atom mapping), predict the complete multi-step reaction mechanism.
@@ -121,7 +124,7 @@ Predicted intermediate: [describe or show SMILES]
 ```
 """
 
-# Verbatim from the same file, key `pathway_student_template_prompt`.
+# Byte-identical to the same file's `pathway_student_template_prompt`.
 USER_TEMPLATE = """Starting Reactants:
 {starting_reactants}
 

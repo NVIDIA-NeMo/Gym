@@ -195,11 +195,14 @@ class TestDottedProducts:
         result = score_pathway([{"product_smiles": "CCO.[Pd]"}], gt, [[1]])
         assert result["exact_match"] is True
 
-    def test_dotted_gold_matches_split_prediction(self) -> None:
+    def test_dotted_gold_matches_under_strict_scoring(self) -> None:
+        """Strict mode removes the subset escape hatch.
+
+        Under lenient matching a partial answer could mask a broken split, so
+        this pins the behaviour where only true set equality passes.
+        """
         gt = [{"step_id": "1", "products": ["CCO.[Pd]"]}]
-        assert canonical_set(["CCO.[Pd]"]) == canonical_set(["CCO", "[Pd]"])
-        result = score_pathway([{"product_smiles": "CCO"}, {"product_smiles": "[Pd]"}], gt, [[1]])
-        # A subset of the gold species, so lenient matching credits it.
+        result = score_pathway([{"product_smiles": "CCO.[Pd]"}], gt, [[1]], lenient=False)
         assert result["exact_match"] is True
 
 
@@ -225,6 +228,58 @@ class TestOrganometallics:
         gt = [{"step_id": "1", "products": [self.CHROMIUM]}]
         result = score_pathway([{"product_smiles": "CCO"}], gt, [[1]])
         assert result["exact_match"] is False
+
+
+class TestMalformedPathway:
+    """A well-formed array can still hold a malformed element.
+
+    Extraction keeps an array when any element is a step, so scoring must treat
+    the rest as ordinary misses rather than raising — a model formatting error
+    must not become a server error.
+    """
+
+    GT = [{"step_id": "1", "products": ["CCO"]}, {"step_id": "2", "products": ["CC=O"]}]
+
+    def test_null_element_does_not_raise(self) -> None:
+        result = score_pathway([{"step_id": 1, "product_smiles": "CCCC"}, None], self.GT, [[1], [2]])
+        assert result["exact_match"] is False
+
+    def test_assorted_non_mappings_do_not_raise(self) -> None:
+        result = score_pathway(["a string", 42, [], None], self.GT, [[1]])
+        assert result["exact_match"] is False
+
+    async def test_verify_scores_a_malformed_element_as_a_miss(self) -> None:
+        body = _make_request('```json\n[{"step_id": 1, "product_smiles": "CCO"}, null]\n```')
+        result = await _make_server().verify(body)
+        assert result.status == FukuyamaBenchStatus.SCORED.value
+        assert result.reward == 0.0
+
+
+class TestPerTierMetrics:
+    """Set B and Set C differ by nearly an order of magnitude upstream.
+
+    A mean pooled across tiers describes no published benchmark, and the default
+    aggregation emits only that pooled scalar, so per-tier keys must be present.
+    """
+
+    def _tasks(self) -> list[list[dict]]:
+        return [
+            [{"case_set": "B", "case_id": "B001", "reward": 1.0}],
+            [{"case_set": "C", "case_id": "C001", "reward": 0.0}],
+        ]
+
+    def test_metrics_are_reported_per_tier(self) -> None:
+        metrics = _make_server().compute_metrics(self._tasks())
+        assert any(k.startswith("B/") for k in metrics), metrics
+        assert any(k.startswith("C/") for k in metrics), metrics
+
+    def test_tiers_are_not_collapsed_into_one_number(self) -> None:
+        """The pooled 0.5 of a 1.0/0.0 mixture must not be the only signal."""
+        metrics = _make_server().compute_metrics(self._tasks())
+        b = {k: v for k, v in metrics.items() if k.startswith("B/")}
+        c = {k: v for k, v in metrics.items() if k.startswith("C/")}
+        assert b and c
+        assert b != c
 
 
 class TestEquivalentSteps:

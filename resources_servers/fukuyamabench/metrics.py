@@ -116,7 +116,14 @@ def product_smiles_from_step(step: dict) -> list[str]:
     Accepts ``product_smiles`` (a dot-joined string or a list) or ``products``
     (a list of strings or of ``{"smiles": ...}`` dicts), matching the shapes the
     upstream prompt and dataset both produce.
+
+    A model can emit a well-formed array holding a malformed element, e.g.
+    ``[{...}, null]``. Extraction keeps such an array because *some* element is a
+    step, so a non-mapping element must score as "no products" here rather than
+    raising and turning a formatting error into a server error.
     """
+    if not isinstance(step, dict):
+        return []
     if "product_smiles" in step:
         smiles = step["product_smiles"]
         if isinstance(smiles, str):

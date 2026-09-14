@@ -35,8 +35,10 @@ jointly.
 
 ## Prompting
 
-The system prompt and user template are reproduced verbatim from upstream
-`eval/prompts/infer_pathway_prompts.yaml` at the pinned revision. Starting
+The system prompt and user template are copied from upstream
+`eval/prompts/infer_pathway_prompts.yaml` at the pinned revision. The user
+template is byte-identical; the system prompt is content-identical with trailing
+whitespace stripped by this repository's pre-commit hook. Starting
 reactants are supplied atom-mapped, matching upstream's SFT/RL input format.
 
 The paper's Appendix C prints a *longer* prompt than the repository ships — it
@@ -112,6 +114,14 @@ species, and the distinct-canonical-form count rises by exactly 17 — every
 recovered species maps to its own form, and no previously-separate species are
 merged. Gold-as-prediction goes from 236/241 to **241/241** with all negative
 controls still at zero.
+
+### Metrics are reported per tier
+
+`compute_metrics` emits `B/...` and `C/...` keys via `compute_subset_metrics`
+keyed on `case_set`. The default Gym aggregation would report only a pooled
+`mean/reward`, and since the published B and C baselines differ by close to an
+order of magnitude, a mean over a mixed split describes no benchmark anyone
+reports. Read the per-tier keys; treat the pooled mean as an artifact.
 
 ### Reproducing published pass@k
 
@@ -194,6 +204,28 @@ value.
 ```bash
 ng_test +entrypoint=resources_servers/fukuyamabench
 ```
+
+## Dependencies
+
+The scorer needs a chemical-graph parser and a canonical-SMILES writer; the
+standard library has neither, so one third-party toolkit is required.
+
+**RDKit is selected.** It is the toolkit upstream's own scorer uses, so parity is
+a property of the choice rather than something to be argued. It is BSD-3-Clause
+(compatible with this repository's Apache-2.0 contribution rule), ships CPython
+3.13 wheels, is on conda-forge, and its only direct Python dependencies are NumPy
+and Pillow. It reproduced every control recorded above.
+
+**Open Babel 3.2.1** is the strongest alternative and does support canonical
+SMILES on Python 3.13, but it is **GPL-2.0**, which CONTRIBUTING forbids
+introducing into the main tree. That rules it out independently of its merits.
+
+Version: see the note in `requirements.txt` for why `2025.9.6` is pinned rather
+than the newer `2026.3.6`, and what would justify moving it. Assessed
+2026-09-14 against
+[RDKit releases](https://github.com/rdkit/rdkit/releases),
+[RDKit license](https://github.com/rdkit/rdkit/blob/master/license.txt), and
+[Open Babel license](https://github.com/openbabel/openbabel/blob/master/COPYING).
 
 ## Licensing
 

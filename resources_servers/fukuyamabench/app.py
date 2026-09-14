@@ -28,6 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.reward_profile import compute_subset_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,16 @@ class FukuyamaBenchVerifyResponse(BaseVerifyResponse):
 
 class FukuyamaBenchResourcesServer(SimpleResourcesServer):
     config: BaseResourcesServerConfig
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        """Report each difficulty tier separately.
+
+        Published Set B and Set C baselines differ by close to an order of
+        magnitude, so a mean pooled over a mixed split describes no benchmark
+        anyone reports. The default aggregation emits only that pooled scalar,
+        so per-tier metrics are added here and a mixed run always carries them.
+        """
+        return compute_subset_metrics(tasks, "case_set")
 
     async def verify(self, body: FukuyamaBenchVerifyRequest) -> FukuyamaBenchVerifyResponse:
         meta = body.verifier_metadata or {}
