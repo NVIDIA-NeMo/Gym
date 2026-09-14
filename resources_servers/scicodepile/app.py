@@ -5,8 +5,8 @@ import asyncio
 import contextlib
 import json
 import os
-import signal
 import shutil
+import signal
 import sys
 import tempfile
 from enum import Enum
@@ -29,10 +29,19 @@ from nemo_gym.reward_profile import (
 
 
 class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
-    # `verify` is a pure function of the persisted row: each task gets a fresh process,
-    # a fresh module namespace and a throwaway CWD, so nothing carries between calls.
-    # Declaring this is what lets `gym eval reverify` run without `++force`. Verified
-    # by re-verifying 40 tasks forward, reversed and again — identical verdicts.
+    # STATELESS means this server carries nothing between verifications: each task gets
+    # a fresh process, a fresh module namespace and a throwaway CWD, so a rollout's
+    # verdict does not depend on what was verified before it or on how the calls are
+    # ordered. That is the property the `gym eval reverify` guard can actually protect,
+    # and it is what `bird_sql` and `terminal_bench_2_1` — which also execute arbitrary
+    # model code — declare.
+    #
+    # It is *not* a claim that verification is a pure function for arbitrary model
+    # output. We execute whatever the model wrote, and code that reads the clock, draws
+    # randomness or touches the network will not reproduce. That is inherent to
+    # executing model code and is not something this server can guarantee away. What is
+    # checked: all 200 dataset-side tests are deterministic — three independent sweeps
+    # of every canonical solution gave identical verdicts, with no task differing.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     num_processes: int = 8
@@ -80,6 +89,11 @@ _RUNNER_ENV = {
     "MKL_NUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
 }
+
+# Upper bound on collecting the runner's pipes after its process group is dead.
+# EOF is expected immediately at that point; this only stops a stuck read from
+# stranding a caller that is holding a concurrency slot.
+_DRAIN_TIMEOUT_SECONDS = 10.0
 
 # Upper bound on reaping a SIGKILLed runner. Only reached if the kill did not land;
 # returning late beats holding the semaphore for the rest of the run.
@@ -168,9 +182,7 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
-        key.update(
-            highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "harness_failure"])
-        )
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "harness_failure"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
         return key
 
@@ -295,6 +307,21 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
 
+    @staticmethod
+    async def _drain(reader: "asyncio.Future") -> str:
+        """Collect stderr, bounded, once the runner's process group is dead.
+
+        Diagnostics only — it is reported alongside `unparseable_runner_output`. EOF is
+        expected immediately here because every descriptor holding the write end open
+        has been killed; the deadline is insurance so a stuck read cannot strand a
+        caller that is holding a concurrency slot.
+        """
+        try:
+            data = await asyncio.wait_for(reader, timeout=_DRAIN_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, asyncio.CancelledError, OSError):
+            return ""
+        return data.decode("utf-8", errors="replace")
+
     async def _run_task(self, setup_code: str, code: str, test: str, entry_point: str) -> Dict[str, Any]:
         # The scratch CWD is created and removed here, not in the runner: a task that
         # hangs is SIGKILLed below and a task can call `os._exit`, and neither path
@@ -337,21 +364,52 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         # Captured now: once asyncio reaps the child, `os.getpgid(proc.pid)` fails even
         # while the group still has live members.
         pgid = proc.pid
+
+        # Drained concurrently so the runner can never block writing into a full pipe.
+        # Nothing waits on this finishing; it is read best-effort after the kill.
+        stderr_reader = asyncio.ensure_future(proc.stderr.read())
+        verdict_line = b""
+        timed_out = False
         try:
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(payload.encode()),
-                    timeout=self.config.subprocess_timeout,
-                )
+                proc.stdin.write(payload.encode())
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                # Runner died before reading its request; the empty verdict below
+                # reports it as `unparseable_runner_output`.
+                pass
+            finally:
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    proc.stdin.close()
+
+            try:
+                # Read one newline-terminated verdict. Neither EOF nor process exit
+                # works as the completion signal: a task that calls `os.fork()` leaves
+                # a child holding inherited duplicates of both pipe write ends, and
+                # asyncio's `Process.wait()` does not resolve until the pipe transports
+                # close either — so both turned an already-written `pass` into a
+                # `timeout`. `subprocess.Popen` hid this because `exec` closes
+                # non-inheritable descriptors; `fork` does not.
+                verdict_line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.config.subprocess_timeout)
             except asyncio.TimeoutError:
-                return {"status": "timeout", "details": {"reason": "subprocess_timeout"}}
+                timed_out = True
+            except (ValueError, asyncio.IncompleteReadError):
+                # Verdict longer than the stream limit, or truncated. Left empty so it
+                # is reported as unparseable rather than raising.
+                verdict_line = b""
         finally:
             # Unconditional and in a `finally`: the verdict is already decided, and a
             # CancelledError (uvicorn allows 0.5s on shutdown) must take this path too,
-            # or the child outlives the `rmtree` of its own CWD.
+            # or the child outlives the `rmtree` of its own CWD. Killing the group is
+            # also what releases any inherited pipe ends.
             await self._kill_process_group(pgid, proc)
 
-        stdout_text = stdout.decode("utf-8", errors="replace")
+        if timed_out:
+            stderr_reader.cancel()
+            return {"status": "timeout", "details": {"reason": "subprocess_timeout"}}
+
+        stdout_text = verdict_line.decode("utf-8", errors="replace")
+        stderr_text = await self._drain(stderr_reader)
         try:
             return json.loads(stdout_text)
         except json.JSONDecodeError:
@@ -359,7 +417,7 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
                 "status": "error",
                 "details": {
                     "reason": "unparseable_runner_output",
-                    "stderr": stderr.decode("utf-8", errors="replace")[:2000],
+                    "stderr": stderr_text[:2000],
                     "stdout": stdout_text[:2000],
                 },
             }

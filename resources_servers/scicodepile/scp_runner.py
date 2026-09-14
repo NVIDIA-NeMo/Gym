@@ -269,7 +269,11 @@ def main() -> None:
     # gets an empty read and reports `unparseable_runner_output`. That is not a
     # guarantee — a task that writes to the channel before exiting decides the
     # verdict. See the module docstring.
-    os.write(result_fd, json.dumps(result).encode())
+    # Newline-terminated: the parent reads one line rather than reading to EOF, because
+    # a task that called `os.fork()` leaves a child holding an inherited duplicate of
+    # this pipe and EOF would then not arrive until that child died. The verdict is a
+    # single JSON document on one line, so the newline is the completion signal.
+    os.write(result_fd, json.dumps(result).encode() + b"\n")
     os.close(result_fd)
     os.close(stderr_fd)
 

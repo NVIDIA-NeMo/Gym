@@ -188,6 +188,31 @@ class TestScientificImports:
         result = run_task(_task("import numpy\n\ndef add(a, b):\n    return int(numpy.add(a, b))\n"))
         assert result["status"] == "pass"
 
+    def test_the_shipped_config_matches_the_class_defaults(self):
+        """The YAML is what actually runs; the class default is not.
+
+        `configs/scicodepile.yaml` pinned `max_as_limit: 8192`, so raising the class
+        default to 30 GiB changed nothing in deployment while the README claimed it
+        had. Any test reading the class default is blind to that. Assert the two
+        agree for every knob the config overrides.
+        """
+        import yaml
+        from app import SciCodePileResourcesServerConfig
+
+        shipped = yaml.safe_load((SERVER_DIR / "configs" / "scicodepile.yaml").read_text())
+        overrides = shipped["scicodepile"]["resources_servers"]["scicodepile"]
+        fields = SciCodePileResourcesServerConfig.model_fields
+
+        # Only the knobs that govern execution. Descriptive keys (domain, description,
+        # value) are legitimate overrides of a null default, not drift.
+        execution_knobs = ("num_processes", "subprocess_timeout", "max_as_limit")
+        drifted = {
+            name: {"yaml": overrides[name], "class_default": fields[name].default}
+            for name in execution_knobs
+            if name in overrides and overrides[name] != fields[name].default
+        }
+        assert not drifted, f"shipped config disagrees with the class defaults it documents: {drifted}"
+
     @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is only applied on Linux")
     def test_numpy_works_under_the_real_address_space_cap(self):
         """Exercise the cap where it actually applies, at the configured default.
@@ -256,9 +281,7 @@ class TestScientificImports:
             "    return a + b\n"
         )
         server = _make_server()
-        result = asyncio.run(
-            server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add")
-        )
+        result = asyncio.run(server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add"))
         assert result["status"] == "pass", result["details"]
 
     def test_ordinary_file_and_tempdir_use_still_passes(self):
@@ -477,9 +500,7 @@ class TestRunnerExitPath:
     def _verdict(self, code):
         server = _make_server(subprocess_timeout=self.TIMEOUT)
         started = time.monotonic()
-        result = asyncio.run(
-            server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add")
-        )
+        result = asyncio.run(server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add"))
         return result, time.monotonic() - started
 
     def test_a_task_that_leaves_a_child_running_still_passes(self):
@@ -493,6 +514,26 @@ class TestRunnerExitPath:
         assert result["status"] == "pass"
         assert elapsed < self.TIMEOUT, "verdict was written but the runner could not exit"
 
+    def test_a_task_that_forks_still_passes(self):
+        """`fork` without `exec` is the case `subprocess.Popen` hides.
+
+        Popen's exec closes non-inheritable descriptors (PEP 446), so the child never
+        held our pipes. A forked child inherits the whole descriptor table, including
+        the runner's duplicates of both pipe write ends — so neither EOF nor asyncio's
+        `Process.wait()` (which itself waits on the pipe transports) can be the
+        completion signal. The verdict is newline-terminated and read as one line.
+        """
+        result, elapsed = self._verdict(
+            "import os, time\n"
+            "def add(a, b):\n"
+            "    if os.fork() == 0:\n"
+            "        time.sleep(120)\n"
+            "        os._exit(0)\n"
+            "    return a + b\n"
+        )
+        assert result["status"] == "pass"
+        assert elapsed < self.TIMEOUT, "a forked child held the verdict pipe open"
+
     def test_a_task_that_leaves_a_thread_running_still_passes(self):
         result, elapsed = self._verdict(
             "import threading, time\n"
@@ -505,9 +546,7 @@ class TestRunnerExitPath:
 
     def test_an_atexit_hook_cannot_stall_the_verdict(self):
         result, elapsed = self._verdict(
-            "import atexit, time\n"
-            "atexit.register(lambda: time.sleep(120))\n"
-            "def add(a, b):\n    return a + b\n"
+            "import atexit, time\natexit.register(lambda: time.sleep(120))\ndef add(a, b):\n    return a + b\n"
         )
         assert result["status"] == "pass"
         assert elapsed < self.TIMEOUT, "interpreter shutdown ran the task's atexit hook"
@@ -515,11 +554,7 @@ class TestRunnerExitPath:
     def test_orphans_are_killed_with_the_process_group(self, tmp_path):
         """Anything the task spawned must die before the parent deletes its CWD."""
         pidfile = tmp_path / "grandchild.pid"
-        child = (
-            "import os, sys, time\n"
-            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
-            "time.sleep(120)\n"
-        )
+        child = f"import os, sys, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(120)\n"
         code = (
             "import subprocess, sys, time\n"
             "def add(a, b):\n"

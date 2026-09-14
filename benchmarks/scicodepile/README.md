@@ -64,9 +64,14 @@ cannot parse, so the task scores zero without the model having attempted it. An
 instruction wrapper removes those but changes the character of the code produced,
 so it is not a free improvement.
 
-Non-attempts are separable from genuine failures: the statuses `no_code_block`,
-`entry_point_missing`, and `error` with `details.reason == "syntax_error"` isolate
-them, and any run should report them alongside the headline number.
+**The statuses do not cleanly separate these non-attempts from genuine failures.**
+With no fence at all the extractor returns the whole response, so a conversational
+answer or a refusal is compiled and lands as `error`/`syntax_error` — the same status
+as a real attempt with a syntax error. `no_code_block` catches only the untagged-fence
+case, and `entry_point_missing` is unreliable on `alignment/python/76`, whose
+`setup_code` defines the entry point itself. Counting non-attempts means reading the
+text, not tallying statuses. Report them alongside the headline number, but derive
+them by inspection.
 
 ## Data notes
 
