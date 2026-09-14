@@ -160,6 +160,11 @@ rm -f "$verifier_uv_installer"
     "terminal-bench/qemu-startup": _verifier_apt_patches("curl expect", bullseye_snapshot=True),
     "terminal-bench/qemu-alpine-ssh": _verifier_apt_patches("curl sshpass", bullseye_snapshot=True),
     "terminal-bench/code-from-image": _verifier_apt_patches("curl"),
+    "terminal-bench/extract-moves-from-video": [
+        # libcurl may already be installed without its recommended CA bundle.
+        # HTTPS verifier downloads require this explicit bootstrap dependency.
+        ("apt-get install -y curl", "apt-get install -y curl ca-certificates || exit $?"),
+    ],
     "terminal-bench/mcmc-sampling-stan": [
         ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
     ],
