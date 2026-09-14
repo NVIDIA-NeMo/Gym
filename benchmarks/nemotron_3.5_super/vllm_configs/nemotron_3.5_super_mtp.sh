@@ -33,7 +33,6 @@ VLLM_COMMON_ARGS=(
 )
 VLLM_PREFILL_ARGS=(
     --speculative-config '{"method":"mtp","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,1024,0]]}'
-    --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
