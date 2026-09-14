@@ -81,8 +81,12 @@ Alternatively, set `EXECUTE_ONLY`, `JUDGE_ONLY`, or `AA_BRIEFCASE_REWARD_MODE`
 environment variables. Explicit Gym config overrides take precedence.
 
 Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately,
-alongside their counts and `aa_lite/rows_valid` / `aa_lite/rows_total`. Invalid
-judge rows are excluded from aggregate scores. The pairwise rate counts a tie
+alongside their counts and Gym's expected, scored, and missing rollout coverage.
+Failed rollouts are recorded in the failures sidecar and may never reach the
+resource aggregate, so `aa_lite/rows_total` alone does not establish completeness.
+Invalid judge rows are excluded from aggregate scores. In `all` mode, an invalid
+judgment in either path excludes the whole task from both aggregate scores.
+The pairwise rate counts a tie
 as half a win. In `all` mode, each task's scalar `reward` is the convenience mean
 of its binary and pairwise scores; it is not an Elo calculation.
 
@@ -91,14 +95,19 @@ AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase El
 Each judge-panel member uses its own model server because the `openai_model`
 adapter fixes the upstream model. Override the three model names with
 `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
-Claude uses a local 32,768-token output limit in both binary and pairwise judging; AA's judge output budget is
-not disclosed.
+Claude uses a local 32,768-token output limit in both binary and pairwise judging.
+GPT and Gemini inherit the local 4,096-token binary and 65,535-token pairwise
+limits. AA's judge output budgets are not disclosed.
 
 Binary judging uses the released AA prompts with an added JSON-format instruction
-on the first call and the existing formatting retry. This is a local formatting
+on the first call and up to two retries for invalid answers. Empty answers repeat
+the same request; nonempty malformed answers receive a formatting reminder.
+This is a local formatting
 adaptation, not an exact reproduction of the unpublished AA judging harness.
 SRT support lives in the shared GDPval file reader, so GDPval submissions that
 contain SRT files also include their subtitle text in judge inputs.
+LaTeX source and PDF content are shown separately; the harness does not compile
+the source to verify that it produces the submitted PDF.
 
 The 32,768-token Claude budget is under validation; it is not an AA-prescribed
 limit or a demonstrated reliability fix.
@@ -106,4 +115,5 @@ limit or a demonstrated reliability fix.
 For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
 starting Gym. This controls the client timeout, not upstream service deadlines.
 Binary requests permit two transport retries with SDK backoff, separately from
-the formatting retry. Exhausted requests remain evaluation errors.
+invalid-answer retries. Exhausted requests remain evaluation errors. These limits
+do not bound the shared model adapter's existing rate-limit retry loop.
