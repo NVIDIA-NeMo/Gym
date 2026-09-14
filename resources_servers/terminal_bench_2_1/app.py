@@ -102,24 +102,37 @@ EOF""",
 }
 
 
-def _verifier_apt_patches(packages: str) -> List[Tuple[str, str]]:
+def _verifier_apt_patches(packages: str, *, bullseye_snapshot: bool = False) -> List[Tuple[str, str]]:
     # These images include CA certificates. Refresh through HTTPS to avoid stale
     # HTTP mirror metadata, and wait for an agent's package-manager operation.
     refresh = """find /etc/apt -maxdepth 2 -type f \\( -name '*.list' -o -name '*.sources' \\) \\
   -exec sed -i 's|http://deb.debian.org|https://deb.debian.org|g' {} +
-apt-get -o Acquire::Retries=3 -o Acquire::https::No-Cache=true update || exit $?"""
+"""
+    source_options = ""
+    if bullseye_snapshot:
+        # Bullseye LTS ended in August 2026; its live security index now points
+        # at removed packages. Use Debian's last LTS snapshot for these images.
+        # Only snapshot freshness is waived; APT still verifies signatures.
+        refresh = """verifier_apt_sources=$(mktemp /tmp/nemo-gym-verifier-apt.XXXXXX.list) || exit $?
+cat > "$verifier_apt_sources" <<'EOF'
+deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260831T235959Z/ bullseye main
+deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260831T235959Z/ bullseye-security main
+EOF
+"""
+        source_options = '-o Dir::Etc::sourcelist="$verifier_apt_sources" -o Dir::Etc::sourceparts=- '
+    refresh += f"apt-get {source_options}-o Acquire::Retries=3 -o Acquire::https::No-Cache=true update || exit $?"
     return [
         ("apt-get update", refresh),
         (
             f"apt-get install -y {packages}",
-            f"apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 install -y {packages} || exit $?",
+            f"apt-get {source_options}-o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 install -y {packages} || exit $?",
         ),
     ]
 
 
 TEST_SH_PATCHES = {
-    "terminal-bench/qemu-startup": _verifier_apt_patches("curl expect"),
-    "terminal-bench/qemu-alpine-ssh": _verifier_apt_patches("curl sshpass"),
+    "terminal-bench/qemu-startup": _verifier_apt_patches("curl expect", bullseye_snapshot=True),
+    "terminal-bench/qemu-alpine-ssh": _verifier_apt_patches("curl sshpass", bullseye_snapshot=True),
     "terminal-bench/code-from-image": _verifier_apt_patches("curl"),
     "terminal-bench/mcmc-sampling-stan": [
         ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),

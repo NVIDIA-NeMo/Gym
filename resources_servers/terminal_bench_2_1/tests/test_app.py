@@ -37,7 +37,14 @@ class TestApp:
             assert content.endswith(grading)
             assert f"install -y {packages} || exit $?" in content
             assert "DPkg::Lock::Timeout=300" in content
-            assert "https://deb.debian.org" in content
+            if task.startswith("qemu-"):
+                assert content.count('Dir::Etc::sourcelist="$verifier_apt_sources"') == 2
+                assert "https://snapshot.debian.org/archive/debian-security/20260831T235959Z/" in content
+                assert "[check-valid-until=no]" in content
+                assert "trusted=yes" not in content
+                assert "--allow-unauthenticated" not in content
+            else:
+                assert "https://deb.debian.org" in content
         assert path.read_text() == original
 
     def test_sanity(self) -> None:
