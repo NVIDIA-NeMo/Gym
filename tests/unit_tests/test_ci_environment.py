@@ -190,6 +190,18 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
 
 
+def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
+    cicd_workflow = CICD_MAIN_WORKFLOW.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    assert (
+        "concurrency:\n"
+        "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
+    )
+    assert "concurrency:" not in unit_workflow
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
