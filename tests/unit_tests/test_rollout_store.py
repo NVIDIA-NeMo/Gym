@@ -360,3 +360,47 @@ def test_missing_current_source_requires_visible_identity_override(prepared_run)
     assert resumed.manifest.run_id == store.manifest.run_id
     saved = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
     assert saved.identity_overridden
+
+
+@pytest.mark.parametrize("retained", [0, 2])
+def test_unsafe_resume_rebuilds_lost_dispatches_preserving_valid_prefix(prepared_run, retained):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending(3):
+            store.record_dispatch(row)
+            store.record_outcome(row | {"reward": 1.0, "response": {}})
+    results = output.read_bytes()
+    journal = journal_path_for(output)
+    prefix = b"".join(journal.read_bytes().splitlines(keepends=True)[:retained])
+    journal.write_bytes(prefix)
+    with pytest.raises(ConfigError, match="no dispatch"):
+        RolloutStore.start_or_resume(output, prepare, resume=True)
+    with pytest.warns(UserWarning, match="lower bounds"):
+        recovered = RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True)
+    with recovered:
+        assert recovered.pending(3) == []
+        assert recovered.coverage()["successful"] == 2
+        assert not recovered.coverage()["identity_verified"]
+    assert output.read_bytes() == results
+    assert journal.read_bytes().startswith(prefix)
+    assert RolloutStore.read(output).selected("success") == recovered.selected("success")
+
+
+@pytest.mark.parametrize("corruption", ["foreign", "conflict", "invalid_event"])
+def test_unsafe_rebuild_does_not_hide_other_corruption(prepared_run, corruption):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending(3):
+            store.record_dispatch(row)
+            store.record_outcome(row | {"reward": 1.0, "response": {}})
+    records = list(read_records(output))
+    journal_path_for(output).write_bytes(b"{}\n" if corruption == "invalid_event" else b"")
+    if corruption == "foreign":
+        records[1]["_ng_run_id"] = "other-run"
+    elif corruption == "conflict":
+        records.append(records[0] | {"reward": 0.0})
+    output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in records))
+    before = snapshot(output)
+    with pytest.raises(ConfigError):
+        RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True)
+    assert snapshot(output) == before

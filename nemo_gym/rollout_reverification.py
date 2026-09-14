@@ -50,7 +50,7 @@ from nemo_gym.rollout_collection import (
     _rollout_for_export,
     _rollout_request_debug_summary,
 )
-from nemo_gym.rollout_journal import RUN_ID_KEY, logical_rollout_id
+from nemo_gym.rollout_journal import RUN_ID_KEY, journal_path_for, logical_rollout_id
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.server_utils import (
@@ -429,6 +429,7 @@ def _yield_inputs_and_rollouts_paired(
     rollouts_jsonl_fpath: Path,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    selected_rollouts: Optional[List[Dict]] = None,
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -437,11 +438,11 @@ def _yield_inputs_and_rollouts_paired(
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
-    with open(rollouts_jsonl_fpath) as r_f:
+    with nullcontext(selected_rollouts) if selected_rollouts is not None else open(rollouts_jsonl_fpath) as r_f:
         for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
             if limit is not None and n_yielded >= limit:
                 break
-            rollout_row = orjson.loads(line)
+            rollout_row = line if selected_rollouts is not None else orjson.loads(line)
             if _is_judge_failure(rollout_row) and not isinstance(rollout_row.get("response"), dict):
                 warnings.warn(
                     f"Skipping judge failure without a saved response: {_rollout_request_debug_summary(rollout_row)}. "
@@ -469,11 +470,16 @@ def _prepare_payloads(
     resume_from_cache: bool,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    selected_rollouts: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
+            materialized_inputs_jsonl_fpath,
+            rollouts_jsonl_fpath,
+            limit=limit,
+            rollout_predicate=rollout_predicate,
+            **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
         )
     ]
     if resume_from_cache:
@@ -730,7 +736,9 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     ``{agent_ref, task_source}`` projection used only to route each result to its resources server
     (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
-    store = RolloutStore.read(output_fpath)
+    # An inventory alone does not make loose legacy output a journal-backed run.
+    has_history = manifest_path_for(output_fpath).exists() or journal_path_for(output_fpath).exists()
+    store = RolloutStore.read(output_fpath) if has_history else None
     if store is not None:
         results = store.selected("success")
     else:
@@ -763,6 +771,7 @@ class RolloutReverificationHelper(BaseModel):
 
         reverify_source_fpath = rollouts_jsonl_fpath
         rollout_predicate = None
+        selected_rollouts = None
 
         if config.judge_failed_only:
             print(_RECOVERY_TWO_SOURCES_WARNING)
@@ -777,12 +786,9 @@ class RolloutReverificationHelper(BaseModel):
             rollout_predicate = _recovery_rollout_predicate(skip_keys)
             if store is not None:
                 eligible = {logical_rollout_id(row) for row in store.pending(_get_max_rollout_attempts())}
-                latest = {logical_rollout_id(row): row for row in store.failures()}
-                recovery_predicate = rollout_predicate
-
-                def rollout_predicate(row):
-                    identity = logical_rollout_id(row)
-                    return identity in eligible and row == latest.get(identity) and recovery_predicate(row)
+                # Use normalized selected attempts, not raw sidecar lines: legacy
+                # import can assign/reassign attempt indices without rewriting payloads.
+                selected_rollouts = [row for row in store.failures() if logical_rollout_id(row) in eligible]
 
         payloads_to_reverify = _prepare_payloads(
             materialized_inputs_jsonl_fpath,
@@ -791,6 +797,7 @@ class RolloutReverificationHelper(BaseModel):
             config.resume_from_cache and store is None,
             config.limit,
             rollout_predicate=rollout_predicate,
+            **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
         )
         if store is not None:
             payloads_to_reverify = store.for_reverification(payloads_to_reverify)

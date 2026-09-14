@@ -38,6 +38,10 @@ from nemo_gym.rollout_recovery import RunManifest, _digest
 RUN_ID_KEY = "_ng_run_id"
 
 
+class MissingDispatchHistory(ConfigError):
+    """A valid saved outcome has lost its preceding dispatch record."""
+
+
 def journal_path_for(output: Path) -> Path:
     return output.with_name(output.stem + "_attempts.jsonl")
 
@@ -181,7 +185,7 @@ class RolloutJournal:
         if row.get(RUN_ID_KEY) != self.manifest.run_id and not (legacy and RUN_ID_KEY not in row):
             raise ConfigError("Saved outcome belongs to a different run.")
         if not legacy and key not in self.dispatched:
-            raise ConfigError(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
+            raise MissingDispatchHistory(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
         previous = self.payloads.get(key)
         if previous is not None and previous != row:
             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")

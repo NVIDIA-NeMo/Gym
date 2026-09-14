@@ -907,3 +907,145 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
     for row in failures:
         assert row["error"] == "Judge unavailable"
         assert row["_ng_failure_message"] == row["_ng_failure_record"]["failure_reason"] == row["error"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "judge_api_key",
+        "judge_base_url",
+        "tavily_api_key",
+        "anthropic_api_key",
+        "sandbox_model_base_url",
+        "num_workers",
+        "switchyard_api_key",
+        "switchyard_base_url",
+    ],
+)
+def test_known_operational_settings_do_not_change_resume_identity(saved_manifest, field):
+    source, rows, _, config, servers, _, _ = saved_manifest
+    settings = servers["policy"]["responses_api_models"]["vllm_model"]
+    settings[field] = "before"
+    before = RunManifest.create(source, rows, config, servers).config_digest
+    settings[field] = "after"
+    assert RunManifest.create(source, rows, config, servers).config_digest == before
+    # The same spelling inside task data must not be silently erased.
+    settings["task_parameters"] = {field: "before"}
+    before = RunManifest.create(source, rows, config, servers).config_digest
+    settings["task_parameters"][field] = "after"
+    assert RunManifest.create(source, rows, config, servers).config_digest != before
+
+
+@pytest.mark.parametrize(
+    "headers", ["headers", "default_headers", "openai_default_headers", "artifact_request_headers"]
+)
+def test_auth_headers_need_not_resolve_but_task_headers_still_affect_identity(saved_manifest, monkeypatch, headers):
+    source, rows, _, config, servers, _, _ = saved_manifest
+    monkeypatch.delenv("GYM_TEST_MISSING_CREDENTIAL", raising=False)
+    settings = servers["policy"]["responses_api_models"]["vllm_model"]
+    settings[headers] = {"Authorization": "Bearer ${oc.env:GYM_TEST_MISSING_CREDENTIAL}", "X-Dataset-Version": "v1"}
+    before = RunManifest.create(source, rows, config, servers).config_digest
+    settings[headers]["Authorization"] = "Bearer changed"
+    assert RunManifest.create(source, rows, config, servers).config_digest == before
+    settings[headers]["X-Dataset-Version"] = "v2"
+    assert RunManifest.create(source, rows, config, servers).config_digest != before
+
+
+@pytest.mark.parametrize("explicit_attempt", [False, True])
+async def test_reverify_imported_legacy_attempt_uses_latest_saved_answer(runner_config, monkeypatch, explicit_attempt):
+    from nemo_gym.rollout_journal import materialized_path_for
+    from nemo_gym.rollout_store import RolloutStore
+
+    output = Path(runner_config.output_jsonl_fpath)
+    row = failing_row(0) | {"task": 0}
+    materialized_path_for(output).write_text(json.dumps(row) + "\n")
+    output.write_text("")
+    old = row | {"_ng_failure_class": "judge_failed", "response": {"id": "old", "output": []}}
+    latest = row | {"_ng_failure_class": "judge_failed", "response": {"id": "latest", "output": []}}
+    if explicit_attempt:
+        old["_ng_attempt_index"] = latest["_ng_attempt_index"] = 0
+    collection.failures_path_for(output).write_text(json.dumps(old) + "\n" + json.dumps(latest) + "\n")
+    with pytest.warns(UserWarning, match="allow_unsafe_resume"):
+        store = RolloutStore.start_or_resume(output, lambda: None, resume=True, allow_unsafe=True)
+    with store:
+        pass
+    verified = []
+
+    async def post(**kwargs):
+        assert kwargs["url_path"] == "/verify"
+        verified.append(kwargs["json"])
+        return FakeResponse(200, {"reward": 1.0, "response": kwargs["json"]["response"]})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    monkeypatch.setattr(reverification, "setup_server_client", lambda: client)
+    monkeypatch.setattr(reverification, "_build_agent_to_resources_server_mapping", lambda _: {"my_agent": "rs"})
+    monkeypatch.setattr(reverification, "raise_for_status", collection.raise_for_status)
+    monkeypatch.setattr(reverification, "get_response_json", collection.get_response_json)
+    monkeypatch.setattr(reverification, "get_exporters", list)
+    config = reverification.RolloutReverificationConfig(
+        materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+        rollouts_jsonl_fpath=str(output),
+        output_jsonl_fpath=str(output),
+        judge_failed_only=True,
+        append=True,
+        disable_aggregation=True,
+    )
+    results = await reverification.RolloutReverificationHelper().run_from_config(config)
+    assert len(verified) == 1
+    assert verified[0]["response"] == latest["response"]
+    assert verified[0]["_ng_attempt_index"] == 2
+    assert results[0]["reward"] == 1.0
+    assert await reverification.RolloutReverificationHelper().run_from_config(config) == results
+    assert len(verified) == 1
+
+
+@pytest.mark.parametrize("loose_sidecar", [False, True])
+def test_legacy_reverify_read_does_not_infer_strict_history_from_inventory(tmp_path, loose_sidecar):
+    from nemo_gym.rollout_journal import materialized_path_for
+
+    output = tmp_path / "legacy.jsonl"
+    row = failing_row(0) | {"reward": 1.0}
+    output.write_text(json.dumps(row) + "\n")
+    inventory = failing_row(0 if loose_sidecar else 1)
+    materialized_path_for(output).write_text(json.dumps(inventory) + "\n")
+    if loose_sidecar:
+        collection.failures_path_for(output).write_text('{"_ng_failure_class":"judge_failed"}\n')
+    assert reverification._load_reverified_results(output)[0] == [row]
+    manifest_path_for(output).write_text("{}")
+    with pytest.raises(ValidationError):
+        reverification._load_reverified_results(output)
+
+
+@pytest.mark.parametrize("native_tokens", [False, True])
+async def test_judge_failure_saves_token_evidence_without_retiring_capture(
+    runner_config, monkeypatch, tmp_path, native_tokens
+):
+    from nemo_gym.token_id_capture import TokenCaptureStore
+    from tests.unit_tests.test_rollout_collection import TestFinalizeRolloutTokenCapture
+
+    captures = TokenCaptureStore(tmp_path / "tokens")
+    settings = {"token_id_capture": {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")}}
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: settings)
+    monkeypatch.setattr(collection, "installed_token_source", lambda: captures)
+    response = {"model": "m", "output": []}
+    if native_tokens:
+        response["output"] = [{"type": "message", "role": "assistant", "content": [], "generation_token_ids": [77]}]
+
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 0:
+            TestFinalizeRolloutTokenCapture._capture(captures)
+            return FakeResponse(200, {"_ng_failure_class": "judge_failed", "reward": 0.0, "response": response})
+        return FakeResponse(200, {"_ng_failure_class": "agent_run_error"})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(RuntimeError, match="None of the 3 dispatched"):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    failures = list(read_records(collection.failures_path_for(output)))
+    judge = next(row for row in failures if row["_ng_task_index"] == 0)
+    assert judge["response"]["output"][0]["generation_token_ids"] == ([77] if native_tokens else [4, 5])
+    assert "reward" not in judge
+    assert "response" not in judge["_ng_failure_record"]
+    assert captures.read_entries("0-0")
+    assert list(read_records(output)) == []
+    assert all("response" not in row for row in failures if row["_ng_task_index"] != 0)

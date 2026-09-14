@@ -22,7 +22,10 @@ The manifest contains a run identifier, a format version, and digests of:
 - The collection settings and resolved model/environment configuration that affect the tasks.
 
 The manifest does not store credentials or raw configuration values. Changing collection concurrency, reporting options,
-credentials, endpoint addresses, or capture directories does not invalidate saved results. Gym resolves configuration
+recognized credential fields, endpoint addresses, or capture directories does not invalidate saved results.
+This includes the shipped policy/judge/provider API-key fields and authentication headers at known server settings
+boundaries. Other headers, custom configuration fields, and task parameters remain part of identity; custom integrations
+should not assume arbitrary credential names are automatically excluded. Gym resolves configuration
 for the materialized agents and their referenced servers; unused server configurations need not resolve in the collector.
 Changing a model, sampling settings, task data paths, prompts, or tasks does invalidate saved results.
 
@@ -110,7 +113,10 @@ payloads are preserved; newly written payloads carry the run identifier. Gym sti
 manifests and materialized inputs that no longer match their saved manifest.
 Use a fresh output location when the intention is to evaluate changed tasks or a different model.
 
-The unsafe override can also reconstruct missing attempt history from saved payloads, retaining their run identifier.
+The unsafe override can also reconstruct missing dispatch history from saved payloads, retaining their run identifier.
+This includes an absent or emptied journal and a truncated journal whose remaining complete records are valid.
+An empty journal before any dispatch is valid and needs no override. Invalid complete events, conflicting payloads,
+and foreign-run records remain errors.
 If the manifest is missing, all surviving tagged artifacts must agree on one run. Conflicting or foreign-run records
 remain errors. Dispatches that left no saved outcome cannot be reconstructed after journal loss, so attempt counts become
 lower bounds; recovered coverage remains unverified. Keep the journal whenever possible.
@@ -168,3 +174,9 @@ With `--judge-failed-only --append` and the original rollout file as both input 
 attempts in the same journal before sending verifier requests. Recovered results then participate in the same selection
 rules as collection and aggregation. Terminal failures and exhausted attempt budgets are respected. Full reverification
 uses a separate output file so that changed scores cannot overwrite the original run's history.
+
+Judge failures with a saved answer retain that answer for reverification. When training-token capture is enabled,
+Gym also attempts to reconstruct its recorded token IDs before writing the failure sidecar. This diagnostic evidence
+does not turn the failure into a scored training sample, and its capture source is not retired by failure persistence.
+Legacy reverification outputs without a manifest or journal retain their original line-reading behavior; a neighboring
+materialized-input file alone does not opt them into strict journal validation.

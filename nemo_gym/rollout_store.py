@@ -32,6 +32,7 @@ from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
+    MissingDispatchHistory,
     RolloutJournal,
     coverage_path_for,
     journal_path_for,
@@ -117,9 +118,26 @@ class RolloutStore:
                 )
                 manifest = manifest.model_copy(update={"identity_overridden": True})
                 seed_legacy = True
-            state = RolloutJournal.load(
-                output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
-            )
+            try:
+                state = RolloutJournal.load(
+                    output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
+                )
+            except MissingDispatchHistory:
+                if not allow_unsafe:
+                    raise
+                # A truncated journal can retain a valid prefix while losing
+                # dispatches for saved payloads. Validate the entire prefix and
+                # all payloads before adding reconstructed events on open.
+                manifest = manifest.model_copy(update={"identity_overridden": True})
+                state = RolloutJournal.load(
+                    output, manifest, import_legacy=manifest.legacy_import, rebuild_history=True
+                )
+                warnings.warn(
+                    "Rebuilding missing dispatch history because allow_unsafe_resume=true. "
+                    "Dispatches without saved outcomes cannot be recovered; attempt counts are lower bounds.",
+                    stacklevel=2,
+                )
+                seed_legacy = True
             if seed_legacy or manifest.identity_overridden or not manifest_path.exists():
                 manifest.write(manifest_path)
             return cls(output, state, seed_legacy=seed_legacy)

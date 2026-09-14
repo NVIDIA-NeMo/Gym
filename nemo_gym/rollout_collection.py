@@ -1536,7 +1536,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
-                # No rollout happened, so there is nothing to capture, tokenize or average.
+                # No score exists. Judge failures may still carry real generation evidence.
                 no_result = no_persist or structured_failure or failure_class in _NO_RESULT_FAILURE_CLASSES
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
@@ -1565,12 +1565,13 @@ class RolloutCollectionHelper(BaseModel):
                 # It leaves harness output and reward unchanged.
                 # Direct callers of run_examples finalize each record themselves.
                 token_capture_build = None
-                if not no_result and token_id_capture_enabled_for_agent(
+                recoverable_generation = failure_class == "judge_failed" and isinstance(result.get("response"), dict)
+                if (not no_result or recoverable_generation) and token_id_capture_enabled_for_agent(
                     global_config,
                     (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
                 ):
                     token_capture_build = await finalize_rollout_token_capture(result, token_source)
-                    if token_capture_build is not None:
+                    if token_capture_build is not None and not no_result:
                         finalized_count += 1
                         if token_capture_build.get(MASK_SAMPLE_KEY):
                             masked_count += 1

@@ -59,9 +59,21 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
         "api_key",
         "openai_api_key",
         "policy_api_key",
+        "judge_api_key",
+        "tavily_api_key",
+        "anthropic_api_key",
+        "model_api_key",
+        "switchyard_api_key",
+        "hf_token",
+        "num_workers",
         "base_url",
         "openai_base_url",
         "policy_base_url",
+        "judge_base_url",
+        "sandbox_model_base_url",
+        "model_base_url",
+        "vllm_base_url",
+        "switchyard_base_url",
         "head_server",
         "disallowed_ports",
         "port_range_low",
@@ -101,6 +113,15 @@ def _without_runtime_options(value: Any) -> Any:
         if not isinstance(settings, dict):
             return settings
         settings = {k: v for k, v in settings.items() if k not in _SERVER_RUNTIME_OPTIONS}
+        # Only authentication headers at known HTTP settings boundaries are
+        # operational. Other headers may change task data or model behavior.
+        for name in ("headers", "default_headers", "openai_default_headers", "artifact_request_headers"):
+            if isinstance(settings.get(name), dict):
+                settings[name] = {
+                    key: value
+                    for key, value in settings[name].items()
+                    if key.lower() not in {"authorization", "proxy-authorization", "x-api-key", "api-key"}
+                }
         if isinstance(settings.get("token_id_capture"), dict):
             settings["token_id_capture"] = {k: v for k, v in settings["token_id_capture"].items() if k != "dir"}
         return settings
