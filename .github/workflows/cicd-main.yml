@@ -294,9 +294,9 @@ jobs:
         needs.pre-flight.result == 'success' &&
         needs.classify_changes.result == 'success'
       }}
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@e56cb73f6ea4273f307de8c10b02e0b23ab4e0c4
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@f0f7f92ca4d6382e2771204f658217031efa27c3
     with:
-      workflow_ref: e56cb73f6ea4273f307de8c10b02e0b23ab4e0c4
+      workflow_ref: f0f7f92ca4d6382e2771204f658217031efa27c3
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
       # SLACK_TEAM_CHANNEL_WEBHOOK intentionally NOT passed: notify-failure below is
