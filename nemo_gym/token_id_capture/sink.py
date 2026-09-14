@@ -31,7 +31,7 @@ import threading
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
@@ -81,6 +81,7 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    response_dialect: Literal["chat_completions", "responses"] = "chat_completions"
     # Store resolved continuations as parent-relative suffixes.
     delta_records: bool = False
     # This records the model server's intent to request prefix supply.

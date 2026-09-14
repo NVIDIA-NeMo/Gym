@@ -57,6 +57,18 @@ original request and response payloads.
 
 ## What capture contains
 
+### Buffered SSE with external token staging
+
+With `token_id_capture.external_staging: true`, captured requests can use `stream: true`
+on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
+Gym requests a complete, non-streaming answer from the inference worker. The worker stages
+training tokens before returning commit coordinates. On successful capture, Gym records the
+commit and removes internal token fields before replaying the answer as SSE. No content is
+delivered during generation, so buffered SSE does not reduce time to first content.
+
+Worker streaming with external capture remains unsupported. Training reconstruction reads
+the external staged tokens, not the SSE text.
+
 ### Rollout-record attachment
 
 `rollout_collection` attaches available model-call data to each rollout. This representative example

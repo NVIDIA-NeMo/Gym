@@ -41,7 +41,7 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -93,16 +93,6 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
-
-
-def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
-    """Reject streaming before sanitization can hide it from worker capture."""
-    context = current_capture_context()
-    if context is not None and context.external_staging and body.get("stream") is True:
-        raise HTTPException(
-            status_code=422,
-            detail="worker-owned token capture does not support streaming requests",
-        )
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -252,7 +242,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
-        _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
             return _orjson_dispatch_response(await self._invoke_responses(request, params))
@@ -297,7 +286,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
-        _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
@@ -344,7 +332,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        _reject_external_capture_streaming(body)
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
@@ -364,7 +351,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
+        context = current_capture_context()
+        if context is not None:
+            context.response_dialect = "responses"
             request_messages = _request_messages(params)
             await resolve_parent(request_messages)
             await register_call_intent()
