@@ -4,10 +4,11 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aa_briefcase_lite.app import (
@@ -15,7 +16,6 @@ from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServerConfig,
 )
 from resources_servers.gdpval.comparison import send_judge_request
-from resources_servers.gdpval.judge_panel import merge_create_kwargs
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -39,7 +39,7 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
     ],
 )
 @pytest.mark.parametrize(("judge_mode", "default_max_tokens"), [("binary", 4096), ("pairwise", 65535)])
-def test_benchmark_panel_routes_to_matching_upstream_model(
+async def test_benchmark_panel_routes_to_matching_upstream_model(
     monkeypatch,
     tmp_path: Path,
     judge_name: str,
@@ -97,7 +97,7 @@ def test_benchmark_panel_routes_to_matching_upstream_model(
             "object": "chat.completion",
             "created": 0,
             "model": expected_model,
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '{"passed": true, "reasoning": "test verdict"}'}}],
         }
     )
     with TestClient(server.setup_webserver()) as transport:
@@ -117,21 +117,23 @@ def test_benchmark_panel_routes_to_matching_upstream_model(
                     messages,
                     create_overrides=pairwise_judge.create_overrides,
                 )
-                == "ok"
+                == '{"passed": true, "reasoning": "test verdict"}'
             )
         else:
-            client = OpenAI(base_url=judge.base_url, api_key=judge.api_key, http_client=transport, max_retries=0)
-            client.chat.completions.create(
-                **merge_create_kwargs(
-                    {
-                        "model": judge.model,
-                        "messages": messages,
-                        "temperature": 0.0,
-                        "max_tokens": 4096,
-                    },
-                    judge.create_overrides,
+            resource._aa_binary_system = "Judge the submitted artifact."
+            resource._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}"
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.setup_webserver())) as http_client:
+                monkeypatch.setattr(
+                    "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
+                    lambda **kwargs: AsyncOpenAI(http_client=http_client, **kwargs),
                 )
-            )
+                parsed, _ = await resource._binary_call(
+                    judge,
+                    "Produce the requested artifact.",
+                    {"check_description": "Check it.", "score_1_criteria": "Correct.", "score_0_criteria": "Incorrect."},
+                    [{"type": "text", "text": "Submitted artifact"}],
+                )
+            assert parsed == {"passed": True, "reasoning": "test verdict"}
     server._client.create_chat_completion.assert_awaited_once()
     forwarded = server._client.create_chat_completion.await_args.kwargs
     assert forwarded["model"] == expected_model
