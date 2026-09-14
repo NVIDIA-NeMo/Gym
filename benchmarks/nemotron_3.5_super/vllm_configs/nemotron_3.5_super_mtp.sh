@@ -36,8 +36,8 @@ VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --data-parallel-size-local 4
+    --tensor-parallel-size 1
 )
 VLLM_DECODE_ARGS=(
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
@@ -45,6 +45,6 @@ VLLM_DECODE_ARGS=(
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --data-parallel-size-local 4
+    --tensor-parallel-size 1
 )
