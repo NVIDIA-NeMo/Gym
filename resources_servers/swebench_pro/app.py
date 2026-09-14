@@ -468,7 +468,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         response_data = body.model_dump() | {
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
-            "evaluation_completed": result.completed,
+            "evaluation_completed": result.completed and reason is None,
             "resolved": result.resolved,
             "patch_applied": result.patch_applied,
             "eval_sandbox_start_time_taken": eval_sandbox_start_time_taken,
@@ -477,7 +477,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "model_patch": model_patch or None,
             "test_results": result.test_results,
             "test_output": result.test_output,
-            "error": extraction_error or result.error,
+            "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
         }
         return SWEBenchProVerifyResponse.model_validate(response_data)
