@@ -23,7 +23,9 @@
 #   POLL_S        seconds between squeue checks            (default: 60)
 #   EXPERIMENT_NAME  job-name prefix                       (default: rp)
 #   GYM_SITE_PACKAGES a venv's site-packages, if orjson/yaml/pydantic are not importable
-#   MAX_ROUNDS    total attempts per shard, first submission included (default: 4)
+#   MAX_ROUNDS    attempts per shard, first submission included  (default: 100)
+#                 Production needs 7-17: a shard is ~26 h of collection at 16 shards and a vLLM
+#                 engine assertion ends a job every ~1.5 h.
 #
 # This runs in the FOREGROUND for hours, so detach it. It locks the sweep directory and refuses
 # to start twice -- each watcher resubmits independently, so several pile up jobs against the
@@ -82,7 +84,12 @@ REPO_ROOT="$(cd "$RP_DIR/../../.." && pwd)"
 # Poll rather than `wait`: sbatch returns immediately, so there is no child to wait on.
 POLL_S=${POLL_S:-60}
 # Bounds resubmission of a shard that keeps dying for a permanent reason.
-MAX_ROUNDS=${MAX_ROUNDS:-4}
+# Attempts per shard. This is the only stop condition: a shard finishes when it runs out of work,
+# or when it has been retried this many times. 4 was far too low -- a production shard is ~26 h of
+# collection at 16 shards while a vLLM engine assertion ends a job every ~1.5 h, so 7-17 attempts
+# is the normal healthy case. Set it well above what you expect to need; a shard that is genuinely
+# broken shows up as "no progress last attempt" in this log, repeatedly.
+MAX_ROUNDS=${MAX_ROUNDS:-100}
 
 cd "$REPO_ROOT"
 
@@ -132,6 +139,7 @@ INNER
 }
 
 declare -A shard_rounds
+declare -A shard_last_outstanding
 round=0
 while :; do
     round=$((round + 1))
@@ -148,6 +156,18 @@ while :; do
             continue
         fi
         attempts=${shard_rounds[$shard_name]:-0}
+
+        # Report progress, but never act on it. An attempt that collected nothing is usually
+        # transient -- an engine dying during startup looks identical to a permanently broken
+        # shard, and the right response to both is to try again. Giving up on no-progress would
+        # abandon an unlucky shard and merge a partial sweep, which is the failure this whole
+        # loop exists to avoid. MAX_ROUNDS is the only stop condition.
+        prev=${shard_last_outstanding[$shard_name]:-}
+        if [[ -n "$prev" && "$outstanding" -ge "$prev" ]]; then
+            echo "    $shard_name: no progress last attempt ($outstanding outstanding); retrying" >&2
+        fi
+        shard_last_outstanding[$shard_name]=$outstanding
+
         if [[ "$attempts" -ge "$MAX_ROUNDS" ]]; then
             echo "    $shard_name still has $outstanding outstanding after $attempts attempts; giving up" >&2
             continue
