@@ -887,3 +887,13 @@ def test_setup_dev_and_lint_run_offline_with_container_baked_tools() -> None:
     assert "command -v pre-commit >/dev/null 2>&1" in lint
     assert lint.count("pip install") == 1
     assert 'pip install --disable-pip-version-check "pre-commit==${pre_commit_version}"' in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
