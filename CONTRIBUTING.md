@@ -159,7 +159,7 @@ Priority is `other > server > doc`: a PR touching both a server file and a core 
 
 ### Scheduled GPU E2E Tests
 
-**Workflow:** `cicd-main.yml`, `gpu_e2e_tests` job — does **not** run on every pull request. GPU E2E tests run on internal GPU infra on a schedule (cron, every 4 hours), not on the pre-merge path.
+**Workflow:** `cicd-main.yml`, `gpu_e2e_tests` job. GPU E2E tests run on internal GPU infra on a schedule (cron, every 4 hours).
 
 If you need to exercise this path for a change (e.g. inference-path or container changes), trigger it manually via `workflow_dispatch` on `cicd-main.yml` rather than waiting for the next scheduled run.
 
