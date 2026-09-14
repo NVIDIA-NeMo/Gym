@@ -1,0 +1,413 @@
+{
+ "stem": "facts_parametric",
+ "run_info": {
+  "endpoint_type": "fixture endpoint",
+  "harness": "simple_agent",
+  "sampling": "temperature 0.0, top_p 1.0",
+  "generation_limits": "max_output_tokens 8192",
+  "verifier": {
+   "summary": "Gemini 2.5 Pro grader, three samples, starter prompt and parse"
+  },
+  "finished_at": "2026-01-01T00:00:00Z",
+  "generation_summary": "fixture"
+ },
+ "rollouts": [
+  {
+   "id": "facts_parametric_public_0022",
+   "question": "nathan hindmarsh height (cm)",
+   "expected_answer": "188 cm (6 ft 2 in)",
+   "topic": "height",
+   "source_url": "https://en.wikipedia.org/wiki/Nathan_Hindmarsh",
+   "reward": 0.0,
+   "generation": "Nathan Hindmarsh, the former Parramatta Eels and Australian rugby league player, is approximately **183 cm** tall (about 6 feet).",
+   "generation_empty": false,
+   "generation_truncated": false,
+   "judge_labels": [
+    "incorrect",
+    "incorrect",
+    "incorrect"
+   ],
+   "judge_labels_starter": [
+    "incorrect",
+    "incorrect",
+    "incorrect"
+   ],
+   "judge_labels_output_line": [
+    "incorrect",
+    "incorrect",
+    "incorrect"
+   ],
+   "judge_parse_agreement": 1.0,
+   "judge_empty_samples": 0,
+   "judge_prompt_sha256": "b45a94ecf2a94367a0fe782597e6529ff547c28888ff3f950eec3e893bcc9abc",
+   "grader_variant": "kaggle-starter-yulongt-facts-parametric-benchmark-starter-code-v10",
+   "is_correct": 0.0,
+   "is_incorrect": 1.0,
+   "is_not_attempted": 0.0,
+   "is_unknown": 0.0,
+   "all_correct": 0.0,
+   "judge_receipts": [
+    {
+     "sample": 0,
+     "seed": 0,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-WaKMwnc6V3Xrzo738gZhASe6yWV0S",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "1.  **Identify the direct predicted answer:** The question asks for Nathan Hindmarsh's height in centimeters. The predicted answer provides the value \"183 cm\".\n\n2.  **Check match with the gold answer:**\n    *   The gold answer is \"188 cm\".\n    *   The predicted answer is \"183 cm\".\n    *   The numeric values 183 and 188 are different. A 5 cm difference in a person's height is a significant discrepa",
+     "content_sha256": "2138b7449559ebc38b45e4fc664c8a683b185cc1673d128d501884c4fcfcf4df",
+     "label_starter": "incorrect",
+     "label_output_line": "incorrect"
+    },
+    {
+     "sample": 1,
+     "seed": 1,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-3rb23vd6L00Od3y0tjGTrKkLa6Zbx",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "The user wants me to grade the predicted answer based on the provided gold answer and question.\n\n1.  **Identify the direct predicted answer:** The predicted answer for Nathan Hindmarsh's height is \"183 cm\".\n2.  **Check match with the gold answer:** The gold answer is \"188 cm\".\n3.  **Compare:** The predicted answer (183 cm) and the gold answer (188 cm) are different numeric values. A difference of ",
+     "content_sha256": "ea54be82d63c14861fe5b9f92ea982a35dd732d000aa3c0f1ee183576e9c2906",
+     "label_starter": "incorrect",
+     "label_output_line": "incorrect"
+    },
+    {
+     "sample": 2,
+     "seed": 2,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-woz36tpSv0XQhyCZlVvMuUe24xfnu",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "The predicted answer provides a specific height for Nathan Hindmarsh, which is 183 cm. The gold answer states the height is 188 cm. These are two different numerical values, and the difference of 5 cm is significant. Therefore, the predicted answer directly contradicts the gold answer.\n\nOutput: MISTAKE",
+     "content_sha256": "80ef7993135546b8772fc802bcefd6d4d9b914f040091df04707c8223ae804d9",
+     "label_starter": "incorrect",
+     "label_output_line": "incorrect"
+    }
+   ],
+   "responses_create_params": {
+    "input": [
+     {
+      "role": "user",
+      "content": "nathan hindmarsh height (cm)"
+     }
+    ]
+   },
+   "response": {
+    "id": "r",
+    "created_at": 0,
+    "model": "fixture",
+    "object": "response",
+    "output": [
+     {
+      "type": "message",
+      "id": "m",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+       {
+        "type": "output_text",
+        "text": "Nathan Hindmarsh, the former Parramatta Eels and Australian rugby league player, is approximately **183 cm** tall (about 6 feet).",
+        "annotations": []
+       }
+      ]
+     }
+    ],
+    "parallel_tool_calls": false,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+     "input_tokens": 50,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 100,
+     "output_tokens_details": {
+      "reasoning_tokens": 60
+     },
+     "total_tokens": 150
+    }
+   },
+   "_ng_task_index": 0,
+   "_ng_rollout_index": 0
+  },
+  {
+   "id": "facts_parametric_public_0007",
+   "question": "quil ateara actor",
+   "expected_answer": "Tyson Houseman",
+   "topic": "actor",
+   "source_url": "https://en.wikipedia.org/wiki/Tyson_Houseman",
+   "reward": 1.0,
+   "generation": "Quil Ateara in the Twilight saga films was played by **Tyson Houseman**, a Canadian actor. He portrayed the character in:\n\n- *The Twilight Saga: New Moon* (2009)\n- *The Twilight Saga: Eclipse* (2010)\n- *The Twilight Saga: Breaking Dawn – Part 1* (2011)\n\nQuil is one of the Quileute shape-shifters (werewolves) in Jacob Black's pack, known for imprinting on Claire Young. The Twilight role was Houseman's film debut.",
+   "generation_empty": false,
+   "generation_truncated": false,
+   "judge_labels": [
+    "correct",
+    "correct",
+    "correct"
+   ],
+   "judge_labels_starter": [
+    "correct",
+    "correct",
+    "correct"
+   ],
+   "judge_labels_output_line": [
+    "correct",
+    "correct",
+    "correct"
+   ],
+   "judge_parse_agreement": 1.0,
+   "judge_empty_samples": 0,
+   "judge_prompt_sha256": "bc86f9acc6d5961616c8381264cb09423d5089449fe42c5bf6646ce52d608750",
+   "grader_variant": "kaggle-starter-yulongt-facts-parametric-benchmark-starter-code-v10",
+   "is_correct": 1.0,
+   "is_incorrect": 0.0,
+   "is_not_attempted": 0.0,
+   "is_unknown": 0.0,
+   "all_correct": 1.0,
+   "judge_receipts": [
+    {
+     "sample": 0,
+     "seed": 0,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-wiCK2BD82tkkzJuCqAyHjgfCtiKpk",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "1.  **Identify the direct predicted answer:** The predicted answer directly states that the actor who played Quil Ateara is \"Tyson Houseman\".\n2.  **Check match with the gold answer:** The gold answer is \"Tyson Houseman\". The predicted answer is an exact match.\n3.  **Evaluate additional information:** The predicted answer also provides extra details about the actor (Canadian), the films he appeared",
+     "content_sha256": "4ccbec53bd875016eb752c74b5ed2c0135556c948a4694a1299edf9ba2f02a29",
+     "label_starter": "correct",
+     "label_output_line": "correct"
+    },
+    {
+     "sample": 1,
+     "seed": 1,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-VmlEnJf2xUBQH2jaFYHHsE3nKtNOH",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "The user wants me to identify the actor who played Quil Ateara.\n\n1.  **Identify the direct predicted answer:** The predicted answer directly states that the actor is \"Tyson Houseman\".\n2.  **Check match with the gold answer:** The gold answer is \"Tyson Houseman\". The predicted answer perfectly matches the gold answer.\n3.  **Evaluate additional information:** The predicted answer also provides detai",
+     "content_sha256": "3b90949a4d524caa248be4fce6f70e0196f6c92df075d121dafdcd6eb1fdc93f",
+     "label_starter": "correct",
+     "label_output_line": "correct"
+    },
+    {
+     "sample": 2,
+     "seed": 2,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-1eAGPvsxJT3zVNxQZhEBHGtvF6xnP",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "1. The direct predicted answer is \"Tyson Houseman\".\n2. This directly matches the gold answer \"Tyson Houseman\". The predicted answer provides additional, non-contradictory information which is permissible.\n\nOutput: CORRECT",
+     "content_sha256": "8792659405981d20c5d6b1d15131e9d3f342777e720024856e0588911f1c3d8d",
+     "label_starter": "correct",
+     "label_output_line": "correct"
+    }
+   ],
+   "responses_create_params": {
+    "input": [
+     {
+      "role": "user",
+      "content": "quil ateara actor"
+     }
+    ]
+   },
+   "response": {
+    "id": "r",
+    "created_at": 0,
+    "model": "fixture",
+    "object": "response",
+    "output": [
+     {
+      "type": "message",
+      "id": "m",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+       {
+        "type": "output_text",
+        "text": "Quil Ateara in the Twilight saga films was played by **Tyson Houseman**, a Canadian actor. He portrayed the character in:\n\n- *The Twilight Saga: New Moon* (2009)\n- *The Twilight Saga: Eclipse* (2010)\n- *The Twilight Saga: Breaking Dawn – Part 1* (2011)\n\nQuil is one of the Quileute shape-shifters (we",
+        "annotations": []
+       }
+      ]
+     }
+    ],
+    "parallel_tool_calls": false,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+     "input_tokens": 50,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 100,
+     "output_tokens_details": {
+      "reasoning_tokens": 60
+     },
+     "total_tokens": 150
+    }
+   },
+   "_ng_task_index": 1,
+   "_ng_rollout_index": 0
+  },
+  {
+   "id": "facts_parametric_public_0003",
+   "question": "What was the population of the Rural Municipality of Minto-Odanah, Manitoba according to the 2021 Census?",
+   "expected_answer": "1,121",
+   "topic": "population",
+   "source_url": "https://en.wikipedia.org/wiki/Rural_Municipality_of_Minto-Odanah",
+   "reward": 0.0,
+   "generation": "I don’t have the exact 2021 Census population for the Rural Municipality of Minto-Odanah reliably memorized, so I’d rather not invent a number. The authoritative figure is in Statistics Canada’s **2021 Census Profile** for the census subdivision **“Minto-Odanah, Rural municipality, Manitoba.”** If you paste the relevant StatCan line/table, I can help interpret it.",
+   "generation_empty": false,
+   "generation_truncated": false,
+   "judge_labels": [
+    "not_attempted",
+    "not_attempted",
+    "not_attempted"
+   ],
+   "judge_labels_starter": [
+    "not_attempted",
+    "not_attempted",
+    "not_attempted"
+   ],
+   "judge_labels_output_line": [
+    "not_attempted",
+    "not_attempted",
+    "not_attempted"
+   ],
+   "judge_parse_agreement": 1.0,
+   "judge_empty_samples": 0,
+   "judge_prompt_sha256": "97bb493c6ae4815a04ea48dee9b1bf4292f182ec12505f46e5ed1d51a8c06069",
+   "grader_variant": "kaggle-starter-yulongt-facts-parametric-benchmark-starter-code-v10",
+   "is_correct": 0.0,
+   "is_incorrect": 0.0,
+   "is_not_attempted": 1.0,
+   "is_unknown": 0.0,
+   "all_correct": 0.0,
+   "judge_receipts": [
+    {
+     "sample": 0,
+     "seed": 0,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-8o5sMj2gaSv7UZ1nDrXCW41HIH0o2",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "1. The user asks for a specific numerical value: the population of the Rural Municipality of Minto-Odanah from the 2021 Census.\n2. The gold answer is \"1,121\".\n3. The predicted answer explicitly refuses to provide a number, stating, \"I don’t have the exact 2021 Census population... reliably memorized, so I’d rather not invent a number.\"\n4. According to the grading guidelines, a response that \"does ",
+     "content_sha256": "45bdd9f6212ed5d25f5c7ec12132cb1c7984ac857f6bcb3c5e7f4e0063018067",
+     "label_starter": "not_attempted",
+     "label_output_line": "not_attempted"
+    },
+    {
+     "sample": 1,
+     "seed": 1,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-eoA9wi9hePC2O2pBKEpWerHQFU4rs",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "The predicted answer explicitly states, \"I don’t have the exact 2021 Census population... so I’d rather not invent a number.\" This is a refusal to provide the requested information. The gold answer is a specific number, \"1,121\", which is not included in the model's response. The model has failed to provide the key detail required by the question.\n\n```\nOutput: NOT_ATTEMPTED\n```",
+     "content_sha256": "8815cc2767d6e39d43dc5cb971904e927b121843290db0bd233f5c1501fe98a5",
+     "label_starter": "not_attempted",
+     "label_output_line": "not_attempted"
+    },
+    {
+     "sample": 2,
+     "seed": 2,
+     "judge_model": "gemini-2.5-pro",
+     "response_id": "chatcmpl-STYyuUm9nAxr7WWyAJE49vrQlDZ4y",
+     "finish_reason": "stop",
+     "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 5
+     },
+     "content": "The user wants me to grade the provided answer.\n\n**1. Identify the direct predicted answer:**\nThe predicted answer explicitly states, \"I don’t have the exact 2021 Census population... so I’d rather not invent a number.\" This is a refusal to provide the specific information requested.\n\n**2. Check match with the gold answer:**\nThe gold answer is \"1,121\". The predicted answer does not provide this nu",
+     "content_sha256": "e3ed4de72dab12aeda0a507a374a94a663711f6373917afcd901cf6c99380704",
+     "label_starter": "not_attempted",
+     "label_output_line": "not_attempted"
+    }
+   ],
+   "responses_create_params": {
+    "input": [
+     {
+      "role": "user",
+      "content": "What was the population of the Rural Municipality of Minto-Odanah, Manitoba according to the 2021 Census?"
+     }
+    ]
+   },
+   "response": {
+    "id": "r",
+    "created_at": 0,
+    "model": "fixture",
+    "object": "response",
+    "output": [
+     {
+      "type": "message",
+      "id": "m",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+       {
+        "type": "output_text",
+        "text": "I don’t have the exact 2021 Census population for the Rural Municipality of Minto-Odanah reliably memorized, so I’d rather not invent a number. The authoritative figure is in Statistics Canada’s **2021 Census Profile** for the census subdivision **“Minto-Odanah, Rural municipality, Manitoba.”** If y",
+        "annotations": []
+       }
+      ]
+     }
+    ],
+    "parallel_tool_calls": false,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+     "input_tokens": 50,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 100,
+     "output_tokens_details": {
+      "reasoning_tokens": 60
+     },
+     "total_tokens": 150
+    }
+   },
+   "_ng_task_index": 2,
+   "_ng_rollout_index": 0
+  }
+ ],
+ "failures": [
+  {
+   "id": "facts_parametric_public_0022",
+   "_ng_task_index": 0,
+   "_ng_rollout_index": 0,
+   "_ng_failure_class": "judge_failed",
+   "_ng_failure_judge_error": "ClientResponseError: 500"
+  },
+  {
+   "id": "facts_parametric_public_9999",
+   "_ng_task_index": 3,
+   "_ng_rollout_index": 0,
+   "_ng_failure_class": "judge_failed",
+   "_ng_failure_judge_error": "ClientResponseError: 503"
+  }
+ ]
+}
