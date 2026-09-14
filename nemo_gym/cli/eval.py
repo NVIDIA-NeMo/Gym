@@ -414,7 +414,10 @@ def e2e_rollout_collection():  # pragma: no cover
         data_processor_config_dict["mode"] = "train_preparation"
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
+        # Keep preparation artifacts scoped to this rollout output. A shared
+        # directory causes metrics conflicts when sequential evals use
+        # different datasets but write results under the same parent.
+        data_process_output_dir = output_fpath.parent / f"{output_fpath.stem}_preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
     server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)

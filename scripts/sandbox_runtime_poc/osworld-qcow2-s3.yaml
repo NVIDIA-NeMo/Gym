@@ -1,0 +1,49 @@
+# S3-backed OSWorld qcow2 disk — the PERMANENT disk-distribution path
+#
+# The ~22.8 GiB Ubuntu.qcow2 lives in S3 and is mounted READ-ONLY into every OSWorld sandbox
+# via the AWS Mountpoint-S3 CSI driver (s3.csi.aws.com, installed cluster-wide as the
+# `s3-csi-node` DaemonSet). ONE static PV + ONE ROX PVC are shared by all sandbox pods
+# (NOT per-pod storage) — the qcow2 is a read-only backing file; each VM's writes go to its
+# own COW overlay (/boot.qcow2) + /storage scratch, never to S3.
+#
+# This replaces the temporary "bake the qcow2 into a 13 GB container image" approach: the
+# sandbox now uses the small (~80 MB) happysixd/osworld-docker base image and streams disk
+# blocks from S3 on demand (mountpoint-s3 caches; COW overlay absorbs writes).
+#
+# Upload the qcow2 once (idempotent): the CSI driver's IAM has read+write to the bucket, so a
+# throwaway pod with an RW mount can `cp /System.qcow2 s3://<bucket>/osworld/System.qcow2`
+# (see STATUS.md "osworld-qcow2-to-s3" job).
+#
+# NOTE: bucketName is environment-specific — this is the cell-1.5 (ns sbx-2) shared-data bucket on
+# the <SANDBOX_CLUSTER_CONTEXT> cluster. `prefix osworld/` scopes the mount to just the qcow2 (the mount
+# root shows System.qcow2, not the whole bucket). Region matches the cluster.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: osworld-qcow2-s3
+spec:
+  capacity: {storage: 1200Gi}          # ignored by mountpoint-s3, but the field is required
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""                  # static provisioning (no dynamic StorageClass)
+  claimRef: {namespace: sbx-2, name: osworld-qcow2-s3}   # pre-bind to the PVC below
+  mountOptions:
+  - region us-east-2
+  - read-only
+  - allow-other                         # so QEMU (non-root inside the guest tooling) can read
+  - prefix osworld/                      # expose only osworld/ ⇒ mount root = System.qcow2
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: osworld-qcow2-s3       # must be unique per PV
+    volumeAttributes:
+      bucketName: <YOUR_S3_BUCKET>
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: osworld-qcow2-s3
+  namespace: sbx-2
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: osworld-qcow2-s3
+  resources: {requests: {storage: 1200Gi}}

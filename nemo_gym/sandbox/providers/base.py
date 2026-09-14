@@ -43,6 +43,7 @@ class SandboxEndpoint:
 
     endpoint: str
     headers: dict[str, str] = field(default_factory=dict)
+    proxied: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.endpoint, str) or not self.endpoint.strip():
@@ -59,6 +60,12 @@ class SandboxEndpoint:
             "headers",
             {str(key): str(value) for key, value in self.headers.items()},
         )
+
+    @property
+    def url(self) -> str:
+        """Backward-compatible alias for integrations created before ``endpoint``."""
+
+        return self.endpoint
 
 
 @dataclass(frozen=True)

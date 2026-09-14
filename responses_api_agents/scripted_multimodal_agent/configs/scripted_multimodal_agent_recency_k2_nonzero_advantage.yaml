@@ -1,0 +1,25 @@
+scripted_multimodal_agent:
+  responses_api_agents:
+    scripted_multimodal_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      fixture: computer_use
+      media_mode: images
+      reward_by_rollout_index:
+        - 0.0
+        - 1.0
+      visual_history:
+        enabled: true
+        shadow_only: false
+        policy:
+          type: recency
+          config:
+            protect_initial_context: true
+            keep_last_image_groups: 1
+            keep_all_text: true
+            image_omission_marker: "[Earlier image omitted]"
+        schedule:
+          type: turn_chunked_recency
+          actions_per_chunk: 2
