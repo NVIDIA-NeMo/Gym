@@ -261,7 +261,11 @@ class SupportsSandboxNetwork(Protocol):
 class SupportsSandboxRuntimeRequirements(Protocol):
     """Optional validation and setup of task-declared runtime requirements."""
 
-    def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> None: ...
+    def validate_runtime_requirements(
+        self, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> dict[str, str] | None:
+        """Validate support and return any required create-time metadata."""
+        ...
 
     async def configure_runtime(
         self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None

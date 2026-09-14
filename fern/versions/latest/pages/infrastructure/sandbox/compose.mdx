@@ -182,10 +182,30 @@ setup failures stop collection startup.
 `cap_add` and `shm_size` require `SupportsSandboxRuntimeRequirements`.
 OpenSandbox's `runtime_requirements.capability_probes` maps capability names to
 commands that verify support already provided by the deployment. The adapter
-does not grant kernel capabilities. With `runtime_requirements.resize_shared_memory=True`,
-the provider checks `/dev/shm`, remounts it when necessary, and verifies the requested
-size. A deployment that denies the remount fails explicitly; the requested limit
-is never silently ignored.
+does not grant kernel capabilities. The validation hook can return metadata that
+the adapter includes when creating each service.
+
+For OpenSandbox deployments that allocate shared memory from create metadata, set:
+
+```yaml
+runtime_requirements:
+  shm_size_metadata_key: nemo.nvidia.com/shm
+```
+
+Compose's `shm_size` byte count becomes the value of that metadata key. This takes
+precedence over a service label or spec metadata for the same key. After creation,
+the provider checks the allocation without root; a mismatch fails startup. No
+remount or additional capability is needed.
+
+On cell-3, `SandboxSpec(metadata={"nemo.nvidia.com/shm": "true"})` requests half the
+sandbox memory limit, while `"8Gi"` requests an explicit size.
+For example, a 16 GiB sandbox with `"true"` gets 8 GiB of `/dev/shm`. The tmpfs is
+charged to the sandbox's memory limit. Inspect it with `df -h /dev/shm`.
+For Compose, use an explicit `shm_size` that fits the sandbox memory limit; a
+server-side allocation below the requested size will fail the provider's check.
+The deployed server may report a mount capacity larger than the sandbox memory
+limit; the mount capacity does not grant additional memory.
+The metadata key is deployment configuration, not built into the adapter.
 
 Volumes require `SupportsSandboxSharedStorage`. Configure OpenSandbox with
 `shared_storage={"host_path": "/mnt/shared/compose", "metadata": {}}`, using a path

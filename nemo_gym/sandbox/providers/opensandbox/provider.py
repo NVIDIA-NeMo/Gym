@@ -687,10 +687,10 @@ class OpenSandboxNetworkingConfig:
 
 @dataclass
 class OpenSandboxRuntimeRequirementsConfig:
-    """Operator-supplied capability probes and permission to resize shared memory."""
+    """Operator-supplied capability probes and create-time shared-memory metadata key."""
 
     capability_probes: dict[str, str] = field(default_factory=dict)
-    resize_shared_memory: bool = False
+    shm_size_metadata_key: str | None = None
 
 
 @dataclass
@@ -734,7 +734,7 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
 
-    def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> None:
+    def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
         for capability in cap_add:
             if not self._runtime_requirements.capability_probes.get(capability, "").strip():
@@ -742,28 +742,29 @@ class OpenSandboxProvider:
         if shm_size is not None:
             if isinstance(shm_size, bool) or not isinstance(shm_size, int) or shm_size <= 0:
                 raise ValueError("shm_size must be a positive number of bytes")
-            if not self._runtime_requirements.resize_shared_memory:
-                raise NotImplementedError(
-                    "OpenSandbox shm_size requires runtime_requirements.resize_shared_memory=true"
-                )
+            key = self._runtime_requirements.shm_size_metadata_key
+            if not key:
+                raise NotImplementedError("OpenSandbox shm_size requires runtime_requirements.shm_size_metadata_key")
+            return {key: str(shm_size)}
+        return {}
 
     async def configure_runtime(
         self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
     ) -> None:
-        """Probe capabilities and apply shared memory limits before starting services."""
+        """Probe capabilities and verify the shared memory allocated at creation."""
         self.validate_runtime_requirements(cap_add=cap_add, shm_size=shm_size)
-        commands = [(capability, self._runtime_requirements.capability_probes[capability]) for capability in cap_add]
+        commands = [
+            (capability, self._runtime_requirements.capability_probes[capability], "root") for capability in cap_add
+        ]
         if shm_size is not None:
             size_check = (
                 "set -- $(stat -fc '%S %b' /dev/shm); "
                 f"expected=$((({shm_size} + $1 - 1) / $1 * $1)); "
                 '[ "$(($1 * $2))" -eq "$expected" ]'
             )
-            current = await self.exec(handle, size_check, user=None, timeout_s=60)
-            if current.return_code != 0:
-                commands.append(("shm_size", f"mount -o remount,size={shm_size} /dev/shm && {size_check}"))
-        for requirement, command in commands:
-            result = await self.exec(handle, command, user="root", timeout_s=60)
+            commands.append(("shm_size", size_check, None))
+        for requirement, command, user in commands:
+            result = await self.exec(handle, command, user=user, timeout_s=60)
             if result.return_code != 0:
                 raise RuntimeError(
                     f"Sandbox {handle.sandbox_id!r} cannot satisfy {requirement}: "

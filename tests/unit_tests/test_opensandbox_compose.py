@@ -154,67 +154,53 @@ def test_runtime_requirements_fail_before_creation_without_operator_support():
     provider.validate_runtime_requirements(cap_add=(), shm_size=None)
     with pytest.raises(NotImplementedError, match="SYS_PTRACE"):
         provider.validate_runtime_requirements(cap_add=("SYS_PTRACE",), shm_size=None)
-    with pytest.raises(NotImplementedError, match="resize_shared_memory"):
+    with pytest.raises(NotImplementedError, match="shm_size_metadata_key"):
         provider.validate_runtime_requirements(cap_add=(), shm_size=1024)
 
 
 @pytest.mark.asyncio
-async def test_runtime_requirements_execute_configured_probe_and_resize(monkeypatch):
+async def test_runtime_requirements_return_metadata_and_verify_without_remount(monkeypatch):
     provider = OpenSandboxProvider(
         runtime_requirements={
             "capability_probes": {"SYS_PTRACE": "gdb-probe"},
-            "resize_shared_memory": True,
+            "shm_size_metadata_key": "example.test/shm",
         }
     )
-    execute = AsyncMock(
-        side_effect=[
-            SandboxExecResult("", "", 1),
-            SandboxExecResult("", "", 0),
-            SandboxExecResult("", "", 0),
-        ]
-    )
+    assert provider.validate_runtime_requirements(cap_add=("SYS_PTRACE",), shm_size=1073741824) == {
+        "example.test/shm": "1073741824"
+    }
+    execute = AsyncMock(return_value=SandboxExecResult("", "", 0))
     monkeypatch.setattr(provider, "exec", execute)
-    handle = SandboxHandle("sandbox", "opensandbox", None)
-    await provider.configure_runtime(handle, cap_add=("SYS_PTRACE",), shm_size=1073741824)
-    assert execute.call_args_list[0].kwargs["user"] is None
-    assert execute.call_args_list[1].args[1] == "gdb-probe"
-    assert execute.call_args_list[1].kwargs["user"] == "root"
-    assert execute.call_args_list[2].args[1].startswith("mount -o remount,size=1073741824 /dev/shm && ")
-    assert execute.call_args_list[2].args[1].endswith(execute.call_args_list[0].args[1])
-    assert execute.call_args_list[2].kwargs["user"] == "root"
+    await provider.configure_runtime(
+        SandboxHandle("sandbox", "opensandbox", None), cap_add=("SYS_PTRACE",), shm_size=1073741824
+    )
+    assert execute.call_args_list[0].args[1] == "gdb-probe"
+    assert execute.call_args_list[0].kwargs["user"] == "root"
+    assert "stat -fc" in execute.call_args_list[1].args[1]
+    assert execute.call_args_list[1].kwargs["user"] is None
+    assert "mount" not in execute.call_args_list[1].args[1]
 
 
 @pytest.mark.asyncio
-async def test_shared_memory_matching_allocation_never_requests_root(monkeypatch):
-    provider = OpenSandboxProvider(runtime_requirements={"resize_shared_memory": True})
-    execute = AsyncMock(return_value=SandboxExecResult("", "", 0))
+@pytest.mark.parametrize("return_code", [0, 1])
+async def test_shared_memory_check_never_requests_root_or_remount(monkeypatch, return_code):
+    provider = OpenSandboxProvider(runtime_requirements={"shm_size_metadata_key": "example.test/shm"})
+    execute = AsyncMock(return_value=SandboxExecResult("", "allocation mismatch", return_code))
     monkeypatch.setattr(provider, "exec", execute)
-    await provider.configure_runtime(SandboxHandle("nonroot", "opensandbox", None), cap_add=(), shm_size=67108864)
+    handle = SandboxHandle("nonroot", "opensandbox", None)
+    if return_code:
+        with pytest.raises(RuntimeError, match="shm_size.*allocation mismatch"):
+            await provider.configure_runtime(handle, cap_add=(), shm_size=67108864)
+    else:
+        await provider.configure_runtime(handle, cap_add=(), shm_size=67108864)
     assert execute.await_count == 1
     assert execute.call_args.kwargs["user"] is None
     assert "mount" not in execute.call_args.args[1]
 
 
-@pytest.mark.asyncio
-async def test_shared_memory_mismatch_attempts_privileged_resize_and_reports_failure(monkeypatch):
-    provider = OpenSandboxProvider(runtime_requirements={"resize_shared_memory": True})
-    execute = AsyncMock(
-        side_effect=[
-            SandboxExecResult("", "", 1),
-            SandboxExecResult("", "fork/exec /bin/bash: operation not permitted", 1),
-        ]
-    )
-    monkeypatch.setattr(provider, "exec", execute)
-    with pytest.raises(RuntimeError, match="shm_size.*operation not permitted"):
-        await provider.configure_runtime(
-            SandboxHandle("nonroot", "opensandbox", None), cap_add=(), shm_size=1073741824
-        )
-    assert [call.kwargs["user"] for call in execute.call_args_list] == [None, "root"]
-
-
 @pytest.mark.parametrize("size", [True, 0, -1, "1gb"])
 def test_runtime_requirements_reject_invalid_shared_memory(size):
-    provider = OpenSandboxProvider(runtime_requirements={"resize_shared_memory": True})
+    provider = OpenSandboxProvider(runtime_requirements={"shm_size_metadata_key": "example.test/shm"})
     with pytest.raises(ValueError, match="positive"):
         provider.validate_runtime_requirements(cap_add=(), shm_size=size)
 

@@ -926,19 +926,23 @@ async def test_runtime_and_host_options_fail_preflight_without_support(options):
 
 
 @pytest.mark.asyncio
-async def test_runtime_requirements_configured_before_workload(tmp_path):
+@pytest.mark.parametrize("with_metadata", [True, False])
+async def test_runtime_requirements_configured_before_workload(tmp_path, with_metadata):
     configured = tmp_path / "configured"
     output = tmp_path / "output"
 
     class RuntimeProvider(ShellProvider):
         async def create(self, spec):
             assert self.validated
+            assert spec.metadata["example.test/shm"] == ("67108864" if with_metadata else "true")
+            assert spec.metadata["purpose"] == "kept"
             return await super().create(spec)
 
         def validate_runtime_requirements(self, *, cap_add, shm_size):
             self.validated = True
             assert cap_add == ("SYS_PTRACE",)
             assert shm_size == 67108864
+            return {"example.test/shm": str(shm_size)} if with_metadata else None
 
         async def configure_runtime(self, handle, *, cap_add, shm_size):
             assert cap_add == ("SYS_PTRACE",)
@@ -954,6 +958,7 @@ async def test_runtime_requirements_configured_before_workload(tmp_path):
                     "image": "image",
                     "cap_add": ["SYS_PTRACE"],
                     "shm_size": 67108864,
+                    "labels": {"example.test/shm": "true", "purpose": "kept"},
                     "command": ["sh", "-c", f"test -f {configured} && touch {output}"],
                 }
             }

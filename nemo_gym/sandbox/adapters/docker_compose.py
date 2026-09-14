@@ -75,6 +75,7 @@ class AsyncSandboxCompose:
         self.project = "compose-" + uuid.uuid4().hex
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
+        self._runtime_metadata: dict[str, dict[str, str]] = {}
         self._started = False
         self._ready = False
         self._closed = False
@@ -149,7 +150,7 @@ class AsyncSandboxCompose:
             if runtime["cap_add"] or runtime["shm_size"] is not None:
                 if not isinstance(self.provider, SupportsSandboxRuntimeRequirements):
                     raise NotImplementedError("Sandbox provider does not support runtime requirements")
-                self.provider.validate_runtime_requirements(**runtime)
+                self._runtime_metadata[name] = self.provider.validate_runtime_requirements(**runtime) or {}
             options = service.get("x-sandbox") or {}
             if set(options) - {"hosts", "resolve_environment"}:
                 raise NotImplementedError(f"Service {name!r}: unsupported x-sandbox options")
@@ -309,7 +310,11 @@ class AsyncSandboxCompose:
                     resources=resources,
                     ports=tuple(dict.fromkeys(ports)),
                     entrypoint=["/bin/sh", "-c", "while :; do sleep 3600; done"],
-                    metadata={**spec.metadata, **(service.get("labels") or {})},
+                    metadata={
+                        **spec.metadata,
+                        **(service.get("labels") or {}),
+                        **self._runtime_metadata.get(name, {}),
+                    },
                 ),
             }
         for name, service in self.document["services"].items():
