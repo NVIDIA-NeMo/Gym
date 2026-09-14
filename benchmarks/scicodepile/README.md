@@ -58,10 +58,8 @@ model unmodified, HumanEval-style, with **no system message**.
 That matches the only prompting the paper specifies: models are evaluated zero-shot on
 "HumanEval-style task prompts, each consisting of a function signature and its
 natural-language specification". The paper publishes no system prompt and no
-instruction wrapper. (Its Appendix K.5 is titled "Prompt Design for Executable
-Benchmark *Construction*" — the prompt used to generate the test artifacts, not the
-one given to evaluated models.) Any wrapper added here would be invention that changes
-what is measured.
+instruction wrapper, so any wrapper added here would be invention that changes what is
+measured.
 
 Note that `system: ""` is not the same as no system message: `nemo_gym/prompt.py`
 emits a system turn whenever the key is present, and an empty one is
