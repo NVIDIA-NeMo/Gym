@@ -69,6 +69,19 @@ logger = logging.getLogger(__name__)
 FILING_READ_SOURCES = ("cache", "sec-corpus", "live")
 FILING_READ_LOG_INTERVAL_SEC = 1800.0
 
+# The judge explains first and ends with its verdict as "[[N]]" (#2852).
+_JUDGE_RATING_RE = re.compile(r"\[\[(\d+)\]\]")
+
+
+def _extract_judge_rating(judge_text: str) -> Optional[int]:
+    """Return the judge's verdict: the LAST ``[[N]]`` in its output, or None when there is none.
+
+    The judge may quote the candidate or restate the rubric on the way to its verdict, so the first
+    ``[[N]]`` is not reliable; the verdict is the one it ends with.
+    """
+    matches = _JUDGE_RATING_RE.findall(judge_text or "")
+    return int(matches[-1]) if matches else None
+
 
 class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for Finance SEC Search resource server."""
@@ -1443,7 +1456,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         judge_user_prompt = self._judge_prompt_template
         judge_user_prompt = judge_user_prompt.replace("{question}", question)
         judge_user_prompt = judge_user_prompt.replace("{expected_answer}", body.expected_answer)
-        judge_user_prompt = judge_user_prompt.replace("{generated_answer}", generated_answer)
+        # A candidate must not be able to plant a parseable rating for the judge to quote back (#2852).
+        judge_user_prompt = judge_user_prompt.replace(
+            "{generated_answer}", _JUDGE_RATING_RE.sub(r"[\1]", generated_answer)
+        )
 
         judge_params = (
             self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
@@ -1475,16 +1491,18 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             except Exception:
                 pass
 
-            rating_match = re.search(r"\[\[(\d+)\]\]", judge_text)
-            rating = int(rating_match.group(1)) if rating_match else None
+            # A reply cut off by max_output_tokens never reached its verdict: retry rather than read a
+            # tentative rating out of the unfinished reasoning.
+            rating = None if judge_response.incomplete_details else _extract_judge_rating(judge_text)
 
             if rating is not None:
                 break
 
             logger.warning(
-                "Judge returned no [[N]] rating (attempt %d/%d). Output: %s",
+                "Judge returned no [[N]] rating (attempt %d/%d, incomplete_details=%s). Output: %s",
                 attempt + 1,
                 max_judge_retries,
+                judge_response.incomplete_details,
                 judge_text[:200],
             )
             if attempt < max_judge_retries - 1:
