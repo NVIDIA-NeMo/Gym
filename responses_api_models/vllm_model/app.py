@@ -367,6 +367,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             capture_config is not None and capture_config.token_id_capture.external_staging
         )
         if self._external_capture_enabled:
+            overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
+            if overrides.get("stream"):
+                raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
@@ -753,6 +756,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         if context is None or not context.external_staging:
             return body_dict
+        if body_dict.get("stream"):
+            raise ValueError("external staging requires non-streaming backend requests")
+        body_dict["stream"] = False
+        body_dict.pop("stream_options", None)
         admission = context.capture_admission
         if admission is None:
             return body_dict
@@ -1142,6 +1149,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
+            if context.response_dialect == "responses":
+                # Fingerprint the served items: Responses separates reasoning from assistant text.
+                response_items = [
+                    item.model_dump()
+                    for item in self._converter.chat_completions_messages_to_responses_items(response_items)
+                ]
             # Compute one fingerprint for the response items.
             # Compute another for the request and response items together.
             # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
