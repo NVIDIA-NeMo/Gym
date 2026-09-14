@@ -87,7 +87,11 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
-        return EnvironmentCapabilities(gpus=True, docker_compose=True)
+        return EnvironmentCapabilities(
+            gpus=True,
+            docker_compose=True,
+            disable_internet="opensandbox" in self._sandbox_provider and not self._uses_compose,
+        )
 
     @property
     def _uses_compose(self) -> bool:
@@ -121,10 +125,16 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
         metadata = dict(spec.metadata)
         if self._sandbox_resource_pool is not None:
             metadata["nemo-gym.nvidia.com/resource-pool"] = self._sandbox_resource_pool.lower()
+        provider_options = deepcopy(spec.provider_options)
+        if self._network_disabled:
+            # Harbor resolves the separate verifier's baseline independently of
+            # the agent. Never retain an allow rule that weakens that baseline.
+            provider_options["network_policy"] = {"defaultAction": "deny", "egress": []}
         return replace(
             spec,
             resources=resources,
             metadata=metadata,
+            provider_options=provider_options,
             env={**self._startup_env(), **self._sandbox_env},
         )
 

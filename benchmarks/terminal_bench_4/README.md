@@ -90,6 +90,15 @@ agent execution, and verification; a four-hour smoke allocation is not an offici
 score run. Official leaderboard submissions use five attempts per task, while this
 integration defaults to one for coverage testing.
 
+For single-container OpenSandbox environments, the adapter translates Harbor's
+effective `no-network` policy into a create-time deny-all egress policy. This
+includes separate verifiers declaring `allow_internet = false`, without applying
+that restriction to their agent sandbox. The deployment must provide an egress
+sidecar with `dns+nft` enforcement; DNS-only filtering cannot block direct IP
+connections. The current sidecar disables IPv6 loopback, so task compatibility
+must be checked when enabling isolation on a new deployment. Network allowlists,
+runtime policy changes, and offline Compose environments remain unsupported.
+
 Compose services run through `AsyncSandboxCompose`, including dependency health
 checks, sidecar artifact collection, and TCP forwarding for the two tasks that use
 `network_mode: service:...`. The adapter checks `SYS_PTRACE` and shared-memory
