@@ -137,7 +137,18 @@ TEST_SH_PATCHES = {
             """verifier_uv_installer=$(mktemp) || exit $?
 if curl -fLsS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 30 --max-time 120 \\
   -o "$verifier_uv_installer" https://astral.sh/uv/0.9.5/install.sh; then
-  sh "$verifier_uv_installer" && verifier_uv_status=0 || verifier_uv_status=$?
+  for verifier_uv_attempt in 1 2 3 4; do
+    if sh "$verifier_uv_installer"; then
+      verifier_uv_status=0
+      break
+    else
+      verifier_uv_status=$?
+    fi
+    if [ "$verifier_uv_attempt" -lt 4 ]; then
+      printf 'Retrying UV release download after installer failure (%s/4)\\n' "$verifier_uv_attempt" >&2
+      sleep 2
+    fi
+  done
 else
   verifier_uv_status=$?
 fi
@@ -169,9 +180,10 @@ rm -f "$verifier_uv_installer"
 
 # A background package install can outlive the policy turn budget. Scope the
 # lock wait to verifier subprocesses so every APT-based task handles that race.
+# Retry UV's Python/package downloads on transient HTTP failures; grading still runs once.
 VERIFIER_COMMAND = """verifier_apt_config=$(mktemp) || exit $?
 printf '%s\\n' 'DPkg::Lock::Timeout "300";' > "$verifier_apt_config" || exit $?
-APT_CONFIG="$verifier_apt_config" bash /tests/test.sh"""
+APT_CONFIG="$verifier_apt_config" UV_HTTP_RETRIES=8 bash /tests/test.sh"""
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
