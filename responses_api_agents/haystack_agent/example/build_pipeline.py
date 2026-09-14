@@ -27,7 +27,7 @@ def build() -> Pipeline:
     agent = Agent(
         chat_generator=NeMoGymResponsesChatGenerator(server_name=MODEL_SERVER_NAME),
         tools=[wiki_search_tool, calculator],
-        system_prompt="You are a helpful assistant that can answer questions and help with tasks. You have access to two tools: calculator and wiki_search. You can use the calculator tool to perform arithmetic operations on two numbers. You can use the wiki_search tool to search Wikipedia for information. Use the tools to help you answer questions and check the answer correctness.",
+        system_prompt=None,
         exit_conditions=["text"],
         max_agent_steps=MAX_AGENT_STEPS,
     )
@@ -40,9 +40,7 @@ def main() -> None:
     import os
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    configs_dir = os.path.join(script_dir, "..", "configs")
-    os.makedirs(configs_dir, exist_ok=True)
-    pipeline_path = os.path.join(configs_dir, "example_pipeline_with_tools.yaml")
+    pipeline_path = os.path.join(script_dir, "example_pipeline_with_tools.yaml")
     with open(pipeline_path, "w") as f:
         f.write(build().dumps())
     print(f"Wrote {pipeline_path}")
