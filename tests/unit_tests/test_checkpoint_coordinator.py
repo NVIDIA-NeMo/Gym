@@ -302,7 +302,7 @@ async def test_partial_worker_cut_ack_remains_draining_until_abort(sock_dir) -> 
                         admitted_at=prefix.admitted_at,
                         disposition="durable_prefix",
                         frozen_buffer_id=f"buffer/{prefix.ticket_id}",
-                        staging_key=f"prefix/{prefix.ticket_id}",
+                        staging_keys=(f"prefix/{prefix.ticket_id}",),
                         prefix_token_count=1,
                         prefix_digest="b" * 64,
                     )

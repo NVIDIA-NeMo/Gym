@@ -77,18 +77,24 @@ class GenerationCutPrefixAck(_GenerationCutModel):
     admitted_at: float
     disposition: Literal["durable_prefix", "durable_failure"]
     frozen_buffer_id: str | None = Field(default=None, min_length=1)
-    staging_key: str | None = Field(default=None, min_length=1)
+    staging_keys: tuple[str, ...] = ()
     prefix_token_count: int | None = Field(default=None, ge=0)
     prefix_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _validate_prefix_evidence(self) -> "GenerationCutPrefixAck":
-        evidence = (self.frozen_buffer_id, self.staging_key, self.prefix_token_count, self.prefix_digest)
-        if self.disposition == "durable_prefix" and any(value is None for value in evidence):
+        evidence = (self.frozen_buffer_id, self.prefix_token_count, self.prefix_digest)
+        if self.disposition == "durable_prefix" and (
+            any(value is None for value in evidence) or not self.staging_keys
+        ):
             raise ValueError(
-                "durable_prefix requires frozen_buffer_id, staging_key, prefix_token_count, and prefix_digest"
+                "durable_prefix requires frozen_buffer_id, staging_keys, prefix_token_count, and prefix_digest"
             )
-        if self.disposition == "durable_failure" and any(value is not None for value in evidence):
+        if len(self.staging_keys) != len(set(self.staging_keys)) or any(not key for key in self.staging_keys):
+            raise ValueError("generation-cut staging_keys must be unique and non-empty")
+        if self.disposition == "durable_failure" and (
+            self.staging_keys or any(value is not None for value in evidence)
+        ):
             raise ValueError("durable_failure cannot carry prefix evidence")
         return self
 
@@ -96,8 +102,8 @@ class GenerationCutPrefixAck(_GenerationCutModel):
 class GenerationCutLineageRecord(GenerationCutPrefixAck):
     """Token-free durable cut coordinate stored in one rollout lineage.
 
-    The TQ row owns the cumulative token and logprob payload.  This record
-    binds that row to the checkpoint and rollout attempt whose model call was
+    The ordered TQ rows own the token and logprob chunks.  This record
+    binds that chain to the checkpoint and rollout attempt whose model call was
     cut.  Repeating an identical record is idempotent; a conflicting record
     for the same checkpoint ticket is a ledger corruption.
     """

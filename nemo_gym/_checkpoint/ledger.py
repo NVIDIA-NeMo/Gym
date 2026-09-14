@@ -470,18 +470,18 @@ def _external_references_for_rows(
             continue
         if cut.model_call_id in committed_model_call_ids:
             continue
-        assert cut.staging_key is not None
-        if cut.staging_key in seen_keys:
-            continue
-        seen_keys.add(cut.staging_key)
-        references.append(
-            ExternalStorageReference(
-                capture_key=capture_key,
-                boundary_model_call_id=cut.model_call_id,
-                kind="generation_prefix_cut",
-                key=cut.staging_key,
+        for staging_key in cut.staging_keys:
+            if staging_key in seen_keys:
+                continue
+            seen_keys.add(staging_key)
+            references.append(
+                ExternalStorageReference(
+                    capture_key=capture_key,
+                    boundary_model_call_id=cut.model_call_id,
+                    kind="generation_prefix_cut",
+                    key=staging_key,
+                )
             )
-        )
     return references
 
 
