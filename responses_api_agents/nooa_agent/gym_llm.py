@@ -371,6 +371,27 @@ class GymResponsesLLM(UnifiedLLM):
             if destination in supported and value is not None:
                 request[destination] = value
 
+        # Adaptive output budget (parity with Avo/n3). An unset max_output_tokens
+        # hits the endpoint's default (4096 on the NVIDIA inference hub), which
+        # reasoning-heavy models consume entirely before any code text is
+        # emitted — TB circuit-fibsqrt lost the NOOA leg twice this way
+        # (11/63, then 16/72 calls truncated, every one at exactly 4096 with
+        # text_tokens == 0). Budget min(available context, cap) with a generous
+        # floor when the caller did not set a value; mirrors n3's
+        # _calculate_adaptive_max_tokens (same 32000 cap that lets AVO pass).
+        if request.get("max_output_tokens") is None:
+            import os as _os
+
+            _cap = int(_os.environ.get("NOOA_MAX_OUTPUT_TOKENS", "32000"))
+            _floor = int(_os.environ.get("NOOA_MIN_OUTPUT_TOKENS", "16000"))
+            _context_window = 131072  # GLM-5.3 max_input; generous default
+            try:
+                _input_chars = sum(len(str(m.get("content") or "")) for m in input_items)
+                _available = _context_window - _input_chars // 4 - int(_context_window * 0.05)
+            except Exception:
+                _available = _cap
+            request["max_output_tokens"] = max(min(_available, _cap), _floor)
+
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         self._request_collector.append(body.model_copy(deep=True))
         # NOOA's message journal is a litellm callback; this LLM bypasses litellm, so drive the
