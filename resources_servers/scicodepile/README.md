@@ -42,6 +42,18 @@ things: process isolation, an `RLIMIT_AS` address-space cap, a throwaway working
 directory, and the parent's wall-clock timeout (enforced by killing the runner's
 entire process group, so spawned children do not outlive it).
 
+The cap is 30 GiB, matching bigcodebench. It exists to stop a runaway allocation
+taking down the node, not to measure the model, so it sits well above anything a
+legitimate scientific function needs — an under-sized cap surfaces as the model's
+`exec_failed`, which is exactly the confound this benchmark cannot afford. For the
+same reason the runner is spawned with `OPENBLAS_NUM_THREADS=1`/`OMP_NUM_THREADS=1`:
+every task imports numpy, and OpenBLAS reserves a per-core buffer at library load
+sized from the machine's core count, which counts against `RLIMIT_AS`. Measured on a
+28-core host, `import numpy` plus one SVD reserves 1.18 GiB of address space unpinned
+versus 0.12 GiB pinned; the reservation grows with core count, so the margin matters
+most on exactly the many-core nodes where the cap would otherwise bite. `RLIMIT_AS`
+is applied on Linux only, so the tests that exercise it are Linux-only too.
+
 Do not run untrusted rollouts on shared nodes without a real sandbox — see
 `nemo_gym/sandbox/`.
 

@@ -158,6 +158,24 @@ class TestResultChannel:
         assert json.loads(proc.stdout)["status"] == "pass"
 
 
+def _pinned_env() -> dict:
+    """The environment the server actually spawns the runner with."""
+    from app import _RUNNER_ENV
+
+    return dict(_RUNNER_ENV)
+
+
+def _run_subprocess_with_env(task: dict, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SERVER_DIR / "scp_runner.py")],
+        input=json.dumps(task),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
+
+
 class TestScientificImports:
     def test_numpy_import_does_not_break_the_runner(self):
         """Regression guard for containment that breaks the benchmark it protects.
@@ -169,6 +187,79 @@ class TestScientificImports:
         pytest.importorskip("numpy")
         result = run_task(_task("import numpy\n\ndef add(a, b):\n    return int(numpy.add(a, b))\n"))
         assert result["status"] == "pass"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is only applied on Linux")
+    def test_numpy_works_under_the_real_address_space_cap(self):
+        """Exercise the cap where it actually applies, at the configured default.
+
+        Every other test passes ``max_as_limit=0``, and the 200/200 validation was run
+        on macOS, where ``_apply_limits`` is skipped entirely — so the cap shipped
+        untested on the only platform that enforces it. OpenBLAS reserves a per-core
+        buffer at load time that counts against RLIMIT_AS, and a cap that numpy cannot
+        fit inside is scored as the model's ``exec_failed``.
+        """
+        pytest.importorskip("numpy")
+        from app import SciCodePileResourcesServerConfig
+
+        code = (
+            "import numpy as np\n"
+            "def add(a, b):\n"
+            "    np.linalg.svd(np.random.rand(64, 64))\n"
+            "    return int(np.add(a, b))\n"
+        )
+        # The shipped default, not a test-local number: the point is to exercise the
+        # value operators actually run with.
+        cap = SciCodePileResourcesServerConfig.model_fields["max_as_limit"].default
+        task = {**_task(code), "max_as_limit": cap, "workdir": ""}
+        proc = _run_subprocess_with_env(task, _pinned_env())
+        assert json.loads(proc.stdout)["status"] == "pass"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is only applied on Linux")
+    def test_blas_thread_pinning_shrinks_the_address_space_reservation(self):
+        """Why the pinning is there, measured rather than asserted.
+
+        The reservation scales with the machine's core count, so the margin this buys
+        grows on exactly the many-core nodes where the cap would otherwise bite.
+        """
+        pytest.importorskip("numpy")
+        code = (
+            "import numpy as np\n"
+            "def _vmsize_gib():\n"
+            "    for line in open('/proc/self/status'):\n"
+            "        if line.startswith('VmSize:'):\n"
+            "            return int(line.split()[1]) / 1024 / 1024\n"
+            "def add(a, b):\n"
+            "    np.linalg.svd(np.random.rand(32, 32))\n"
+            "    raise AssertionError(f'VMSIZE={_vmsize_gib():.3f}')\n"
+        )
+        task = {**_task(code), "max_as_limit": 0, "workdir": ""}
+
+        def _measure(env):
+            details = json.loads(_run_subprocess_with_env(task, env).stdout)["details"]
+            return float(details["message"].split("VMSIZE=")[1])
+
+        pinned = _measure(_pinned_env())
+        unpinned = _measure({k: v for k, v in _pinned_env().items() if not k.endswith("_NUM_THREADS")})
+        assert pinned < unpinned, f"pinning did not reduce the reservation ({pinned} vs {unpinned} GiB)"
+
+    def test_the_server_spawns_the_runner_with_the_pinned_env(self):
+        """Measuring the pinning is not enough — the server must actually apply it.
+
+        Driven through ``_run_task`` rather than the runner directly, because that is
+        where the environment is attached.
+        """
+        code = (
+            "import os\n"
+            "def add(a, b):\n"
+            "    assert os.environ.get('OPENBLAS_NUM_THREADS') == '1', os.environ.get('OPENBLAS_NUM_THREADS')\n"
+            "    assert os.environ.get('OMP_NUM_THREADS') == '1'\n"
+            "    return a + b\n"
+        )
+        server = _make_server()
+        result = asyncio.run(
+            server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add")
+        )
+        assert result["status"] == "pass", result["details"]
 
     def test_ordinary_file_and_tempdir_use_still_passes(self):
         """Scientific tasks legitimately create, read, and clean up scratch files."""

@@ -32,8 +32,12 @@ class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
     # Upstream reports no per-task time limit for the runnable stratum; 120s is
     # generous for these functions and still bounds a hung rollout.
     subprocess_timeout: float = 120.0
-    # Address-space cap (MiB) applied inside the runner, 0 disables.
-    max_as_limit: int = 8 * 1024
+    # Address-space cap (MiB) applied inside the runner, 0 disables. 30 GiB matches
+    # bigcodebench. The cap exists to stop a runaway allocation taking down the node,
+    # not to measure the model, so it should sit well above anything a legitimate
+    # scientific function needs: an under-sized cap is scored as the model's
+    # `exec_failed`, which is exactly the confound this benchmark cannot afford.
+    max_as_limit: int = 30 * 1024
 
 
 def _sanitize_for_json(value: Any) -> Any:
@@ -51,6 +55,24 @@ def _sanitize_for_json(value: Any) -> Any:
         return [_sanitize_for_json(v) for v in value]
     return value
 
+
+# Pin the BLAS thread pools in the runner's environment. Every task in this benchmark
+# imports numpy, and OpenBLAS reserves a per-core buffer at library load time, sized
+# from the machine's core count rather than from the work. Measured here on a 28-core
+# host: `import numpy` plus one SVD reserves 1.18 GiB of address space unpinned versus
+# 0.12 GiB pinned — roughly 39 MiB per core. That reservation counts against RLIMIT_AS,
+# so on a many-core node numpy alone approaches the cap and the resulting failure would
+# be scored as the model's `exec_failed` (OpenBLAS issue #4762).
+#
+# These must be set in the child's environment, not inside the runner: OpenBLAS reads
+# them when the shared library loads, which is before any code we control runs.
+_RUNNER_ENV = {
+    **os.environ,
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
 
 # Upper bound on reaping a SIGKILLed runner. Only reached if the kill did not land;
 # returning late beats holding the semaphore for the rest of the run.
@@ -276,6 +298,7 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             # the runner and orphans grandchildren — which then keep running against a
             # working directory this method is about to delete.
             start_new_session=True,
+            env=_RUNNER_ENV,
         )
         # Equal to the group id because `start_new_session` makes the child the leader.
         # Captured now: once asyncio reaps the child, `os.getpgid(proc.pid)` fails even
