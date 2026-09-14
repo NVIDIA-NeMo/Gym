@@ -553,6 +553,8 @@ class AsyncSandbox:
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
         if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
             descriptor = {**descriptor, "workdir": self._spec.workdir}
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
+            descriptor = {**descriptor, "ports": list(self._spec.ports)}
         return descriptor
 
     @classmethod
@@ -568,7 +570,8 @@ class AsyncSandbox:
             descriptor = descriptor.to_dict()
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
-        sandbox = cls(provider, SandboxSpec(workdir=workdir), owns_provider=owns_provider)
+        ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
         return sandbox

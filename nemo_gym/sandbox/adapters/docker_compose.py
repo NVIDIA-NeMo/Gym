@@ -287,7 +287,9 @@ class AsyncSandboxCompose:
                 resources["cpu"] = float(service["cpus"])
             if "mem_limit" in service:
                 resources["memory_mib"] = (int(service["mem_limit"]) + 1048575) // 1048576
-            user = service.get("user") or None
+            user = service.get("user")
+            if user == "":
+                user = None
             if isinstance(user, str) and ":" in user:
                 raise NotImplementedError(f"Service {name!r}: user:group overrides are unsupported by the sandbox API")
             if isinstance(user, str) and user.isdecimal():

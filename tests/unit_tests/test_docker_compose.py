@@ -789,7 +789,8 @@ async def test_invalid_project_and_volumes_never_provision(document, message):
 
 
 @pytest.mark.asyncio
-async def test_service_resources_environment_and_workdir(tmp_path):
+@pytest.mark.parametrize("user", ["1000", "0", 0])
+async def test_service_resources_environment_and_workdir(tmp_path, user):
     from nemo_gym.sandbox.providers.base import SandboxSpec
 
     output = tmp_path / "output"
@@ -800,7 +801,7 @@ async def test_service_resources_environment_and_workdir(tmp_path):
         async def exec(self, handle, command, **kwargs):
             if self.users is None:
                 self.users = []
-            self.users.append(kwargs.get("user"))
+            self.users.append((command, kwargs.get("user")))
             return await super().exec(handle, command, **kwargs)
 
     provider = UserProvider()
@@ -810,7 +811,7 @@ async def test_service_resources_environment_and_workdir(tmp_path):
             "services": {
                 "app": {
                     "image": "original-image",
-                    "user": "1000",
+                    "user": user,
                     "entrypoint": "sh -c",
                     "command": shlex.quote(f'printf "%s|%s|%s" "$OVERRIDE" "$SPEC" "$PWD" > {output}; sleep 1'),
                     "environment": {"OVERRIDE": "new", "UNSET": None},
@@ -831,7 +832,11 @@ async def test_service_resources_environment_and_workdir(tmp_path):
         assert spec.ttl_s == 30
         assert spec.resources.cpu == 1.5
         assert spec.resources.memory_mib == 2
-        assert 1000 in provider.users
+        service_users = [
+            uid for command, uid in provider.users if str(output) in command or command.startswith("sh /tmp/")
+        ]
+        assert len(service_users) >= 2  # Service launch and health check.
+        assert all(uid == int(user) for uid in service_users)
         with pytest.raises(RuntimeError, match="already started"):
             await group.start()
     assert provider.closed == ["1"]
@@ -1130,6 +1135,11 @@ async def test_process_finishing_during_marker_probe_is_not_startup_failure(monk
 
 
 class ConnectableShellProvider(ShellProvider):
+    async def endpoint(self, handle, port):
+        from nemo_gym.sandbox.providers.base import SandboxEndpoint
+
+        return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}")
+
     async def serialize_handle(self, handle, *, scope=None):
         return {"sandbox_id": handle.sandbox_id, "scope": scope}
 
@@ -1144,13 +1154,19 @@ async def test_compose_connect_round_trip_without_yaml_or_provisioning(tmp_path)
         original,
         {
             "services": {
-                "main": {"image": "image", "command": ["sleep", "60"], "working_dir": str(tmp_path)},
+                "main": {
+                    "image": "image",
+                    "command": ["sleep", "60"],
+                    "working_dir": str(tmp_path),
+                    "expose": ["8000"],
+                },
                 "db": {"image": "image", "command": ["sleep", "60"]},
             }
         },
         poll_interval_s=0.01,
     )
     async with owner:
+        endpoint = await owner.services["main"].endpoint(8000)
         descriptor = json.loads(json.dumps(await owner.serialize(scope="operate")))
         assert set(descriptor["services"]) == {"main", "db"}
         assert descriptor["services"]["main"]["scope"] == "operate"
@@ -1160,6 +1176,9 @@ async def test_compose_connect_round_trip_without_yaml_or_provisioning(tmp_path)
         receiver.aclose = AsyncMock()
         connected = await AsyncSandboxCompose.connect(descriptor, provider=receiver)
         async with connected:
+            assert await connected.services["main"].endpoint(8000) == endpoint
+            with pytest.raises(ValueError, match="not declared"):
+                await connected.services["main"].endpoint(8001)
             assert (await connected.services["main"].exec("pwd")).stdout.strip() == str(tmp_path)
             assert await connected.serialize(scope="operate") == descriptor
         assert receiver.closed == ["2", "1"]
