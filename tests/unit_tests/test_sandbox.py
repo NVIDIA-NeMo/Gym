@@ -1313,6 +1313,9 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
         connection={"domain": "sandbox.example", "protocol": "https"},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
+        # This checks the capability protocol and SDK plumbing; the identity
+        # probe connect() runs by default has its own tests.
+        operations={"identity_check": False},
     )
 
     # The provider satisfies the optional capability protocol.

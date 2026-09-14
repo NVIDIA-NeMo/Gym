@@ -193,6 +193,24 @@ class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
+class SandboxEndedError(RuntimeError):
+    """Raised when a sandbox no longer exists or can no longer serve requests.
+
+    Terminal: the sandbox was deleted, expired, or its pod died. Callers must
+    not retry the operation and must not grade or otherwise trust anything the
+    sandbox reports afterwards.
+    """
+
+
+class SandboxMisrouteError(SandboxEndedError):
+    """Raised when the pod that answered is not the requested sandbox.
+
+    The OpenSandbox server resolves a sandbox to a pod IP that is not cleared
+    when the pod dies, so a dead sandbox's requests can be served by a live pod
+    that reused its IP. The requested sandbox is gone, hence a form of ended.
+    """
+
+
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 

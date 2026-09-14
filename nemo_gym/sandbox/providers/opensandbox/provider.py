@@ -15,23 +15,27 @@
 """OpenSandbox provider implementation."""
 
 import asyncio
+import base64
 import logging
 import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndedError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxMisrouteError,
     SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
@@ -83,6 +87,15 @@ class SandboxBackendUnreachableError(RuntimeError):
 
 
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+# Sandbox identity guard (RL-1469). Every command first proves, inside the pod
+# that receives it, that the pod is the requested sandbox; on mismatch it exits
+# with MISROUTE_EXIT_CODE and prints MISROUTE_MARKER to stderr.
+MISROUTE_MARKER = "NEMO_GYM_SANDBOX_MISROUTE"
+MISROUTE_EXIT_CODE = 199
+# Raw bytes per guarded upload command. Base64 grows this by 4/3 and the
+# guard adds a few hundred bytes; the whole command must stay under Linux's
+# 128 KiB single-argument limit for the `sh -c <code>` execd spawns.
+UPLOAD_CHUNK_BYTES = 64 * 1024
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
     "connection refused",
@@ -285,6 +298,53 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
+
+
+def _is_sandbox_gone_error(exception: BaseException) -> bool:
+    """Match errors meaning the sandbox itself is gone (deleted, expired, ended).
+
+    The server answers 404 for a sandbox it no longer knows and the SDK does not
+    always carry the server's error code through (a dead sandbox surfaces as a
+    bare "Failed to run command. Status code: 404"), so every 404 and 410 from a
+    sandbox operation counts. The provider never issues a request that can
+    legitimately 404 on a live sandbox: file reads go through a guarded copy to a
+    path this provider just created, and command/status/log lookups only 404
+    when the pod that ran them is gone.
+    """
+    return _exception_status_code(exception) in (404, 410)
+
+
+def _expected_pod_hostname(sandbox_id: str) -> str:
+    """Pod name of a BatchSandbox's single replica; Kubernetes makes it the pod hostname."""
+    return f"{sandbox_id}-0"
+
+
+def _identity_guard(sandbox_id: str) -> str:
+    """Shell prelude that aborts unless it runs inside ``sandbox_id``'s pod.
+
+    execd runs every command through ``sh -c``, so this check executes in the
+    pod that actually received the request. Check and action cannot be split by
+    the server re-routing the sandbox in between, which is what makes it safe
+    against the stale pod IP misroute (RL-1469).
+    """
+    expected = shlex.quote(_expected_pod_hostname(sandbox_id))
+    return (
+        '__ng_pod="$(cat /etc/hostname 2>/dev/null || printf %s "$HOSTNAME")"; '
+        f'if [ "$__ng_pod" != {expected} ]; then '
+        f'echo "{MISROUTE_MARKER} expected={expected} actual=$__ng_pod" >&2; exit {MISROUTE_EXIT_CODE}; fi; '
+    )
+
+
+def _raise_if_misrouted(sandbox_id: str, result: SandboxExecResult) -> None:
+    """Turn the guard's refusal into a typed, non-retryable error."""
+    stderr = result.stderr or ""
+    if result.return_code != MISROUTE_EXIT_CODE or MISROUTE_MARKER not in stderr:
+        return
+    detail = next((line for line in stderr.splitlines() if MISROUTE_MARKER in line), stderr).strip()
+    raise SandboxMisrouteError(
+        f"Sandbox {sandbox_id!r} is not the pod that answered ({detail}); the server routed this request "
+        "to another sandbox, which means the original sandbox is gone and its pod IP was reused (RL-1469)"
+    )
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -581,6 +641,10 @@ class OpenSandboxOperationConfig:
     # unreachable sandbox hangs for the shared request timeout (tuned for long
     # submits) before failing. None falls back to that shared budget.
     status_poll_timeout_s: float | None = 10.0
+    # Make every command prove it runs in the requested sandbox and route file
+    # transfer through that guarded path. Protects against the server proxying a
+    # dead sandbox's traffic into a live one that reused its pod IP (RL-1469).
+    identity_check: bool = True
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -841,7 +905,12 @@ class OpenSandboxProvider:
             ),
             timeout=timeout_s,
         )
-        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        if self._operations.identity_check:
+            # The SDK health check only proves *some* execd answered. Prove it is
+            # this sandbox's pod before handing the handle out.
+            await self._exec(handle, "true", timeout_s=timeout_s)
+        return handle
 
     async def _await_sdk_call(
         self,
@@ -891,15 +960,22 @@ class OpenSandboxProvider:
             before_sleep=_before_sleep,
             reraise=True,
         )
-        async for attempt in retry_policy:
-            with attempt:
-                return await self._await_sdk_call(
-                    operation_factory(),
-                    operation=operation,
-                    sandbox_id=sandbox_id,
-                    timeout_s=timeout_s,
-                )
+        try:
+            async for attempt in retry_policy:
+                with attempt:
+                    return await self._await_sdk_call(
+                        operation_factory(),
+                        operation=operation,
+                        sandbox_id=sandbox_id,
+                        timeout_s=timeout_s,
+                    )
 
+        except Exception as e:
+            if _is_sandbox_gone_error(e):
+                raise SandboxEndedError(
+                    f"Sandbox {sandbox_id!r} no longer exists (during {operation}): {str(e)[:300]}"
+                ) from e
+            raise
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
 
     async def _submit_command(
@@ -1233,14 +1309,17 @@ class OpenSandboxProvider:
         get_info = getattr(handle.raw, "get_info", None)
         if get_info is None:
             return SandboxStatus.UNKNOWN
-        info = await self._await_sdk_operation(
-            get_info,
-            operation="get_info",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
+        try:
+            info = await self._await_sdk_operation(
+                get_info,
+                operation="get_info",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
+            )
+        except SandboxEndedError:
+            return SandboxStatus.STOPPED
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
 
@@ -1274,6 +1353,11 @@ class OpenSandboxProvider:
             opts_kwargs["uid"] = user
         elif isinstance(user, str) and user != "root":
             effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(user)}"
+        guarded = self._operations.identity_check
+        if guarded:
+            # Runs before any user switch so the check itself cannot fail on
+            # permissions; /etc/hostname is world-readable.
+            effective_command = _identity_guard(handle.sandbox_id) + effective_command
 
         sdk_timeout_s = (
             float(timeout_s) + 60.0
@@ -1284,15 +1368,22 @@ class OpenSandboxProvider:
         )
         effective_retries = self._command_retry_count() if retries is None else retries
 
+        def _checked(result: SandboxExecResult) -> SandboxExecResult:
+            if guarded:
+                _raise_if_misrouted(handle.sandbox_id, result)
+            return result
+
         async def _dispatch() -> SandboxExecResult:
             if self._operations.background_exec:
-                return await self._exec_background(
-                    handle,
-                    effective_command,
-                    opts_kwargs,
-                    sdk_timeout_s=sdk_timeout_s,
-                    total_timeout_s=timeout_s,
-                    retries=effective_retries,
+                return _checked(
+                    await self._exec_background(
+                        handle,
+                        effective_command,
+                        opts_kwargs,
+                        sdk_timeout_s=sdk_timeout_s,
+                        total_timeout_s=timeout_s,
+                        retries=effective_retries,
+                    )
                 )
 
             execution = await self._submit_command(
@@ -1316,7 +1407,9 @@ class OpenSandboxProvider:
             else:
                 return_code = 0
 
-            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            return _checked(
+                SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            )
 
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
@@ -1635,14 +1728,83 @@ class OpenSandboxProvider:
             else None,
         )
 
+    def _file_transfer_timeout_s(self) -> float | None:
+        return float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
-        """Upload one local file into an OpenSandbox sandbox."""
-        await self._write_file(handle, target_path, source_path.read_bytes())
+        """Upload one local file into an OpenSandbox sandbox.
+
+        With ``identity_check`` the bytes travel inside guarded commands, so a
+        misrouted upload is refused by the pod that receives it before any byte
+        lands. The raw file API cannot offer that: it writes wherever the
+        request happens to arrive. Chunks keep each command under the kernel's
+        single-argument limit for the ``sh -c`` execd spawns.
+        """
+        data = source_path.read_bytes()
+        if not self._operations.identity_check:
+            await self._write_file(handle, target_path, data)
+            return
+        quoted_target = shlex.quote(target_path)
+        quoted_parent = shlex.quote(str(PurePosixPath(target_path).parent))
+        chunks = [data[offset : offset + UPLOAD_CHUNK_BYTES] for offset in range(0, len(data), UPLOAD_CHUNK_BYTES)]
+        chunks = chunks or [b""]
+        for index, chunk in enumerate(chunks):
+            encoded = base64.b64encode(chunk).decode("ascii")
+            steps: list[str] = []
+            if index == 0:
+                steps.append(f"mkdir -p {quoted_parent}")
+            redirect = ">" if index == 0 else ">>"
+            steps.append(f"printf %s {shlex.quote(encoded)} | base64 -d {redirect} {quoted_target}")
+            if index == len(chunks) - 1:
+                # execd's file API writes uploads as 0755; keep that contract so
+                # uploaded scripts stay directly executable.
+                steps.append(f"chmod 755 {quoted_target}")
+            result = await self._exec(handle, " && ".join(steps), timeout_s=self._file_transfer_timeout_s())
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"OpenSandbox upload to {target_path!r} failed on chunk {index + 1}/{len(chunks)} "
+                    f"(exit {result.return_code}): {(result.stderr or '')[:500]}; sandbox_id={handle.sandbox_id!r}"
+                )
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one file from an OpenSandbox sandbox."""
+        """Download one file from an OpenSandbox sandbox.
+
+        With ``identity_check`` the file is first copied, under the guard, to a
+        private staging path that only this sandbox can hold; the raw read then
+        fetches that path. A misrouted request fails at the guarded copy and
+        never reads a stranger's file.
+        """
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(await self._read_file(handle, source_path))
+        if not self._operations.identity_check:
+            target_path.write_bytes(await self._read_file(handle, source_path))
+            return
+        staging_dir = f"/tmp/.nemo-gym-{handle.sandbox_id}"
+        staging_path = f"{staging_dir}/download-{uuid4().hex}"
+        copied = await self._exec(
+            handle,
+            f"mkdir -p {shlex.quote(staging_dir)} && cp {shlex.quote(source_path)} {shlex.quote(staging_path)}",
+            timeout_s=self._file_transfer_timeout_s(),
+        )
+        if copied.return_code != 0:
+            raise FileNotFoundError(
+                f"OpenSandbox download of {source_path!r} failed (exit {copied.return_code}): "
+                f"{(copied.stderr or '')[:500]}; sandbox_id={handle.sandbox_id!r}"
+            )
+        try:
+            data = await self._read_file(handle, staging_path)
+        finally:
+            try:
+                await self._exec(
+                    handle, f"rm -f {shlex.quote(staging_path)}", timeout_s=self._file_transfer_timeout_s()
+                )
+            except Exception:
+                LOGGER.debug(
+                    "Could not remove download staging file %s in sandbox %s",
+                    staging_path,
+                    handle.sandbox_id,
+                    exc_info=True,
+                )
+        target_path.write_bytes(data)
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""

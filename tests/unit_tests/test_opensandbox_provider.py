@@ -718,9 +718,12 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
 
+    # Exercises the raw SDK plumbing (verbatim commands, the file API). The
+    # identity guard rewrites both and is covered by test_opensandbox_identity_guard.
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
+        operations={"identity_check": False},
     )
     raw = FakeRaw()
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
@@ -1228,16 +1231,22 @@ async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: 
     assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
 
 
-async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
+async def test_missing_sandbox_is_reported_as_stopped_and_never_retried() -> None:
+    """A 404 means the sandbox is gone: status() says STOPPED, other operations raise SandboxEndedError.
+
+    Neither path may retry; the earlier behaviour leaked the raw SDK exception
+    and left callers to pattern-match its message.
+    """
     from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
 
     provider = opensandbox_provider.OpenSandboxProvider(
         probe={"command": None},
-        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0, "identity_check": False},
     )
     not_found = SandboxApiException("Get sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found")
     not_found.status_code = 404
     get_info_calls = 0
+    read_calls = 0
 
     class MissingRaw:
         async def get_info(self) -> Any:
@@ -1245,16 +1254,21 @@ async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None
             get_info_calls += 1
             raise not_found
 
-    with pytest.raises(SandboxApiException, match="not found"):
-        await provider.status(
-            opensandbox_provider.SandboxHandle(
-                sandbox_id="sandbox-1",
-                provider_name="opensandbox",
-                raw=MissingRaw(),
-            ),
-        )
+        class files:  # noqa: N801 - mirrors the SDK attribute
+            @staticmethod
+            async def read_bytes(source_path: str) -> bytes:
+                nonlocal read_calls
+                read_calls += 1
+                raise not_found
 
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=MissingRaw())
+
+    assert await provider.status(handle) is SandboxStatus.STOPPED
     assert get_info_calls == 1
+
+    with pytest.raises(opensandbox_provider.SandboxEndedError, match="sandbox-1"):
+        await provider._read_file(handle, "/missing")
+    assert read_calls == 1
 
 
 async def test_create_once_and_connect_after_create_error_paths(
@@ -1620,7 +1634,8 @@ def test_attribution_invalid_key_prefix_raises(key_prefix: str) -> None:
 
 async def test_connect_health_checks_by_default(fake_opensandbox_sdk: None) -> None:
     """An unchecked handle would defer the exec-daemon startup gap to the first call."""
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    # The identity probe needs a command-capable fake; it has its own tests.
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, operations={"identity_check": False})
 
     await provider.connect({"sandbox_id": "sandbox-9"})
 
@@ -1632,6 +1647,7 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     provider = opensandbox_provider.OpenSandboxProvider(
         create={"skip_health_check": True},
         probe={"command": None},
+        operations={"identity_check": False},
     )
 
     await provider.connect({"sandbox_id": "sandbox-9"})

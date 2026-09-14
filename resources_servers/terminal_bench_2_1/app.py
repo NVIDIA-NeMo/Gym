@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxEndedError, SandboxResources, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -199,6 +199,22 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
+    async def _sandbox_ended_reason(self, sandbox: AsyncSandbox) -> Optional[str]:
+        """Return why grading must be skipped, or None when the sandbox looks alive.
+
+        Only a definite terminal status skips grading. A status lookup that
+        fails or is unknown falls through: the provider's identity guard still
+        refuses to grade a pod that is not the sandbox we seeded, so treating an
+        uncertain sandbox as alive cannot grade the wrong one.
+        """
+        try:
+            status = await sandbox.status()
+        except Exception:
+            return None
+        if status in (SandboxStatus.ERROR, SandboxStatus.STOPPED):
+            return f"sandbox_ended: sandbox status is {status.value}; grading skipped"
+        return None
+
     @contextmanager
     def _patch_golden_patch_solve_sh(
         self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
@@ -269,17 +285,32 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        try:
-            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-            eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
-            )
-            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except:
-            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+        failure_reason: Optional[str] = await self._sandbox_ended_reason(eval_sandbox)
+        if failure_reason is not None:
+            # Grading a sandbox that has ended would run this task's tests in
+            # whatever pod the server routes the dead sandbox to (RL-1469).
+            print(f"Skipping TerminalBench 2.1 tests for {body.task_name}: {failure_reason}", file=stderr)
             eval_result = None
-            test_output = ""
+            test_output = failure_reason
+        else:
+            try:
+                await self._upload_folder(
+                    eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
+                )
+                eval_result = await eval_sandbox.exec(
+                    "bash /tests/test.sh",
+                    timeout_s=self.config.evaluation_timeout,
+                )
+                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+            except SandboxEndedError as e:
+                failure_reason = f"sandbox_ended: {e}"
+                print(f"Sandbox ended while grading {body.task_name}: {failure_reason}", file=stderr)
+                eval_result = None
+                test_output = failure_reason
+            except:
+                print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+                eval_result = None
+                test_output = ""
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -311,6 +342,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            failure_reason=failure_reason,
         )
 
 

@@ -66,6 +66,13 @@ sandbox:
       # A retried command the server already started runs twice; agent commands
       # are usually mutating. Raise only for idempotent workloads.
       command_retries: 0
+      # Every command first proves, inside the pod that receives it, that the pod
+      # is this sandbox (`<sandbox_id>-0`); uploads and downloads travel through
+      # that guarded path too. Defends against the server proxying a dead
+      # sandbox's traffic into a live sandbox that reused its pod IP (RL-1469).
+      # A mismatch raises SandboxMisrouteError; a deleted sandbox raises
+      # SandboxEndedError. Neither is retried.
+      identity_check: true
       close_timeout_s: 30
       # Short status/log polls instead of one long-lived SSE stream, for load
       # balancers that cap stream duration. Costs extra round trips.
