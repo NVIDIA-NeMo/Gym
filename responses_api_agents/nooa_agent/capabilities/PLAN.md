@@ -1,5 +1,10 @@
 # Plan: run NOOA capability evaluations through Gym
 
+Handoff scope update (2026-09-09): [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) is the current execution plan.
+Only the first calculate slice and its verification scaffolding are in scope. Stages 2–6 are deferred; the lifecycle
+projection choice below must be reconciled with Nikhil's newer ATIF-based stack, not treated as a settled transfer contract.
+Gym's team owns the later agent-sandbox runner integration.
+
 ## Goal
 
 Use Gym as the reproducible evaluation envelope for NOOA's model-facing capability suite. Each Gym rollout must instantiate the same NOOA agent class, invoke the same method with the same arguments, and preserve the source scorer's meaning. This creates executable regression coverage behind the NOOA–Gym adapter before its architecture is simplified.
