@@ -87,8 +87,8 @@ aa_briefcase_lite_stirrup_agent:
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,/tmp/aa_briefcase_lite/deliverables}
       # Full rollout and judging by default; use Gym overrides for diagnostics
       # or judge_only=true to reuse cached artifacts without rerunning the policy.
-      execute_only: false
-      judge_only: false
+      execute_only: ${oc.env:EXECUTE_ONLY,false}
+      judge_only: ${oc.env:JUDGE_ONLY,false}
       rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
       resources_server:
         type: resources_servers

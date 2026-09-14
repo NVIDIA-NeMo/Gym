@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
+from pydantic import TypeAdapter
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.benchmarks import _benchmark_config_paths
@@ -32,10 +33,10 @@ def resolve_config(monkeypatch, tmp_path):
     monkeypatch.setenv("AA_BRIEFCASE_LITE_DATASET_DIR", str(tmp_path / "dataset"))
     monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.invalid/v1")
     monkeypatch.setenv("JUDGE_API_KEY", "dummy")
-    # Execution modes come from Gym config; reward mode defaults to all.
+    # Test the defaults independently of the calling shell.
     monkeypatch.delenv("AA_BRIEFCASE_REWARD_MODE", raising=False)
-    monkeypatch.setenv("EXECUTE_ONLY", "true")
-    monkeypatch.setenv("JUDGE_ONLY", "true")
+    monkeypatch.delenv("EXECUTE_ONLY", raising=False)
+    monkeypatch.delenv("JUDGE_ONLY", raising=False)
 
     def resolve(*overrides):
         initial = OmegaConf.merge(
@@ -68,8 +69,8 @@ def test_benchmark_discovery_resolves_full_local_profile(resolve_config) -> None
     assert agent.datasets[0].num_repeats == 1
     assert agent.task == "aa_briefcase_lite"
     assert agent.agent_max_turns == 500
-    assert agent.execute_only is False
-    assert agent.judge_only is False
+    assert TypeAdapter(bool).validate_python(agent.execute_only) is False
+    assert TypeAdapter(bool).validate_python(agent.judge_only) is False
     assert resources.reward_mode == "all"
     assert resources.pairwise_reference_ids == ["gpt-5-5"]
     assert resources.pairwise_num_trials == 2
@@ -91,7 +92,7 @@ def test_judge_only_overrides_keep_reference_profile(resolve_config, reward_mode
     agent = get_first_server_config_dict(config, AGENT_NAME)
     resources = get_first_server_config_dict(config, RESOURCES_NAME)
 
-    assert agent.execute_only is False
+    assert TypeAdapter(bool).validate_python(agent.execute_only) is False
     assert agent.judge_only is True
     assert agent.rerun_incomplete is False
     assert resources.reward_mode == reward_mode
@@ -104,4 +105,4 @@ def test_generation_only_override(resolve_config) -> None:
     agent = get_first_server_config_dict(config, AGENT_NAME)
 
     assert agent.execute_only is True
-    assert agent.judge_only is False
+    assert TypeAdapter(bool).validate_python(agent.judge_only) is False
