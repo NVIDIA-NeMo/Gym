@@ -64,15 +64,20 @@ gdpval_resources_server:
       # multi-stage driver picks the `num_models` nearest anchors per stage.
       #
       # ANCHOR VINTAGE: Artificial Analysis GDPval-AA v2 live board, read
-      # 2026-09-09. Anchors are held FIXED in the fit, so a stale anchor shifts
+      # 2026-09-09 for the original nine, 2026-09-11 for the three Sep-2026
+      # additions (deepseek_v4_flash_0731, inkling_small, qwen35_122b). Anchors are held FIXED in the fit, so a stale anchor shifts
       # every candidate score by roughly the anchor error — the previous set was
       # 30-76 points above the current board and inflated results accordingly.
       # deepseek_v4_pro is the plain "DeepSeek V4 Pro (Reasoning, Max Effort)"
       # row (1223), NOT "DeepSeek V4 Pro 0813" (1493): the deliverables in this
       # reference set were collected 2026-07-04, before the 0813 release. Check
       # the variant, not just the family name, when refreshing.
-      # This is the ultra-v3 "9-ref no-gold" set (human_gold and gptoss_20b are
+      # This is the "12-ref no-gold" set (human_gold and gptoss_20b are
       # DELIBERATELY excluded — incomplete/missing deliverables inflate the fit).
+      # The top three anchors of the old nine-ref set stopped at 1223 while the
+      # AA board ran to 1764, so a frontier candidate was fitted by
+      # extrapolation past the ceiling; deepseek_v4_flash_0731 raises it to 1468
+      # and qwen35_122b closes the 905-992 gap.
       # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
       # the NEL /gdpval/refs/<id> container mounts, and holds that reference's
       # per-task `task_<task_id>/` deliverables. Three ways to point elsewhere:
@@ -91,9 +96,15 @@ gdpval_resources_server:
       #
       #   - one-off: ++...gdpval.reference_models.<id>.deliverables_dir=/abs/path
       reference_models:
+        deepseek_v4_flash_0731:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_flash_0731
+          elo: 1468
         deepseek_v4_pro:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro
           elo: 1223
+        inkling_small:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/inkling_small
+          elo: 1191
         glm51_fp8:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/glm51_fp8
           elo: 1181
@@ -106,6 +117,9 @@ gdpval_resources_server:
         qwen36_35b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen36_35b
           elo: 992
+        qwen35_122b:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen35_122b
+          elo: 925
         qwen35_397b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen35_397b
           elo: 905
