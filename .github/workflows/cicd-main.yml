@@ -278,8 +278,33 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  validate_codeowners_membership:
+    name: Validate CODEOWNERS membership
+    needs: [pre-flight, classify_changes]
+    # Nightly only, same reasoning as container_build/gpu_e2e_tests/provider_e2e_tests
+    # above: a departed member makes suggest-reviewers.yml's reviewer-request call
+    # fail atomically for the WHOLE suggestion batch wherever they'd be suggested, so
+    # this needs to be caught promptly on its own cadence -- not on every PR push, and
+    # not skipped for docs-only changes (CODEOWNERS membership can go stale with zero
+    # code changes).
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
+        needs.pre-flight.result == 'success' &&
+        needs.classify_changes.result == 'success'
+      }}
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@74c97d9a1241554f347f4be6557192560e266eff
+    with:
+      workflow_ref: 74c97d9a1241554f347f4be6557192560e266eff
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
+      # SLACK_TEAM_CHANNEL_WEBHOOK intentionally NOT passed: notify-failure below is
+      # the single unified alert for this whole workflow. Passing the webhook here
+      # too would fire a second, duplicate Slack alert on failure.
+
   Nemo_CICD_Test:
-    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
+    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, validate_codeowners_membership]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -295,6 +320,7 @@ jobs:
           CONTAINER_BUILD_RESULT: ${{ needs.container_build.result }}
           GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
           PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
+          CODEOWNERS_MEMBERSHIP_RESULT: ${{ needs.validate_codeowners_membership.result }}
         run: |
           echo "Event: $EVENT_NAME"
           echo "Pre-flight: $PREFLIGHT_RESULT"
@@ -303,6 +329,7 @@ jobs:
           echo "Unit tests: $UNIT_TEST_RESULT"
           echo "Container build: $CONTAINER_BUILD_RESULT"
           echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
+          echo "CODEOWNERS membership: $CODEOWNERS_MEMBERSHIP_RESULT"
           echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
@@ -329,6 +356,7 @@ jobs:
             # TEMPORARILY allow the disabled Fireworks job to be skipped.
             if [[ "$CONTAINER_BUILD_RESULT" != "success" || \
                   "$GPU_E2E_TEST_RESULT" != "success" || \
+                  "$CODEOWNERS_MEMBERSHIP_RESULT" != "success" || \
                   ( "$PROVIDER_E2E_TEST_RESULT" != "success" && \
                     "$PROVIDER_E2E_TEST_RESULT" != "skipped" ) ]]; then
               echo "One or more nightly jobs did not succeed."
@@ -360,7 +388,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, validate_codeowners_membership, Nemo_CICD_Test]
     environment: main
     # Deliberately checks github.event_name directly rather than
     # needs.classify_changes.outputs.is_nightly: classify_changes is skipped
@@ -401,4 +429,5 @@ jobs:
             • Container build: ${{ needs.container_build.result }}
             • GPU E2E tests: ${{ needs.gpu_e2e_tests.result }}
             • Provider E2E tests: ${{ needs.provider_e2e_tests.result }}
+            • CODEOWNERS membership: ${{ needs.validate_codeowners_membership.result }}
             • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
