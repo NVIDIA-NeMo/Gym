@@ -13,6 +13,10 @@ harmbench:
         input: []
         temperature: 0.0
         max_output_tokens: 1
+      # Upstream evaluate_completions.py --num_tokens: the generation is clipped to this many
+      # classifier-tokenizer tokens before classification. Set to null only for non-reasoning
+      # targets whose generation is already capped at the paper's 512 tokens.
+      generation_clip_tokens: 512
 
 harmbench_classifier:
   responses_api_models:

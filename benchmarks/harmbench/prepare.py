@@ -55,7 +55,10 @@ def _render(rows: list[dict[str, str]]) -> str:
                     "responses_create_params": {
                         "input": [{"role": "user", "content": direct_request}],
                         "temperature": 0.0,
-                        "max_output_tokens": 256,
+                        "top_p": 1.0,
+                        # HarmBench uses max_new_tokens=512 for every reported experiment
+                        # (docs/evaluation_pipeline.md, scripts/run_pipeline.py).
+                        "max_output_tokens": 512,
                     },
                     "harmbench_id": behavior_id,
                     "behavior": behavior,
