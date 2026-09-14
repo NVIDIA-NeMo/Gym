@@ -44,7 +44,7 @@ then be read as if it meant the new thing. Anything of that kind needs a
 import os
 import secrets
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -97,11 +97,71 @@ class SubmissionRecord(BaseModel):
     submitted_by: str
     benchmarks: list[BenchmarkJob]
     hostname: str | None = None
+    # Whatever the executor needs to find this submission again that the fields
+    # above cannot express -- a k8s namespace, say. Free-form because the shape
+    # is the executor's business; a reader keys off `executor` before reading it.
+    executor_metadata: dict[str, str] = {}
     schema_version: int = SCHEMA_VERSION
 
     @property
     def failed(self) -> list[BenchmarkJob]:
         return [b for b in self.benchmarks if b.job_id is None]
+
+    def dumps(self) -> str:
+        """The manifest's on-disk bytes; one spelling, so every store matches."""
+        return self.model_dump_json(indent=2) + "\n"
+
+    def write_local_index(self) -> Path | None:
+        """Record the submission on this machine, or report why not and carry on.
+
+        Best-effort by design: this runs after the jobs are queued, so raising
+        here would report a failure for work that is really running. The durable
+        copy is the manifest in the run directory.
+        """
+        path = local_index_dir() / f"{self.gym_job_id}.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.dumps(), encoding="utf-8")
+        except OSError as error:
+            print(f"Could not write the local job index at {path}: {error}", file=sys.stderr)
+            return None
+        return path
+
+    @classmethod
+    def load(cls, payload: dict) -> "SubmissionRecord":
+        """Parse a record, refusing only one written by a NEWER Gym.
+
+        Older records stay readable: fields added since take their defaults, which
+        the module docstring's compatibility rule is there to guarantee. Refusing
+        them instead would mean an upgrade silently orphaned every job already
+        submitted.
+
+        A newer record is the one case that cannot be read safely -- it may carry
+        fields whose meaning this version does not know -- so it fails, and says
+        which way round the mismatch is.
+        """
+        version = payload.get("schema_version")
+        if not isinstance(version, int):
+            raise ValueError(
+                f"Job record has no usable schema_version (got {version!r}); it was not written by `gym eval submit`."
+            )
+        if version > SCHEMA_VERSION:
+            raise ValueError(
+                f"Job record schema_version {version} was written by a newer nemo-gym; this one understands "
+                f"up to {SCHEMA_VERSION}. Upgrade nemo-gym to read it."
+            )
+        return cls.model_validate(payload)
+
+
+def utc_now() -> datetime:
+    """The clock the run directory is named from.
+
+    Here rather than in an executor because run-directory identity is this
+    module's concern, and every executor needs the same answer. A seam: tests
+    freeze it to prove two submits in the same second still get distinct
+    directories.
+    """
+    return datetime.now(timezone.utc)
 
 
 def utc_timestamp(now: datetime) -> str:
@@ -126,50 +186,3 @@ def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
     return Path(base) / "nemo-gym" / "jobs"
-
-
-def dumps(record: SubmissionRecord) -> str:
-    """The manifest's on-disk bytes; one spelling, so every store matches."""
-    return record.model_dump_json(indent=2) + "\n"
-
-
-def write_local_index(record: SubmissionRecord) -> Path | None:
-    """Record the submission locally, or report why not and carry on.
-
-    Best-effort by design: this runs after the jobs are queued, so raising here
-    would report a failure for work that is really running. The durable copy is
-    the manifest in the run directory.
-    """
-    path = local_index_dir() / f"{record.gym_job_id}.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(dumps(record), encoding="utf-8")
-    except OSError as error:
-        print(f"Could not write the local job index at {path}: {error}", file=sys.stderr)
-        return None
-    return path
-
-
-def load_record(payload: dict) -> SubmissionRecord:
-    """Parse a record, refusing only one written by a NEWER Gym.
-
-    Older records stay readable: fields added since take their defaults, which
-    the module docstring's compatibility rule is there to guarantee. Refusing
-    them instead would mean an upgrade silently orphaned every job already
-    submitted.
-
-    A newer record is the one case that cannot be read safely -- it may carry
-    fields whose meaning this version does not know -- so it fails, and says
-    which way round the mismatch is.
-    """
-    version = payload.get("schema_version")
-    if not isinstance(version, int):
-        raise ValueError(
-            f"Job record has no usable schema_version (got {version!r}); it was not written by `gym eval submit`."
-        )
-    if version > SCHEMA_VERSION:
-        raise ValueError(
-            f"Job record schema_version {version} was written by a newer nemo-gym; this one understands "
-            f"up to {SCHEMA_VERSION}. Upgrade nemo-gym to read it."
-        )
-    return SubmissionRecord.model_validate(payload)

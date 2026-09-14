@@ -29,7 +29,7 @@ from nemo_gym.orchestration.executors.slurm import (
     _sbatch_command,
     _validate_mounts,
 )
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, load_record
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord
 
 
 def test_sbatch_command_captures_the_status_of_sbatch_not_the_pipeline():
@@ -169,7 +169,7 @@ def test_run_writes_the_manifest_into_the_run_dir(tmp_path, monkeypatch):
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
     manifest = Path(record.run_dir) / MANIFEST_NAME
-    assert load_record(json.loads(manifest.read_text())) == record
+    assert SubmissionRecord.load(json.loads(manifest.read_text())) == record
 
 
 def test_run_writes_the_local_index(tmp_path, monkeypatch):
@@ -180,7 +180,7 @@ def test_run_writes_the_local_index(tmp_path, monkeypatch):
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
     index = tmp_path / "cache" / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
-    assert load_record(json.loads(index.read_text())) == record
+    assert SubmissionRecord.load(json.loads(index.read_text())) == record
 
 
 def test_run_records_a_failed_benchmark_without_disturbing_the_others(tmp_path, monkeypatch):
@@ -214,7 +214,7 @@ def test_run_records_a_benchmark_the_scheduler_never_answered_for(tmp_path, monk
 
 def test_two_runs_in_the_same_second_get_different_run_dirs(tmp_path, monkeypatch):
     frozen = datetime(2026, 9, 9, 10, 2, 3, tzinfo=timezone.utc)
-    monkeypatch.setattr(slurm_module, "_utc_now", lambda: frozen)
+    monkeypatch.setattr(slurm_module, "utc_now", lambda: frozen)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
     run_dirs = []

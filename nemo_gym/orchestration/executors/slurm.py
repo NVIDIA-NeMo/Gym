@@ -17,7 +17,7 @@ import getpass
 import re
 import shlex
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from nemo_gym import __version__
@@ -29,10 +29,9 @@ from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
     BenchmarkJob,
     SubmissionRecord,
-    dumps,
     new_gym_job_id,
+    utc_now,
     utc_timestamp,
-    write_local_index,
 )
 
 
@@ -135,12 +134,6 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-def _utc_now() -> datetime:
-    """A seam: tests freeze this to prove two submits in the same second still
-    get distinct run directories."""
-    return datetime.now(timezone.utc)
-
-
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -154,7 +147,7 @@ class SlurmExecutor(BaseExecutor):
         cluster = next(iter(config.compute))
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
-        now = _utc_now()
+        now = utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
 
@@ -174,13 +167,13 @@ class SlurmExecutor(BaseExecutor):
                 # Best-effort local copy first: it cannot itself fail the submit,
                 # and if the manifest write below fails, this is what preserves a
                 # parseable record for the by-hand recovery that error asks for.
-                write_local_index(record)
+                record.write_local_index()
                 # Inside the connection: the manifest is the durable copy, and a
                 # run directory without one is the state this all exists to remove.
                 # The jobs are already queued by now, so the error has to name them
                 # or they are stranded with no record anywhere.
                 try:
-                    conn.write_text(remote_run_dir / MANIFEST_NAME, dumps(record))
+                    conn.write_text(remote_run_dir / MANIFEST_NAME, record.dumps())
                 except Exception as error:
                     queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
                     raise RuntimeError(

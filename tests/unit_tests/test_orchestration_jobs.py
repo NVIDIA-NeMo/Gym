@@ -26,11 +26,8 @@ from nemo_gym.orchestration.jobs import (
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
-    dumps,
-    load_record,
     local_index_dir,
     new_gym_job_id,
-    write_local_index,
 )
 
 
@@ -60,7 +57,7 @@ def _record(**overrides) -> SubmissionRecord:
 
 def test_record_round_trips_through_json():
     record = _record()
-    restored = load_record(json.loads(record.model_dump_json()))
+    restored = SubmissionRecord.load(json.loads(record.model_dump_json()))
     assert restored == record
 
 
@@ -75,28 +72,28 @@ def test_load_record_accepts_an_older_record_after_an_upgrade():
     key is simply absent and the model's default fills it. Refusing this is what
     would strand every job already on disk the moment nemo-gym is upgraded.
     """
-    payload = json.loads(dumps(_record()))
+    payload = json.loads(_record().dumps())
     payload["schema_version"] = SCHEMA_VERSION - 1
     payload.pop("hostname")
 
-    record = load_record(payload)
+    record = SubmissionRecord.load(payload)
 
     assert record.schema_version == SCHEMA_VERSION - 1
     assert record.hostname is None
 
 
 def test_load_record_rejects_a_payload_with_no_version():
-    payload = json.loads(dumps(_record()))
+    payload = json.loads(_record().dumps())
     del payload["schema_version"]
     with pytest.raises(ValueError, match="no usable schema_version"):
-        load_record(payload)
+        SubmissionRecord.load(payload)
 
 
 def test_load_record_refuses_a_newer_schema_version():
     payload = json.loads(_record().model_dump_json())
     payload["schema_version"] = SCHEMA_VERSION + 1
     with pytest.raises(ValueError, match="written by a newer nemo-gym"):
-        load_record(payload)
+        SubmissionRecord.load(payload)
 
 
 def test_gym_job_id_embeds_the_utc_timestamp():
@@ -122,10 +119,10 @@ def test_write_local_index_writes_the_record(tmp_path, monkeypatch: MonkeyPatch)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     record = _record()
 
-    path = write_local_index(record)
+    path = record.write_local_index()
 
     assert path == tmp_path / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
-    assert load_record(json.loads(path.read_text())) == record
+    assert SubmissionRecord.load(json.loads(path.read_text())) == record
 
 
 def test_write_local_index_returns_none_when_it_cannot_write(tmp_path, monkeypatch: MonkeyPatch, capsys):
@@ -136,7 +133,7 @@ def test_write_local_index_returns_none_when_it_cannot_write(tmp_path, monkeypat
 
     monkeypatch.setattr(Path, "mkdir", boom)
 
-    assert write_local_index(_record()) is None
+    assert _record().write_local_index() is None
     assert "read-only file system" in capsys.readouterr().err
 
 
@@ -146,9 +143,25 @@ def test_write_local_index_writes_exactly_what_dumps_produces(tmp_path, monkeypa
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     record = _record()
 
-    path = write_local_index(record)
+    path = record.write_local_index()
 
-    assert path.read_text() == dumps(record)
+    assert path.read_text() == record.dumps()
+
+
+def test_executor_metadata_carries_whatever_an_executor_needs():
+    """The record cannot grow a field per executor, so anything one needs that
+    the shared fields cannot express goes here -- a k8s namespace, say. It round
+    trips like any other field and defaults to empty for executors with nothing
+    to add."""
+    assert _record().executor_metadata == {}
+
+    record = _record()
+    record.executor_metadata = {"namespace": "frontier-eval", "context": "prod"}
+
+    assert SubmissionRecord.load(json.loads(record.dumps())).executor_metadata == {
+        "namespace": "frontier-eval",
+        "context": "prod",
+    }
 
 
 def test_jobs_module_is_executor_agnostic():
@@ -186,4 +199,4 @@ def test_submission_record_executor_is_not_closed_over_todays_executors():
         benchmarks=[],
     )
     assert record.executor == "kubernetes"
-    assert load_record(json.loads(dumps(record))) == record
+    assert SubmissionRecord.load(json.loads(record.dumps())) == record

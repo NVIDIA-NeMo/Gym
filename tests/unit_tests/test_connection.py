@@ -20,7 +20,7 @@ from pytest import MonkeyPatch
 
 from nemo_gym.orchestration.executors import connection as connection_module
 from nemo_gym.orchestration.executors.connection import LocalConnection, SSHConnection
-from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, dumps
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
 def test_local_connection_runs_a_compound_bash_command(tmp_path):
@@ -94,13 +94,13 @@ def test_ssh_connection_writes_the_same_bytes_the_local_index_holds(monkeypatch:
     target = tmp_path / "run dir" / "gym-job.json"
     target.parent.mkdir()
 
-    script = _script_for(monkeypatch, target, dumps(record))
+    script = _script_for(monkeypatch, target, record.dumps())
     subprocess.run(["bash", "-s"], input=script, text=True, check=True)
 
-    assert target.read_bytes() == dumps(record).encode()
+    assert target.read_bytes() == record.dumps().encode()
     # And the store this is supposed to match, written the other way.
     local = tmp_path / "local.json"
-    LocalConnection().write_text(local, dumps(record))
+    LocalConnection().write_text(local, record.dumps())
     assert target.read_bytes() == local.read_bytes()
 
 
