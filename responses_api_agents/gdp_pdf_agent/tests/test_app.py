@@ -598,6 +598,7 @@ class TestRun:
             await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
 
+    @requires_example_manifest
     async def test_non_client_response_exceptions_also_score_zero(self) -> None:
         # Any other exception type (not just ClientResponseError) must be equally contained --
         # e.g. a JSON decode error or an assertion deep inside an upstream library.
