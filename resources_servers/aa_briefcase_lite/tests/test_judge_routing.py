@@ -27,7 +27,7 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
         (
             "claude-opus-4.8",
             "aws/anthropic/bedrock-claude-opus-4-8",
-            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}, "max_tokens": 65536},
+            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}, "max_tokens": 32768},
             {},
         ),
         (
