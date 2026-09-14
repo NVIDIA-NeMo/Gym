@@ -170,6 +170,12 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
             self.task_env_config.docker_image,
             json.loads(self._compose_image_configs.read_text()),
         )
+        if "opensandbox" in self._sandbox_provider:
+            for service in document["services"].values():
+                if service.get("shm_size") is not None:
+                    # Provision tmpfs before startup; configure_runtime still
+                    # verifies the exact size without needing a root remount.
+                    service.setdefault("labels", {})["nemo.nvidia.com/shm"] = str(service["shm_size"])
         output_dir = self.trial_paths.trial_dir / "sandbox"
         output_dir.mkdir(parents=True, exist_ok=True)
         compose_file = output_dir / f"compose-{uuid4().hex}.yaml"
