@@ -1,10 +1,15 @@
 #!/bin/bash
 
+GYM_MODEL_PARAMS=(
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
+)
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
-    --gpu-memory-utilization 0.9
+    --gpu-memory-utilization 0.85
     --distributed-executor-backend mp
     --data-parallel-backend mp
     --enable-auto-tool-choice
@@ -12,9 +17,9 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --enable-chunked-prefill
     --enable-prefix-caching
+    --max-model-len 262144
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
-    --no-async-scheduling
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32

@@ -48,6 +48,7 @@ class TestPrintRichTable:
     def test_uses_default_console_on_tty(self) -> None:
         fake_console = MagicMock()
         fake_console.is_terminal = True
+        fake_console.file.isatty.return_value = True
         # `Console` is imported inside the function from `rich.console`, so patch it there.
         with patch("rich.console.Console", return_value=fake_console) as console_cls:
             table = _long_table()
@@ -57,9 +58,11 @@ class TestPrintRichTable:
         console_cls.assert_called_once_with()
         fake_console.print.assert_called_once_with(table)
 
-    def test_not_truncated_regardless_of_ambient_width(self, capsys, monkeypatch) -> None:
-        # Rich derives a non-TTY console's width from COLUMNS (falling back to 80). Whatever that
-        # ambient width is, the table must render at its natural width, never truncated to fit.
+    def test_not_truncated_when_force_color_misclassifies_pipe(self, capsys, monkeypatch) -> None:
+        # Rich treats FORCE_COLOR as enabled based on presence alone.
+        # TERM=dumb then ignores a requested width unless the height is also explicit.
+        monkeypatch.setenv("FORCE_COLOR", "0")
+        monkeypatch.setenv("TERM", "dumb")
         monkeypatch.setenv("COLUMNS", "10")
         print_rich_table(_long_table())
         out = capsys.readouterr().out

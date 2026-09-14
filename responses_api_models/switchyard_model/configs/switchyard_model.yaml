@@ -1,0 +1,63 @@
+# Route Gym model calls through a Switchyard proxy, so any benchmark Gym supports can be run
+# against a router.
+#
+# Gym hosts the proxy for you, in-process. Point deployment at a native Switchyard TOML
+# deployment -- the llm_clients, targets, and routes the proxy serves -- and run:
+#
+#   gym eval run --benchmark <name> --model-type switchyard_model \
+#     ++policy_model.responses_api_models.switchyard_model.deployment=/path/to/routes.toml
+#
+# Hosting uses the native server that ships with this server's nemo-switchyard dependency; there
+# is no separate process to install or manage. The proxy starts when this server starts and stops
+# when it exits.
+#
+# To attach to a proxy you already run instead -- to pin a specific Switchyard build, or to share
+# one instance across servers -- set switchyard_base_url and deployment is not needed:
+#
+#   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
+policy_model:
+  responses_api_models:
+    switchyard_model:
+      entrypoint: app.py
+
+      # The native TOML deployment the hosted proxy serves. Required unless switchyard_base_url
+      # is set.
+      deployment: ${oc.env:SWITCHYARD_DEPLOYMENT,null}
+
+      # Route name to request. Switchyard maps it to a concrete target; the model that actually
+      # served each call comes back on the response.
+      switchyard_model: ${policy_model_name}
+
+      # Set to attach to an already-running proxy instead of hosting one.
+      switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
+      switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
+
+      # The hosted proxy binds loopback; this server is the network-facing piece.
+      # null picks a free port that does not collide with Gym's own servers.
+      proxy_port: null
+
+      # Gym's rollout-attempt id is sent as Switchyard's opaque session id, so routing decisions
+      # and costs can be joined back to the rollout that produced them. x-switchyard-session-id is
+      # the name the native server reads into routing metadata; add proxy_x_session_id when
+      # attaching to a switchyard-server running with --routing-log-file, whose session log keys
+      # on that name.
+      session_id_headers:
+        - x-switchyard-session-id
+      # forward_session_id defaults to true, and the id only exists when observability or token
+      # capture is on -- without one the server warns and sends nothing. Deliberately NOT set
+      # here: an explicitly set true is a promise, and the server refuses to start when it
+      # cannot keep it.
+
+      # Directory for this run's routing-condition record: a provenance manifest at startup
+      # (route, deployment hash + archived contents, nemo-switchyard version) and a /v1/stats
+      # snapshot at shutdown. Use one directory per run; null disables.
+      condition_dir: ${oc.env:SWITCHYARD_CONDITION_DIR,null}
+
+      # Identity of an attached proxy, copied verbatim into the condition manifest -- Gym cannot
+      # see what an external proxy runs, so its operator says (e.g. switchyard_commit, the
+      # deployment's hash). Ignored when hosting.
+      proxy_provenance: {}
+
+      extra_body: {}
+      default_headers: {}
+      max_concurrent_requests: null

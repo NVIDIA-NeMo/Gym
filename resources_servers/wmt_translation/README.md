@@ -51,18 +51,18 @@ original generation text stored in rollout output is not modified.
 > quality is a corpus-level score, not a per-task correctness probability,
 > so the Tier 1 pass@k template in `migrate-benchmark` doesn't apply.
 
-## Per-sample reward + per-row COMET
+## Per-sample reward + batched COMET
 
 `verify()` reports both `sentence_spbleu` and `sentence_chrf`, and returns
 `sentence_chrf(generation, [reference]) / 100` as the `reward` field.
 `compute_metrics()` reports both metrics at corpus level.
 
-When `compute_comet: true`, `verify()` also dispatches a per-row score
-request to the persistent xCOMET-XXL actor pool and awaits the result
-before returning. Each rollout in `rollouts.jsonl` therefore carries
-its own `comet_score` (or `None` when the model produced an empty
-generation), and `compute_metrics()` aggregates those per-row scores
-into per-pair / cross-pair means and std-dev keys.
+When `compute_comet: true`, `verify()` leaves `comet_score` unset.
+`compute_metrics()` then fills missing scores with batched xCOMET-XXL
+`predict` calls (`comet_batch_size` triples per extra_gpu actor, one
+wave of `comet_num_shards` actors at a time) and checkpoints
+`evaluator_rollouts.jsonl` after each wave. Already-scored resume rows
+are skipped; empty generations stay `None`.
 
 When `language_consistency_backend` is configured, `verify()` also computes a
 per-row `language_consistency_score` in-process. WMT24++ selects the
@@ -87,11 +87,9 @@ scale). Each pair is printed with its score, ordered from lowest to highest.
 
 When `compute_comet: true`, `_ensure_comet_actors()` lazily spawns
 `comet_num_shards` Ray actors (one per GPU on the extra_gpu node) on the
-first `verify()` call. Each actor loads `Unbabel/XCOMET-XXL` once in
-`__init__` and serves score requests from the resident model — no
-per-call cold-load. `verify()` round-robins requests across the pool
-under a small lock and awaits the future inline so per-row scoring is
-interleaved with rollout collection.
+first `compute_metrics()` call that still has unscored rows. Each actor
+loads `Unbabel/XCOMET-XXL` once in `__init__` and serves score requests
+from the resident model — no per-call cold-load.
 
 The checkpoint and its xlm-roberta-xxl tokenizer are resolved via
 `comet.download_model()` and `load_from_checkpoint()`, both of which hit
@@ -99,6 +97,12 @@ HF_HOME. The benchmark prepare step (`benchmarks/wmt24pp/prepare.py`)
 pre-populates the cache so actors initialize fully offline; if the cache
 is missing, the first actor falls back to fetching from HF Hub on
 startup.
+
+By default each actor sets `py_executable` to a mirrored copy of the
+resources-server uv Python so remote workers can import the same
+packages. Set `comet_use_worker_python: true` when the extra_gpu worker
+already has the COMET runtime on its process Python and should inherit
+that interpreter instead.
 
 ## Example usage
 
@@ -136,6 +140,8 @@ COMET actor pool) and launches Gym in one shot, see the
 | `comet_model`       | `Unbabel/XCOMET-XXL`  | HF repo passed to `comet.download_model`                        |
 | `comet_batch_size`  | `16`                  | Batch size for `model.predict`                                  |
 | `comet_num_shards`  | `8`                   | Number of CometActors in the pool; cap at the extra node's GPU count |
+| `comet_use_worker_python` | `false`          | Inherit the extra_gpu worker process Python instead of mirroring uv Python |
+| `language_consistency_backend` | `null`        | Optional per-rollout language-consistency backend |
 | `language_consistency_warning_threshold` | `50.0` | Warn for source-target pairs below this mean 0–100 language-consistency score |
 | `strip_reasoning`   | `true`                | Drop a `<think>...</think>` preamble before scoring             |
 

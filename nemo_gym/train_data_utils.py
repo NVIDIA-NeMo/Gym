@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
+from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
@@ -29,8 +31,8 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
-    AgentServerRef,
     BaseNeMoGymCLIConfig,
+    BenchmarkDatasetConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
@@ -40,6 +42,7 @@ from nemo_gym.config_types import (
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
 )
@@ -47,6 +50,12 @@ from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.task_data import (
+    TaskDataSchemaError,
+    TaskDataValidator,
+    find_server_dir,
+    load_task_data_schema,
+)
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -79,6 +88,23 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
     )
+    task_data_validation: Literal["off", "warn", "error", "auto"] = Field(
+        default="auto",
+        description=(
+            "Validate each dataset row against the owning server's task_data.py schema during "
+            "collation. 'warn' prints a per-file report, 'error' fails collation on schema "
+            "violations, 'off' skips validation. The default 'auto' resolves to 'error' in "
+            "example_validation mode (the repo's PR gate, where all committed data is known "
+            "clean) and 'warn' in train_preparation mode (user datasets must not break "
+            "mid-pipeline). Servers without a task_data.py are always skipped."
+        ),
+    )
+
+    @property
+    def effective_task_data_validation(self) -> str:
+        if self.task_data_validation != "auto":
+            return self.task_data_validation
+        return "error" if self.mode == "example_validation" else "warn"
 
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:
@@ -360,9 +386,25 @@ class TrainDataProcessor(BaseModel):
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
 
+        # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
+        # the task schema and verifier) or by agents (self-contained environments that verify
+        # in-process, e.g. tau2 — and, transitionally, legacy configs that have not moved their
+        # datasets yet). Model servers cannot declare datasets.
         agent_configs: List[ServerInstanceConfig] = [
             c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_agents"
         ]
+        declaring_configs: List[ServerInstanceConfig] = [
+            c for c in server_instance_configs if c.SERVER_TYPE in ("responses_api_agents", "resources_servers")
+        ]
+        model_configs_with_data = [
+            c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_models" and c.datasets
+        ]
+        if model_configs_with_data:
+            raise ValueError(
+                "Datasets cannot be declared on model servers: "
+                f"{sorted(c.name for c in model_configs_with_data)}. Declare them on the resources "
+                "server that owns their task schema (or on the agent for self-contained environments)."
+            )
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in server_instance_configs])
         print(
@@ -371,11 +413,16 @@ class TrainDataProcessor(BaseModel):
 
         agent_configs_with_data: List[ServerInstanceConfig] = []
         agent_configs_without_data: List[ServerInstanceConfig] = []
-        for agent_config in agent_configs:
+        for agent_config in declaring_configs:
             if agent_config.datasets:
                 agent_configs_with_data.append(agent_config)
-            else:
+            elif agent_config.SERVER_TYPE == "responses_api_agents":
                 agent_configs_without_data.append(agent_config)
+
+        # NOTE(dataset-decoupling): the deprecation warning for datasets declared on agents that
+        # reference a resources server ships with the config migration PR, not here — otherwise
+        # every un-migrated in-repo config would warn about a move the migration performs anyway.
+        # Until then both declaration homes are equally supported.
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
         print(
@@ -465,6 +512,13 @@ class TrainDataProcessor(BaseModel):
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
+                if not isinstance(d, DatasetConfig):
+                    # Benchmark datasets have no registry identifiers; their file comes from
+                    # their prepare_script (`gym eval prepare`), not a download.
+                    raise ValueError(
+                        f"Benchmark dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
+                        f"`gym eval prepare` (its prepare_script is {d.prepare_script}) before collating."
+                    )
                 if d.gitlab_identifier and d.huggingface_identifier:
                     backend = config.data_source
                 elif not d.gitlab_identifier:
@@ -648,7 +702,9 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
+                # The agent: pin is routing config, not dataset identity; excluding it keeps
+                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
+                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
@@ -702,12 +758,71 @@ This could be due to a change in how metrics are calculated, leading to outdated
     # Collate samples
     ########################################
 
+    @staticmethod
+    def _owning_resources_server_impl(
+        c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The resources-server implementation (directory) that owns a declaring instance's data.
+
+        Datasets declared by a resources server belong to its own implementation; datasets
+        declared by an agent belong to the resources server the agent references. Self-contained
+        agents (no resources_server reference) return None here; the validator lookup then falls
+        back to the agent's own directory.
+        """
+        if c.SERVER_TYPE == "resources_servers":
+            return next(iter(c.resources_servers))
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        inner = c.get_inner_run_server_config()
+        ref = getattr(inner, "resources_server", None)
+        rs_name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
+        if not isinstance(rs_name, str):
+            return None
+        for other in server_instance_configs:
+            if other.SERVER_TYPE == "resources_servers" and other.name == rs_name:
+                return next(iter(other.resources_servers))
+        return None
+
+    @classmethod
+    def _task_data_validator_for(
+        cls,
+        c: ServerInstanceConfig,
+        d: Union[DatasetConfig, BenchmarkDatasetConfig],
+        server_instance_configs: List[ServerInstanceConfig],
+    ) -> Optional[TaskDataValidator]:
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        base_folder = "resources_servers"
+        if impl_key is None:
+            # No resources server owns this data. A self-contained agent (one that declares no
+            # resources_server reference at all) may own a schema itself, under
+            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
+            # dangling is skipped: its schema home is the (missing) resources server.
+            if c.SERVER_TYPE != "responses_api_agents":
+                return None
+            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+                return None
+            impl_key = next(iter(c.responses_api_agents))
+            base_folder = "responses_api_agents"
+        server_dir = find_server_dir(impl_key, base_folder=base_folder)
+        if server_dir is None:
+            return None
+        try:
+            adapter = load_task_data_schema(server_dir)
+        except TaskDataSchemaError as e:
+            warnings.warn(f"Skipping task_data validation for {impl_key}: {e}", stacklevel=2)
+            return None
+        if adapter is None:
+            return None
+        return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
+
     def _collate_samples_single_type(
         self,
         type: DatasetType,
         server_instance_configs: List[ServerInstanceConfig],
+        task_data_validation: str = "warn",
     ) -> List[Path]:
         paths_to_collate = []
+        used_prepare_paths: set[Path] = set()
         for c in server_instance_configs:
             for d in c.datasets:
                 if d.type != type:
@@ -718,21 +833,65 @@ This could be due to a change in how metrics are calculated, leading to outdated
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
                 data_path = Path(d.jsonl_fpath)
-                prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
+                # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
+                # file (previously a second declaration silently truncated the first, so all copies
+                # carried the last declarer's stamp). Candidates are tried until one is unused, so
+                # repeats WITHIN one instance also stay distinct: bare stem, then instance-
+                # qualified, then instance+dataset-qualified, then numbered.
+                candidates = chain(
+                    (
+                        data_path.with_name(f"{data_path.stem}_prepare.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.jsonl"),
+                    ),
+                    (data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.{k}.jsonl") for k in count(2)),
+                )
+                prepare_path = next(p for p in candidates if p not in used_prepare_paths)
+                used_prepare_paths.add(prepare_path)
                 # Create the artifact dir if needed (the prepared file is written next to the
                 # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # The routing stamp: task_source names the declaring instance; the agent is
+                # resolved from it at dispatch time. Collated output carries NO agent_ref — the
+                # agent is a run-time choice, never part of the data. Incoming rows that still
+                # carry a legacy agent_ref get it stripped (with one warning per file): routing
+                # for this dataset comes from the declaration, and passing the stale field
+                # through would leak the old coupling into the clean format.
+                legacy_agent_ref_rows = 0
+                validator = None
+                if task_data_validation != "off":
+                    validator = self._task_data_validator_for(c, d, server_instance_configs)
                 with open(prepare_path, "w") as target:
-                    for line in self._iter_dataset_lines(d):
-                        d = json.loads(line)
+                    for row_index, line in enumerate(self._iter_dataset_lines(d)):
+                        row = json.loads(line)
 
                         if prompt_cfg:
-                            validate_prompt_compatibility([d], prompt_cfg)
-                            d = apply_prompt_to_row(d, prompt_cfg)
+                            validate_prompt_compatibility([row], prompt_cfg)
+                            row = apply_prompt_to_row(row, prompt_cfg)
 
-                        d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
-                        target.write(f"{json.dumps(d)}\n")
+                        if row.pop(AGENT_REF_KEY, None) is not None:
+                            legacy_agent_ref_rows += 1
+                        row[TASK_SOURCE_KEY_NAME] = c.name
+                        # num_repeats duplicates each line consecutively; validate only the first
+                        # copy so reports count each source row once, with its jsonl line index.
+                        if validator is not None and row_index % d.num_repeats == 0:
+                            validator.validate_row(row_index // d.num_repeats, row)
+                        target.write(f"{json.dumps(row)}\n")
 
+                if validator is not None and (not validator.report.clean or validator.report.unknown_keys):
+                    summary = validator.report.summary()
+                    if task_data_validation == "error" and not validator.report.clean:
+                        raise ValueError(summary)
+                    print(f"[task_data validation]\n{summary}")
+
+                if legacy_agent_ref_rows:
+                    warnings.warn(
+                        f"{d.jsonl_fpath}: stripped legacy agent_ref from {legacy_agent_ref_rows} rows "
+                        "(deprecated in source datasets; routing comes from the config declaration).",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                 paths_to_collate.append(prepare_path)
 
         return paths_to_collate
@@ -758,7 +917,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
+                # The agent: pin is routing config, not dataset identity; excluding it keeps
+                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
+                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
@@ -781,6 +942,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             paths_to_collate = self._collate_samples_single_type(
                 type=type,
                 server_instance_configs=server_instance_configs,
+                task_data_validation=config.effective_task_data_validation,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

@@ -128,6 +128,13 @@ class TestDiscoverEnvironments:
 
         assert set(_discover_environments_in_dir(envs_dir)) == {"real"}
 
+    def test_ignores_tombstone_directories(self, tmp_path: Path) -> None:
+        envs_dir = tmp_path / "environments"
+        manifest_path = _write_manifest(tmp_path, "environments", "moved", _manifest("moved"))
+        manifest_path.parent.joinpath(registry_module.ENVIRONMENT_TOMBSTONE_FILENAME).write_text("replacement\n")
+
+        assert _discover_environments_in_dir(envs_dir) == {}
+
     def test_unparseable_or_metadataless_configs_still_discovered(self, tmp_path: Path) -> None:
         # Configs without a parseable resources_servers block (or malformed YAML) must still be
         # discovered by name, just with no description/domain — never crash discovery.

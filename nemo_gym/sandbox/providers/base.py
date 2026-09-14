@@ -311,6 +311,13 @@ class SandboxPtySession(Protocol):
         """Block until the process exits and return its exit code."""
         ...
 
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the transport only for brief completion
+        polls; returns ``(merged output, exit code or None)``. The server
+        retains a bounded window of output between polls, and exceeding it
+        raises rather than returning truncated output."""
+        ...
+
     async def close(self) -> None:
         """Idempotent: release local resources; a session this client created
         is also ended, while an attached one is merely detached and lives on

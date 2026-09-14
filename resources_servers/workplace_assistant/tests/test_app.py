@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from fastapi import Request
-from pytest import fixture
+from pytest import fixture, raises
 
 from nemo_gym.base_resources_server import BaseSeedSessionRequest
 from nemo_gym.openai_utils import (
@@ -1254,12 +1254,9 @@ class TestApp:
         ]
         mock_email_df = pd.DataFrame(mock_email_data)
 
-        # Seed session
-        resources_server = self.init_server(config)
         session_id = "test_session_company_dir"
         mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
         mock_request_with_session = Request(scope=mock_scope)
-        await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
 
         with (
             patch(
@@ -1274,6 +1271,8 @@ class TestApp:
             mock_email_csv.return_value = mock_email_df
 
             resources_server = self.init_server(config)
+            await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
+            assert session_id in resources_server.session_id_to_tool_env
 
             HARDCODED_CURRENT_TIME = pd.to_datetime("2023-11-30T23:59:00")
             SYS_PROMPT = (
@@ -1381,9 +1380,29 @@ class TestApp:
                 id="0",
             )
 
-            verification_response = await resources_server.verify(verify_request)
+            verification_response = await resources_server.verify(mock_request_with_session, verify_request)
 
             assert verification_response.reward == 1.0
+            assert session_id not in resources_server.session_id_to_tool_env
+
+    async def test_verify_cleans_up_session_when_scoring_fails(self, config: WorkbenchResourcesServerConfig) -> None:
+        resources_server = self.init_server(config)
+        session_id = "test_session_scoring_failure"
+        mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
+        mock_request_with_session = Request(scope=mock_scope)
+        await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
+
+        verify_request = MagicMock()
+        verify_request.ground_truth = []
+        verify_request.response.output = []
+
+        with (
+            patch("resources_servers.workplace_assistant.app.is_correct", side_effect=RuntimeError("scoring failed")),
+            raises(RuntimeError, match="scoring failed"),
+        ):
+            await resources_server.verify(mock_request_with_session, verify_request)
+
+        assert session_id not in resources_server.session_id_to_tool_env
 
     async def test_stateful_email_deletion_and_fetch(self, config: WorkbenchResourcesServerConfig) -> None:
         """
@@ -1578,13 +1597,20 @@ class TestApp:
                 id="1",
             )
 
-            verification_response = await resources_server.verify(verify_request)
+            session_id = "test_session_stateful_email"
+            mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
+            mock_request_with_session = Request(scope=mock_scope)
+            await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
+            assert session_id in resources_server.session_id_to_tool_env
+
+            verification_response = await resources_server.verify(mock_request_with_session, verify_request)
 
             # The reward should be 1.0 because the predicted function calls in our
             # crafted `response` object exactly match the `ground_truth`.
             assert verification_response.reward == 1.0, (
                 f"Verification failed with reward {verification_response.reward}"
             )
+            assert session_id not in resources_server.session_id_to_tool_env
 
     async def test_extra_arguments_error_handling(self, config: WorkbenchResourcesServerConfig) -> None:
         """

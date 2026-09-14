@@ -16,10 +16,10 @@
 
 `run()` used to log `[browsecomp][abort]` and re-raise. That makes /run return 500, which
 the collector treats as fatal (`raise_for_status` in nemo_gym/rollout_collection.py), so a
-single bad sample kills every remaining one. It cost two full 8-node allocations:
+single bad sample kills every remaining one. It cost two full multi-node allocations:
 
-  * one run died at  34/400 (malformed tool-call JSON, fixed separately)
-  * one run died at 167/400 (a 500 out of the agent's own /v1/responses)
+  * one run died early (malformed tool-call JSON, fixed separately)
+  * one run died mid-way (a 500 out of the agent's own /v1/responses)
 
 So the sample is now scored 0 and the error is carried on the response as `agent_error`,
 keeping the failure COUNTABLE in the results rather than silently indistinguishable from a
@@ -216,8 +216,8 @@ async def test_contained_for_any_server_error(status: int) -> None:
 class TestInfrastructureFailureIsRetryableNotScored:
     """Containing a HARNESS failure must not also record it as a result.
 
-    Job 5877505 lost 198 samples this way and its Exa twin 304. The 4h cluster
-    cap forced a chain-hop; `gym eval run` restarted its own FastAPI servers and
+    Two runs lost hundreds of samples each this way. A cluster walltime cap
+    forced a chain-hop; `gym eval run` restarted its own FastAPI servers and
     the agent was answering ~54s before policy_model finished booting. Every
     remaining sample took a 500 and was written to the MAIN rollouts jsonl as a
     scored zero, where `_load_from_cache` treats it as permanently done -- so no
