@@ -1547,7 +1547,14 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if input_rows and not persisted_results:
+        # Opted-in failure classes are scored outcomes, including runs where
+        # every rollout exhausted its turn budget and only sidecars were written.
+        counted = _failure_rows_counted_as_zero(
+            [failures_fpath],
+            config.count_failure_classes_as_zero,
+            {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
+        )
+        if input_rows and not persisted_results and not counted:
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
@@ -1565,10 +1572,8 @@ class RolloutCollectionHelper(BaseModel):
         persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics using only the
-        # rows written to the main rollouts jsonl so runtime aggregation matches
+        # Aggregate main results and opted-in sidecar outcomes, matching
         # `gym eval aggregate`.
-        counted: List[Dict] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1577,11 +1582,6 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted[:] = _failure_rows_counted_as_zero(
-                [failures_fpath],
-                config.count_failure_classes_as_zero,
-                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
-            )
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"

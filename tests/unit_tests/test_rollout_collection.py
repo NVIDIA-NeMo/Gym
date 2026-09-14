@@ -1130,6 +1130,57 @@ class TestRolloutCollection:
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
 
+    @pytest.mark.parametrize("disable_aggregation", [False, True])
+    async def test_run_from_config_counts_an_entirely_budget_exhausted_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        disable_aggregation: bool,
+    ) -> None:
+        """Configured budget zeros remain scored outcomes even with no main-file results."""
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_path = tmp_path / "output.jsonl"
+        aggregated = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(
+                    200,
+                    {"reward": 0.0, NG_FAILURE_CLASS_KEY: "turn_budget_exhausted", "_ng_failure_terminal": True},
+                )
+            aggregated.extend(dict(row) for row in json.verify_responses)
+            return FakeResponse(200, compute_aggregate_metrics(aggregated).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_path),
+                output_jsonl_fpath=str(output_path),
+                count_failure_classes_as_zero=["turn_budget_exhausted"],
+                disable_aggregation=disable_aggregation,
+                disable_health_check=True,
+            )
+        )
+
+        assert output_path.read_bytes() == b""
+        failures = [orjson.loads(line) for line in _failures_path_for(output_path).read_bytes().splitlines()]
+        assert len(failures) == 1
+        assert failures[0][NG_FAILURE_CLASS_KEY] == "turn_budget_exhausted"
+        assert failures[0]["_ng_failure_terminal"] is True
+        metrics_path = output_path.with_stem("output_aggregate_metrics").with_suffix(".json")
+        if disable_aggregation:
+            assert not aggregated
+            assert not metrics_path.exists()
+        else:
+            assert len(aggregated) == 1
+            assert aggregated[0]["reward"] == 0.0
+            assert not any(key.startswith("_ng_failure_") for key in aggregated[0])
+            assert orjson.loads(metrics_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+
     async def test_run_from_config_fails_when_no_rollout_produced_a_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
