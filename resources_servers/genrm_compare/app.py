@@ -48,12 +48,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
-    GROUP_ATTEMPT_KEY_NAME,
-    GROUP_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -69,6 +64,9 @@ from resources_servers.genrm_compare.utils import (
 
 
 logger = logging.getLogger(__name__)
+
+GROUP_ID_KEY_NAME = "_ng_group_id"
+GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 
 
 class CohortEvaluationError(RuntimeError):

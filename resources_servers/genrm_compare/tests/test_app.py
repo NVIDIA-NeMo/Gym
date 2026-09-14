@@ -24,7 +24,6 @@ from pytest import MonkeyPatch, approx
 import resources_servers.genrm_compare.app
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import (
-    GROUP_ATTEMPT_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -38,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from resources_servers.genrm_compare.app import (
+    GROUP_ATTEMPT_KEY_NAME,
     GenRMCompareConfig,
     GenRMCompareRequest,
     GenRMCompareResourcesServer,
