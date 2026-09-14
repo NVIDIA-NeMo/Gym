@@ -32,7 +32,8 @@ aa_briefcase_lite_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
-      dataset_dir: ${oc.env:AA_BRIEFCASE_LITE_DATASET_DIR}
+      # Allow benchmark discovery before dataset setup; the server requires a path at startup.
+      dataset_dir: ${oc.env:AA_BRIEFCASE_LITE_DATASET_DIR,null}
       # binary: released A/C prompt and checks; pairwise: local AQ/P comparison;
       # all: both, with a non-official convenience scalar averaging the two.
       reward_mode: ${oc.env:AA_BRIEFCASE_REWARD_MODE,all}
