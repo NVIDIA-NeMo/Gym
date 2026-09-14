@@ -253,3 +253,26 @@ def test_verifier_script_is_staged_into_the_image():
     text = _DEF.read_text(encoding="utf-8")
     assert "verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py" in text
     assert (_CONTAINERS / "verify_gdpval_sandbox.py").exists()
+
+
+def test_prompt_advertises_the_working_dir_the_provider_actually_uses():
+    """The prompt's example path must be this sandbox's, not the reference one.
+
+    The published Artificial Analysis prompt says `/home/user`, because their
+    sandbox runs as a non-root user. GDPValTask constructs the provider with
+    `working_dir="/root"`, and every command is prefixed with a `cd` to it, so
+    an example rooted at /home/user sends the model to a directory that does
+    not exist here.
+    """
+    import re
+
+    task_src = (Path(__file__).resolve().parents[1] / "tasks" / "gdpval.py").read_text(encoding="utf-8")
+    m = re.search(r'working_dir\s*=\s*"([^"]+)"', task_src)
+    assert m, "could not find the working_dir the GDPval provider is constructed with"
+    working_dir = m.group(1)
+
+    prompt = _prompt()
+    assert working_dir in prompt, f"prompt never names the real working dir {working_dir}"
+    assert "/home/user" not in prompt, (
+        f"prompt carries the reference sandbox's /home/user path; this sandbox uses {working_dir}"
+    )
