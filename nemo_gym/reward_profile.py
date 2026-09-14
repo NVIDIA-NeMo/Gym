@@ -863,10 +863,16 @@ def select_measured(
     Three things happen. Masked samples leave the quality set, because their reward is not
     a measurement of the evaluated system. The flag itself is stripped from what remains:
     it is a flag, not a measurement, and the profiler would otherwise coerce it to an int
-    and publish `mean/mask_sample` alongside real metrics. And the matching input rows are
-    dropped alongside their results, so the two stay aligned -- a masked rollout is absent
-    from the quality set but was never missing from the collection, and must not be
-    reported as an incomplete run or require ``allow_partial_rollouts`` to profile.
+    and publish `mean/mask_sample` alongside real metrics. And the input rows of exactly
+    those masked results are dropped with them, so the two stay aligned -- a masked rollout
+    is absent from the quality set but was never missing from the collection, and must not
+    be reported as an incomplete run or require ``allow_partial_rollouts`` to profile.
+
+    Only the masked pairs are removed, never "keep what was scored": a row whose result is
+    genuinely missing has to survive into the quality set so alignment still reports the
+    collection as partial. This function narrows what is measured; it does not decide
+    whether the collection was complete, and callers that enforce completeness must
+    validate the original rows and results before calling it.
 
     Masked rows are returned rather than discarded: completion and coverage accounting
     still has to see them.
@@ -878,9 +884,43 @@ def select_measured(
     if not masked:
         return rows, measured_results, masked, coverage
 
-    measured_keys = {_rollout_key(vr) for vr in scored}
-    measured_rows = [row for row in rows if _rollout_key(row) in measured_keys]
+    masked_keys = {_rollout_key(vr) for vr in masked}
+    measured_rows = [row for row in rows if _rollout_key(row) not in masked_keys]
     return measured_rows, measured_results, masked, coverage
+
+
+def coverage_by_agent(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Coverage for each agent, computed from that agent's own records.
+
+    A run-wide coverage block copied onto every agent tells each of them how much *the run*
+    masked, which reads as that agent's own loss. An agent that masked nothing would carry
+    another agent's count.
+
+    Agents are keyed by name; an agent whose every result was masked still gets an entry,
+    so a caller can keep reporting it after the quality metrics drop it.
+    """
+    agent_of_key = {
+        _rollout_key(row): (row.get("agent_ref") or {}).get("name")
+        for row in rows
+        if (row.get("agent_ref") or {}).get("name") is not None
+    }
+
+    per_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for vr in results:
+        name = agent_of_key.get(_rollout_key(vr))
+        if name is not None:
+            per_agent[name].append(vr)
+
+    coverage: Dict[str, Dict[str, Any]] = {}
+    for name, records in per_agent.items():
+        scored, masked = _partition_on_mask(records)
+        agent_coverage = _coverage_metrics(records, scored, masked)
+        if agent_coverage:
+            coverage[name] = agent_coverage
+    return coverage
 
 
 def _coverage_metrics(
