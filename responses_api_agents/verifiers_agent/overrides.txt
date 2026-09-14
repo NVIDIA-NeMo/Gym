@@ -1,0 +1,11 @@
+# verifiers v0.3.1 (this agent's harness) requires openai>=2.9.0, but nemo-gym pins
+# openai<=2.7.2 on this branch, so the two cannot resolve together. Keep the newer
+# SDK isolated to this agent's venv; other Gym processes retain Gym's pin.
+# 2.44.0 is the version dmolinari/ab-evals was validated with on main.
+openai==2.44.0
+# uv --override replaces every declared constraint on openai, including the floor
+# that openai-agents (pulled in by verifiers) declares, so the resolver would pair
+# openai 2.44.0 with the newest openai-agents, which imports symbols only present
+# in openai 3.x and fails at import time. 0.18.1 is what a plain openai==2.44.0
+# constraint resolves to; bump the two together.
+openai-agents==0.18.1
