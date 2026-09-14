@@ -39,7 +39,9 @@ HF_SPLIT = "train"
 # a prompt, test, canonical solution, entry point or audit flag that keeps 200 rows
 # would silently change what is measured and move every score with no failure at all.
 # This is the snapshot every number and control in the READMEs was produced against.
-HF_REVISION = "9afb3a95c7fa8e470119cf6f74b44ec735c5a95b"
+# The pragma silences detect-secrets: a 40-char hex Hugging Face commit SHA trips its
+# HexHighEntropyString plugin. This is a public dataset revision, not a credential.
+HF_REVISION = "9afb3a95c7fa8e470119cf6f74b44ec735c5a95b"  # pragma: allowlist secret
 # Upstream ships a single 200-row split. Assert it so a silent upstream change
 # surfaces here rather than as an unexplained score movement.
 EXPECTED_ROWS = 200
