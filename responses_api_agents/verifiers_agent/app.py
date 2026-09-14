@@ -236,6 +236,14 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         accumulating a connection pool per rollout. ``rollout_id_from_run``
         returns ``None`` when capture is disabled, preserving the shared
         unprefixed client path.
+
+        The per-run client BORROWS that transport rather than owning it, so it
+        must never be closed: ``Client.close()`` closes the underlying httpx
+        client, which every later rollout is still using. Nothing on the current
+        path closes it -- neither this agent nor ``run_group``/``generate`` on
+        the verifiers legacy API, and every ``.close()`` call site in verifiers
+        sits under ``verifiers/v1/``, which this agent does not use -- but the
+        wrapper looks disposable, so the rule is written down here.
         """
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
