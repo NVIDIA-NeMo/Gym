@@ -22,7 +22,6 @@ strict-validation behavior.
 """
 
 import json
-from copy import deepcopy
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -417,40 +416,6 @@ class TestSanitizeStreamingBody:
         assert "annotations" not in body["input"][1]["content"][0]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
-    @pytest.mark.parametrize(
-        ("item", "prefix"),
-        [
-            ({"type": "reasoning", "summary": []}, "rs"),
-            (
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": "I inspected the files."}],
-                },
-                "msg",
-            ),
-        ],
-    )
-    def test_duplicate_replayed_output_items_have_unique_stable_ids(self, item: dict, prefix: str) -> None:
-        provided_id = f"{prefix}_provided"
-        body = {
-            "stream": True,
-            "input": [deepcopy(item), deepcopy(item), {**deepcopy(item), "id": provided_id}],
-        }
-
-        cleaned, _ = sanitize_streaming_responses_body(body)
-        # Check IDs in the serialized Responses params, before any Chat downconversion.
-        params = validate_streaming_responses_params(cleaned)
-        ids = [entry["id"] for entry in params.model_dump()["input"]]
-
-        assert len(set(ids)) == 3
-        assert all(item_id.startswith(f"{prefix}_") for item_id in ids)
-        assert ids[2] == provided_id
-        assert sanitize_streaming_responses_body(body)[0] == cleaned
-        assert sanitize_streaming_responses_body(cleaned)[0] == cleaned
-        assert body["input"][:2] == [item, item]
-
     def test_drops_unsupported_input_items(self) -> None:
         # Codex's code_mode interleaves an `additional_tools` carrier item into the input history;
         # the Gym input union has no representation for it, so it is dropped item-by-item.
@@ -691,6 +656,30 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_idless_output_replay_matches_direct_validation(self, stream: bool) -> None:
+        client, server = _client(_EchoModel)
+        body = {
+            "input": [
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "I inspected the files."}],
+                },
+            ],
+        }
+
+        response = client.post("/v1/responses", json={**body, "stream": stream})
+
+        assert response.status_code == 200, response.text
+        expected = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+        assert server.last_params.input == expected.input
+        assert server.last_params.input[0].id.startswith("rs_")
+        assert server.last_params.input[1].id.startswith("msg_")
+        assert server.last_params.input[1].content[0].annotations == []
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
