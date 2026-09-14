@@ -11,9 +11,10 @@ configuration paths.
 
 Supported operations are create/readiness, exec, single-file upload/download,
 status, shutdown, declared HTTP endpoints, reconnect-by-ID, and duplex PTY/pipe
-sessions. MFN fixes PTY dimensions when `ExecStream` starts, so resizing an
-existing session, attaching from another client, detached PTY execution, and
-signals other than terminal `SIGINT` are not supported.
+sessions. PTY dimensions can be changed during an active session on current
+MFN deployments. Older deployments ignore resize frames and leave the previous
+dimensions unchanged. Attaching from another client, detached PTY execution,
+and signals other than terminal `SIGINT` are not supported.
 
 Noninteractive commands and the creation probe use `ExecStream` and immediately
 half-close its stdin side. This also works with local MFN backends whose

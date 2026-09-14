@@ -164,7 +164,9 @@ async def test_pty_round_trip(provider):
                 assert first.request.pty.rows == 24
                 yield pb.ExecStreamResponse(output=pb.ExecOutput(data=b"prompt> "))
                 second = await anext(requests)
-                yield pb.ExecStreamResponse(output=pb.ExecOutput(data=second.stdin.data))
+                assert (second.resize.rows, second.resize.cols) == (40, 100)
+                third = await anext(requests)
+                yield pb.ExecStreamResponse(output=pb.ExecOutput(data=third.stdin.data))
                 yield pb.ExecStreamResponse(complete=pb.ExecComplete(exit_code=0))
 
             return responses()
@@ -174,9 +176,9 @@ async def test_pty_round_trip(provider):
     session = await provider.create_pty(handle, SandboxPtySpec(rows=24, cols=80))
 
     assert await session.read() == b"prompt> "
+    await session.resize(40, 100)
+    await session.resize(40, 100)  # Repeating the current size sends no frame.
     await session.write(b"echo hi\n")
     assert await session.read() == b"echo hi\n"
     assert await session.wait_exit() == 0
-    with pytest.raises(NotImplementedError):
-        await session.resize(40, 100)
     await session.close()

@@ -25,6 +25,8 @@ class MFNPtySession:
         self._stub = stub
         self._sandbox_id = sandbox_id
         self._spec = spec
+        self._rows = spec.rows
+        self._cols = spec.cols
         self._shell = shell
         self._requests: asyncio.Queue[Any] = asyncio.Queue()
         self._stdout: asyncio.Queue[bytes | object] = asyncio.Queue()
@@ -57,7 +59,7 @@ class MFNPtySession:
             unbuffered=True,
         )
         if self._spec.pty:
-            request.pty.CopyFrom(pb.Pty(rows=self._spec.rows, cols=self._spec.cols))
+            request.pty.CopyFrom(pb.Pty(rows=self._rows, cols=self._cols))
         await self._requests.put(pb.ExecStreamRequest(request=request))
         self._call = self._stub.ExecStream(self._request_iterator())
         self._reader = asyncio.create_task(self._read_responses())
@@ -130,9 +132,14 @@ class MFNPtySession:
         await self._requests.put(pb.ExecStreamRequest(stdin=pb.SendStdInRequest(data=data)))
 
     async def resize(self, rows: int, cols: int) -> None:
-        if (rows, cols) == (self._spec.rows, self._spec.cols):
+        if not self._spec.pty:
+            raise SandboxPtyError("Cannot resize an MFN pipe-mode session")
+        if self._closed:
+            raise SandboxPtyError("MFN PTY session is closed")
+        if (rows, cols) == (self._rows, self._cols):
             return
-        raise NotImplementedError("MFN PTY dimensions are fixed when ExecStream starts")
+        await self._requests.put(pb.ExecStreamRequest(resize=pb.Pty(rows=rows, cols=cols)))
+        self._rows, self._cols = rows, cols
 
     async def send_signal(self, signal: str) -> None:
         if signal.upper() == "SIGINT" and self._spec.pty:

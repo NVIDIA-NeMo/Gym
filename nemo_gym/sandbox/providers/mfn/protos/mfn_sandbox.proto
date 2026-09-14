@@ -153,6 +153,7 @@ message ExecStreamRequest {
   oneof data {
     ExecRequest request = 1;
     SendStdInRequest stdin = 2;
+    Pty resize = 3;
   }
 }
 
