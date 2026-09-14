@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -201,9 +202,17 @@ class TestNumRepeatsDerivation:
 
     def test_falls_back_to_repeat_level_metrics(self, tmp_path):
         groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
-        entry = _entry(groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(4)])
+        repeat_level_metrics = [{"_ng_rollout_index": i, "mean/reward": i / 4} for i in range(4)]
+        entry = _entry(groups=groups, repeat_level_metrics=repeat_level_metrics)
         run = _load(tmp_path, "base", [entry])
         assert run.num_repeats == 4
+        assert run.repeat_level_metrics == repeat_level_metrics
+
+    def test_missing_repeat_level_metrics_loads_as_an_empty_list(self, tmp_path):
+        entry = _entry()
+        del entry["repeat_level_metrics"]
+        run = _load(tmp_path, "base", [entry])
+        assert run.repeat_level_metrics == []
 
     def test_repeat_level_fallback_works_per_agent_in_a_multi_agent_file(self, tmp_path):
         """Aggregation nests each agent's repeat_level_metrics under its own entry, stripped of
@@ -334,24 +343,231 @@ class TestMetricRows:
                         "mean_across_repeats/mean/reward": 0.80,
                     },
                     key_metrics={"mean/reward": 0.80},
+                    repeat_level_metrics=[{"mean/reward": 0.70}, {"mean/reward": 0.90}],
                 )
             ],
         )
         candidate = _load(
             tmp_path,
             "cand",
-            [_entry(agent_metrics={"mean/reward": 0.60}, key_metrics={"mean/reward": 0.60})],
+            [
+                _entry(
+                    agent_metrics={
+                        "mean/reward": 0.60,
+                        "mean_across_repeats/mean/reward": 0.60,
+                    },
+                    key_metrics={"mean/reward": 0.60},
+                    repeat_level_metrics=[{"mean/reward": 0.50}, {"mean/reward": 0.70}],
+                )
+            ],
             role="candidate",
         )
         (row,) = build_metric_rows(baseline, [candidate])
         assert row.metric == "mean/reward" and row.is_key_metric
         assert row.baseline.value == pytest.approx(0.80)
+        assert row.baseline.mean_across_repeats == pytest.approx(0.80)
         assert (row.baseline.ci_low, row.baseline.ci_high) == (0.70, 0.90)
         assert row.baseline.se_across_repeats == pytest.approx(0.05)
         assert row.candidates[0].delta == pytest.approx(-0.20)
         assert row.candidates[0].delta_pct == pytest.approx(-25.0)
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.8084869844593309)
+        assert row.candidates[0].delta_ci_high == pytest.approx(0.40848698445933074)
         # The candidate recorded no interval of its own.
         assert row.candidates[0].ci_low is None
+
+    def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
+        baseline_values = [0.0, 0.1, 0.2]
+        candidate_values = [0.1, 0.5, 0.9, 1.3]
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.1, "mean_across_repeats/mean/reward": 0.1},
+                    repeat_level_metrics=[{"mean/reward": value} for value in baseline_values],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.7, "mean_across_repeats/mean/reward": 0.7},
+                    repeat_level_metrics=[{"mean/reward": value} for value in candidate_values],
+                )
+            ],
+            role="candidate",
+        )
+
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.candidates[0].delta == pytest.approx(0.6)
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.20089819746637771)
+        assert row.candidates[0].delta_ci_high == pytest.approx(1.4008981974663777)
+
+    def test_mean_delta_uses_across_repeat_point_estimates(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={
+                        "mean/reward": 0.4,
+                        "mean_across_repeats/mean/reward": 0.5,
+                        "ci_low_95_across_repeats/mean/reward": -0.1,
+                        "ci_high_95_across_repeats/mean/reward": 1.1,
+                    },
+                    repeat_level_metrics=[{"mean/reward": 0.0}, {"mean/reward": 1.0}],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={
+                        "mean/reward": 0.6,
+                        "mean_across_repeats/mean/reward": 1.0,
+                        "ci_low_95_across_repeats/mean/reward": -0.2,
+                        "ci_high_95_across_repeats/mean/reward": 2.2,
+                    },
+                    repeat_level_metrics=[{"mean/reward": 0.0}, {"mean/reward": 2.0}],
+                )
+            ],
+            role="candidate",
+        )
+
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.baseline.value == pytest.approx(0.4)
+        assert row.baseline.mean_across_repeats == pytest.approx(0.5)
+        assert row.candidates[0].value == pytest.approx(0.6)
+        assert row.candidates[0].mean_across_repeats == pytest.approx(1.0)
+        assert row.candidates[0].delta == pytest.approx(0.5)
+        assert row.candidates[0].delta_pct == pytest.approx(100.0)
+        assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.5)
+
+    def test_delta_ci_requires_across_repeat_values_on_both_sides(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={
+                        "mean/reward": 0.4,
+                        "mean_across_repeats/mean/reward": 0.5,
+                        "ci_low_95_across_repeats/mean/reward": -0.1,
+                        "ci_high_95_across_repeats/mean/reward": 1.1,
+                    },
+                    repeat_level_metrics=[{"mean/reward": 0.0}, {"mean/reward": 1.0}],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.6},
+                    repeat_level_metrics=[{"mean/reward": 0.1}, {"mean/reward": 1.1}],
+                )
+            ],
+            role="candidate",
+        )
+
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.baseline.value == pytest.approx(0.4)
+        assert row.baseline.mean_across_repeats == pytest.approx(0.5)
+        assert row.baseline.ci_low == pytest.approx(-0.1)
+        assert row.candidates[0].value == pytest.approx(0.6)
+        assert row.candidates[0].mean_across_repeats is None
+        assert row.candidates[0].delta == pytest.approx(0.1)
+        assert row.candidates[0].delta_ci_low is None
+        assert row.candidates[0].delta_ci_high is None
+
+    def test_zero_across_repeat_mean_is_selected_without_truthiness_fallback(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.1, "mean_across_repeats/mean/reward": 0.0},
+                    repeat_level_metrics=[{"mean/reward": -0.1}, {"mean/reward": 0.1}],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.2, "mean_across_repeats/mean/reward": 0.5},
+                    repeat_level_metrics=[{"mean/reward": 0.4}, {"mean/reward": 0.6}],
+                )
+            ],
+            role="candidate",
+        )
+
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.baseline.value == pytest.approx(0.1)
+        assert row.baseline.mean_across_repeats == 0.0
+        assert row.candidates[0].delta == pytest.approx(0.5)
+        assert row.candidates[0].delta_pct is None
+        assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.5)
+
+    def test_delta_ci_is_unavailable_without_two_repeats_per_side(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5, "mean_across_repeats/mean/reward": 0.5},
+                    repeat_level_metrics=[{"mean/reward": 0.4}, {"mean/reward": 0.6}],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5, "mean_across_repeats/mean/reward": 0.5},
+                    repeat_level_metrics=[{"mean/reward": 0.5}],
+                )
+            ],
+            role="candidate",
+        )
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.candidates[0].delta_ci_low is None
+        assert row.candidates[0].delta_ci_high is None
+
+    def test_constant_repeat_values_produce_a_collapsed_delta_ci_without_warnings(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5, "mean_across_repeats/mean/reward": 0.5},
+                    repeat_level_metrics=[{"mean/reward": 0.5}] * 2,
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.6, "mean_across_repeats/mean/reward": 0.6},
+                    repeat_level_metrics=[{"mean/reward": 0.6}] * 2,
+                )
+            ],
+            role="candidate",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            (row,) = build_metric_rows(baseline, [candidate])
+        assert row.candidates[0].delta_ci_low == pytest.approx(0.1)
+        assert row.candidates[0].delta_ci_high == pytest.approx(0.1)
 
     def test_zero_baseline_leaves_relative_change_undefined(self, tmp_path):
         baseline = _load(tmp_path, "base", [_entry(agent_metrics={"mean/reward": 0.0})])
@@ -700,12 +916,14 @@ class TestEndToEnd:
                 _entry(
                     agent_metrics={
                         "mean/reward": 0.75,
+                        "mean_across_repeats/mean/reward": 0.75,
                         "ci_low_95_across_repeats/mean/reward": 0.70,
                         "ci_high_95_across_repeats/mean/reward": 0.80,
                         "pass@1[avg-of-2]/accuracy": 75.0,
                     },
                     key_metrics={"pass@1[avg-of-2]/accuracy": 75.0},
                     groups=[_group(0, [1.0, 1.0]), _group(1, [0.0, 0.0])],
+                    repeat_level_metrics=[{"mean/reward": 0.70}, {"mean/reward": 0.80}],
                 )
             ],
         )
@@ -714,9 +932,14 @@ class TestEndToEnd:
             "run_b",
             [
                 _entry(
-                    agent_metrics={"mean/reward": 0.25, "pass@1[avg-of-2]/accuracy": 25.0},
+                    agent_metrics={
+                        "mean/reward": 0.25,
+                        "mean_across_repeats/mean/reward": 0.25,
+                        "pass@1[avg-of-2]/accuracy": 25.0,
+                    },
                     key_metrics={"pass@1[avg-of-2]/accuracy": 25.0},
                     groups=[_group(0, [0.0, 0.0]), _group(1, [0.0, 0.0])],
+                    repeat_level_metrics=[{"mean/reward": 0.20}, {"mean/reward": 0.30}],
                 )
             ],
         )
@@ -825,6 +1048,7 @@ class TestEndToEnd:
         assert [column.header for column in table.columns] == [
             "Metric",
             "Δ (cand − base)",
+            "95% CI for Δ (cand − base)",
             "Baseline",
             "Baseline 95% CI",
             "Candidate",
@@ -833,6 +1057,7 @@ class TestEndToEnd:
         # Only key metrics get a row, and `[avg-of-k]` survives Rich markup escaping.
         assert table.row_count == 1
         assert "pass@1\\[avg-of-2]/accuracy" in list(table.columns[0].cells)
+        assert list(table.columns[2].cells) == ["—"]
 
     @pytest.mark.parametrize(
         "groups, expected",
@@ -861,6 +1086,14 @@ class TestEndToEnd:
         # Candidate-varying fields stay list-shaped so a second candidate needs no schema change.
         assert isinstance(payload["candidates"], list)
         assert isinstance(payload["comparisons"][0]["metrics"][0]["candidates"], list)
+        rows = {row["metric"]: row for row in payload["comparisons"][0]["metrics"]}
+        assert rows["mean/reward"]["baseline"]["value"] == pytest.approx(0.75)
+        assert rows["mean/reward"]["baseline"]["mean_across_repeats"] == pytest.approx(0.75)
+        assert "raw_value" not in rows["mean/reward"]["baseline"]
+        assert "value_is_across_repeats" not in rows["mean/reward"]["baseline"]
+        assert rows["mean/reward"]["candidates"][0]["delta_ci_low"] == pytest.approx(-0.8042434922296655)
+        assert rows["mean/reward"]["candidates"][0]["delta_ci_high"] == pytest.approx(-0.19575650777033454)
+        assert rows["pass@1[avg-of-2]/accuracy"]["candidates"][0]["delta_ci_low"] is None
         assert payload == orjson.loads(result.model_dump_json())
 
     def test_output_dir_cannot_be_a_file(self, tmp_path):
@@ -882,10 +1115,16 @@ class TestEndToEnd:
         markdown = render_markdown(result)
         assert "# gym eval compare" in markdown
         assert "### Key metrics" in markdown
-        assert "| Metric | Δ (cand − base) | Baseline | Baseline 95% CI | Candidate | Candidate 95% CI |" in markdown
+        assert (
+            "| Metric | Δ (cand − base) | 95% CI for Δ (cand − base) | Baseline | Baseline 95% CI | "
+            "Candidate | Candidate 95% CI |" in markdown
+        )
         # A metric with no recorded interval renders an em dash rather than a fabricated one.
-        assert "| `pass@1[avg-of-2]/accuracy` | -50.00 (-66.7%) | 75.00 | — | 25.00 | — |" in markdown
-        assert "| `mean/reward` | -0.5000 (-66.7%) | 0.7500 | [0.7000, 0.8000] | 0.2500 | — |" in markdown
+        assert "| `pass@1[avg-of-2]/accuracy` | -50.00 (-66.7%) | — | 75.00 | — | 25.00 | — |" in markdown
+        assert (
+            "| `mean/reward` | -0.5000 (-66.7%) | [-0.8042, -0.1958] | "
+            "0.7500 | [0.7000, 0.8000] | 0.2500 | — |" in markdown
+        )
         assert "### Sample flips" in markdown
         assert "1 pass→fail" in markdown
 
@@ -916,7 +1155,7 @@ class TestReportEdgeCases:
         markdown = render_markdown(self._result(tmp_path, baseline, candidate))
         # No key metrics were recorded, and the one-sided metric has no delta to show.
         assert "No key metrics were recorded for this agent." in markdown
-        assert "| `pass@1/accuracy` | — | 10.00 | — | — | — |" in markdown
+        assert "| `pass@1/accuracy` | — | — | 10.00 | — | — | — |" in markdown
         # A zero baseline has no meaningful relative change.
         assert "| `mean/reward` | +0.5000 (n/a) |" in markdown
         assert "### Metrics present in only one run" in markdown

@@ -42,16 +42,13 @@ RunRole = Literal["baseline", "candidate"]
 
 @dataclass(frozen=True)
 class LoadedRun:
-    """One side of the comparison, narrowed to a single agent.
-
-    Only what the diff actually consumes. Run identity (role, paths, label) stays on `RunFile`,
-    which the report carries directly, so it is deliberately not duplicated here.
-    """
+    """One side of the comparison, narrowed to a single agent."""
 
     agent_name: str
     agent_metrics: Dict[str, Any]
     key_metrics: Dict[str, Any]
     group_level_metrics: List[Dict[str, Any]]
+    repeat_level_metrics: List[Dict[str, Any]]
     num_tasks: int = 0
     num_repeats: Optional[int] = None
     has_repeat_cis: bool = False
@@ -250,6 +247,7 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         agent_metrics=agent_metrics,
         key_metrics=key_metrics,
         group_level_metrics=group_level_metrics,
+        repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
         num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
         has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
