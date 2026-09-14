@@ -181,7 +181,6 @@ TASK_INDEX_KEY_NAME = "_ng_task_index"
 GROUP_ID_KEY_NAME = "_ng_group_id"
 GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 GROUP_MEMBER_INDEX_KEY_NAME = "_ng_group_member_index"
-COHORT_FAILURE_MODE_KEY_NAME = "_ng_cohort_failure_mode"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.

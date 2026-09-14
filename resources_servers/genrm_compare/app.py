@@ -54,7 +54,6 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import (
-    COHORT_FAILURE_MODE_KEY_NAME,
     GROUP_ATTEMPT_KEY_NAME,
     GROUP_ID_KEY_NAME,
     GROUP_MEMBER_INDEX_KEY_NAME,
@@ -70,6 +69,7 @@ from nemo_gym.server_utils import raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
+    extract_from_response_obj,
     extract_output_text,
     generate_comparison_pairs,
     get_prompt_key_from_input,
@@ -104,7 +104,6 @@ class _CohortState:
 
     prompt_digest: str
     key: str = ""
-    failure_kind: Optional[str] = None
     group_id: Optional[str] = None
     group_attempt: int = 0
     members: Dict[int, _CohortMember] = field(default_factory=dict)
@@ -115,6 +114,7 @@ class _CohortState:
     deadline: float = 0.0
     timeout_handle: Optional[asyncio.TimerHandle] = None
     evaluation_task: Optional[asyncio.Task[None]] = None
+    comparisons: Dict[Tuple[int, int, int], asyncio.Task] = field(default_factory=dict)
 
 
 @dataclass
@@ -158,8 +158,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_model_server: ModelServerRef  # Default: genrm_model (see config)
     genrm_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
-    # Cohort-based verify: number of rollouts per prompt before running comparison (Difference 1)
-    # When > 1, verify() buffers by prompt and runs comparison when cohort is full; rewards are relative to cohort.
+    # Cohort verification publishes relative rewards after all identified members
+    # and comparisons finish; pairwise judging can overlap remaining generation.
     # When <= 1, verify() returns default_score (no comparison).
     num_rollouts_per_prompt: int = Field(default=1, ge=1)
     cohort_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
@@ -167,8 +167,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     max_terminal_cohorts: int = Field(default=4096, gt=0)
 
     # Comparison strategy
-    comparison_strategy: str = "circular"  # "all_pairs" or "circular"
-    num_judges_per_comparison: int = 1
+    comparison_strategy: Literal["all_pairs", "circular"] = "circular"  # "all_pairs" or "circular"
+    num_judges_per_comparison: int = Field(default=1, ge=1)
 
     # Principle-based GenRM settings
     use_principle: bool = False
@@ -227,7 +227,6 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0, strict=True)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME, ge=0, strict=True)
     group_member_index: Optional[int] = Field(default=None, alias=GROUP_MEMBER_INDEX_KEY_NAME, ge=0, strict=True)
-    cohort_failure_mode: Literal["http", "row"] = Field(default="http", alias=COHORT_FAILURE_MODE_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
     @model_validator(mode="before")
@@ -299,9 +298,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     """Resources server for GenRM pairwise comparison of multiple responses.
 
     Supports two modes:
-    - Cohort-based verify (Difference 1): When num_rollouts_per_prompt > 1, verify() buffers by prompt;
-      when the cohort is full, runs comparison and returns per-rollout rewards. Callers await until
-      their cohort is complete and get their reward.
+    - Cohort-based verify: Compare identified members as they arrive; publish
+      per-rollout rewards only after the complete cohort finishes judging.
     - Batch /compare: Direct comparison of N response_objs (e.g. for rollout_collection or tests).
     """
 
@@ -335,15 +333,15 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort = self._resolve_verify_cohort(body, prompt_key, prompt_digest)
         self._expire_verify_cohort(cohort)
         if cohort.phase == "failed":
-            self._raise_cohort_failure(body, cohort)
+            self._raise_cohort_failure(cohort)
+        if cohort.phase == "completed":
+            raise HTTPException(status_code=409, detail="GenRM group attempt is complete; start a new attempt")
         member = cohort.members.get(index)
         if member is not None:
             if member.response_digest != response_digest:
                 raise HTTPException(
                     status_code=409, detail=f"GenRM already has a different response for rollout_index={index}"
                 )
-            if cohort.phase == "completed":
-                return self._verify_response(body, cohort.rewards[index])
         else:
             if cohort.phase != "collecting":
                 raise HTTPException(status_code=409, detail=f"GenRM cohort is already {cohort.phase}")
@@ -355,31 +353,23 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         # orphaned exceptions without changing what an active waiter receives.
         future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         member.waiters.append(future)
-        if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
-            cohort.phase = "evaluating"
-            task = asyncio.create_task(
-                self._evaluate_verify_cohort(cohort), name="genrm-cohort-evaluation", context=Context()
-            )
-            cohort.evaluation_task = task
-            self._cohort_tasks.add(task)
-            task.add_done_callback(self._cohort_tasks.discard)
-            # Cancellation before the coroutine first runs bypasses its try/finally.
-            task.add_done_callback(
-                lambda done: self._fail_verify_cohort(cohort, "GenRM cohort evaluation was cancelled", "cancelled")
-                if done.cancelled()
-                else None
-            )
-
         try:
+            self._schedule_comparisons(cohort)
+            if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
+                cohort.phase = "evaluating"
+                cohort.evaluation_task = self._own_task(self._evaluate_verify_cohort(cohort), cohort)
             reward = await asyncio.shield(future)
         except CohortEvaluationError:
-            self._raise_cohort_failure(body, cohort)
+            self._raise_cohort_failure(cohort)
         finally:
-            # Only detach this HTTP waiter. The accepted logical answer remains
-            # available to its siblings and identical retransmissions until expiry.
             future.cancel()
             if future in member.waiters:
                 member.waiters.remove(future)
+            # One disconnected duplicate does not cancel an attached original.
+            # Losing every waiter for an accepted member fails the active group:
+            # a retried /run may generate a different answer, not retransmit this one.
+            if not member.waiters:
+                self._fail_verify_cohort(cohort, "GenRM member lost its last waiter", "cancelled")
         return self._verify_response(body, reward)
 
     @staticmethod
@@ -399,11 +389,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         return body.group_member_index if body.group_member_index is not None else body.rollout_index
 
     @staticmethod
-    def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
-        # Only callers that explicitly understand failure rows opt in. RL callers
-        # retain HTTP failures, rather than consuming the failsafe's placeholder reward.
-        if body.cohort_failure_mode == "row":
-            raise JudgeError(cohort.failure, failure_kind=cohort.failure_kind)
+    def _raise_cohort_failure(cohort: _CohortState) -> None:
         raise HTTPException(status_code=503, detail=cohort.failure)
 
     def _validate_logical_coordinates(self, body: GenRMCompareVerifyRequest) -> None:
@@ -412,11 +398,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 status_code=422, detail=f"either {TASK_INDEX_KEY_NAME}, {GROUP_ID_KEY_NAME}, or prompt_id is required"
             )
         if self._member_index(body) is None:
-            raise HTTPException(status_code=422, detail=f"{ROLLOUT_INDEX_KEY_NAME} is required")
+            raise HTTPException(
+                status_code=422, detail=f"{GROUP_MEMBER_INDEX_KEY_NAME} or {ROLLOUT_INDEX_KEY_NAME} is required"
+            )
         if not 0 <= self._member_index(body) < self.config.num_rollouts_per_prompt:
             raise HTTPException(
                 status_code=422,
-                detail=f"{ROLLOUT_INDEX_KEY_NAME} must be in [0, {self.config.num_rollouts_per_prompt})",
+                detail=f"GenRM member slot must be in [0, {self.config.num_rollouts_per_prompt})",
             )
 
     def _resolve_verify_cohort(
@@ -442,7 +430,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     status_code=409,
                     detail=f"GenRM attempt {body.group_attempt} was superseded by attempt {watermark.latest_attempt}",
                 )
-        if watermark is None or body.group_attempt > watermark.latest_attempt:
+        if watermark is not None and body.group_attempt > watermark.latest_attempt:
             for older in list(self._verify_cohorts.values()):
                 if older.group_id == identity and older.group_attempt < body.group_attempt:
                     self._fail_verify_cohort(
@@ -450,6 +438,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         f"GenRM attempt {older.group_attempt} was superseded by attempt {body.group_attempt}",
                         "superseded",
                     )
+        if watermark is None or body.group_attempt > watermark.latest_attempt:
             self._latest_group_attempts[identity] = _GroupAttemptWatermark(body.group_attempt, prompt_digest)
         cohort = self._verify_cohorts.get(prompt_key)
         if cohort is None:
@@ -496,6 +485,44 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    def _own_task(self, coroutine, cohort: _CohortState) -> asyncio.Task:
+        task = asyncio.create_task(coroutine, context=Context())
+        self._cohort_tasks.add(task)
+
+        def finished(done):
+            self._cohort_tasks.discard(done)
+            if done.cancelled():
+                self._fail_verify_cohort(cohort, "GenRM comparison was cancelled", "cancelled")
+            elif (error := done.exception()) is not None:
+                self._fail_verify_cohort(
+                    cohort,
+                    f"GenRM evaluation failed: {type(error).__name__}: {str(error)[:1000]}",
+                    "evaluation_failed",
+                )
+
+        task.add_done_callback(finished)
+        return task
+
+    def _schedule_comparisons(self, cohort: _CohortState) -> None:
+        # Keep main's overlap between generation and pairwise judging. Every
+        # pair is scheduled once by logical slots, including out-of-order arrivals.
+        cfg = self.config
+        for judge in range(cfg.num_judges_per_comparison):
+            for i, j in generate_comparison_pairs(cfg.comparison_strategy, cfg.num_rollouts_per_prompt):
+                key = (i, j, judge)
+                if i in cohort.members and j in cohort.members and key not in cohort.comparisons:
+                    cohort.comparisons[key] = self._own_task(self._compare_members(cohort, i, j), cohort)
+
+    async def _compare_members(self, cohort: _CohortState, i: int, j: int):
+        first, second = cohort.members[i].body, cohort.members[j].body
+        return await self._run_single_comparison(
+            _input_to_conversation_history(first.responses_create_params.input),
+            first.response.model_dump(),
+            second.response.model_dump(),
+            pair_idx=(i, j),
+            principle=first.principle,
+        )
+
     async def _evaluate_verify_cohort(self, cohort: _CohortState) -> None:
         try:
             indices = sorted(cohort.members)
@@ -504,10 +531,23 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if first is None or any(body is None for body in bodies):
                 raise RuntimeError("GenRM response discarded before evaluation")
             responses = [body.response.model_dump() for body in bodies]
-            rewards, _, _, _ = await self._run_compare(
-                conversation_history=_input_to_conversation_history(first.responses_create_params.input or []),
+            metadata = sorted(cohort.comparisons, key=lambda key: (key[2], key[0], key[1]))
+            comparisons = await asyncio.gather(*(cohort.comparisons[key] for key in metadata))
+            if cohort.phase != "evaluating":
+                return
+            cfg = self.config
+            rewards, _, _, _ = aggregate_scores(
+                comparison_results=comparisons,
+                comparison_metadata=metadata,
                 response_objs=responses,
-                principle=first.principle,
+                aggregator_method=cfg.aggregator_method,
+                default_score=cfg.default_score,
+                reasoning_bonus=cfg.reasoning_bonus,
+                answer_bonus=cfg.answer_bonus,
+                top_percentile=cfg.top_percentile,
+                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
             )
             if len(rewards) != len(indices) or any(not isfinite(reward) for reward in rewards):
                 raise RuntimeError("GenRM must return one finite reward per cohort member")
@@ -531,11 +571,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.phase not in ("collecting", "evaluating"):
             return False
         cohort.failure = message
-        cohort.failure_kind = {
-            "judge_timeout": "transport_timeout",
-            "evaluation_failed": "judge_failed",
-            "superseded": "cancelled",
-        }.get(reason, reason)
         self._finish_verify_cohort(cohort, "failed", reason)
         return True
 
@@ -550,6 +585,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort.evaluation_task = None
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
+        for comparison in cohort.comparisons.values():
+            if comparison is not asyncio.current_task() and not comparison.done():
+                comparison.cancel()
+        cohort.comparisons.clear()
         for index, member in cohort.members.items():
             for waiter in member.waiters:
                 if not waiter.done():
@@ -568,6 +607,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             len(cohort.members),
             self.config.num_rollouts_per_prompt,
         )
+        # Retain only a compact disposition, never answer/reward replay data.
+        cohort.members.clear()
+        cohort.rewards.clear()
         self._prune_terminal_cohorts()
 
     def _prune_terminal_cohorts(self) -> None:
@@ -700,9 +742,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 comparison_results=None,
                 metrics=None,
             )
-        rewards, metrics, comparison_results, comparison_metadata = await self._run_compare(
-            conversation_history, response_objs, principle=body.principle
-        )
+        try:
+            rewards, metrics, comparison_results, comparison_metadata = await self._run_compare(
+                conversation_history, response_objs, principle=body.principle
+            )
+        except JudgeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         detailed_results = [
             {
                 "response_i": i,
@@ -782,7 +827,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
         for attempt_idx in range(max_attempts):
             raw_response = await reraise_judge_errors(call())
-            genrm_answer = extract_output_text(raw_response)
+            if not isinstance(raw_response, dict) or raw_response.get("status") not in {None, "completed"}:
+                raise JudgeError("GenRM judge returned an unsuccessful response")
+            _, genrm_answer = extract_from_response_obj(raw_response)
+            if not genrm_answer.strip():
+                raise JudgeError("GenRM judge returned no answer")
             try:
                 return parse_genrm_output(genrm_answer, cfg.default_score, cfg.default_ranking, raise_on_fail=True)
             except GenRMOutputParseError:

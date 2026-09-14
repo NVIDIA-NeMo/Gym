@@ -1,18 +1,46 @@
 ---
 title: "GenRM Comparison Groups"
-description: "Configure bounded group scoring and identify retries without mixing candidate answers."
+description: "Bound group scoring and isolate attempts without mixing candidate answers."
 position: 9
 ---
 
 # GenRM Comparison Groups
 
-The `genrm_compare` resources server scores multiple answers to one prompt using a generative reward model.
-Each rollout calls `/verify` separately. The server collects the configured number of members, compares
-their answers, and returns an individual reward to each rollout. A comparison group is also called a cohort.
+The `genrm_compare` resources server compares several answers to one prompt using a generative reward
+model. Each rollout calls `/verify` separately. A comparison group, also called a cohort, contains exactly
+`num_rollouts_per_prompt` members. Rewards are published only after all members and comparisons finish.
 
-## Collecting with Gym
+## Caller contract
 
-Set these fields under `genrm_compare_resources_server.resources_servers.genrm_compare`:
+The caller must dispatch every member of a group concurrently enough to reach verification. It must also
+own the group identity and decide whether to replace a failed group. The server does not schedule rollouts,
+regenerate answers, persist results, or resume a collector.
+
+Send these fields through the agent to `/verify`:
+
+| Field | Meaning |
+| --- | --- |
+| `_ng_group_id` | Unique identity for one logical comparison group, distinct across runs and prompt occurrences. |
+| `_ng_group_attempt` | Nonnegative integer shared by every member of one attempt. |
+| `_ng_group_member_index` | Member slot from zero through `num_rollouts_per_prompt - 1`. |
+| `_ng_rollout_index` | Existing rollout index; used as the member slot when `_ng_group_member_index` is omitted. |
+
+All members must have the same prompt and principle. The optional separate member index lets a caller
+use global rollout indices without changing the group's local slots. Responses echo these coordinates;
+framework counters are excluded from reward metrics.
+
+For four answers A, B, C, and D, a caller sends four concurrent `/run` requests with one group ID, attempt
+zero, and slots 0, 1, 2, and 3. Comparisons start as their two answers arrive. The server retains the existing
+circular or all-pairs schedule, then waits for every comparison before assigning rewards by member slot.
+Shared judge calls run outside any individual member's rollout capture context.
+
+An exact response duplicate can attach another waiter while the group is active. A different response for
+an occupied slot receives HTTP 409. A completed attempt also rejects late requests with HTTP 409; there is
+no cached reward replay. This avoids treating a newly requested verification as a fresh judge result.
+
+## Deadlines and failures
+
+Configure these fields under `genrm_compare_resources_server.resources_servers.genrm_compare`:
 
 ```yaml
 num_rollouts_per_prompt: 4
@@ -21,98 +49,66 @@ cohort_result_ttl_s: 21600
 max_terminal_cohorts: 4096
 ```
 
-For `gym eval run`, use a number of repeats divisible by the group size and concurrency at least as large
-as one group. Gym gives each task/agent's consecutive sets of four answers separate group identities.
-Fan-out targets stay in separate groups. The collector reserves concurrency for complete groups so that
-members of different groups cannot occupy every slot while waiting for each other.
+The finite, positive deadline starts with the first valid member and covers collection and judging.
+Later arrivals and duplicates do not extend it. Allow enough time for both generation skew and judge latency.
+The supplied server YAML uses 16 members; this example explicitly changes it to four.
 
-The materialized inputs record the group ID, group attempt and member slot before generation starts.
-`_ng_rollout_index` remains the global per-task rollout index used for output and profiling; the separate
-`_ng_group_member_index` identifies the answer's position within its comparison group.
+The initial policy is to fail the whole group. If D never arrives, A, B, and C receive HTTP 503 without a
+reward when the deadline expires. Judge HTTP errors, transport errors, empty or incomplete judge responses,
+and a judging timeout also fail the group. A nonempty completed judge answer that cannot be parsed retains
+the existing configured parse-retry/default-score policy.
 
-Gym's file collector explicitly requests tagged failure rows. A missing member or failed judge call sends
-the arrived answers to the failures sidecar with `_ng_failure_class="judge_failed"` and a failure kind.
-These rows retain the generated answers and are excluded from ordinary score aggregation. The wire row
-contains a placeholder reward of zero for compatibility with the existing failure envelope; it is not
-a scored answer. This routing does not require `route_failures_to_sidecar=true`, which covers generic
-agent request errors separately.
+If a member loses its last waiting request, the active group fails and releases its siblings. This matters
+because retrying `/run` may generate a different answer. Disconnecting one duplicate leaves an attached
+original valid. Failure and shutdown cancel owned comparisons and discard answers and waiters. Each
+terminal transition logs one bounded disposition event without prompt or answer content.
 
-## Completion deadline
+The simple agent preserves verification HTTP statuses: 503 for a failed group, 409 for a conflict or retired
+attempt, and 422 for invalid coordinates. These errors contain no ordinary reward. Existing collector
+failure handling applies; this server does not add a saved-answer failure envelope or a judge-only recovery
+channel.
 
-`cohort_timeout_s` must be finite and positive. Its default is 1800 seconds. The deadline starts when the
-first valid member arrives and covers both collecting answers and judging them. Duplicates and subsequent
-arrivals do not extend it. Increase it for workloads with long tool executions or slow judging.
+## Replacement attempts and retention
 
-The server releases every waiter on incomplete membership, a judge call failure, a judging deadline, or
-shutdown. It never caches a successful score for a failed judge HTTP/transport call. A successful judge
-reply that cannot be parsed retains the existing configured parse-retry/default-score policy.
+To replace a group, the caller increments `_ng_group_attempt` for every member and dispatches the complete
+group again. A newer attempt retires older active attempts and releases their waiters. A late completion
+from an older judge task cannot publish into the replacement. Repeating a failed attempt returns failure
+while its disposition is retained. An individual rollout retry counter never advances a group attempt.
 
-Cancelling one request detaches that waiter without cancelling scoring needed by other members. Its
-accepted answer remains available until completion or expiry. A disconnect does not authorize a newly
-sampled answer to replace it: resend the exact saved answer, or coordinate a replacement for the whole group.
+Run this resources server with one HTTP worker. Its registry is local to that process. Completed and failed
+groups retain only compact dispositions and prompt/attempt coordinates, bounded by `max_terminal_cohorts`
+and `cohort_result_ttl_s`. Answers, rewards, and waiter futures are discarded at completion or failure.
 
-Pairwise judging starts after the complete group arrives. Members are ordered by their logical slots, so
-HTTP arrival order does not determine comparison pairs or reward assignment. This changes generation/judge
-overlap compared with incremental comparison dispatch; comparative performance has not been established.
-Shared judging runs outside any individual member's rollout capture and trace context.
+The count cap can evict a disposition before its TTL. After eviction or server restart, the server cannot
+recognize a replay from retained state. Callers must enforce accepted attempt identity across those
+boundaries and use fresh group IDs for unrelated work. This is bounded server cleanup, not durable recovery.
 
-## External caller contract
+## Using the file collector
 
-External callers, including NeMo-RL, own their group dispatch and retry policy. Send these fields through
-the agent to `/verify`:
+The file collector's scheduling and resume behavior are unchanged. It does not create local group slots,
+reserve concurrency for entire groups, or advance shared group attempts. In particular, arbitrary fan-out,
+multiple groups of repeats, or mixed-group scheduling require a caller that supplies the grouping and
+admits complete groups. Concurrency below the group size cannot fill even one group.
 
-| Field | Meaning |
-| --- | --- |
-| `_ng_group_id` | Unique identity for one logical comparison group, distinct across runs and prompt occurrences. |
-| `_ng_group_attempt` | Nonnegative integer shared by every member of one group attempt. |
-| `_ng_group_member_index` | Optional member slot from zero through `num_rollouts_per_prompt - 1`. |
-| `_ng_rollout_index` | Rollout identity; used as the member slot when `_ng_group_member_index` is omitted, as in NeMo-RL's current caller. |
+A small check can use one task, one agent, and exactly four repeats with the four-member configuration above.
+Give that task a fresh `_ng_group_id` and `_ng_group_attempt: 0`. The collector's rollout indices 0–3 then
+serve as the local slots:
 
-All members must have the same prompt and principle. An exact response-payload duplicate attaches another
-waiter or returns its cached reward. A different response for an occupied slot is rejected with HTTP 409.
-Successful responses echo the group coordinates. Framework group counters are excluded from score metrics.
+```bash
+gym eval run --no-serve --agent genrm_simple_agent \
+    --input one-task.jsonl --output fresh-results.jsonl \
+    --num-repeats 4 --concurrency 4
+```
 
-A caller replacing a group must increment `_ng_group_attempt` for every member. A newer attempt retires
-older active attempts, releases their waiters, and rejects late older requests. A late judge completion
-cannot publish into the replacement. Repeating a failed attempt returns failure; it does not silently
-create another group. An individual rollout's retry counter never advances a group attempt.
+Start the configured policy, judge, and Gym servers first. Use a fresh group ID and output path for another
+independent check. This example does not provide group resume: the caller must coordinate a complete new
+attempt after failure, including when only some completed rewards reached disk.
 
-The default external failure protocol is HTTP 503 with no reward. This preserves RL's infrastructure-retry
-signal. Only consumers that exclude tagged failure rows from scoring may opt into
-`_ng_cohort_failure_mode="row"`, which uses the JudgeError sidecar envelope described above. Gym's file
-collector sets this field; the low-level `run_examples` API does not change an external caller's protocol.
+Legacy requests can use `_ng_task_index` or `prompt_id` plus member slots instead of `_ng_group_id`. Keep
+these identities unique across work sharing the server and coordinate attempts explicitly. An omitted
+group attempt defaults to zero, with one migration log for explicit group IDs. Anonymous prompt-only
+requests are rejected because arrival counting cannot distinguish retransmission from a new member.
 
-Legacy callers can provide `_ng_task_index` or a nonempty `prompt_id`, plus a member slot, without an explicit
-group ID. They must keep those identities unique and coordinate attempts themselves. Prompt-only requests
-without member identity are rejected because arrival counting cannot distinguish retries from new answers.
-An omitted group attempt defaults to zero and emits one bounded migration log when a group ID was supplied.
-
-## Resume and reverification
-
-Gym can resume a completely pending group from its materialized inputs. It preserves that group's ID,
-advances its shared attempt, persists the updated inputs, and regenerates every member. This also advances
-the group attempt when a previous process died without writing a failure row. Other completed groups remain
-unchanged. Existing per-rollout retry limits still apply.
-
-Partial-group resume is unsupported. For example, if a process stops after writing only two of a completed
-four-member group's rewards, Gym rejects the remaining partial group before generation. Rerun the complete
-group into a fresh output file. Old caches without group identities also require a fresh output file.
-The current implementation does not reconstruct a group from saved successful and failed answers.
-
-`gym eval reverify` rejects configured GenRM cohorts, including `force=true` and `judge_failed_only=true`.
-Individual reverification cannot reconstruct complete membership or coordinate a fresh group attempt, and
-an unchanged request might return a cached reward without running the judge. Durable answer reuse and
-coordinated group reverification require a separate implementation.
-
-## Retention
-
-Run this resources server with one HTTP worker. Its registry and duplicate-result cache are local to that
-process, not shared across workers or persisted to disk.
-
-Completed and failed groups retain compact response digests and outcomes, limited by `max_terminal_cohorts`
-and `cohort_result_ttl_s`. Both limits must be positive and the TTL finite. Entries expire in completion order;
-normal requests within the limits inspect only the oldest terminal entry. Shutdown clears the registry.
-
-Cached replay and stale-request detection are available only while their state is retained. The count cap
-can evict a group before its TTL at high throughput. Callers must enforce accepted attempt identity across
-eviction and server restart; this cache is not a durable replay guarantee.
+GenRM declares individual `gym eval reverify` unsupported. Forcing it does not reconstruct group membership
+or coordinate attempts, and a retained completed attempt returns 409. Durable answer reuse, group resume,
+and group reverification belong in follow-up work with the collector or training framework's retry policy.

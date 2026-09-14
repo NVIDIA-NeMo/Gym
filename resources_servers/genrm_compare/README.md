@@ -235,24 +235,13 @@ Compare multiple candidate responses.
 
 ### POST `/verify`
 
-Cohort-based verification endpoint used during rollout collection.
+Cohort verification requires caller-owned group and member identities and a finite deadline.
+Comparisons start as answers arrive; rewards are published only for a complete group. Missing members,
+judge failures, or loss of a member's last waiter fail the group with HTTP 503 and no reward.
+The caller coordinates complete replacement attempts; collector scheduling and resume are unchanged.
 
-- When `num_rollouts_per_prompt <= 1`, returns `default_score`
-- When `num_rollouts_per_prompt > 1`, requires a group ID, task index, or `prompt_id`, and an explicit member slot. It waits for the complete group under a finite collection/judging deadline.
-- External callers send `_ng_group_id`, `_ng_group_attempt`, and `_ng_rollout_index` in `[0, N)`. An optional `_ng_group_member_index` separates the group slot from a global rollout index.
-- `gym eval run` stamps and persists groups per task/agent, including fan-out and multiple groups of repeats. Repeats must be divisible by N; concurrency must be at least N.
-- Exact duplicates reuse results. Newly sampled replacements require a coordinated new group attempt, including after a client disconnect.
-- Complete pending groups can resume with a shared attempt advance. Partial-group resume and individual reverification (including forced/judge-failed-only) are rejected before dispatch.
-
-See [GenRM Comparison Groups](../../fern/versions/latest/pages/evaluation/genrm-cohorts.mdx) for the failure protocol, cache limits, and migration contract.
-
-## Error Handling
-
-The server handles failures gracefully:
-
-- **Parse failures**: Retries up to `genrm_parse_retries` times with sleep between attempts
-- **Judge HTTP/connection errors**: Fail the cohort; never publish or cache default rewards for failed calls. External callers receive HTTP 503. Gym's file collector opts into tagged failure rows that retain answers in the sidecar and stay out of metrics.
-- **Single response**: Returns default score (no comparison possible)
+See [GenRM Comparison Groups](../../fern/versions/latest/pages/evaluation/genrm-cohorts.mdx) for
+coordinates, the supported collector example, cancellation behavior, and bounded retention limits.
 
 ## Development
 

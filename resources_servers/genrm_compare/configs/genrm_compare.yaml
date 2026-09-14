@@ -25,17 +25,17 @@ genrm_compare_resources_server:
         type: responses_api_models
         name: genrm_model
       
-      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
-      # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
-      # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      # The caller supplies this many identified members per group and enough concurrency
+      # to let them all reach verification. Comparisons overlap generation; rewards
+      # are published only after every member and comparison finishes.
       num_rollouts_per_prompt: 16
 
       # Absolute deadline from the first /verify arrival through reward publication.
       # Increase for long rollouts; incomplete groups fail without a reward.
       cohort_timeout_s: 1800
 
-      # Retain compact rewards/digests for idempotent late retries. The cache is also
-      # bounded. Replays after eviction or server restart require caller recovery.
+      # Retain compact terminal dispositions for bounded duplicate/stale-attempt rejection.
+      # No answers or rewards are cached; fencing across eviction/restart belongs to the caller.
       cohort_result_ttl_s: 21600
       max_terminal_cohorts: 4096
       

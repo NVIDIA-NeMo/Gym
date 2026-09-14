@@ -4,9 +4,9 @@
 
 Task-owned data contains the optional provenance label ``dataset``. Cohort verification
 also requires caller-owned identity: a group ID, task index or prompt_id, and a member
-slot. Gym's file collector supplies group IDs, shared attempts and group-member indices;
-external callers must supply their own coordinates. Anonymous prompt-only verification
-is unsupported because transport retries cannot be counted as new group members.
+slot. Callers supply group IDs, shared attempts and local member indices; the existing
+rollout index is a fallback when it already identifies a slot within this group.
+Anonymous prompt-only verification is unsupported because transport retries cannot be counted as new group members.
 These wire fields remain on ``GenRMCompareVerifyRequest``; see the GenRM cohort guide
 for the distinction between a global rollout index and a comparison-group slot.
 """

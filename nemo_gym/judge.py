@@ -47,10 +47,6 @@ ResponseT = TypeVar("ResponseT", bound=BaseModel)
 class JudgeError(Exception):
     """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
 
-    def __init__(self, message: str, *, failure_kind: str | None = None):
-        super().__init__(message)
-        self.failure_kind = failure_kind
-
 
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     """Await a judge call; re-raise any exception as JudgeError (recorded verbatim)."""
@@ -104,13 +100,11 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             )
             if body is None:  # verify always has a request body; guard against an opaque 500
                 raise RuntimeError("judge_failsafe: could not locate the verify request body") from e
-            data = body.model_dump(by_alias=True) | {
+            data = body.model_dump() | {
                 "reward": 0.0,
                 "_ng_failure_class": "judge_failed",
                 "_ng_failure_judge_error": str(e),
             }
-            if e.failure_kind is not None:
-                data["_ng_failure_kind"] = e.failure_kind
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

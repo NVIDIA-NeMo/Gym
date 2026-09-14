@@ -52,7 +52,6 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.genrm_cohorts import collection_admission, prepare_genrm_collection
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -1254,7 +1253,6 @@ class RolloutCollectionHelper(BaseModel):
             return await self._run_from_config(config)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
-        global_config = get_global_config_dict()
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
 
@@ -1274,17 +1272,6 @@ class RolloutCollectionHelper(BaseModel):
             ) = self._load_from_cache(config)
             persisted_rows = list(rows)
             persisted_results = list(results)
-            if prepare_genrm_collection(input_rows, global_config, config.num_samples_in_parallel, resume=True):
-                # Persist a shared attempt advance before dispatch, even when a
-                # previous process died without writing a failure sidecar row.
-                updates = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]): r for r in input_rows}
-                original = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
-                temporary = config.materialized_jsonl_fpath.with_suffix(".jsonl.tmp")
-                with temporary.open("wb") as f:
-                    for row in original:
-                        row = updates.get((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]), row)
-                        f.write(orjson.dumps(row) + b"\n")
-                temporary.replace(config.materialized_jsonl_fpath)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -1314,8 +1301,6 @@ class RolloutCollectionHelper(BaseModel):
             ):
                 self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
 
-            prepare_genrm_collection(input_rows, global_config, config.num_samples_in_parallel)
-
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
@@ -1330,6 +1315,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        global_config = get_global_config_dict()
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Resolve the training-token store directory once.
@@ -1926,10 +1912,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
-        admission = collection_admission(examples, semaphore)
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
-            async with admission(row):
+            async with semaphore:
                 started_at = time()
                 res = None
                 try:
