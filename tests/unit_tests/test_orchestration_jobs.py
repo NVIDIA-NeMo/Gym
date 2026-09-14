@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -124,3 +126,41 @@ def test_write_local_index_writes_exactly_what_dumps_produces(tmp_path, monkeypa
     path = write_local_index(record)
 
     assert path.read_text() == dumps(record)
+
+
+def test_jobs_module_is_executor_agnostic():
+    """`jobs.py` must not drag any executor into a reader's import path.
+
+    A reader that only wants to parse a record -- EFB's collect, `gym eval
+    status` -- should not end up importing Slurm, SSH and the sbatch templates.
+    Checked in a SUBPROCESS on purpose: this test module imports executors
+    itself, so asserting against the already-loaded sys.modules here would pass
+    no matter what jobs.py does.
+    """
+    probe = (
+        "import sys;"
+        "import nemo_gym.orchestration.jobs;"
+        "leaked = sorted(m for m in sys.modules if 'orchestration.executors' in m);"
+        "print(','.join(leaked))"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "", f"jobs.py pulled in executor modules: {result.stdout.strip()}"
+
+
+def test_submission_record_executor_is_not_closed_over_todays_executors():
+    """A future k8s or local executor must be able to write a record without
+    editing this schema, so `executor` is an open str rather than an enum of the
+    executors that exist today."""
+    record = SubmissionRecord(
+        gym_job_id="gym-job-20260101T000000Z-abc123",
+        gym_version="0.0.0",
+        submitted_at="2026-01-01T00:00:00Z",
+        run_dir="/runs/gym-job-20260101T000000Z-abc123",
+        cluster="some-cluster",
+        executor="kubernetes",
+        submitted_by="someone",
+        benchmarks=[],
+    )
+    assert record.executor == "kubernetes"
+    assert load_record(json.loads(dumps(record))) == record

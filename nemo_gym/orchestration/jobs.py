@@ -16,9 +16,18 @@
 """The record a submission leaves behind.
 
 `api.py` is the input schema (what to submit); this is the output schema (what
-was submitted). Nothing here imports from `executors/`, so a reader — today
-EFB's collect, tomorrow `gym eval status` — can load a record without pulling
-Slurm, SSH and the sbatch templates into its import path.
+was submitted).
+
+This module is executor-agnostic on purpose, and that is a rule rather than a
+coincidence: it must describe a submission made by ANY executor -- Slurm today,
+k8s or a local runner later. Two consequences, both enforced by
+`test_jobs_module_is_executor_agnostic`:
+
+* Nothing here imports from `executors/`, so a reader -- today EFB's collect,
+  tomorrow `gym eval status` -- can load a record without pulling Slurm, SSH and
+  the sbatch templates into its import path.
+* No field is typed or named after one executor's vocabulary. Where a docstring
+  explains a value by example, it says which executor the example comes from.
 """
 
 import os
@@ -26,7 +35,6 @@ import secrets
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel
 
@@ -35,14 +43,19 @@ from nemo_gym import __version__
 
 SCHEMA_VERSION = 1
 
-# The manifest's name inside the remote run directory. Readers look for exactly this.
+# The manifest's name inside the run directory, wherever that directory lives.
+# Readers look for exactly this.
 MANIFEST_NAME = "gym-job.json"
 
 
 class BenchmarkJob(BaseModel):
-    """One benchmark's submission. `job_id` is None exactly when its `sbatch`
-    failed, in which case `error` says why; the other benchmarks in the same
-    submission are unaffected."""
+    """One benchmark's submission.
+
+    `job_id` is None exactly when the executor failed to enqueue this benchmark
+    (for the Slurm executor, a failed `sbatch`), in which case `error` says why.
+    The other benchmarks in the same submission are unaffected -- one failure
+    does not discard the record for the ones that did start.
+    """
 
     benchmark: str
     job_dir: str
@@ -53,8 +66,17 @@ class BenchmarkJob(BaseModel):
 class SubmissionRecord(BaseModel):
     """Everything needed to find a submitted run again.
 
-    `hostname` None means the submission ran on the login node itself (see
-    `get_connection`), not that the host is unknown.
+    `executor` names the executor that produced this record, and is the field a
+    reader branches on before interpreting the executor-shaped parts of the rest
+    -- `job_id`, for instance, is a Slurm job ID under the Slurm executor and
+    need not be numeric under another. It is deliberately a plain `str` rather
+    than an enum of the executors that happen to exist today, so that adding one
+    does not require a schema version bump on every reader.
+
+    `hostname` None means the submission was made from the machine that runs the
+    workload manager's client directly, rather than reaching it over SSH -- not
+    that the host is unknown. Executors with no remote-submission concept at all
+    leave it None.
     """
 
     gym_job_id: str
@@ -62,7 +84,7 @@ class SubmissionRecord(BaseModel):
     submitted_at: str
     run_dir: str
     cluster: str
-    executor: Literal["slurm"]
+    executor: str
     submitted_by: str
     benchmarks: list[BenchmarkJob]
     hostname: str | None = None
@@ -84,9 +106,10 @@ def new_gym_job_id(now: datetime) -> str:
     """The submission's primary key, and the run directory's name.
 
     The random suffix is what keeps two submits in the same second against the
-    same `job.output_path` from sharing a directory — `SSHConnection.copy`
-    rsyncs with `--delete`, so sharing one means the second silently erases the
-    first's staged scripts.
+    same `job.output_path` from sharing a directory. Sharing one is not merely
+    untidy: an executor that stages by mirroring a directory will delete what it
+    does not recognise (the Slurm executor copies with `rsync --delete`), so the
+    second submit silently erases the first's staged scripts.
     """
     return f"gym-job-{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
 
