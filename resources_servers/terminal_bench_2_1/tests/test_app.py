@@ -10,12 +10,25 @@ import pytest
 from nemo_gym.server_utils import ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     TEST_SH_PATCHES,
+    VERIFIER_COMMAND,
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
 )
 
 
 class TestApp:
+    def test_verifier_receives_apt_lock_wait_and_preserves_exit_status(self, tmp_path: Path) -> None:
+        script = tmp_path / "test.sh"
+        script.write_text('cat "$APT_CONFIG"\nrm "$APT_CONFIG"\nexit 7\n')
+        result = subprocess.run(
+            ["bash", "-c", VERIFIER_COMMAND.replace("/tests/test.sh", str(script))],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 7
+        assert result.stdout == 'DPkg::Lock::Timeout "300";\n'
+        assert result.stderr == ""
+
     @pytest.mark.parametrize(
         ("task", "packages"),
         [("qemu-startup", "curl expect"), ("qemu-alpine-ssh", "curl sshpass"), ("code-from-image", "curl")],

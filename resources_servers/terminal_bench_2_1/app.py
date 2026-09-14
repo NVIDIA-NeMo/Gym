@@ -152,6 +152,13 @@ TEST_SH_PATCHES = {
 }
 
 
+# A background package install can outlive the policy turn budget. Scope the
+# lock wait to verifier subprocesses so every APT-based task handles that race.
+VERIFIER_COMMAND = """verifier_apt_config=$(mktemp) || exit $?
+printf '%s\\n' 'DPkg::Lock::Timeout "300";' > "$verifier_apt_config" || exit $?
+APT_CONFIG="$verifier_apt_config" bash /tests/test.sh"""
+
+
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
     config: TerminalBench21ResourcesServerConfig
 
@@ -300,7 +307,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
+                VERIFIER_COMMAND,
                 timeout_s=self.config.evaluation_timeout,
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
