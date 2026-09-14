@@ -66,7 +66,14 @@ vllm_router:
 # own env var wins, so override per run without editing this file.
 sbatch:
   account: nemotron_n3_post
-  qos: interactive
+  # `normal`, not `interactive`: interactive is capped at node=4 and 8 submitted jobs per user,
+  # with DenyOnLimit, so sbatch *fails* rather than queueing. num_shards above needs
+  # num_shards x (prefill + decode) nodes -- 48 at 16 x (1+2) -- and even a 2-shard run exceeds
+  # the 4-node cap. `normal` allows node=1512 and 2000 submitted jobs.
+  # There is no `batch` qos on this cluster -- batch is the partition; the qos names are
+  # normal / free / interactive / short / cpu-*.
+  # Use interactive only for a single-shard smoke run, via SBATCH_QOS=interactive.
+  qos: normal
   timelimit: "04:00:00"
 
 # Containers, for `srun --container-image`.

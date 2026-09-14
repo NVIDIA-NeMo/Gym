@@ -188,8 +188,8 @@ materialize:
 
 sbatch:                          # optional; each key becomes SBATCH_<KEY>
   account: nemotron_n3_post
-  qos: interactive
-  timelimit: "04:00:00"
+  qos: normal                    # not interactive: capped at 4 nodes / 8 jobs, DenyOnLimit,
+  timelimit: "04:00:00"          # so a sharded run fails at submit rather than queueing
 
 srun:                            # optional
   container: /lustre/.../eval.sqsh
@@ -249,7 +249,11 @@ SWEEP_DIR=<sweep> POLICY_BASE_URL=http://host:8000/v1 POLICY_MODEL_NAME=<model> 
 ### 03a - Starting, resuming and monitoring a profiling job
 
 `03_run_sharded.sh` submits one job per shard and watches them. A shard whose job dies with work
-outstanding is resubmitted, up to `MAX_ROUNDS` total attempts (4, so three retries). It merges and splits when all are done;
+outstanding is resubmitted, up to `MAX_ROUNDS` total attempts (100). That is not a number you should
+need: a shard is ~26 h of collection at 16 shards while a vLLM engine assertion ends a job roughly
+every 1.5 h, so 7-17 attempts is the normal healthy case. A shard that exhausts its attempts is
+named on stderr and the script exits non-zero -- it still merges what was collected, but it never
+reports a partial sweep as a complete one. It merges and splits when all are done;
 each shard's own job profiles itself, so run `05_profile.sh` after for the whole sweep:
 
 ```bash
@@ -452,7 +456,7 @@ rewards before a run finishes.
 | `SANDBOX_CONTAINER` | 03 | required by `ns_tools` and `math_formal_lean` |
 | `NUM_PREFILL_NODES`, `NUM_DECODE_NODES` | 03 | P/D split; nodes = P + D |
 | `SBATCH_ACCOUNT`, `SBATCH_GRES` | 03 | `nemotron_n4_post`, `gpu:4` — only when the manifest's `sbatch` block is silent |
-| `WALLTIME`, `MAX_ROUNDS` | 03 | per-job limit; total attempts per shard (4 = first submission plus 3 retries) |
+| `WALLTIME`, `MAX_ROUNDS` | 03 | per-job limit; total attempts per shard (100) |
 | `PROFILE_JOBS` | 05 | concurrent label profiles (8) |
 
 ### Artifacts, in `outputs/sweeps/<nickname>/`
