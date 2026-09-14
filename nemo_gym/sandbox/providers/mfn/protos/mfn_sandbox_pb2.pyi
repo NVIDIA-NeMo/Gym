@@ -266,12 +266,14 @@ class SendStdInRequest(_message.Message):
     def __init__(self, data: _Optional[bytes] = ...) -> None: ...
 
 class ExecStreamRequest(_message.Message):
-    __slots__ = ("request", "stdin")
+    __slots__ = ("request", "stdin", "resize")
     REQUEST_FIELD_NUMBER: _ClassVar[int]
     STDIN_FIELD_NUMBER: _ClassVar[int]
+    RESIZE_FIELD_NUMBER: _ClassVar[int]
     request: ExecRequest
     stdin: SendStdInRequest
-    def __init__(self, request: _Optional[_Union[ExecRequest, _Mapping]] = ..., stdin: _Optional[_Union[SendStdInRequest, _Mapping]] = ...) -> None: ...
+    resize: Pty
+    def __init__(self, request: _Optional[_Union[ExecRequest, _Mapping]] = ..., stdin: _Optional[_Union[SendStdInRequest, _Mapping]] = ..., resize: _Optional[_Union[Pty, _Mapping]] = ...) -> None: ...
 
 class ExecStreamResponse(_message.Message):
     __slots__ = ("output", "complete")
