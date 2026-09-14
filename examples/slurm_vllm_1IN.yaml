@@ -49,6 +49,8 @@ driver:
           top_p: 0.9
         config_paths: # if services include pre-defined service types, some configs might be created and added to the command automatically
           - benchmarks/ifbench/config.yaml
+        observability_enabled: true # optional; auto-derives model_call_capture_dir
+        # from this benchmark's own real output directory unless set explicitly here
 job:
   output_path: /lustre/fsw/my-path
 
