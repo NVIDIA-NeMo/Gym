@@ -202,6 +202,15 @@ def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
     assert "concurrency:" not in unit_workflow
 
 
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
