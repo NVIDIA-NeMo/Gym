@@ -41,6 +41,15 @@ def test_workplace_prefix_mode_rewrites_only_later_model_calls(
     agent = _agent()
     request = NeMoGymResponseCreateParamsNonStreaming(
         input="create the event",
+        tools=[
+            {
+                "type": "function",
+                "name": "calendar_create_event",
+                "description": "Create a calendar event.",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": False,
+            }
+        ],
         tool_choice="auto",
         parallel_tool_calls=True,
         max_output_tokens=64,
@@ -51,7 +60,7 @@ def test_workplace_prefix_mode_rewrites_only_later_model_calls(
     assert first == request
 
     second = agent._prepare_model_request_for_turn(request, turn_index=2)
-    assert second.tools == []
+    assert second.tools == request.tools
     assert second.tool_choice == "none"
     assert second.parallel_tool_calls is False
     assert second.max_output_tokens == 512
