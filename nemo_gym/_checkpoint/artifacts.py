@@ -30,6 +30,7 @@ CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
 AGENT_CONTINUATION_INDEX_FEATURE = "agent_continuation_index_v1"
 AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE = "agent_resource_dependency_index_v1"
 EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE = "external_storage_reference_index_v1"
+GENERATION_CUT_LINEAGE_FEATURE = "generation_cut_lineage_v1"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 
@@ -96,14 +97,14 @@ class AgentContinuationRoot(BaseModel):
 
 
 class ExternalStorageReference(BaseModel):
-    """Opaque external token-storage row needed by a parked continuation."""
+    """Opaque external token-storage row needed by a Gym recovery point."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1] = 1
     capture_key: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     boundary_model_call_id: str = Field(min_length=1)
-    kind: Literal["token_capture_staging"] = "token_capture_staging"
+    kind: Literal["token_capture_staging", "generation_prefix_cut"] = "token_capture_staging"
     key: str = Field(min_length=1)
 
 
