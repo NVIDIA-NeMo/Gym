@@ -26,12 +26,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from pathlib import Path
 from typing import Any, Optional
 
 from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
+
+
+# Marker the scorers set when they did not produce a real judgement. Deliberately
+# not plain ``"error"``: the metadata returned on the success path is the judge's
+# own parsed JSON, and a judge is free to put its own ``error`` field in there --
+# flagging on that would mark good judgements invalid.
+SCORING_ERROR_KEY = "scoring_error"
+
+# Rubric judge requests had no timeout: ``AsyncOpenAI`` defaults to 600 s with two
+# silent retries, so a legitimately long request -- a multi-page PDF rasterised to
+# page images, say -- burns 30 minutes across three attempts and then surfaces to
+# the caller as a plain transient 500, with nothing to indicate a timeout was
+# involved. ``comparison.py`` already bounds its own judge calls this way; the
+# rubric path did not.
+#
+# ``max_retries=0`` is deliberate: a request too slow to finish once is too slow
+# three times, so the SDK retries only multiply wall-clock. One bounded attempt
+# fails in a third of the time and says what happened.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +140,12 @@ async def score_with_rubric(
         deliverable_text=deliverable_text,
     )
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -187,7 +212,11 @@ async def score_with_rubric(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Rubric JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # A partial score is a salvage, not a judgement: criteria the judge
+            # never emitted are simply absent, so the number is biased low. Tag
+            # it so the caller can flag the row rather than averaging it in as
+            # though the whole rubric had been scored.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
         print(f"Rubric judge parsed keys: {list(result.keys())}", flush=True)
         if "criteria_scores" in result:
@@ -208,13 +237,19 @@ async def score_with_rubric(
                 score = sum(scores) / len(scores)
                 print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
 
-        if score is None:
+        score_missing = score is None
+        if score_missing:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
             score = 0.0
 
         print(f"Rubric final score: {score} (judge: {judge.name})", flush=True)
         if isinstance(result, dict):
             result["judge_name"] = judge.name
+            if score_missing:
+                # The judge replied with well-formed JSON that simply carries no
+                # score. That is a 0.0 indistinguishable from a genuinely bad
+                # deliverable unless it is tagged here.
+                result[SCORING_ERROR_KEY] = "no_score_in_response"
             if include_raw_responses:
                 result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
@@ -268,7 +303,12 @@ async def score_with_rubric_visual(
     content: list[dict] = [{"type": "text", "text": judge_text}]
     content.extend(deliverable_content_blocks)
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -326,7 +366,9 @@ async def score_with_rubric_visual(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Visual judge JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # See the text path above: tag the salvage so it is flagged, not
+            # silently averaged in as a real score.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
         print(f"Visual judge parsed keys: {list(result.keys())}", flush=True)
         if "criteria_scores" in result:
@@ -346,13 +388,17 @@ async def score_with_rubric_visual(
                 score = sum(scores) / len(scores)
                 print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
 
-        if score is None:
+        score_missing = score is None
+        if score_missing:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
             score = 0.0
 
         print(f"Visual judge final score: {score} (judge: {judge.name})", flush=True)
         if isinstance(result, dict):
             result["judge_name"] = judge.name
+            if score_missing:
+                # See the text path above.
+                result[SCORING_ERROR_KEY] = "no_score_in_response"
             if include_raw_responses:
                 result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
@@ -403,7 +449,12 @@ async def score_with_rubric_structured(
     def _client_for(judge: ResolvedJudge) -> Any:
         key = (judge.base_url, judge.api_key)
         if key not in client_cache:
-            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
@@ -520,7 +571,11 @@ async def score_with_rubric_structured(
 
     if not scores:
         print("[structured-rubric] no valid scores from any trial", flush=True)
-        no_valid_metadata: dict = {"error": "no_valid_scores", "num_trials": num_trials}
+        no_valid_metadata: dict = {
+            "error": "no_valid_scores",  # retained: pre-existing key, read by operators
+            SCORING_ERROR_KEY: "no_valid_scores",
+            "num_trials": num_trials,
+        }
         if include_raw_responses:
             no_valid_metadata["raw_responses"] = trial_responses
         return 0.0, no_valid_metadata
