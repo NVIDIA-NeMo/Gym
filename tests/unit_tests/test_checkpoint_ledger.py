@@ -141,7 +141,10 @@ def _generation_cut_receipt(
                 **inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
                 frozen_buffer_id=f"active/{checkpoint_id}",
-                staging_key=f"__generation_cut__/{checkpoint_id}/{rollout_id}/{model_call_id}",
+                staging_keys=(
+                    f"__generation_cut__/previous/{rollout_id}/{model_call_id}",
+                    f"__generation_cut__/{checkpoint_id}/{rollout_id}/{model_call_id}",
+                ),
                 prefix_token_count=17,
                 prefix_digest="a" * 64,
             ),
@@ -275,7 +278,7 @@ def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> N
         CheckpointArtifactReference.model_validate(summary["storage_reference_index"]),
         ExternalStorageReference,
     )
-    assert [reference.key for reference in references] == [receipt.prefixes[0].staging_key]
+    assert {reference.key for reference in references} == set(receipt.prefixes[0].staging_keys)
 
     restored = tmp_path / "restored"
     result = CaptureLedgerCheckpointer(restored, server_name="policy").restore(checkpoint)
@@ -622,7 +625,7 @@ def test_model_commit_accepts_agent_continuation_index_and_returns_reference_ind
                 **cut_inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
                 frozen_buffer_id="active/checkpoint-1",
-                staging_key="__generation_cut__/checkpoint-1/rollout-a/call-1",
+                staging_keys=("__generation_cut__/checkpoint-1/rollout-a/call-1",),
                 prefix_token_count=2,
                 prefix_digest="a" * 64,
             ),
@@ -967,8 +970,8 @@ class _RecordingGenerationCutBackend:
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
                     frozen_buffer_id=f"active/{inventory.checkpoint_id}",
-                    staging_key=(
-                        f"__generation_cut__/{inventory.checkpoint_id}/{prefix.rollout_id}/{prefix.model_call_id}"
+                    staging_keys=(
+                        f"__generation_cut__/{inventory.checkpoint_id}/{prefix.rollout_id}/{prefix.model_call_id}",
                     ),
                     prefix_token_count=2,
                     prefix_digest="a" * 64,

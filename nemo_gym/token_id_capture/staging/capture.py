@@ -95,7 +95,7 @@ class RolloutTokenCapture:
         *,
         prefix_token_ids: list[int] | None = None,
         generation_cut: StagedCallBaseSnapshot | None = None,
-        generation_cut_staging_key: str | None = None,
+        generation_cut_staging_keys: tuple[str, ...] | None = None,
         stream: bool = False,
         weight_version: int | None = None,
     ) -> ActiveCall:
@@ -129,7 +129,7 @@ class RolloutTokenCapture:
             self._validate_generation_cut(
                 admission,
                 generation_cut,
-                staging_key=generation_cut_staging_key,
+                staging_keys=generation_cut_staging_keys,
                 weight_version=weight_version,
             )
         elif admission.generation_cut is not None:
@@ -149,15 +149,15 @@ class RolloutTokenCapture:
         admission: CaptureAdmission,
         snapshot: StagedCallBaseSnapshot,
         *,
-        staging_key: str | None,
+        staging_keys: tuple[str, ...] | None,
         weight_version: int,
     ) -> None:
         continuation = admission.generation_cut
         where = f"rollout {admission.rollout_id} call {admission.model_call_id}"
         if continuation is None:
             raise CaptureError(f"{where}: a staged generation cut was not authorized")
-        if staging_key != continuation.staging_key:
-            raise CaptureError(f"{where}: fetched generation-cut key does not match admission")
+        if staging_keys != continuation.staging_keys:
+            raise CaptureError(f"{where}: fetched generation-cut keys do not match admission")
         if (
             snapshot.rollout_id != continuation.source_capture_key
             or snapshot.model_call_id != continuation.source_model_call_id
@@ -349,6 +349,65 @@ class RolloutTokenCapture:
             token_mask_delta=token_mask_delta,
             generation_log_probs_delta=logprobs_delta,
             extras=extras,
+            extras_digest=extras_digest,
+            chain_hash=chain_hash,
+            cumulative_hash=cumulative_hash,
+        )
+
+    def build_generation_chunk_record(
+        self,
+        call: ActiveCall,
+        *,
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+    ) -> StagedCallRecord:
+        """Build one independently validated generated-token-only cut chunk."""
+        if not generated_token_ids:
+            raise ValueError("generation chunk must contain at least one token")
+        if len(generated_token_ids) != len(generated_logprobs):
+            raise ValueError("generated token IDs and log probabilities must have equal lengths")
+        admission = call.admission
+        token_ids_delta = list(generated_token_ids)
+        token_mask_delta = [1.0] * len(token_ids_delta)
+        logprobs_delta = list(generated_logprobs)
+        delta_len = len(token_ids_delta)
+        cum_len = admission.prev_len + delta_len
+        chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
+        cumulative_hash = hash_token_ids(call.prefix_token_ids + token_ids_delta)
+        extras_digest = compute_extras_digest(None)
+        digest = compute_staging_digest(
+            schema_version=admission.schema_version,
+            digest_version=STAGING_DIGEST_VERSION,
+            extras_digest_version=EXTRAS_DIGEST_VERSION,
+            rollout_id=admission.rollout_id,
+            model_call_id=admission.model_call_id,
+            parent_call_id=admission.parent_call_id,
+            mode=admission.mode,
+            prev_len=admission.prev_len,
+            delta_len=delta_len,
+            cum_len=cum_len,
+            weight_version=call.weight_version,
+            token_ids_delta=token_ids_delta,
+            token_mask_delta=token_mask_delta,
+            generation_log_probs_delta=logprobs_delta,
+            extras_digest=extras_digest,
+            chain_hash=chain_hash,
+            cumulative_hash=cumulative_hash,
+        )
+        return StagedCallRecord(
+            rollout_id=admission.rollout_id,
+            model_call_id=admission.model_call_id,
+            parent_call_id=admission.parent_call_id,
+            mode=admission.mode,
+            prev_len=admission.prev_len,
+            delta_len=delta_len,
+            cum_len=cum_len,
+            weight_version=call.weight_version,
+            digest=digest,
+            token_ids_delta=token_ids_delta,
+            token_mask_delta=token_mask_delta,
+            generation_log_probs_delta=logprobs_delta,
+            extras=None,
             extras_digest=extras_digest,
             chain_hash=chain_hash,
             cumulative_hash=cumulative_hash,

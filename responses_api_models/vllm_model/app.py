@@ -942,7 +942,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         restored_cut = self._generation_cut_for_context()
         if restored_cut is not None:
             if (
-                restored_cut.staging_key is None
+                not restored_cut.staging_keys
                 or restored_cut.prefix_token_count is None
                 or restored_cut.prefix_digest is None
             ):
@@ -955,7 +955,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             restored_cut.attempt_index,
                         ),
                         source_model_call_id=restored_cut.model_call_id,
-                        staging_key=restored_cut.staging_key,
+                        staging_keys=restored_cut.staging_keys,
                         generation_token_count=restored_cut.prefix_token_count,
                         digest=restored_cut.prefix_digest,
                     )
