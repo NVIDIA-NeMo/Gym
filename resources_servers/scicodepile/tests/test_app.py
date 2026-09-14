@@ -10,9 +10,12 @@ the negative cases matter at least as much as the positive one.
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -291,6 +294,91 @@ class TestScratchDirectoryLifecycle:
         assert json.loads(proc.stdout)["status"] == "pass"
         # Present, not cleaned up by the child: the caller that supplied it owns it.
         assert (workdir / "written_here.txt").is_file()
+
+
+class TestRunnerExitPath:
+    """A written verdict must not be undone by how the runner exits.
+
+    ``proc.communicate()`` waits for EOF on the runner's pipes, and a normal
+    interpreter shutdown joins non-daemon threads and runs ``atexit`` hooks. Six
+    upstream tasks already use ``subprocess``/``multiprocessing``, so every one of
+    these is a passing solution that used to be scored ``timeout`` — and to hold a
+    concurrency slot for the full timeout while doing it.
+    """
+
+    TIMEOUT = 5.0
+
+    def _verdict(self, code):
+        server = _make_server(subprocess_timeout=self.TIMEOUT)
+        started = time.monotonic()
+        result = asyncio.run(
+            server._run_task(setup_code="", code=code, test=_task("")["test"], entry_point="add")
+        )
+        return result, time.monotonic() - started
+
+    def test_a_task_that_leaves_a_child_running_still_passes(self):
+        """The child inherits fd 2, so it held the stderr pipe open past the verdict."""
+        result, elapsed = self._verdict(
+            "import subprocess, sys\n"
+            "def add(a, b):\n"
+            "    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "    return a + b\n"
+        )
+        assert result["status"] == "pass"
+        assert elapsed < self.TIMEOUT, "verdict was written but the runner could not exit"
+
+    def test_a_task_that_leaves_a_thread_running_still_passes(self):
+        result, elapsed = self._verdict(
+            "import threading, time\n"
+            "def add(a, b):\n"
+            "    threading.Thread(target=lambda: time.sleep(120), daemon=False).start()\n"
+            "    return a + b\n"
+        )
+        assert result["status"] == "pass"
+        assert elapsed < self.TIMEOUT, "interpreter shutdown joined a non-daemon thread"
+
+    def test_an_atexit_hook_cannot_stall_the_verdict(self):
+        result, elapsed = self._verdict(
+            "import atexit, time\n"
+            "atexit.register(lambda: time.sleep(120))\n"
+            "def add(a, b):\n    return a + b\n"
+        )
+        assert result["status"] == "pass"
+        assert elapsed < self.TIMEOUT, "interpreter shutdown ran the task's atexit hook"
+
+    def test_orphans_are_killed_with_the_process_group(self, tmp_path):
+        """Anything the task spawned must die before the parent deletes its CWD."""
+        pidfile = tmp_path / "grandchild.pid"
+        child = (
+            "import os, sys, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        code = (
+            "import subprocess, sys, time\n"
+            "def add(a, b):\n"
+            f"    subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "    time.sleep(1)\n"
+            "    return a + b\n"
+        )
+        result, _ = self._verdict(code)
+        assert result["status"] == "pass"
+
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail(f"grandchild {pid} outlived the runner")
+
+    def test_a_genuine_hang_still_times_out(self):
+        """The complement: making the exit path fast must not disarm the timeout."""
+        result, elapsed = self._verdict("def add(a, b):\n    while True:\n        pass\n")
+        assert result["status"] == "timeout"
+        assert elapsed >= self.TIMEOUT
 
 
 class TestFailureReason:

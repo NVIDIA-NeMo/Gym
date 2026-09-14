@@ -45,6 +45,7 @@ import os
 import platform
 import sys
 import tempfile
+import traceback
 
 
 def _apply_limits(max_as_limit_mb: int) -> None:
@@ -196,9 +197,17 @@ def main() -> None:
     # rebinds `sys.stdout` — it does not protect the descriptor, so incidental
     # C-level writes to fd 1 would otherwise corrupt an honest task's JSON.
     # This does not make the verdict unforgeable; see the module docstring.
+    #
+    # fd 2 goes to /dev/null as well, and for a different reason: the parent waits
+    # for EOF on both pipes. Anything the task spawns inherits these descriptors, so
+    # a task that leaves a child running would hold the stderr pipe open and turn a
+    # written `pass` into a `timeout`. The real stderr is kept on a private duplicate
+    # so a runner-internal crash is still reportable.
     result_fd = os.dup(1)
+    stderr_fd = os.dup(2)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull_fd, 1)
+    os.dup2(devnull_fd, 2)
     os.close(devnull_fd)
 
     try:
@@ -207,6 +216,8 @@ def main() -> None:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 result = run_task(req)
     except BaseException as exc:  # pragma: no cover - defensive
+        with contextlib.suppress(BaseException):
+            os.write(stderr_fd, traceback.format_exc().encode("utf-8", "replace"))
         # Reached only for failures outside `run_task` — setting up the working
         # directory or the stream redirection — i.e. before any model code runs.
         # A crash *after* model code runs is attributed to the model inside
@@ -228,6 +239,15 @@ def main() -> None:
     # verdict. See the module docstring.
     os.write(result_fd, json.dumps(result).encode())
     os.close(result_fd)
+    os.close(stderr_fd)
+
+    # Hard exit, not a return: the verdict is written and nothing left to do here is
+    # worth waiting on. A normal interpreter shutdown joins non-daemon threads and
+    # runs `atexit` hooks, both of which task code can leave behind, so a task whose
+    # `check` passed would sit until the parent's timeout fired and be scored
+    # `timeout` instead of `pass`. Everything this process owns is either already
+    # closed or owned by the parent (the working directory in particular).
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
+import os
+import signal
 import shutil
 import sys
 import tempfile
@@ -31,6 +34,11 @@ class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
     subprocess_timeout: float = 120.0
     # Address-space cap (MiB) applied inside the runner, 0 disables.
     max_as_limit: int = 8 * 1024
+
+
+# Upper bound on reaping a SIGKILLed runner. Only reached if the kill did not land;
+# returning late beats holding the semaphore for the rest of the run.
+_REAP_TIMEOUT_SECONDS = 10.0
 
 
 class FailureCode(str, Enum):
@@ -185,6 +193,26 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             return FailureCode.TEST_CODE_FAILED
         return FailureCode.RUNNER_CRASHED
 
+    @staticmethod
+    async def _kill_process_group(pgid: int, proc) -> None:
+        """SIGKILL the runner's process group and reap it.
+
+        ``ProcessLookupError`` is the normal case: the runner exited and left nothing
+        behind. Anything else means the task spawned something that is still alive.
+
+        Every step is individually fallible and none of them may block: this runs in a
+        ``finally``, so a hang here would hold the concurrency slot open forever and
+        stall the whole rollout run rather than just this task. Hence the fallback
+        ``proc.kill()`` if the group signal could not be delivered, and the bounded
+        wait if even that leaves the child unreaped.
+        """
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+
     async def _run_task(self, setup_code: str, code: str, test: str, entry_point: str) -> Dict[str, Any]:
         # The scratch CWD is created and removed here, not in the runner: a task that
         # hangs is SIGKILLed below and a task can call `os._exit`, and neither path
@@ -216,16 +244,29 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # New session: the runner becomes its own process-group leader, so whatever
+            # the task spawns can be killed as a group. `proc.kill()` alone reaches only
+            # the runner and orphans grandchildren — which then keep running against a
+            # working directory this method is about to delete.
+            start_new_session=True,
         )
+        # Equal to the group id because `start_new_session` makes the child the leader.
+        # Captured now: once asyncio reaps the child, `os.getpgid(proc.pid)` fails even
+        # while the group still has live members.
+        pgid = proc.pid
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(payload.encode()),
-                timeout=self.config.subprocess_timeout,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return {"status": "timeout", "details": {"reason": "subprocess_timeout"}}
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(payload.encode()),
+                    timeout=self.config.subprocess_timeout,
+                )
+            except asyncio.TimeoutError:
+                return {"status": "timeout", "details": {"reason": "subprocess_timeout"}}
+        finally:
+            # Unconditional and in a `finally`: the verdict is already decided, and a
+            # CancelledError (uvicorn allows 0.5s on shutdown) must take this path too,
+            # or the child outlives the `rmtree` of its own CWD.
+            await self._kill_process_group(pgid, proc)
 
         stdout_text = stdout.decode("utf-8", errors="replace")
         try:

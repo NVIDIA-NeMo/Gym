@@ -31,7 +31,8 @@ directory, so each task gets a throwaway one.
 runs with the privileges and environment of the resources server, and can shell out,
 open sockets, or write outside its working directory. Containment is limited to four
 things: process isolation, an `RLIMIT_AS` address-space cap, a throwaway working
-directory, and the parent's wall-clock timeout.
+directory, and the parent's wall-clock timeout (enforced by killing the runner's
+entire process group, so spawned children do not outlive it).
 
 Do not run untrusted rollouts on shared nodes without a real sandbox — see
 `nemo_gym/sandbox/`.
@@ -40,6 +41,21 @@ The result channel is kept off file descriptor 1: the runner reports its verdict
 a private duplicate and points fd 1 at `/dev/null`. Task code owns fd 1 too, and
 `redirect_stdout` rebinds only `sys.stdout`, not the descriptor, so without this an
 honest task's incidental output would corrupt its own verdict.
+
+### Leaving the runner
+
+Once the verdict is on the channel the runner calls `os._exit(0)` rather than
+returning. A normal interpreter shutdown joins non-daemon threads and runs `atexit`
+hooks, both of which task code can leave behind; fd 2 is also pointed at `/dev/null`
+so that anything the task spawns cannot hold the parent's stderr pipe open. Without
+these, a solution whose `check` passed — six upstream tasks already use
+`subprocess`/`multiprocessing` — was scored `timeout` and held a concurrency slot for
+the full 120 s.
+
+The runner is spawned with `start_new_session=True` and its whole process group is
+SIGKILLed in a `finally`, so a task's children die before the parent removes the
+working directory they are writing into, and a cancellation on server shutdown takes
+the same path.
 
 **That is a robustness property, not a security one — the verdict is not
 tamper-proof.** Task code can still reach the result channel through another
