@@ -213,6 +213,29 @@ def _login_site(
             page.locator("#password").fill(password)
             page.get_by_role("button", name="Log in").click()
         time.sleep(2)
+        if site == "shopping":
+            _verify_shopping_login(page, base_url=base_url, goto=goto)
         LOG.info("event=webarena_site_login_complete site=%s", site)
     finally:
         page.close()
+
+
+def _verify_shopping_login(page: Any, *, base_url: str, goto: Callable[[Any, str], None]) -> None:
+    """Require an authenticated dashboard before exposing a task to the model.
+
+    A submitted login form can return normally without authenticating. Check a
+    protected page in the same context; login_sites owns the bounded retries.
+    Never retry or change policy actions to compensate for a failed setup.
+    """
+
+    account_url = f"{base_url}/customer/account/"
+    goto(page, account_url)
+    expected, actual = urlparse(account_url), urlparse(page.url)
+    account_path = expected.path.rstrip("/")
+    if (actual.scheme, actual.netloc) != (expected.scheme, expected.netloc) or actual.path.rstrip("/") not in {
+        account_path,
+        f"{account_path}/index",
+    }:
+        raise RuntimeError("WebArena shopping login did not reach the authenticated account page")
+    page.get_by_role("heading", name="My Account", exact=True).wait_for(state="visible", timeout=10000)
+    LOG.info("event=webarena_site_login_verified site=shopping")
