@@ -31,6 +31,7 @@ VLLM_COMMON_ARGS=(
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
     --enable-mamba-fine-grained-prefix-cache
     --prefix-match-unit 16
+    --max-cudagraph-capture-size 1200
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
