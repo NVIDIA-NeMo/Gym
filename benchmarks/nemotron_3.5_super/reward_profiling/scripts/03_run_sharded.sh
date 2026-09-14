@@ -114,27 +114,55 @@ echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
 SWEEP_DIR="$SWEEP_DIR" NUM_SHARDS="$NUM_SHARDS" SHARDS_DIR="$SHARDS_DIR" \
     bash "$RP_DIR/scripts/02_shard.sh"
 
-# Outstanding rollouts for a shard: inputs whose (task, rollout) pair is not yet in its
-# rollouts.jsonl.
+# Work a shard has left, defined exactly as Gym defines it.
+#
+# This MUST match rollout_collection.py:1213-1216, which runs
+#   inputs - (successes | terminal | maxed_out)
+# where `terminal` and `maxed_out` come from rollouts_failures.jsonl and are deliberately never
+# retried. Counting only successes -- which this did -- means any rollout that goes terminal (a
+# judge 500, a sandbox timeout, three failed attempts) stays "outstanding" forever: the watcher
+# resubmits a job that dispatches nothing, and the sweep has no terminating condition at all.
+# Across 5.8M rollouts terminal failures are a certainty, so this affected every shard.
+#
+# Tolerates a torn final line -- a walltime-killed job leaves one, which is the exact event this
+# function exists to observe -- and a missing rollouts.jsonl.
 shard_outstanding() {
-    python - "$1" <<'INNER'
+    python - "$1" "${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-3}" <<'INNER'
 import json, sys
+from collections import Counter
 from pathlib import Path
 
-d = Path(sys.argv[1])
-done_pairs = set()
-for line in open(d / "rollouts.jsonl"):
-    if line.strip():
-        r = json.loads(line)
-        done_pairs.add((r.get("_ng_task_index"), r.get("_ng_rollout_index")))
+d, max_attempts = Path(sys.argv[1]), int(sys.argv[2])
 
-outstanding = 0
-for line in open(d / "rollouts_materialized_inputs.jsonl"):
-    if not line.strip():
-        continue
-    r = json.loads(line)
-    outstanding += (r.get("_ng_task_index"), r.get("_ng_rollout_index")) not in done_pairs
-print(outstanding)
+def rows(name):
+    try:
+        fh = open(d / name)
+    except FileNotFoundError:
+        return
+    with fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue          # torn final line from a killed job
+
+def key(r):
+    return (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
+
+gated = {key(r) for r in rows("rollouts.jsonl")}
+
+attempts, terminal = Counter(), set()
+for r in rows("rollouts_failures.jsonl"):
+    k = key(r)
+    attempts[k] += 1
+    if r.get("_ng_failure_terminal"):
+        terminal.add(k)
+gated |= terminal
+gated |= {k for k, n in attempts.items() if n >= max_attempts}
+
+print(sum(key(r) not in gated for r in rows("rollouts_materialized_inputs.jsonl")))
 INNER
 }
 
