@@ -2,7 +2,7 @@ config_paths:
   - resources_servers/safe_child_llm/configs/safe_child_llm.yaml
 
 safe_child_llm_benchmark:
-  _inherit_from: safe_child_llm_response_collector
+  _inherit_from: safe_child_llm_simple_agent
   responses_api_agents:
     simple_agent:
       datasets:

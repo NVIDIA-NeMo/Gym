@@ -95,13 +95,19 @@ def _render(sources: dict[str, bytes]) -> str:
             output.append(
                 json.dumps(
                     {
-                        "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
+                        # Paper section 3.3: temperature 0 and a fixed maximum token budget; the pinned
+                        # kidsafellm/utils/gpt_api.py wrappers use max_tokens=1024 (and temperature 0.2,
+                        # which contradicts the paper; the paper value is used here).
+                        "responses_create_params": {
+                            "input": [{"role": "user", "content": prompt}],
+                            "temperature": 0.0,
+                            "max_output_tokens": 1024,
+                        },
                         "safe_child_id": identifier,
                         "age_group": age_group,
                         "category": row["category"].strip(),
                         "source": row["source"].strip(),
                         "prompt": prompt,
-                        "annotation_status": "pending_human_review",
                         "upstream_revision": UPSTREAM_REVISION,
                     },
                     ensure_ascii=False,
