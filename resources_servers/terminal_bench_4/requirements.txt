@@ -1,0 +1,4 @@
+-e nemo-gym[dev,sandbox] @ ../../
+harbor==0.23.0
+opensandbox==0.1.16
+httpx-aiohttp

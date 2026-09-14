@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare task identities; Harbor retrieves the immutable official task packages."""
+"""Prepare pinned identities; the resources server resolves official packages."""
 
 import json
 from pathlib import Path
@@ -31,7 +31,14 @@ def prepare(task_names: list[str] | None = None, category: str | None = None) ->
     with OUTPUT_PATH.open("w") as output:
         for task in tasks:
             output.write(
-                json.dumps({"task_name": f"terminal-bench/{task['name']}", "responses_create_params": {"input": []}})
+                json.dumps(
+                    {
+                        "task_name": f"terminal-bench/{task['name']}",
+                        "task_ref": task["ref"],
+                        "dataset_ref": manifest["ref"],
+                        "responses_create_params": {"input": []},
+                    }
+                )
                 + "\n"
             )
     return OUTPUT_PATH

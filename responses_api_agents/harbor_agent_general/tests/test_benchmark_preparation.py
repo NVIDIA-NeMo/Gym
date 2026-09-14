@@ -19,7 +19,11 @@ def test_prepared_names_match_harbor_package_registry(tmp_path, monkeypatch):
     assert len(rows) == len(ids) == 66
     for row in rows:
         config = DatasetConfig(name=manifest["dataset"], ref=manifest["ref"], task_names=[row["task_name"]])
-        assert len(config._filter_task_ids(ids)) == 1
+        selected = config._filter_task_ids(ids)
+        assert len(selected) == 1
+        assert row["task_ref"] == selected[0].ref
+        assert row["dataset_ref"] == manifest["ref"]
+        assert "path" not in row
 
 
 @pytest.mark.parametrize("category,count", [("cpu", 52), ("compose", 11), ("gpu", 3)])

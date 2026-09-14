@@ -397,6 +397,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_timeout: float
 
     debug: bool = False
+    resources_handoff: bool = False
+    sandbox_providers: Dict[str, Any] = Field(default_factory=dict)
+    opencode_env_from_process: List[str] = Field(default_factory=list)
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
@@ -438,11 +441,11 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
 
-    opencode_results_fpath: str
-    opencode_run_stdout: str
-    opencode_run_stderr: str
-    opencode_finished: bool
-    opencode_export_found: bool
+    opencode_results_fpath: str = ""
+    opencode_run_stdout: str = ""
+    opencode_run_stderr: str = ""
+    opencode_finished: bool = False
+    opencode_export_found: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -885,6 +888,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
+        if self.config.resources_handoff:
+            from responses_api_agents.opencode_sandboxed_agent.borrowed import run
+
+            return OpenCodeSandboxedAgentVerifyResponse.model_validate(await run(self, request, body))
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
