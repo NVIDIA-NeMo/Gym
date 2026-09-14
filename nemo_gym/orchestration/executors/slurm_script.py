@@ -168,6 +168,17 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
     return render_vllm_ray_symmetric_run(inner_cmd, total_nodes, resource_flags)
 
 
+# vLLM refuses `--api-server-count` in headless mode ("no API servers are started in headless
+# mode") and exits before loading anything. The flag is legitimate on the head node and reaches us
+# through a service's own extra_args, so it is stripped from the worker command rather than
+# rejected: Gym decides which nodes run headless, so Gym keeps their command valid.
+_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--api-server-count(?:[= ]\S+)?")
+
+
+def _strip_headless_incompatible_flags(cmd: str) -> str:
+    return _HEADLESS_INCOMPATIBLE_FLAG.sub("", cmd)
+
+
 def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
     # Data-parallel replicas span nodes. vLLM's Ray-based DP auto-placement doesn't spread ranks
     # across physical nodes - launching a single `vllm serve --data-parallel-size N` from one node
@@ -189,7 +200,7 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
     trust_flag = " --trust-remote-code" if service.trust_remote_code else ""
     head_cmd = common + dp_flags + trust_flag
     worker_cmd = (
-        common
+        _strip_headless_incompatible_flags(common)
         + dp_flags
         + trust_flag
         + " --headless"

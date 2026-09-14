@@ -367,6 +367,30 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert 'exec "$@"' in out
 
 
+def test_worker_command_drops_api_server_count():
+    """vLLM exits on `--api-server-count` in headless mode before loading anything:
+    "no API servers are started in headless mode". The flag is valid on the head
+    node and arrives via the service's own extra_args, so only the worker branch
+    is stripped. A real mmlu-prox run lost all five workers to this.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args="--api-server-count 1 --enable-prefix-caching",
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+    head, worker = block.split("else")
+
+    assert "--api-server-count 1" in head
+    assert "--headless" in worker
+    assert "--api-server-count" not in worker
+    # Stripping must not take the neighbouring flag with it.
+    assert "--enable-prefix-caching" in worker
+
+
 def test_multi_instance_multi_node_command_survives_the_shell():
     """vLLM's JSON flags are single-quoted, and the DP branches are embedded in a
     single-quoted `bash -lc '...'`. Unescaped they end the block early and the
