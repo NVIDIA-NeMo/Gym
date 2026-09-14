@@ -199,7 +199,6 @@ APIs, NeMo Gym replaces its module-level HTTP transport factories with an aiohtt
 by Gym's shared client session. The adapter accepts HTTP and HTTPS proxies; SOCKS proxies are
 rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwest transport.
 
-
 ## Docker Compose
 
 Use `AsyncSandboxCompose` with upstream-resolved YAML as described in the
@@ -209,9 +208,10 @@ Startup does not build templates or inspect registries.
 
 E2B microVMs do not share a network namespace. The optional client-side relay
 carries TCP over the deployment's WebSocket service ingress. Each sandbox receives
-synthetic IP addresses assigned to its own loopback interface for its peers, so services retain their declared names
-and TCP ports. `network_mode: service:<name>` forwards the target's declared ports
-on localhost as well. This requires no gateway or cluster changes.
+guest-local, non-loopback IP addresses on its loopback interface so services retain
+their declared names and TCP ports. Peer names resolve outside `127.0.0.0/8`;
+`network_mode: service:<name>` also forwards the target's declared ports on localhost.
+This requires no gateway or cluster changes.
 
 The relay requires Python 3.9+, `aiohttp`, and `pyroute2` inside each service template. Prepare
 these in the template, or supply an explicit setup command suitable for its OS:
@@ -244,9 +244,9 @@ The setup example assumes the template already includes Python's `venv` support
 and permits package downloads. The relay requires Linux guests with root and
 `NET_ADMIN` to assign guest-local addresses, install service aliases, and bind low
 ports. `networking.address_cidr` defaults to `198.18.0.0/15`; choose an unused range
-if it conflicts with the workload. It does not change host or cluster networking. It authenticates peer connections with per-sandbox random
-tokens and accepts only declared target ports. API credentials are not copied to
-relay configuration. TCP half-close is preserved; UDP, shared writable volumes,
+if it conflicts with the workload. The relay authenticates peer connections with
+per-sandbox random tokens and accepts only declared target ports. API credentials
+are not copied to relay configuration. TCP half-close is preserved; UDP, shared writable volumes,
 and general network-namespace sharing are unsupported and rejected. Declared TCP
 ports must be distinct across services: a wildcard service bind would otherwise
 conflict with a local peer listener. Use one provider instance per collection.
@@ -291,12 +291,6 @@ For gateways with upload request limits, set
 `operations.upload_chunk_size_bytes` (for example, `8388608`) to upload large files
 in bounded requests and assemble them inside the sandbox.
 
-AgentENV validation used the 11 TB4 Compose tasks' official images, converted to
-E2B templates with the existing builder. Client-side task setup supplies the image
-user and PostgreSQL `PATH`, and recreates the verifier's PostgreSQL socket directory
-under `/run` when absent after boot. These task-specific settings belong in the benchmark
-launcher, not the provider. Shared-memory requests used 64 MiB. KV main/loadgen
-templates use four vCPUs each to accommodate relay overhead; Next.js verification
-uses 8 GiB of memory. Size templates explicitly for the workload and relay. No shared EFS mount
-was needed by these 11 Compose files; this does not imply writable shared-volume
-support for other tasks.
+Configure template resources, service users, startup commands, and environment
+variables for the workload upstream. Size templates to accommodate both the
+workload and relay; the provider does not infer these settings from images.
