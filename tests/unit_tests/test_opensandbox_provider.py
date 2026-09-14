@@ -1228,51 +1228,33 @@ async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: 
     assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
 
 
-async def test_missing_sandbox_is_reported_as_stopped_and_never_retried() -> None:
-    """A 404 means the sandbox is gone: status() says STOPPED, other operations raise SandboxEndedError.
-
-    Neither path may retry; the earlier behaviour leaked the raw SDK exception
-    and left callers to pattern-match its message.
-    """
+async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
     from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
 
     provider = opensandbox_provider.OpenSandboxProvider(
         probe={"command": None},
         operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
     )
-    not_found = SandboxApiException("Failed to run command. Status code: 404")
+    not_found = SandboxApiException("Get sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found")
     not_found.status_code = 404
-    calls = {"get_info": 0, "run": 0, "read": 0}
+    get_info_calls = 0
 
     class MissingRaw:
         async def get_info(self) -> Any:
-            calls["get_info"] += 1
+            nonlocal get_info_calls
+            get_info_calls += 1
             raise not_found
 
-        class commands:  # noqa: N801 - mirrors the SDK attribute
-            @staticmethod
-            async def run(command: str, *, opts: Any) -> Any:
-                calls["run"] += 1
-                raise not_found
+    with pytest.raises(SandboxApiException, match="not found"):
+        await provider.status(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=MissingRaw(),
+            ),
+        )
 
-        class files:  # noqa: N801 - mirrors the SDK attribute
-            @staticmethod
-            async def read_bytes(source_path: str) -> bytes:
-                calls["read"] += 1
-                raise not_found
-
-    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=MissingRaw())
-
-    assert await provider.status(handle) is SandboxStatus.STOPPED
-    assert calls["get_info"] == 1
-
-    with pytest.raises(opensandbox_provider.SandboxEndedError, match="sandbox-1"):
-        await provider.exec(handle, "true", timeout_s=5)
-    assert calls["run"] == 1
-
-    with pytest.raises(opensandbox_provider.SandboxEndedError, match="sandbox-1"):
-        await provider._read_file(handle, "/missing")
-    assert calls["read"] == 1
+    assert get_info_calls == 1
 
 
 async def test_create_once_and_connect_after_create_error_paths(

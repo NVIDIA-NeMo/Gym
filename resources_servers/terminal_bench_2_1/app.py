@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxEndedError, SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import AsyncSandbox, SandboxNotRunningError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -199,26 +199,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
-    async def _sandbox_not_running_reason(self, sandbox: AsyncSandbox) -> Optional[str]:
-        """Return why grading must be skipped, or None when the sandbox is confirmed running.
-
-        The OpenSandbox server can route a dead sandbox's requests to a live
-        sandbox that reused its pod IP (RL-1469). Grading then uploads this
-        task's tests into, and runs them inside, a stranger's sandbox and reads
-        back a reward from its filesystem. The control plane knows when a
-        sandbox died (OOM kills surface as a failed status, deletions as
-        stopped), so grade only on a positive RUNNING answer; anything else,
-        including a failed status lookup, is a skipped verification with the
-        reason attached, never a reward.
-        """
-        try:
-            status = await sandbox.status()
-        except Exception as e:
-            return f"sandbox_status_unavailable: {type(e).__name__}: {str(e)[:300]}; grading skipped"
-        if status is not SandboxStatus.RUNNING:
-            return f"sandbox_not_running: sandbox status is {status.value}; grading skipped"
-        return None
-
     @contextmanager
     def _patch_golden_patch_solve_sh(
         self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
@@ -244,17 +224,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         target_dirpath: str,
         patches: Dict[str, List[Tuple[str, str]]],
         task_name: Optional[str] = None,
+        require_running: bool = False,
     ) -> None:
+        """Upload a folder; with ``require_running`` the first command checks the sandbox is alive."""
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
+        check_status = require_running
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
                 continue
 
             target_fpath = f"{target_dirpath}/{file}"
-            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
+            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}", require_running=check_status)
+            check_status = False
             assert mkdir_result.return_code == 0, mkdir_result
 
             with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
@@ -289,32 +273,29 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        failure_reason: Optional[str] = await self._sandbox_not_running_reason(eval_sandbox)
-        if failure_reason is not None:
-            # Grading a sandbox that is not confirmed running would run this
-            # task's tests in whatever pod the server routes it to (RL-1469).
+        failure_reason: Optional[str] = None
+        try:
+            # The grading commands refuse to run against a sandbox the control
+            # plane reports dead: the server may otherwise route them to another
+            # sandbox that reused the dead one's pod IP (RL-1469).
+            await self._upload_folder(
+                eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name, require_running=True
+            )
+            eval_result = await eval_sandbox.exec(
+                "bash /tests/test.sh",
+                timeout_s=self.config.evaluation_timeout,
+                require_running=True,
+            )
+            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        except SandboxNotRunningError as e:
+            failure_reason = f"sandbox_not_running: {e}"
             print(f"Skipping TerminalBench 2.1 tests for {body.task_name}: {failure_reason}", file=stderr)
             eval_result = None
             test_output = failure_reason
-        else:
-            try:
-                await self._upload_folder(
-                    eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
-                )
-                eval_result = await eval_sandbox.exec(
-                    "bash /tests/test.sh",
-                    timeout_s=self.config.evaluation_timeout,
-                )
-                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-            except SandboxEndedError as e:
-                failure_reason = f"sandbox_ended: {e}"
-                print(f"Sandbox ended while grading {body.task_name}: {failure_reason}", file=stderr)
-                eval_result = None
-                test_output = failure_reason
-            except:
-                print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
-                eval_result = None
-                test_output = ""
+        except:
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
+            test_output = ""
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -325,7 +306,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if eval_result is not None:
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name, require_running=True)
                     temp_file.seek(0)
                     reward = float(temp_file.read())
 

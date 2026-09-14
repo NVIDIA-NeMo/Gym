@@ -193,12 +193,12 @@ class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
-class SandboxEndedError(RuntimeError):
-    """Raised when a sandbox no longer exists or can no longer serve requests.
+class SandboxNotRunningError(RuntimeError):
+    """Raised by ``require_running`` operations when the sandbox is stopped or failed.
 
-    Terminal: the sandbox was deleted, expired, or its pod died. Callers must
-    not retry the operation and must not grade or otherwise trust anything the
-    sandbox reports afterwards.
+    Requests to a dead sandbox must not be sent: some backends keep routing
+    them to whichever sandbox reused the dead one's address (RL-1469), so the
+    operation would run against a stranger's filesystem.
     """
 
 

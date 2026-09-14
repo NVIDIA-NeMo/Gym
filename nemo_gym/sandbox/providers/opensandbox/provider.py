@@ -29,7 +29,6 @@ from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
-    SandboxEndedError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -286,19 +285,6 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
-
-
-def _is_sandbox_gone_error(exception: BaseException) -> bool:
-    """Match errors meaning the sandbox itself is gone (deleted, expired, ended).
-
-    The server answers 404 for a sandbox it no longer knows and the SDK does not
-    always carry the server's error code through (a dead sandbox surfaces as a
-    bare "Failed to run command. Status code: 404"), so every 404 and 410 from a
-    sandbox operation counts. Nothing the provider asks a live sandbox for can
-    legitimately 404: command status/log lookups only 404 when the pod that ran
-    them is gone, and file reads target paths the caller just produced.
-    """
-    return _exception_status_code(exception) in (404, 410)
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -905,22 +891,15 @@ class OpenSandboxProvider:
             before_sleep=_before_sleep,
             reraise=True,
         )
-        try:
-            async for attempt in retry_policy:
-                with attempt:
-                    return await self._await_sdk_call(
-                        operation_factory(),
-                        operation=operation,
-                        sandbox_id=sandbox_id,
-                        timeout_s=timeout_s,
-                    )
+        async for attempt in retry_policy:
+            with attempt:
+                return await self._await_sdk_call(
+                    operation_factory(),
+                    operation=operation,
+                    sandbox_id=sandbox_id,
+                    timeout_s=timeout_s,
+                )
 
-        except Exception as e:
-            if _is_sandbox_gone_error(e):
-                raise SandboxEndedError(
-                    f"Sandbox {sandbox_id!r} no longer exists (during {operation}): {str(e)[:300]}"
-                ) from e
-            raise
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
 
     async def _submit_command(
@@ -1254,17 +1233,14 @@ class OpenSandboxProvider:
         get_info = getattr(handle.raw, "get_info", None)
         if get_info is None:
             return SandboxStatus.UNKNOWN
-        try:
-            info = await self._await_sdk_operation(
-                get_info,
-                operation="get_info",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=float(self._connection.request_timeout_s)
-                if self._connection.request_timeout_s is not None
-                else None,
-            )
-        except SandboxEndedError:
-            return SandboxStatus.STOPPED
+        info = await self._await_sdk_operation(
+            get_info,
+            operation="get_info",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(self._connection.request_timeout_s)
+            if self._connection.request_timeout_s is not None
+            else None,
+        )
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
 

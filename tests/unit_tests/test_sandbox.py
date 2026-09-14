@@ -1846,3 +1846,90 @@ async def test_pty_exec_detach_requires_a_capable_session() -> None:
     with pytest.raises(NotImplementedError, match="detached execution"):
         await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()
+
+
+class StatusProbeProvider(FakeSandboxProvider):
+    """FakeSandboxProvider whose status is configurable and counted."""
+
+    def __init__(self, status: SandboxStatus) -> None:
+        super().__init__()
+        self.status_value = status
+        self.status_calls = 0
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        del handle
+        self.status_calls += 1
+        return self.status_value
+
+
+async def _started(provider: StatusProbeProvider) -> AsyncSandbox:
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image"))
+    return sandbox
+
+
+@pytest.mark.parametrize("dead_status", [SandboxStatus.ERROR, SandboxStatus.STOPPED])
+async def test_require_running_refuses_operations_on_a_dead_sandbox(
+    tmp_path: Path, dead_status: SandboxStatus
+) -> None:
+    from nemo_gym.sandbox import SandboxNotRunningError
+
+    provider = StatusProbeProvider(dead_status)
+    sandbox = await _started(provider)
+    local = tmp_path / "f"
+    local.write_text("x")
+
+    with pytest.raises(SandboxNotRunningError, match=dead_status.value):
+        await sandbox.exec("echo hi", require_running=True)
+    with pytest.raises(SandboxNotRunningError, match=dead_status.value):
+        await sandbox.upload(local, "/remote/f", require_running=True)
+    with pytest.raises(SandboxNotRunningError, match=dead_status.value):
+        await sandbox.download("/remote/f", tmp_path / "out", require_running=True)
+
+    assert provider.exec_calls == []
+    assert provider.upload_calls == []
+    assert provider.download_calls == []
+    assert provider.status_calls == 3
+
+
+async def test_require_running_lets_a_running_sandbox_proceed(tmp_path: Path) -> None:
+    provider = StatusProbeProvider(SandboxStatus.RUNNING)
+    sandbox = await _started(provider)
+    local = tmp_path / "f"
+    local.write_text("x")
+
+    result = await sandbox.exec("echo hi", require_running=True)
+    await sandbox.upload(local, "/remote/f", require_running=True)
+    await sandbox.download("/remote/f", tmp_path / "out", require_running=True)
+
+    assert result.return_code == 0
+    assert len(provider.exec_calls) == 1
+    assert len(provider.upload_calls) == 1
+    assert len(provider.download_calls) == 1
+    assert provider.status_calls == 3
+
+
+async def test_require_running_is_off_by_default(tmp_path: Path) -> None:
+    provider = StatusProbeProvider(SandboxStatus.ERROR)
+    sandbox = await _started(provider)
+
+    local = tmp_path / "f"
+    local.write_text("x")
+
+    await sandbox.exec("echo hi")
+    await sandbox.upload(local, "/remote/f")
+    await sandbox.download("/remote/f", tmp_path / "out")
+
+    assert provider.status_calls == 0
+    assert len(provider.exec_calls) == 1
+
+
+async def test_require_running_does_not_refuse_when_the_provider_cannot_tell(tmp_path: Path) -> None:
+    """UNKNOWN means the provider has no status signal; refusing would disable it entirely."""
+    provider = StatusProbeProvider(SandboxStatus.UNKNOWN)
+    sandbox = await _started(provider)
+
+    result = await sandbox.exec("echo hi", require_running=True)
+
+    assert result.return_code == 0
+    assert provider.status_calls == 1
