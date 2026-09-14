@@ -199,20 +199,24 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
-    async def _sandbox_ended_reason(self, sandbox: AsyncSandbox) -> Optional[str]:
-        """Return why grading must be skipped, or None when the sandbox looks alive.
+    async def _sandbox_not_running_reason(self, sandbox: AsyncSandbox) -> Optional[str]:
+        """Return why grading must be skipped, or None when the sandbox is confirmed running.
 
-        Only a definite terminal status skips grading. A status lookup that
-        fails or is unknown falls through: the provider's identity guard still
-        refuses to grade a pod that is not the sandbox we seeded, so treating an
-        uncertain sandbox as alive cannot grade the wrong one.
+        The OpenSandbox server can route a dead sandbox's requests to a live
+        sandbox that reused its pod IP (RL-1469). Grading then uploads this
+        task's tests into, and runs them inside, a stranger's sandbox and reads
+        back a reward from its filesystem. The control plane knows when a
+        sandbox died (OOM kills surface as a failed status, deletions as
+        stopped), so grade only on a positive RUNNING answer; anything else,
+        including a failed status lookup, is a skipped verification with the
+        reason attached, never a reward.
         """
         try:
             status = await sandbox.status()
-        except Exception:
-            return None
-        if status in (SandboxStatus.ERROR, SandboxStatus.STOPPED):
-            return f"sandbox_ended: sandbox status is {status.value}; grading skipped"
+        except Exception as e:
+            return f"sandbox_status_unavailable: {type(e).__name__}: {str(e)[:300]}; grading skipped"
+        if status is not SandboxStatus.RUNNING:
+            return f"sandbox_not_running: sandbox status is {status.value}; grading skipped"
         return None
 
     @contextmanager
@@ -285,10 +289,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        failure_reason: Optional[str] = await self._sandbox_ended_reason(eval_sandbox)
+        failure_reason: Optional[str] = await self._sandbox_not_running_reason(eval_sandbox)
         if failure_reason is not None:
-            # Grading a sandbox that has ended would run this task's tests in
-            # whatever pod the server routes the dead sandbox to (RL-1469).
+            # Grading a sandbox that is not confirmed running would run this
+            # task's tests in whatever pod the server routes it to (RL-1469).
             print(f"Skipping TerminalBench 2.1 tests for {body.task_name}: {failure_reason}", file=stderr)
             eval_result = None
             test_output = failure_reason

@@ -202,15 +202,6 @@ class SandboxEndedError(RuntimeError):
     """
 
 
-class SandboxMisrouteError(SandboxEndedError):
-    """Raised when the pod that answered is not the requested sandbox.
-
-    The OpenSandbox server resolves a sandbox to a pod IP that is not cleared
-    when the pod dies, so a dead sandbox's requests can be served by a live pod
-    that reused its IP. The requested sandbox is gone, hence a form of ended.
-    """
-
-
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
