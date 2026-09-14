@@ -26,7 +26,7 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
-    --data-parallel-size 1
+    --data-parallel-size 4
     --api-server-count 1
     --enable-mamba-fine-grained-prefix-cache
     --prefix-match-unit 16
