@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from harbor.models.task.config import EnvironmentConfig
+from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
 
 from nemo_gym.sandbox import SandboxExecResult
@@ -27,6 +27,67 @@ def make_environment(tmp_path: Path, **kwargs) -> HarborSandboxEnvironment:
         sandbox_provider=kwargs.pop("sandbox_provider", {"local": {}}),
         **kwargs,
     )
+
+
+async def test_offline_verifier_creation_overrides_allow_rules_without_affecting_agent(tmp_path, monkeypatch):
+    from responses_api_agents.harbor_agent_general import sandbox_environment as module
+
+    options = {
+        "resource_requests": "limits",
+        "network_policy": {"defaultAction": "allow", "egress": [{"action": "allow", "target": "example.com"}]},
+    }
+    original = deepcopy(options)
+    created = []
+
+    def create(provider, spec):
+        created.append(spec)
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        return sandbox
+
+    monkeypatch.setattr(module, "AsyncSandbox", create)
+    for phase in ("agent", "verifier"):
+        env = make_environment(
+            tmp_path / phase,
+            sandbox_provider={"opensandbox": {}},
+            sandbox_provider_options=options,
+            network_policy=NetworkPolicy(network_mode="no-network" if phase == "verifier" else "public"),
+        )
+        env._upload_environment_dir_after_start = AsyncMock()
+        await env.start(False)
+        await env.stop(True)
+    assert created[0].provider_options == original
+    assert created[1].provider_options == {
+        "resource_requests": "limits",
+        "network_policy": {"defaultAction": "deny", "egress": []},
+    }
+    assert options == original
+
+
+@pytest.mark.parametrize("provider,compose", [("local", False), ("opensandbox", True)])
+def test_offline_unsupported_backends_fail_closed(tmp_path, provider, compose):
+    if compose:
+        (tmp_path / "docker-compose.yaml").write_text("services: {}")
+    with pytest.raises(ValueError, match="no-network.*not supported"):
+        make_environment(
+            tmp_path,
+            sandbox_provider={provider: {}},
+            compose_image_configs="unused.json",
+            network_policy=NetworkPolicy(network_mode="no-network"),
+            allow_unenforced_internet_isolation=True,
+        )
+
+
+async def test_allowlists_and_runtime_policy_changes_remain_unsupported(tmp_path):
+    with pytest.raises(ValueError, match="allowlist.*not supported"):
+        make_environment(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            network_policy=NetworkPolicy(network_mode="allowlist", allowed_hosts=["example.com"]),
+        )
+    env = make_environment(tmp_path, sandbox_provider={"opensandbox": {}})
+    with pytest.raises(ValueError, match="cannot change network policy"):
+        await env.set_network_policy(NetworkPolicy(network_mode="no-network"))
 
 
 @pytest.mark.parametrize("request_gpu_type", [True, False])
