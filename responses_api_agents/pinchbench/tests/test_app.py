@@ -24,13 +24,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_routing import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
     PinchBenchAgent,
     PinchBenchAgentConfig,
     PinchBenchRunRequest,
@@ -336,6 +334,36 @@ async def test_failure_routing_sentinels(exc, expected_class, no_persist, termin
     assert dumped.get(NG_FAILURE_CLASS_KEY) == expected_class
     assert bool(dumped.get(NG_NO_PERSIST_KEY)) is no_persist
     assert bool(dumped.get(NG_TERMINAL_KEY)) is terminal
+
+
+@pytest.mark.asyncio
+async def test_failure_routing_replaces_stale_result_fields(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def fail(task_id, out_dir, rollout_id=None):
+        raise RuntimeError("sandbox exploded")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", fail)
+    body = _run_body()
+    body.model_dump.return_value.update(
+        {
+            "reward": 0.75,
+            "response": {"stale": True},
+            "grading_notes": "stale notes",
+            NG_FAILURE_CLASS_KEY: "stale_class",
+            NG_NO_PERSIST_KEY: True,
+            NG_TERMINAL_KEY: True,
+        }
+    )
+
+    dumped = (await agent.run(body=body)).model_dump()
+
+    assert dumped["reward"] == 0.0
+    assert dumped["response"]["output"][0]["type"] == "message"
+    assert dumped["grading_notes"] == "run failed: RuntimeError: sandbox exploded"
+    assert dumped[NG_FAILURE_CLASS_KEY] == "legitimate"
+    assert NG_NO_PERSIST_KEY not in dumped
+    assert NG_TERMINAL_KEY not in dumped
 
 
 @pytest.mark.asyncio
