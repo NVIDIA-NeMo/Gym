@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
 
@@ -302,7 +303,7 @@ def test_extra_overlays_must_be_resolved_upstream(tmp_path):
 async def test_compose_startup_and_cleanup(tmp_path, monkeypatch, split_endpoints):
     from responses_api_agents.harbor_agent_general import sandbox_environment as module
 
-    (tmp_path / "docker-compose.yaml").write_text("services: {peer: {image: peer}}")
+    (tmp_path / "docker-compose.yaml").write_text("services: {peer: {image: peer, shm_size: 1gb}}")
     images = tmp_path / "images.json"
     record = {
         "image": "pinned@sha256:abc",
@@ -337,6 +338,9 @@ async def test_compose_startup_and_cleanup(tmp_path, monkeypatch, split_endpoint
     assert calls[0][0][0]["opensandbox"]["connection"]["domain"] == "cpu.example.test"
     assert env._sandbox_provider["opensandbox"]["connection"]["domain"] == "cpu.example.test"
     assert calls[0][0][1].is_file()
+    document = yaml.safe_load(calls[0][0][1].read_text())
+    assert document["services"]["peer"]["labels"]["nemo.nvidia.com/shm"] == str(1024**3)
+    assert "nemo.nvidia.com/shm" not in document["services"]["main"].get("labels", {})
     await env.stop(True)
     compose.stop.assert_awaited_once()
     assert env._sandbox is None and env._compose is None
