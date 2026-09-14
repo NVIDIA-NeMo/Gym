@@ -94,8 +94,10 @@ def render_observation(
     if not observation.tabs:
         tab_lines.append("  - (none)")
     text_parts.append("\n".join(tab_lines))
-    if observation.last_action:
-        text_parts.append(f"Previous action: {observation.last_action}")
+    # The parsed assistant turn already carries the action in model history.
+    # The Nano observation protocol supplies the next screenshot, step and tab
+    # context; echoing a serialized action here changes that input protocol.
+    # Keep last_action in the observation for artifacts, not as new user text.
     if observation.last_action_error:
         text_parts.append(f"Previous action failed: {observation.last_action_error}")
 

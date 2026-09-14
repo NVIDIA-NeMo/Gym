@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from nemo_gym.web.actions import parse_nano_omni_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.browser_session import BrowserSessionHandle
 from nemo_gym.web.models import WebAction, WebObservation, WebTask
@@ -353,6 +354,71 @@ def test_step_success_terminal_and_failures(monkeypatch: pytest.MonkeyPatch, tmp
     driver._page = None
     with pytest.raises(RuntimeError, match="not been reset"):
         driver.step(navigate)
+
+
+@pytest.mark.parametrize("limit,expected_executed", [(None, 11), (8, 0), (4, 0)])
+def test_step_respects_resource_tool_call_limit_without_repair(
+    tmp_path: Path, limit: int | None, expected_executed: int
+) -> None:
+    # Exercise both the agent-side parser and the execution-side validation.
+    # Checking the parser alone misses the driver's implicit default cap.
+    items = [
+        {
+            "type": "function_call",
+            "call_id": f"call-{index}",
+            "name": "navigate",
+            "arguments": '{"url":"https://example.test/' + str(index) + '"}',
+        }
+        for index in range(11)
+    ]
+    action = parse_nano_omni_tool_calls(items, max_calls=None)
+    before = action.model_dump(mode="json")
+    driver = _driver(tmp_path, action_delay_seconds=0, max_tool_calls=limit)
+    context = _Context()
+    page = context.new_page()
+    driver._context = context
+    driver._page = page
+    driver._task = _task()
+    driver._observation = WebObservation(url=page.url)
+    driver._capture = lambda: WebObservation(url=page.url)  # type: ignore[method-assign]
+
+    result = driver.step(action)
+
+    navigations = [call for call in page.calls if call[0] == "goto"]
+    assert len(navigations) == expected_executed
+    assert action.model_dump(mode="json") == before
+    assert [item["arguments"] for item in items] == [
+        '{"url":"https://example.test/' + str(index) + '"}' for index in range(11)
+    ]
+    if limit is None:
+        assert result.execution_ok and not result.terminated
+        assert [call[1] for call in navigations] == [f"https://example.test/{index}" for index in range(11)]
+        assert result.observation.url == "https://example.test/10"
+    else:
+        assert not result.execution_ok and result.terminated
+        assert f"{limit}-call limit" in result.info["action_error"]
+
+
+def test_resource_default_cap_and_unlimited_mode_preserve_argument_validation(tmp_path: Path) -> None:
+    assert _config().max_tool_calls == 8
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        _config(max_tool_calls=0)
+    driver = _driver(tmp_path, action_delay_seconds=0, max_tool_calls=None)
+    page = _Page()
+    driver._page = page
+    driver._task = _task()
+    driver._observation = WebObservation(url=page.url)
+    driver._capture = lambda: WebObservation(url=page.url)  # type: ignore[method-assign]
+    # A caller bypassing the agent must still not execute malformed arguments.
+    action = WebAction(
+        name="navigate", script="", arguments={"calls": [{"name": "navigate", "arguments": {"url": "file:///tmp"}}]}
+    )
+    before = action.model_dump(mode="json")
+    result = driver.step(action)
+    assert not result.execution_ok and result.terminated
+    assert "must use http(s)" in result.info["action_error"]
+    assert page.calls == []
+    assert action.model_dump(mode="json") == before
 
 
 def test_step_bounds_hook_failure_and_closed_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

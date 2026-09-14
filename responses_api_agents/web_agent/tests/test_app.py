@@ -24,6 +24,7 @@ from responses_api_agents.web_agent.app import (
     WebAgentConfig,
     WebAgentRunRequest,
     _incomplete_model_reason,
+    _is_model_context_overflow,
     _merge_usage,
     _nano_omni_parse_retry_messages,
     _parse_response_action,
@@ -540,7 +541,7 @@ async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(
 
 @pytest.mark.asyncio
 async def test_action_parse_failure_is_retried_without_stepping_browser():
-    agent = _agent(parse_retries=1)
+    agent = _agent(parse_retries=1, nano_omni_retry_invalid_tool_calls=False)
     calls = _wire(
         agent,
         {
@@ -566,7 +567,7 @@ async def test_action_parse_failure_is_retried_without_stepping_browser():
     request = MagicMock()
     request.cookies = {}
     body = WebAgentRunRequest(
-        responses_create_params={"input": "Solve"},
+        responses_create_params={"input": "Solve", "temperature": 0.1, "top_p": 0.95},
         web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
     )
 
@@ -575,6 +576,180 @@ async def test_action_parse_failure_is_retried_without_stepping_browser():
     assert result.model_turns == 2
     assert result.environment_steps == 1
     assert [path for _server, path, _body in calls].count("/step") == 1
+    requests = [body for _server, path, body in calls if path == "/v1/responses"]
+    assert requests[0].model_dump(mode="json") == requests[1].model_dump(mode="json")
+    assert requests[1].temperature == 0.1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score", [0.0, 1.0])
+@pytest.mark.parametrize("arguments", ['{"actions":"[]"}', '{"actions":['])
+async def test_reference_invalid_tool_arguments_end_interaction_and_evaluate(arguments, score):
+    agent = _agent(parse_retries=2, nano_omni_retry_invalid_tool_calls=False)
+    response = _native_model_response("computer", arguments)
+    before = json.dumps(response)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed()],
+            "/v1/responses": [response],
+            "/evaluate": [{"result": {"valid_sample": True, "reward": score, "task_success": bool(score)}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": [], "temperature": 0.1},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+    assert [path for _server, path, _body in calls] == ["/seed_session", "/v1/responses", "/evaluate", "/close"]
+    assert result.reward == score
+    assert result.mask_sample is False
+    assert result.model_turns == 1
+    assert result.environment_steps == 0
+    assert json.dumps(response) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_invalid", [False, True])
+@pytest.mark.parametrize("score", [0.0, 1.0])
+async def test_reference_executes_valid_call_prefix_then_evaluates_without_repair(retry_invalid, score):
+    agent = _agent(parse_retries=0, nano_omni_retry_invalid_tool_calls=retry_invalid)
+    arguments = '{ "actions": [{"action":"left_click","coordinate":[0.2,0.3]}] }'
+    response = _native_model_response("computer", arguments)
+    second = _native_model_response("computer", '{"actions":"[]"}')["output"][0]
+    response["output"].append({**second, "call_id": "bad-call"})
+    response["output"].append(
+        {**_native_model_response("navigate", '{"url":"back"}')["output"][0], "call_id": "unreached-call"}
+    )
+    before = json.dumps(response)
+    expected_output = NeMoGymResponse.model_validate(response).output
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed()],
+            "/v1/responses": [response],
+            "/step": [{"operation_id": "step-0", "observation": _observation(), "execution_ok": True}],
+            "/evaluate": [{"result": {"valid_sample": True, "reward": score, "task_success": bool(score)}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": [], "temperature": 0.1},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="225"),
+        ),
+    )
+    paths = [path for _server, path, _body in calls]
+    assert paths == ["/seed_session", "/v1/responses"] + ([] if retry_invalid else ["/step"]) + ["/evaluate", "/close"]
+    assert (result.reward, result.mask_sample, result.model_turns) == (score, False, 1)
+    assert result.environment_steps == (0 if retry_invalid else 1)
+    assert result.truncated is True
+    assert json.dumps(response) == before
+    if not retry_invalid:
+        step_body = next(body for _server, path, body in calls if path == "/step")
+        assert step_body["action"]["arguments"]["calls"] == [
+            {"id": expected_output[0].call_id, "name": "computer", "arguments": json.loads(arguments)}
+        ]
+        assert result.response.output == expected_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_call_limit, call_count", [(8, 1), (None, 11)])
+async def test_nano_next_request_preserves_parser_output_without_action_echo(tool_call_limit, call_count):
+    agent = _agent(nano_omni_max_tool_calls=tool_call_limit)
+    arguments = '{ "actions": [ {"action": "wait", "duration": 0} ] }'
+    first = _native_model_response("computer", arguments)
+    first["output"] = [{**first["output"][0], "call_id": f"call-{index}"} for index in range(call_count)]
+    original_output = NeMoGymResponse.model_validate(first).output
+    after_action = _observation()
+    after_action["last_action"] = "serialized action for resource diagnostics"
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed()],
+            "/v1/responses": [first, _native_model_response("terminate", '{"status":"success","answer":"done"}')],
+            "/step": [
+                {"operation_id": "step-0", "observation": after_action, "execution_ok": True},
+                {"operation_id": "step-1", "observation": after_action, "execution_ok": True, "terminated": True},
+            ],
+            "/evaluate": [{"result": {"reward": 1.0, "task_success": True, "valid_sample": True}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": [], "temperature": 0.1},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+
+    requests = [body for _server, path, body in calls if path == "/v1/responses"]
+    assert len(requests) == 2
+    retained = [item for item in requests[1].input if getattr(item, "type", None) == "function_call"]
+    assert retained == original_output
+    assert retained[0].arguments == arguments  # Preserve parser formatting, not merely JSON equality.
+    assert result.response.output[0] == original_output[0]
+    next_observation = requests[1].input[-1].model_dump(mode="json")
+    assert "You are currently on Step 2." in json.dumps(next_observation)
+    assert "Previous action" not in json.dumps(next_observation)
+    assert "serialized action for resource diagnostics" not in json.dumps(next_observation)
+    assert not any(getattr(item, "type", None) == "function_call_output" for item in requests[1].input)
+    assert (result.model_turns, result.environment_steps, result.reward) == (2, 2, 1.0)
+
+
+@pytest.mark.parametrize("score", [0.0, 1.0])
+@pytest.mark.asyncio
+async def test_arena_execution_error_stops_and_uses_live_evaluator_score(score):
+    agent = _agent()
+    failed_observation = _observation()
+    failed_observation["last_action_error"] = "TimeoutError: navigation timed out"
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed()],
+            "/v1/responses": [_native_model_response("computer", '{"actions":[{"action":"wait","duration":0}]}')],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": failed_observation,
+                    "execution_ok": False,
+                    "terminated": True,
+                }
+            ],
+            "/evaluate": [{"result": {"reward": score, "task_success": bool(score), "valid_sample": True}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": []},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+
+    paths = [path for _server, path, _body in calls]
+    assert paths == ["/seed_session", "/v1/responses", "/step", "/evaluate", "/close"]
+    assert (result.model_turns, result.environment_steps) == (1, 1)
+    assert result.terminated is True
+    assert result.mask_sample is False
+    assert result.reward == score
+    assert result.task_success == bool(score)
 
 
 @pytest.mark.asyncio
@@ -777,68 +952,187 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
     assert "/close" in calls
 
 
-@pytest.mark.asyncio
-async def test_model_context_overflow_skips_futile_request_retries_but_remains_rollout_retryable():
-    agent = _agent(model_turn_max_retries=20, model_retry_delay_secs=0)
-    model_attempts = 0
-    model_headers = {}
+def _context_overflow(status=500):
     overflow = ClientResponseError(
         request_info=MagicMock(),
         history=(),
-        status=500,
-        message="Internal Server Error",
+        status=status,
+        message="model request failed",
     )
     overflow.response_content = json.dumps(
         {
             "error": {
-                "message": ("The decoder prompt (length 128107) is longer than the maximum model length of 128000."),
+                "message": ("The decoder prompt (length 128379) is longer than the maximum model length of 128000."),
                 "type": "BadRequestError",
                 "code": 400,
             }
         }
     ).encode()
+    return overflow
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 422, 429])
+def test_context_error_wording_does_not_override_authentication_or_request_errors(status):
+    assert not _is_model_context_overflow(_context_overflow(status))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 500])
+@pytest.mark.parametrize("benchmark", [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA])
+@pytest.mark.parametrize("score", [0.0, 1.0])
+async def test_context_overflow_evaluates_live_state_and_preserves_completed_turns(status, benchmark, score):
+    agent = _agent(model_turn_max_retries=20, model_retry_delay_secs=0)
+    calls = []
+    model_attempts = 0
+    policy = _native_model_response("computer", '{"actions":[{"action":"wait","duration":0}]}')
+    policy["usage"] = {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 5,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 15,
+    }
 
     async def post_json(*, url_path, **kwargs):
-        nonlocal model_attempts, model_headers
+        nonlocal model_attempts
+        calls.append(url_path)
         if url_path == "/seed_session":
-            response = _FakeHttpResponse(_seed())
-            return response, await response.json()
-        if url_path == "/v1/responses":
+            payload = _seed("687")
+        elif url_path == "/v1/responses":
             model_attempts += 1
-            model_headers = kwargs["headers"]
-            raise overflow
-        if url_path == "/close":
-            response = _FakeHttpResponse({"closed": True, "session_id": "session-a"})
-            return response, await response.json()
-        raise AssertionError(f"unexpected path: {url_path}")
+            if model_attempts == 2:
+                assert kwargs["headers"]["x-nemo-gym-log-step"] == "1"
+                raise _context_overflow(status)
+            assert model_attempts == 1, "context overflow must not retry the model request"
+            payload = policy
+        elif url_path == "/step":
+            payload = {"operation_id": "step-0", "observation": _observation(), "execution_ok": True}
+        elif url_path == "/evaluate":
+            assert kwargs["json"] == {"final_answer": None}
+            payload = {
+                "result": {"valid_sample": True, "reward": score, "raw_score": score, "task_success": bool(score)}
+            }
+        elif url_path == "/close":
+            payload = {"closed": True, "session_id": "session-a", "recording_artifacts": [_recording()]}
+        else:
+            raise AssertionError(f"unexpected path: {url_path}")
+        response = _FakeHttpResponse(payload)
+        return response, await response.json()
 
     agent._post_json = AsyncMock(side_effect=post_json)
     request = MagicMock()
     request.cookies = {}
     body = WebAgentRunRequest(
         responses_create_params={"input": "Solve"},
-        web_task=WebTask(
-            benchmark=WebBenchmark.WEBVOYAGER,
-            task_id="Google Map--14",
-        ),
+        web_task=WebTask(benchmark=benchmark, task_id="687"),
     )
 
     result = await agent.run(request, body)
     dumped = result.model_dump()
 
-    assert model_attempts == 1
-    assert model_headers == {
-        "x-nemo-gym-log-adapter": "web_agent",
-        "x-nemo-gym-log-task-id": "Google Map--14",
-        "x-nemo-gym-log-domain": "webvoyager",
-        "x-nemo-gym-log-step": "0",
-        "x-nemo-gym-log-parse-attempt": "0",
-    }
-    assert result.mask_sample is True
-    assert result.failure_kind == "model_context_overflow"
-    assert dumped["_ng_failure_class"] == "retryable_infrastructure"
+    assert calls == ["/seed_session", "/v1/responses", "/step", "/v1/responses", "/evaluate", "/close"]
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    assert result.reward == score
+    assert result.task_success is bool(score)
+    assert result.truncated is True
+    assert result.terminated is False
+    assert result.truncation_reason == "model_context_overflow"
+    assert result.environment_steps == 1
+    assert result.model_turns == 1
+    assert result.response.id == policy["id"]
+    assert result.response.output[0].arguments == policy["output"][0]["arguments"]
+    assert result.response.output[-1].role == "user"
+    assert result.response.usage.total_tokens == 15
+    assert result.artifact_session_id == "session-a"
+    assert result.recording_artifacts[0].uri.endswith("/task.webm")
+    assert "_ng_failure_class" not in dumped
     assert "_ng_failure_terminal" not in dumped
-    assert result.verifier_result.metadata["error_kind"] == "model_context_overflow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("benchmark", list(WebBenchmark))
+async def test_first_turn_context_overflow_still_evaluates_without_fabricating_model_output(benchmark):
+    agent = _agent(judge=benchmark == WebBenchmark.WEBVOYAGER, model_turn_max_retries=20)
+    calls = []
+
+    async def post_json(*, url_path, **kwargs):
+        calls.append(url_path)
+        if url_path == "/seed_session":
+            payload = _seed()
+        elif url_path == "/v1/responses":
+            raise _context_overflow()
+        elif url_path == "/evaluate":
+            payload = {"result": {"valid_sample": True, "reward": 0.0}}
+        elif url_path == "/close":
+            payload = {"closed": True}
+        elif url_path == "/verify":
+            assert kwargs["json"]["screenshots"] == ["data:image/png;base64,abc"]
+            payload = {"reward": 0.0, "mask_sample": False}
+        else:
+            raise AssertionError(f"unexpected path: {url_path}")
+        response = _FakeHttpResponse(payload)
+        return response, await response.json()
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    request = MagicMock(cookies={})
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=benchmark, task_id="0"),
+    )
+
+    result = await agent.run(request, body)
+
+    expected = ["/seed_session", "/v1/responses", "/evaluate", "/close"]
+    if benchmark == WebBenchmark.WEBVOYAGER:
+        expected.append("/verify")
+    assert calls == expected
+    assert result.mask_sample is False
+    assert result.reward == 0.0
+    assert result.truncated is True
+    assert result.truncation_reason == "model_context_overflow"
+    assert result.model_turns == result.environment_steps == 0
+    assert result.response.output == []
+    assert result.response.usage is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_path", ["/v1/responses", "/evaluate"])
+async def test_context_overflow_does_not_turn_unrelated_errors_into_valid_scores(failed_path):
+    agent = _agent()
+    calls = []
+
+    async def post_json(*, url_path, **kwargs):
+        calls.append(url_path)
+        if url_path == "/seed_session":
+            payload = _seed()
+        elif url_path == "/v1/responses":
+            if failed_path == url_path:
+                raise TimeoutError("model endpoint unavailable")
+            raise _context_overflow()
+        elif url_path == "/evaluate":
+            raise TimeoutError("evaluator unavailable")
+        elif url_path == "/close":
+            payload = {"closed": True}
+        else:
+            raise AssertionError(f"unexpected path: {url_path}")
+        response = _FakeHttpResponse(payload)
+        return response, await response.json()
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    result = await agent.run(
+        MagicMock(cookies={}),
+        WebAgentRunRequest(
+            responses_create_params={"input": "Solve"},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "infrastructure_error:TimeoutError"
+    assert result.model_dump()["_ng_failure_class"] == "retryable_infrastructure"
+    assert calls[-1] == "/close"
+    assert calls.count("/evaluate") == int(failed_path == "/evaluate")
 
 
 @pytest.mark.asyncio

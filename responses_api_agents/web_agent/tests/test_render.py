@@ -8,6 +8,7 @@ from nemo_gym.web.models import (
     WebImage,
     WebObservation,
     WebObservationProfile,
+    WebTab,
     WebTask,
 )
 from responses_api_agents.web_agent.render import (
@@ -49,6 +50,40 @@ def test_visual_browser_render_is_screenshot_first_and_has_no_text_action_gramma
     assert "# Task Instruction:" in text
     assert "Step 1" in text
     assert "Action:" not in text
+
+
+@pytest.mark.parametrize("benchmark", list(WebBenchmark))
+def test_nano_observation_does_not_echo_assistant_action(benchmark):
+    observation = WebObservation(
+        screenshot=WebImage(data_url="data:image/png;base64,AA=="),
+        active_tab_index=0,
+        tabs=[WebTab(index=0, title="Search", url="https://example.test/search")],
+        last_action='{"name":"computer","arguments":{"actions":[{"action":"wait","duration":0}]}}',
+    )
+    before = observation.model_dump(mode="json")
+
+    message = render_observation(observation, WebTask(benchmark=benchmark, task_id="0"), step_index=1)
+
+    assert _block_types(message) == ["input_image", "input_text"]
+    assert _block_text(message.content[1]) == (
+        "You are currently on Step 2.\n\n"
+        "Tab Context:\n"
+        "- current_tab_id: 0\n"
+        "- tab_count: 1\n"
+        "- available_tabs:\n"
+        "  - tab_id: 0, title: Search, url: https://example.test/search"
+    )
+    assert observation.model_dump(mode="json") == before
+
+
+def test_continuing_after_action_error_keeps_truthful_error_feedback():
+    observation = WebObservation(last_action="computer", last_action_error="TimeoutError: navigation timed out")
+
+    message = render_observation(observation, WebTask(benchmark="webarena", task_id="0"), step_index=1)
+
+    text = _block_text(message.content[0])
+    assert "Previous action failed: TimeoutError: navigation timed out" in text
+    assert "Previous action: computer" not in text
 
 
 def test_visual_runtime_keeps_screenshot_when_optional_a11y_text_is_present():
