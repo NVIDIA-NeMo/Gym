@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import tempfile
 from contextlib import ExitStack
@@ -287,6 +288,12 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             parsed = _parse_binary_judgement(raw)
             if parsed is not None:
                 return parsed, raw
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                logging.getLogger(__name__).warning(
+                    "Invalid binary judge answer reached its token limit: model=%s completion_tokens=%s",
+                    judge.model,
+                    getattr(getattr(response, "usage", None), "completion_tokens", None),
+                )
             # Empty generations have nothing to repair: retry the same check without
             # adding empty assistant turns or rerunning already completed checks.
             if not raw:
@@ -442,6 +449,8 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     submission_b=ref_sections[judges[0].name],
                     sections_by_judge=sections_by_judge,
                     num_trials=self.config.pairwise_num_trials,
+                    invalid_response_retries=2,
+                    retry_timeouts=True,
                     return_raw_responses=self.config.persist_raw_judge_responses,
                     rng=rng,
                 )

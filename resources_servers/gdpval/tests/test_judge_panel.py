@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import zipfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from openai import APIStatusError, APITimeoutError
 
 from resources_servers.gdpval.comparison import (
     B_WIN_RESPONSE,
     FILE_TYPE_MAP,
+    REQUEST_MAX_ATTEMPTS,
     TIE_RESPONSE,
     Judge,
     parse_judgement,
     run_trials,
+    send_judge_request,
 )
 from resources_servers.gdpval.judge_panel import (
     AUDIO_EXTS,
@@ -357,3 +362,121 @@ class TestRunTrialsPanel:
                 submission_b=[],
                 num_trials=2,
             )
+
+    @pytest.mark.parametrize("invalid_answers", [0, 2, 3])
+    def test_retries_preserve_judge_and_positions_without_repeating_valid_votes(self, monkeypatch, invalid_answers):
+        responses = ["BOXED[B]", *["" if i % 2 == 0 else "malformed" for i in range(invalid_answers)], "BOXED[A]"]
+        send = MagicMock(side_effect=responses)
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        panel = [_judge_returning("one", "unused"), _judge_returning("two", "unused")]
+        result = run_trials(
+            judges=panel,
+            task_prompt="Compare submissions",
+            refs=[],
+            submission_a=[{"type": "text", "text": "First artifact"}],
+            submission_b=[{"type": "text", "text": "Second artifact"}],
+            num_trials=2,
+            rng=make_rng(0, "task"),
+            invalid_response_retries=2,
+            return_raw_responses=True,
+        )
+
+        exhausted = invalid_answers == 3
+        assert result["winner"] == B_WIN_RESPONSE
+        assert result["win_count_b"] == (1 if exhausted else 2)
+        assert result["task_count"] == (1 if exhausted else 2)
+        assert result["invalid_count"] == int(exhausted)
+        assert result["raw_responses"] == ["BOXED[B]", "" if exhausted else "BOXED[A]"]
+        assert len(result["trial_judges"]) == 2
+        assert send.call_count == 1 + min(invalid_answers + 1, 3)
+        first, second, *retries = send.call_args_list
+        assert first.args[1] == f"model-{result['trial_judges'][0]}"
+        assert second.args[1] == f"model-{result['trial_judges'][1]}"
+        assert str(first.args[2]).index("First artifact") < str(first.args[2]).index("Second artifact")
+        assert str(second.args[2]).index("Second artifact") < str(second.args[2]).index("First artifact")
+        if retries:
+            assert retries[0] == second  # An empty answer repeats the unchanged request.
+        if len(retries) > 1:
+            assert retries[1].args[:2] == second.args[:2]
+            assert retries[1].args[3:] == second.args[3:]
+            assert retries[1].args[2][:-1] == second.args[2]
+            assert retries[1].args[2][-1] == {
+                "role": "user",
+                "content": "End with exactly one verdict: BOXED[A], BOXED[B], or BOXED[TIE].",
+            }
+            assert "malformed" not in str(retries[1].args[2])
+
+    def test_retry_exhaustion_does_not_turn_all_invalid_votes_into_ties(self, monkeypatch):
+        send = MagicMock(return_value="")
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        with pytest.raises(ValueError, match="All 2 pairwise judge responses were invalid"):
+            run_trials(
+                judges=[_judge_returning("solo", "unused")],
+                task_prompt="Compare submissions",
+                refs=[],
+                submission_a=[],
+                submission_b=[],
+                num_trials=2,
+                invalid_response_retries=2,
+            )
+        assert send.call_count == 6
+
+    def test_malformed_answer_adds_format_reminder_only_once(self, monkeypatch):
+        send = MagicMock(side_effect=["Unstructured winner explanation", "Still unstructured", "BOXED[B]"])
+        monkeypatch.setattr("resources_servers.gdpval.comparison.send_judge_request", send)
+        result = run_trials(
+            judges=[_judge_returning("solo", "unused")],
+            task_prompt="Compare submissions",
+            refs=[],
+            submission_a=[],
+            submission_b=[],
+            num_trials=1,
+            invalid_response_retries=2,
+        )
+        assert result["winner"] == B_WIN_RESPONSE
+        first, second, third = send.call_args_list
+        assert second == third
+        assert second.args[2][:-1] == first.args[2]
+        assert len(second.args[2]) == len(first.args[2]) + 1
+        assert "unstructured" not in str(second.args[2]).lower()
+
+
+@pytest.mark.parametrize("status_timeout", [False, True])
+@pytest.mark.parametrize("retry_timeouts,recover", [(False, False), (True, True), (True, False)])
+def test_pairwise_transport_timeout_retry_is_opt_in_and_bounded(monkeypatch, status_timeout, retry_timeouts, recover):
+    request = httpx.Request("POST", "https://judge.invalid/v1/chat/completions")
+    error = (
+        APIStatusError("Request timed out", response=httpx.Response(408, request=request), body={})
+        if status_timeout
+        else APITimeoutError(request=request)
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="BOXED[B]"), finish_reason="stop")]
+    )
+    client = MagicMock()
+    client.chat.completions.create.side_effect = (
+        [error] * (REQUEST_MAX_ATTEMPTS - 1) + [response] if recover else error
+    )
+    sleep = MagicMock()
+    monkeypatch.setattr("resources_servers.gdpval.comparison.time.sleep", sleep)
+    if recover:
+        assert send_judge_request(client, "judge", [], retry_timeouts=retry_timeouts) == "BOXED[B]"
+    else:
+        with pytest.raises(type(error)):
+            send_judge_request(client, "judge", [], retry_timeouts=retry_timeouts)
+    attempts = REQUEST_MAX_ATTEMPTS if retry_timeouts else 1
+    assert client.chat.completions.create.call_count == attempts
+    assert sleep.call_count == attempts - 1
+    calls = client.chat.completions.create.call_args_list
+    assert all(call == calls[0] for call in calls)
+
+
+def test_pairwise_length_warning_contains_usage_without_response_text(caplog):
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Private response text"), finish_reason="length")],
+        usage=SimpleNamespace(completion_tokens=32768),
+    )
+    assert send_judge_request(client, "judge", []) == "Private response text"
+    assert "completion_tokens=32768" in caplog.text
+    assert "Private response text" not in caplog.text

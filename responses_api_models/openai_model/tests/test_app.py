@@ -30,6 +30,8 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
     SimpleModelServer,
     SimpleModelServerConfig,
 )
@@ -63,7 +65,9 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(
+        self, max_concurrent_requests=None, drop_input_reasoning_items=False, request_timeout_seconds=None
+    ):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -73,6 +77,7 @@ class TestApp:
             entrypoint="",
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
+            request_timeout_seconds=request_timeout_seconds,
             drop_input_reasoning_items=drop_input_reasoning_items,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
@@ -365,3 +370,61 @@ class TestApp:
 
         await asyncio.gather(*(worker() for _ in range(8)))
         assert peak == 2
+
+
+@pytest.mark.parametrize(
+    "endpoint,client_method,body",
+    [
+        ("responses", "create_response", NeMoGymResponseCreateParamsNonStreaming(input=[])),
+        (
+            "chat_completions",
+            "create_chat_completion",
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
+        ),
+    ],
+)
+@pytest.mark.parametrize("queued", [False, True])
+async def test_request_deadline_cancels_work_and_preserves_semaphore(endpoint, client_method, body, queued):
+    server = TestApp()._setup_server(max_concurrent_requests=1, request_timeout_seconds=0.02)
+    cancelled = asyncio.Event()
+
+    async def blocked(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    mock_call = AsyncMock(side_effect=blocked)
+    server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    setattr(server._client, client_method, mock_call)
+    if queued:
+        await server._semaphore.acquire()
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(TimeoutError):
+                await getattr(server, endpoint)(body)
+        if queued:
+            mock_call.assert_not_awaited()
+            assert server._semaphore.locked()
+        else:
+            mock_call.assert_awaited_once()
+            assert cancelled.is_set()
+            assert not server._semaphore.locked()
+    finally:
+        if queued:
+            server._semaphore.release()
+
+
+async def test_request_deadline_bounds_rate_limit_retries(monkeypatch):
+    server = TestApp()._setup_server(request_timeout_seconds=0.02)
+    response = MagicMock(status=429)
+    response.content.read = AsyncMock(return_value=b"rate limited")
+    upstream = AsyncMock(return_value=response)
+    monkeypatch.setattr("nemo_gym.openai_utils.request", upstream)
+
+    async with asyncio.timeout(1):
+        with pytest.raises(TimeoutError):
+            await server.chat_completions(NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]))
+    upstream.assert_awaited_once()
+    await asyncio.sleep(0.03)
+    upstream.assert_awaited_once()

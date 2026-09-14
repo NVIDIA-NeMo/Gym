@@ -188,7 +188,7 @@ async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover
 
 
 @pytest.mark.parametrize("empty_answers", [0, 2, 3])
-async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, tmp_path, empty_answers):
+async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, tmp_path, caplog, empty_answers):
     monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
     server = AABriefcaseLiteResourcesServer.model_construct(
         config=AABriefcaseLiteResourcesServerConfig.model_construct(
@@ -231,7 +231,14 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
                 "object": "chat.completion",
                 "created": 0,
                 "model": "model",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop" if content else "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 32768, "total_tokens": 32778},
             },
         )
 
@@ -253,3 +260,5 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
     assert len(requests) == 1 + min(empty_answers + 1, 3)
     assert sum("first check" in str(request["messages"]) for request in requests) == 1
     assert all(request == requests[1] for request in requests[1:])
+    assert caplog.text.count("completion_tokens=32768") == empty_answers
+    assert "Submitted artifact" not in caplog.text

@@ -1363,12 +1363,15 @@ def send_judge_request(
     messages: list[dict],
     max_output_tokens: int = 65535,
     create_overrides: Optional[dict] = None,
+    retry_timeouts: bool = False,
 ) -> str:
     """Send a judge request with exponential-backoff retry.  Returns response text.
 
     *create_overrides* (a panel member's reasoning/generation knobs) is merged
     over the default create kwargs; a ``None`` value removes the matching
     default (e.g. to drop ``temperature`` for a reasoning model that rejects it).
+    ``retry_timeouts`` includes client and HTTP 408 timeouts in the same retry
+    budget; by default those retain the shared caller's existing behavior.
     """
     backoff = REQUEST_INITIAL_BACKOFF_SECONDS
     create_kwargs = merge_create_kwargs(
@@ -1384,9 +1387,16 @@ def send_judge_request(
     for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
         try:
             response = client.chat.completions.create(**create_kwargs)
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                LOGGER.warning(
+                    "Judge completion reached its token limit: model=%s completion_tokens=%s",
+                    model,
+                    getattr(getattr(response, "usage", None), "completion_tokens", None),
+                )
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
-            retryable = _is_retryable(error)
+            timeout = isinstance(error, APITimeoutError) or getattr(error, "status_code", None) == 408
+            retryable = (retry_timeouts and timeout) or _is_retryable(error)
             is_last = attempt == REQUEST_MAX_ATTEMPTS
             if not retryable or is_last:
                 raise
@@ -1856,6 +1866,8 @@ def run_trials(
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
     rng: Optional[random.Random] = None,
+    invalid_response_retries: int = 0,
+    retry_timeouts: bool = False,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
@@ -1867,7 +1879,10 @@ def run_trials(
 
     Invalid responses without a boxed verdict are excluded rather than scored
     as ties. If every response is invalid, the matchup fails so its caller can
-    retry or drop it explicitly.
+    retry or drop it explicitly. ``invalid_response_retries`` repeats only the
+    invalid trial with the same judge and submission positions, adding a format
+    reminder for nonempty malformed answers. ``retry_timeouts`` opts into the
+    request sender's bounded retry policy for client and HTTP 408 timeouts.
 
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
     ``tie_count``, ``task_count`` (valid votes only), ``invalid_count``,
@@ -1882,6 +1897,8 @@ def run_trials(
     """
     if not judges:
         raise ValueError("run_trials requires a non-empty judge panel")
+    if invalid_response_retries < 0:
+        raise ValueError("invalid_response_retries must be non-negative")
     rng = rng or random.Random()
 
     win_count_a = 0
@@ -1912,12 +1929,27 @@ def run_trials(
             submission_a=current_a,
             submission_b=current_b,
         )
-        response_text = send_judge_request(
-            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
-        )
+        format_reminder_added = False
+        for _attempt in range(invalid_response_retries + 1):
+            response_text = send_judge_request(
+                judge.client,
+                judge.model,
+                messages,
+                max_output_tokens,
+                judge.create_overrides,
+                retry_timeouts=retry_timeouts,
+            )
+            judgement = parse_judgement(response_text)
+            if judgement is not None:
+                break
+            if response_text and not format_reminder_added and _attempt < invalid_response_retries:
+                messages = [
+                    *messages,
+                    {"role": "user", "content": "End with exactly one verdict: BOXED[A], BOXED[B], or BOXED[TIE]."},
+                ]
+                format_reminder_added = True
         if return_raw_responses:
             raw_responses.append(response_text)
-        judgement = parse_judgement(response_text)
 
         # Per-judge tally (same A=submission_a / B=submission_b convention as the
         # global counts) so the panel's per-member balance is auditable.

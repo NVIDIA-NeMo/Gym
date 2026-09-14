@@ -49,6 +49,15 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    request_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Deadline for one model request, including queueing and upstream retries. "
+            "None leaves the request unbounded."
+        ),
+    )
+
     drop_input_reasoning_items: bool = Field(
         default=False,
         description=(
@@ -86,7 +95,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 body_dict["input"] = [
                     item for item in input_items if not (isinstance(item, dict) and item.get("type") == "reasoning")
                 ]
-        async with self._semaphore:
+        async with asyncio.timeout(self.config.request_timeout_seconds), self._semaphore:
             openai_response_dict = await self._client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
 
@@ -95,7 +104,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
-        async with self._semaphore:
+        async with asyncio.timeout(self.config.request_timeout_seconds), self._semaphore:
             openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
 
