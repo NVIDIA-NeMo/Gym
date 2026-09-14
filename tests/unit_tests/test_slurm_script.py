@@ -23,6 +23,7 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
+    _build_vllm_multi_instance_multi_node_command,
     _build_vllm_ray_command,
     _node_totals,
     _render_directives,
@@ -364,6 +365,34 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert "checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
+
+
+def test_multi_instance_multi_node_command_survives_the_shell():
+    """vLLM's JSON flags are single-quoted, and the DP branches are embedded in a
+    single-quoted `bash -lc '...'`. Unescaped they end the block early and the
+    whole invocation word-splits -- a real mmlu-prox submission died of this with
+    "/usr/bin/env: Argument list too long". Run the rendered block through bash
+    and check the JSON arrives as one argument.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args='--hf-overrides \'{"architectures":["Custom"],"norm_mean":[0.5,0.5]}\'',
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+
+    # Replace `vllm serve` with a printf that dumps one argument per line, so the
+    # test observes what the shell actually passed rather than the rendered text.
+    # Double quotes, because this substitution happens AFTER rendering and so is
+    # not itself escaped -- single quotes here would break the block the test is
+    # checking.
+    script = "SLURM_NODEID=0 HEAD_NODE_IP=1.2.3.4 " + block.replace("vllm serve", 'printf "%s\\n"', 2)
+    argv = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    assert '{"architectures":["Custom"],"norm_mean":[0.5,0.5]}' in argv
 
 
 def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():

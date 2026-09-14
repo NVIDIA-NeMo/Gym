@@ -27,6 +27,7 @@ from nemo_gym.orchestration.api import (
 )
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
+    escape_for_single_quoted_block,
     render_driver_entrypoint,
     render_gym_cmd,
     render_health_check,
@@ -194,12 +195,17 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
         + " --headless"
         + f" --data-parallel-start-rank $(( SLURM_NODEID * {dp_size_local} ))"
     )
+    # Both branches go inside a single-quoted `bash -lc '...'`, and this service's
+    # command carries JSON flags that are themselves single-quoted
+    # (--hf-overrides, --limit-mm-per-prompt, --media-io-kwargs). Unescaped they
+    # end the block early and the whole invocation word-splits; mmlu-prox died
+    # that way with "/usr/bin/env: Argument list too long".
     return (
         "bash -lc '\n"
         '    if [ "$SLURM_NODEID" = "0" ]; then\n'
-        f"        {head_cmd}\n"
+        f"        {escape_for_single_quoted_block(head_cmd)}\n"
         "    else\n"
-        f"        {worker_cmd}\n"
+        f"        {escape_for_single_quoted_block(worker_cmd)}\n"
         "    fi\n"
         "'"
     )

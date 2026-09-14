@@ -77,6 +77,25 @@ def render_ray_prelude() -> str:
     return _RAY_PRELUDE
 
 
+def escape_for_single_quoted_block(body: str) -> str:
+    """Make `body` safe to embed inside a single-quoted `bash -c '...'` block.
+
+    POSIX shells do not nest single quotes: an inner quote ENDS the outer string
+    rather than nesting in it. Every value that had to be quoted -- a Hydra
+    override containing a space, or any of the JSON blobs vLLM flags take
+    (`--hf-overrides '{"architectures":[...]}'`) -- would otherwise break out of
+    the block and word-split. Both failure modes have been observed on real
+    submissions: Hydra rejecting `+multistage.stages=[{num_tasks:` on its own,
+    and `/usr/bin/env: Argument list too long` from a multi-node vLLM command
+    whose JSON flags reopened the quoting.
+
+    `'"'"'` is the standard end-quote / literal-quote / reopen-quote sequence.
+    It leaves `$VAR` and `$(( ))` untouched, which matters: the inner shell is
+    the one meant to expand them.
+    """
+    return body.replace("'", "'\"'\"'")
+
+
 def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:
     """Render the Ray head/worker bootstrap that wraps a single vLLM instance's TP/PP command so
     it spans multiple Slurm nodes.
@@ -86,7 +105,13 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
     pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
     rank ($SLURM_NODEID).
     """
-    return _VLLM_RAY_SYMMETRIC_RUN.format(total_nodes=total_nodes, resource_flags=resource_flags, inner_cmd=inner_cmd)
+    # Only the interpolated values are escaped; the template's own structure is
+    # what the quoting is meant to preserve.
+    return _VLLM_RAY_SYMMETRIC_RUN.format(
+        total_nodes=total_nodes,
+        resource_flags=escape_for_single_quoted_block(resource_flags),
+        inner_cmd=escape_for_single_quoted_block(inner_cmd),
+    )
 
 
 def render_health_check(name: str, port: int, path: str, timeout: int) -> str:
@@ -160,14 +185,5 @@ def render_driver_entrypoint(
 
     preamble.append('exec "$@"')
     body = "\n    ".join(preamble)
-    # The body goes inside a single-quoted `bash -c '...'`, and POSIX shells do
-    # not nest single quotes: an inner quote ENDS the outer string rather than
-    # nesting in it. So every argument shlex.quote() had to quote -- which is
-    # every value containing a space -- would break out and word-split. A real
-    # run died exactly here: gdpval's prepare passes
-    # `+multistage.stages=[{num_tasks: 45, ...}]`, the shell handed Hydra just
-    # `+multistage.stages=[{num_tasks:`, and Hydra reported "no viable
-    # alternative at input '[{num_tasks:'". The replacement below is the
-    # standard end-quote / literal-quote / reopen-quote dance.
-    body = body.replace("'", "'\"'\"'")
+    body = escape_for_single_quoted_block(body)
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
