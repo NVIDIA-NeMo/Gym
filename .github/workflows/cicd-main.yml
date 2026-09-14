@@ -296,7 +296,7 @@ jobs:
       }}
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@74c97d9a1241554f347f4be6557192560e266eff
     with:
-      workflow_ref: 74c97d9a1241554f347f4be6557192560e266eff
+      workflow_ref: 74c97d9a1241554f347f4be6557192560e266eff  # pragma: allowlist secret
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
       # SLACK_TEAM_CHANNEL_WEBHOOK intentionally NOT passed: notify-failure below is
