@@ -835,6 +835,7 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(
         "coverage/failed": 1,
         "coverage/omitted": 1,
         "coverage/unknown": 0,
+        "coverage/attempts_exhausted": 0,
     }
     assert not report["complete"] and report["reconciled"]
     failures = list(read_records(collection.failures_path_for(output)))

@@ -401,6 +401,7 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         "coverage/failed": 1,
         "coverage/omitted": 1,
         "coverage/unknown": 2,
+        "coverage/attempts_exhausted": 0,
     }
     assert report["coverage_known"] and not report["complete"]
     assert len(list(read_records(output))) == 2  # Aggregating does not rewrite history.
