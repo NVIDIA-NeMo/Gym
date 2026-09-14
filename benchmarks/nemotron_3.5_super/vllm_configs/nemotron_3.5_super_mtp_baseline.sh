@@ -35,6 +35,7 @@ VLLM_COMMON_ARGS=(
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
+    --cudagraph-metrics
     --max-num-seqs 1024
     --data-parallel-size-local 1
     --tensor-parallel-size 4
