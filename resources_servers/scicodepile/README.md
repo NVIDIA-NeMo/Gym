@@ -92,6 +92,14 @@ verdict. Trust a verdict only to the extent you trust the code that produced it.
 `runner_crashed`, and `unparseable_runner_output`. `details.phase` says which compile
 unit raised: `setup`, `model` or `test`.
 
+Every string in the response is forced back into encodable UTF-8 before it is sent.
+A lone surrogate — from `raise ValueError('\udcff')`, a `surrogateescape`-decoded
+filename, or the `\udcff` JSON escape in the incoming request — is representable in a
+Python `str` and survives the runner's JSON round trip, but raises when the response
+is encoded for the wire. That would be an HTTP 500, and with the default
+`route_failures_to_sidecar=False` a 500 aborts the whole rollout run. One task's
+exception message must not be able to end the job.
+
 ### Harness faults
 
 `failure_reason` is set only when `reward=0.0` does not reflect policy quality —

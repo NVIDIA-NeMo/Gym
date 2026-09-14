@@ -575,6 +575,86 @@ class TestModelCausedFaultsAreNotExcused:
         assert res.failure_reason == "setup_code_failed"
 
 
+class TestUnserializableText:
+    """Model-controlled text must never be able to 500 the endpoint.
+
+    A lone surrogate is representable in a Python ``str`` and survives the runner's
+    JSON round trip, then raises ``UnicodeEncodeError`` when the response is encoded
+    for the wire. With the default ``route_failures_to_sidecar=False`` a 500 aborts
+    the whole rollout run, so one task's exception message could end the job.
+    """
+
+    @pytest.mark.parametrize(
+        "label,code",
+        [
+            ("raised from the function", "def add(a, b):\n    raise ValueError('\\udcff')"),
+            ("raised at module level", "raise ValueError('\\udcff')\ndef add(a, b):\n    return a + b"),
+            (
+                "surrogateescape-decoded filename",
+                "def add(a, b):\n    open(b'/nonexistent/\\xff'.decode('utf-8', 'surrogateescape'))",
+            ),
+        ],
+    )
+    def test_a_surrogate_in_an_exception_does_not_500(self, short_timeout_client, label, code):
+        from app import SciCodePileVerifyRequest
+
+        req = SciCodePileVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "add"}]},
+            response=_make_response(f"```python\n{code}\n```"),
+            verifier_metadata={
+                "task_id": "alignment/python/1",
+                "entry_point": "add",
+                "setup_code": "",
+                "test": "def check(candidate):\n    assert candidate(2, 3) == 5\n",
+            },
+        )
+        resp = short_timeout_client.post("/verify", json=req.model_dump())
+        assert resp.status_code == 200, f"{label} aborted the run with HTTP {resp.status_code}"
+        assert resp.json()["reward"] == 0.0
+
+    def test_a_surrogate_in_the_request_body_does_not_500(self, short_timeout_client):
+        """The echoed request is model-controlled too, and reaches us over the wire.
+
+        ``\\udcff`` is a legal JSON escape, so a client relaying model output produces
+        a lone surrogate in the request that ``json.loads`` accepts happily. Sanitizing
+        only the fields this server adds leaves that route open.
+        """
+        from app import SciCodePileVerifyRequest
+
+        req = SciCodePileVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "add"}]},
+            response=_make_response("SURROGATE_SLOT\n```python\ndef add(a, b):\n    return a + b\n```"),
+            verifier_metadata={
+                "task_id": "alignment/python/1",
+                "entry_point": "add",
+                "setup_code": "",
+                "test": "def check(candidate):\n    assert candidate(2, 3) == 5\n",
+            },
+        )
+        raw = json.dumps(req.model_dump(), ensure_ascii=True).replace("SURROGATE_SLOT", "\\udcff")
+        assert "\\udcff" in raw
+        resp = short_timeout_client.post(
+            "/verify", content=raw.encode("ascii"), headers={"Content-Type": "application/json"}
+        )
+        assert resp.status_code == 200, f"a surrogate in the echoed body aborted the run ({resp.status_code})"
+        assert resp.json()["reward"] == 1.0
+
+    def test_sanitizer_preserves_ordinary_text(self):
+        """Sanitizing is lossy only for text that could not have been sent at all."""
+        from app import _sanitize_for_json
+
+        payload = {"msg": "ünïcödé ✓ 日本語", "n": 3, "xs": [1.5, None, True], "nested": {"k": "v"}}
+        assert _sanitize_for_json(payload) == payload
+
+    def test_sanitizer_replaces_lone_surrogates_everywhere(self):
+        from app import _sanitize_for_json
+
+        out = _sanitize_for_json({"a": "x\udcffy", "b": ["\udcff"], "c": {"d": "\udcff"}})
+        for value in (out["a"], out["b"][0], out["c"]["d"]):
+            value.encode("utf-8")  # must not raise
+        assert "\udcff" not in out["a"]
+
+
 class TestHarnessFailureMetric:
     """The fault rate is published as a score, so it needs no manual filter."""
 

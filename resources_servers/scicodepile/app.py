@@ -36,6 +36,22 @@ class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
     max_as_limit: int = 8 * 1024
 
 
+def _sanitize_for_json(value: Any) -> Any:
+    """Recursively replace code points that cannot be encoded as UTF-8.
+
+    Lone surrogates are the case that matters: they are representable in a Python
+    ``str`` and survive ``json.dumps``/``json.loads``, but raise ``UnicodeEncodeError``
+    the moment the response is encoded for the wire. See ``_respond``.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {_sanitize_for_json(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_json(v) for v in value]
+    return value
+
+
 # Upper bound on reaping a SIGKILLed runner. Only reached if the kill did not land;
 # returning late beats holding the semaphore for the rest of the run.
 _REAP_TIMEOUT_SECONDS = 10.0
@@ -128,23 +144,34 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
         return key
 
+    @staticmethod
+    def _respond(body: SciCodePileVerifyRequest, **fields: Any) -> SciCodePileVerifyResponse:
+        """Build the response with every string forced back into encodable UTF-8.
+
+        Model-controlled text reaches the response by several routes — the echoed
+        request, ``extracted_model_*``, and the runner's rendering of an exception
+        message — and a lone surrogate in any of them (``raise ValueError('\\udcff')``,
+        or a ``surrogateescape``-decoded filename) survives the runner's JSON round
+        trip and then raises during response serialization. That is an HTTP 500, and
+        with the default ``route_failures_to_sidecar=False`` a 500 aborts the entire
+        rollout run. One task's exception message must not be able to do that.
+
+        Sanitizing is lossy only for text that could not have been sent at all.
+        """
+        return SciCodePileVerifyResponse(**_sanitize_for_json({**body.model_dump(), **fields}))
+
     async def verify(self, body: SciCodePileVerifyRequest) -> SciCodePileVerifyResponse:
         model_out = body.response.output_text or ""
         meta = body.verifier_metadata or {}
         task_id = meta.get("task_id")
 
         if not model_out.strip():
-            return SciCodePileVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                status="empty_output",
-                task_id=task_id,
-            )
+            return self._respond(body, reward=0.0, status="empty_output", task_id=task_id)
 
         extracted = preprocess_code_completion(model_out)
         if not extracted:
-            return SciCodePileVerifyResponse(
-                **body.model_dump(),
+            return self._respond(
+                body,
                 reward=0.0,
                 extracted_model_output=model_out,
                 status="no_code_block",
@@ -161,8 +188,8 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
 
         status = result.get("status")
         details = result.get("details")
-        return SciCodePileVerifyResponse(
-            **body.model_dump(),
+        return self._respond(
+            body,
             reward=1.0 if status == "pass" else 0.0,
             extracted_model_output=model_out,
             extracted_model_code=extracted,
