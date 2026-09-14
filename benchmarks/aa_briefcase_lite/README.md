@@ -49,7 +49,7 @@ an Apptainer network namespace with no interfaces, an isolated writable
 
 The default runs all four tasks and judges their deliverables with both the 55
 released binary checks and the eight local analytical-quality/presentation
-pairwise criteria (`reward_mode: all`, `execute_only: false`, `judge_only: false`).
+pairwise criteria (`AA_BRIEFCASE_REWARD_MODE` defaults to `all`, `execute_only: false`, `judge_only: false`).
 Pairwise judging uses the public GPT-5.5 reference submission (`gpt-5-5`) with two
 position-debiased trials per criterion. AA has not released its production
 pairwise prompt or private comparison graph, so these pairwise and combined
@@ -90,7 +90,6 @@ AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase El
 
 Each judge-panel member uses its own model server because the `openai_model`
 adapter fixes the upstream model. Override the three model names with
-`JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed;
-`JUDGE_MODEL_NAME` remains a fallback for Gemini. Claude uses a local 16,384-token
-output limit in both binary and pairwise judging; AA's judge output budget is
+`JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
+Claude uses a local 16,384-token output limit in both binary and pairwise judging; AA's judge output budget is
 not disclosed.

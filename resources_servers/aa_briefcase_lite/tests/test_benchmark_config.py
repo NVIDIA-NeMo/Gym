@@ -32,8 +32,8 @@ def resolve_config(monkeypatch, tmp_path):
     monkeypatch.setenv("AA_BRIEFCASE_LITE_DATASET_DIR", str(tmp_path / "dataset"))
     monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.invalid/v1")
     monkeypatch.setenv("JUDGE_API_KEY", "dummy")
-    # Scoring and execution modes must come from Gym config, even in an old shell.
-    monkeypatch.setenv("AA_BRIEFCASE_REWARD_MODE", "binary")
+    # Execution modes come from Gym config; reward mode defaults to all.
+    monkeypatch.delenv("AA_BRIEFCASE_REWARD_MODE", raising=False)
     monkeypatch.setenv("EXECUTE_ONLY", "true")
     monkeypatch.setenv("JUDGE_ONLY", "true")
 

@@ -30,12 +30,11 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
             {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}, "max_tokens": 16384},
             {},
         ),
-        ("gemini-3.1-pro", "legacy-model", {"reasoning_effort": "high"}, {"JUDGE_MODEL_NAME": "legacy-model"}),
         (
             "gemini-3.1-pro",
             "gemini-model",
             {"reasoning_effort": "high"},
-            {"JUDGE_MODEL_NAME": "legacy-model", "JUDGE_GEMINI_MODEL": "gemini-model"},
+            {"JUDGE_GEMINI_MODEL": "gemini-model"},
         ),
     ],
 )
@@ -55,7 +54,7 @@ def test_benchmark_panel_routes_to_matching_upstream_model(
     Capture the outbound provider request, after the adapter's fixed-model
     override. No provider credentials or network calls are needed.
     """
-    for name in ("JUDGE_MODEL_NAME", "JUDGE_GPT_MODEL", "JUDGE_GEMINI_MODEL", "JUDGE_CLAUDE_MODEL"):
+    for name in ("JUDGE_GPT_MODEL", "JUDGE_GEMINI_MODEL", "JUDGE_CLAUDE_MODEL"):
         monkeypatch.delenv(name, raising=False)
     for name, value in model_overrides.items():
         monkeypatch.setenv(name, value)

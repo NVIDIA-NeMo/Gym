@@ -7,7 +7,7 @@ aa_briefcase_lite_judge_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
-      openai_model: ${oc.env:JUDGE_GEMINI_MODEL,${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}}
+      openai_model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
 
 aa_briefcase_lite_gpt_judge_model:
   responses_api_models:
@@ -35,7 +35,7 @@ aa_briefcase_lite_resources_server:
       dataset_dir: ${oc.env:AA_BRIEFCASE_LITE_DATASET_DIR}
       # binary: released A/C prompt and checks; pairwise: local AQ/P comparison;
       # all: both, with a non-official convenience scalar averaging the two.
-      reward_mode: all
+      reward_mode: ${oc.env:AA_BRIEFCASE_REWARD_MODE,all}
       pairwise_reference_ids: [gpt-5-5]
       pairwise_num_trials: 2
       binary_formatting_retries: 1
@@ -54,7 +54,7 @@ aa_briefcase_lite_resources_server:
           media_mode: images_and_text
           create_params_overrides: {reasoning_effort: high, temperature: null}
         - name: gemini-3.1-pro
-          model: ${aa_briefcase_lite_judge_model.responses_api_models.openai_model.openai_model}
+          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
           model_server:
             type: responses_api_models
             name: aa_briefcase_lite_judge_model
