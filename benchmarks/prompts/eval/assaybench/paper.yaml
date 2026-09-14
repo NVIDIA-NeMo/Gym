@@ -1,0 +1,19 @@
+# The messages AssayBench's reference harness sent for every screen (arXiv:2605.10876), used by the
+# `assaybench`, `assaybench-val` and `assaybench-latest` benchmarks.
+#
+# Three layers, innermost first:
+#   1. `{question}` -- the paper's Appendix A.4 template, rendered per screen at prepare time
+#      (resources_servers/assaybench/prepare.py::BIOGRID_RANKING_PROMPT).
+#   2. The suffix the collection script appended to every question at request time
+#      (collect_llm_predictions.py::process_single_example, "Your goal is to provide ...").
+#   3. DSPy's ChatAdapter framing for `ChainOfThought(RankingSignature)`: the system message that
+#      declares the `question` / `reasoning` / `answer` fields, and the `[[ ## field ## ]]` markers
+#      in the user turn. Captured from dspy 3.3.1 (`ChatAdapter().format(...)`); the format has been
+#      stable across the 2.6 -> 3.x line. The verifier reads the reply back the same way.
+#
+# Written as double-quoted scalars so the trailing spaces DSPy emits ("`reasoning` (str): " and
+# "your objective is: ") survive the repo's whitespace hooks. `{{...}}` are literal braces in the
+# DSPy system text; `{question}` is the row field. Byte-exactness against DSPy's own rendering is
+# checked in resources_servers/assaybench/tests/test_app.py::TestPrompt.
+system: "Your input fields are:\n1. `question` (str): The gene ranking task description\nYour output fields are:\n1. `reasoning` (str): \n2. `answer` (str): Comma-separated list of genes in ranked order\nAll interactions will be structured in the following way, with the appropriate values filled in.\n\n[[ ## question ## ]]\n{{question}}\n\n[[ ## reasoning ## ]]\n{{reasoning}}\n\n[[ ## answer ## ]]\n{{answer}}\n\n[[ ## completed ## ]]\nIn adhering to this structure, your objective is: \n        Signature for gene ranking task."
+user: "[[ ## question ## ]]\n{question}\n\nYour goal is to provide a list of genes that meet the screen criteria, even if you do not have access to the actual experimental data. The genes must use HGNC symbols. Use your knowledge of biology, gene function, and relevant pathways to predict which genes are most likely to be hits. Do not refuse to answer or say you need more data—make your best predictions based on your understanding of the biological context.\n\nRespond with the corresponding output fields, starting with the field `[[ ## reasoning ## ]]`, then `[[ ## answer ## ]]`, and then ending with the marker for `[[ ## completed ## ]]`."

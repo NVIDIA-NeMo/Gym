@@ -1,0 +1,25 @@
+# AssayBench LaTest: 19 screens from publications after September 2025, none in BioGRID -- the
+# paper's held-out probe for memorization (Sections 2.3 and 5.5, "LaTest" rows of Table 3). Same
+# prompt as the temporal splits. Note dFDR is undefined here: no LaTest screen has negative
+# relevance, so `fdr@100` is 0 for every rollout rather than informative.
+config_paths:
+  - resources_servers/assaybench/configs/assaybench.yaml
+
+assaybench_latest_assaybench_resources_server:
+  _inherit_from: assaybench
+
+assaybench_latest_assaybench_simple_agent:
+  _inherit_from: assaybench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: assaybench_latest_assaybench_resources_server
+      datasets:
+      - name: assaybench-latest
+        type: benchmark
+        jsonl_fpath: benchmarks/assaybench-latest/data/assaybench_latest_benchmark.jsonl
+        prepare_script: benchmarks/assaybench-latest/prepare.py
+        license: MIT
+        prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+        num_repeats: 5

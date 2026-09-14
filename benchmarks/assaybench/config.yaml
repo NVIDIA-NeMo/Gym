@@ -1,0 +1,27 @@
+# AssayBench, temporal test split (334 screens published after 2021) -- the cohort behind the paper's
+# Table 2 and the "test" rows of Table 3. `assaybench-val` and `assaybench-latest` are the other two
+# reported cohorts; same server, same prompt, different rows.
+config_paths:
+  - resources_servers/assaybench/configs/assaybench.yaml
+
+# `_inherit_from` keeps this benchmark config isolated from the generic one above.
+assaybench_assaybench_resources_server:
+  _inherit_from: assaybench
+
+assaybench_assaybench_simple_agent:
+  _inherit_from: assaybench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: assaybench_assaybench_resources_server
+      datasets:
+      - name: assaybench
+        type: benchmark
+        jsonl_fpath: benchmarks/assaybench/data/assaybench_benchmark.jsonl
+        prepare_script: benchmarks/assaybench/prepare.py
+        license: MIT
+        # The reference harness's messages (paper template + collection suffix, DSPy-framed).
+        prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+        # n_runs=5 is what the paper ran for open-weight models (1 for the proprietary APIs).
+        num_repeats: 5

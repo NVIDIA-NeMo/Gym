@@ -1,0 +1,35 @@
+assaybench:
+  resources_servers:
+    assaybench:
+      entrypoint: app.py
+      domain: knowledge
+      description: AssayBench -- rank the hit genes of a CRISPR screen from its plain-text description (arXiv:2605.10876)
+      value: Tests whether a model can turn mechanistic biology into experimentally measured phenotypic outcomes, scored with the paper's adjusted nDCG
+      verified: false
+      # RankingMetrics(k_values=...) from the authors' `assaybench` package; the reference used these.
+      k_values: [5, 10, 20, 50, 100]
+      # The paper's headline metric. Continuous in [0, 1]; 0 is random-or-worse, 1 the ideal ranking.
+      reward_metric: adjusted_ndcg@100
+      # Canonicalize predicted symbols to HGNC before scoring, as the reference evaluation did.
+      use_gene_mapper: true
+      # The reference harness's quality gate (re-scan the raw reply when the answer field yields
+      # fewer genes than this). Its code path only fired for the Biomni client, so off by default.
+      min_expected_genes: 0
+      strip_think_blocks: true
+assaybench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: assaybench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        # Pre-materialized with benchmarks/prompts/eval/assaybench/paper.yaml (the reference
+        # harness's messages); do not pass +prompt_config when running rollouts against it.
+        jsonl_fpath: resources_servers/assaybench/data/example.jsonl
+        license: MIT

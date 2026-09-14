@@ -1,0 +1,23 @@
+# AssayBench, temporal validation split (218 screens published in 2021) -- the "val" rows of the
+# paper's Table 3. See benchmarks/assaybench for the test split.
+config_paths:
+  - resources_servers/assaybench/configs/assaybench.yaml
+
+assaybench_val_assaybench_resources_server:
+  _inherit_from: assaybench
+
+assaybench_val_assaybench_simple_agent:
+  _inherit_from: assaybench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: assaybench_val_assaybench_resources_server
+      datasets:
+      - name: assaybench-val
+        type: benchmark
+        jsonl_fpath: benchmarks/assaybench-val/data/assaybench_val_benchmark.jsonl
+        prepare_script: benchmarks/assaybench-val/prepare.py
+        license: MIT
+        prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+        num_repeats: 5
