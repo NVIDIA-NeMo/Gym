@@ -384,7 +384,9 @@ class GymResponsesLLM(UnifiedLLM):
 
             _cap = int(_os.environ.get("NOOA_MAX_OUTPUT_TOKENS", "32000"))
             _floor = int(_os.environ.get("NOOA_MIN_OUTPUT_TOKENS", "16000"))
-            _context_window = 131072  # GLM-5.3 max_input; generous default
+            # Context window is model-specific (GLM-5.3 131072, nemotron-v3 262144, ...);
+            # let the operator set it so the budget uses the real headroom.
+            _context_window = int(_os.environ.get("NOOA_CONTEXT_WINDOW", "131072"))
             try:
                 _input_chars = sum(len(str(m.get("content") or "")) for m in input_items)
                 _available = _context_window - _input_chars // 4 - int(_context_window * 0.05)
