@@ -8,14 +8,15 @@
 
 nickname: nemotron_3_5_super
 
-# Slurm jobs to split across. Nodes = num_shards x (prefill_nodes + decode_nodes).
+# Slurm jobs to split across. Nodes = num_shards x (prefill_nodes + decode_nodes) = 160.
 num_shards: 16
 
 vllm:
   model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
-  # Nodes per shard. One job cannot exceed ~16; decode limits throughput, so widen it first.
-  prefill_nodes: 1
-  decode_nodes: 2
+  # Nodes per shard, 10. The only shape measured since the router and sandbox fixes; one job
+  # cannot exceed ~16, and decode limits throughput, so widen that side first.
+  prefill_nodes: 2
+  decode_nodes: 8
 
 # P/D front end. The stock health-check defaults eject engines for being busy.
 vllm_router:

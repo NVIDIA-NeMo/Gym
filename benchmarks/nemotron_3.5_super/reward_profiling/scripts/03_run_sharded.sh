@@ -9,7 +9,8 @@
 #
 # Sharding also cuts the per-job driver preflight, which is a linear scan of the input before the
 # first dispatch: ~20 min over the full 271.5 GiB, about a minute over a 1/16 shard, and it is paid
-# again on every resubmission. Nodes = NUM_SHARDS x (prefill + decode), so 16 shards at the 1+2 default is 48 nodes.
+# again on every resubmission. Nodes = NUM_SHARDS x (prefill + decode), so 16 shards at the 2+8
+# default is 160 nodes.
 #
 # USAGE
 #   MODEL=<ckpt> \
@@ -67,7 +68,7 @@ for _required in SWEEP_DIR; do
 done
 
 # num_shards from the manifest when this environment does not set it. Nodes = NUM_SHARDS x
-# (vllm.prefill_nodes + vllm.decode_nodes), so 16 shards at the default 1+2 is 48 nodes.
+# (vllm.prefill_nodes + vllm.decode_nodes), so 16 shards at the default 2+8 is 160 nodes.
 # 2>/dev/null || true to match 02_shard.sh:28, which guards the identical block. Without it a torn
 # sweep_report.json or a missing python aborts the whole run at startup.
 _manifest_shards=$(python - "$SWEEP_DIR" 2>/dev/null <<'PY_SHARDS'

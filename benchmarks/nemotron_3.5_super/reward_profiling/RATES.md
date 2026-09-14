@@ -161,7 +161,7 @@ judge is untested at load here rather than proven healthy.
 
 ```
 5,808,968 / 6,614 per hr (steady) = 878 h on 40 GPUs = 35,132 GPU-hours   -> 36.6 days on one P2D8
-                                                                          -> 2.3 days on 16 shards
+                                                                          -> 2.3 days on 16 shards of P2D8
 ```
 
 That is roughly twice the 16,540 GPU-hours estimated from the 16-GPU run (186 vs 351 per GPU-hr):
@@ -214,7 +214,7 @@ Plan from the **sustained** rate, not the window figure: job 7061265 collected 3
 ```
 5,808,968 / 29,941 per hr = 194 h on one P2D8 = 7,762 GPU-hours
                                               -> 8.1 days on one P2D8
-                                              -> 12.1 h on 16 shards
+                                              -> 12.1 h on 16 shards of P2D8 (160 nodes)
 ```
 
 | | GPU-hours | basis |
@@ -249,6 +249,38 @@ paying the ~20 min preflight. Sharding is not an optimisation here, it is the on
 
 The honest sustained number is still unmeasured: no run with the fixes has yet completed a full
 walltime. Until one does, treat every figure in this file as an upper bound on throughput.
+
+### Sizing the sharded shape — and a correction
+
+Every "N shards" figure elsewhere in this file was produced by multiplying a **single-job P2D8
+rate** by the shard count. That silently assumes each shard is itself a P2D8. An earlier revision
+paired that arithmetic with a node count computed for 1-prefill-2-decode shards, which understated
+the fleet by 3.3x: "16 shards, 48 nodes, 9.8 h" cannot be true, because 16 shards each running at
+the measured P2D8 rate is 160 nodes.
+
+Consistent, from the one post-fix measurement (job 7090847, 1,153 rollouts per GPU-hr) against
+5.67M remaining rollouts, with a 78% duty cycle for the ~25 min preflight paid on each restart:
+
+| shape | nodes | GPUs | ETA |
+|---|---|---|---|
+| 16 x P2D8 | 160 | 640 | 9.8 h |
+| 32 x P2D8 | 320 | 1280 | 4.9 h |
+| 16 x 1P2D | 48 | 192 | 32.7 h |
+| 32 x 1P2D | 96 | 384 | 16.4 h |
+
+**Which shape is most efficient per GPU is unmeasured.** The obvious comparison does not survive
+scrutiny: the 351 per GPU-hr from the 16-GPU run and the 186 from the first P2D8 are both *pre-fix*,
+and holding the shape constant the router and sandbox fixes moved P2D8 from 186 to 1,153 — a 6x
+swing, far larger than any gap between shapes. There is exactly one post-fix datapoint and it is
+P2D8.
+
+The manifest therefore defaults to P2D8: not because it is proven fastest, but because it is the
+only shape measured end to end since the fixes, and shipping an unmeasured default is what produced
+the 48-versus-160 confusion above.
+
+To settle it properly: two shards at 1P2D against two at P2D8, same input slice, compared on
+**MB/hr per GPU** rather than rollouts/hr — composition skews the rollout count, as the 6.1x vs
+4.1x gap in the section above shows.
 
 ## Concurrency has a ceiling, and it is not a capacity limit (job 7062901)
 

@@ -46,8 +46,8 @@ setsid nohup bash -lc "SWEEP_DIR=$R/outputs/sweeps/nemotron_3_5_super NUM_SHARDS
 SWEEP_DIR=$R/outputs/sweeps/nemotron_3_5_super bash $R/scripts/05_profile.sh
 ```
 
-`NUM_SHARDS` is jobs, not nodes: each is `NUM_PREFILL_NODES + NUM_DECODE_NODES` (1 + 2 by
-default), so 16 shards is 48 nodes. Size it from [RATES.md](RATES.md).
+`NUM_SHARDS` is jobs, not nodes: each is `NUM_PREFILL_NODES + NUM_DECODE_NODES` (2 + 8 by
+default), so 16 shards is 160 nodes. Size it from [RATES.md](RATES.md).
 
 For a single job instead of N, swap step 2 for `03_run_single.sh` — same arguments, no sharding.
 `MODEL=<ckpt>` overrides the manifest's checkpoint; so does `CONTAINER`, `SANDBOX_CONTAINER`, or
@@ -97,7 +97,7 @@ below is grouped for reading, and `nemotron_3_5_super.yaml` puts the blocks you 
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
 2. **num_shards** — Slurm jobs to split across, i.e. `NUM_SHARDS`
-    - nodes = `num_shards × (vllm.prefill_nodes + vllm.decode_nodes)`, so 16 shards at 1+2 is 48
+    - nodes = `num_shards × (vllm.prefill_nodes + vllm.decode_nodes)`, so 16 shards at 2+8 is 160
       nodes. One job cannot exceed ~16 nodes: `--segment` needs a topology-contiguous allocation
       and an NVL72 rack is 18
 3. **vllm** — what gets served, i.e. `vllm serve <model>`
