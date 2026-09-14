@@ -32,7 +32,7 @@ The env package is not on PyPI, install it into the agent's venv for data prep.
 Running environment will create its own venv.
 
 ```bash
-uv pip install -e environments/automationbench
+uv pip install -e benchmarks/automationbench
 ```
 
 This pulls `automation-bench` from the upstream repo. Note upstream declares
@@ -41,10 +41,10 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 ## Data
 
 ```bash
-python environments/automationbench/prepare.py
+python benchmarks/automationbench/prepare.py
 ```
 
-Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100). 
+Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100).
 
 ## Note on comparability
 

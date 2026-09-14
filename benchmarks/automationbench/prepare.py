@@ -40,7 +40,7 @@ def prepare(
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
             "automationbench_env is not installed. Install this environment first:\n"
-            "    uv pip install -e environments/automationbench"
+            "    uv pip install -e benchmarks/automationbench"
         ) from exc
 
     env = load_environment(domains=domains, max_turns=max_turns, toolset=TOOLSET)
