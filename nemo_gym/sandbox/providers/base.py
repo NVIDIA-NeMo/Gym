@@ -27,6 +27,7 @@ class SandboxStatus(str, Enum):
 
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
@@ -252,6 +253,23 @@ class SupportsSandboxEndpoint(Protocol):
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPauseResume(Protocol):
+    """Optional provider capability for preserving and restoring a sandbox.
+
+    Pause preserves the filesystem, not running processes or PTY sessions;
+    callers open a new PTY after ``resume()``.
+    """
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause a sandbox while preserving its filesystem state."""
+        ...
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and refresh its handle."""
         ...
 
 
