@@ -22,8 +22,8 @@ permissions:
 jobs:
   validate-codeowners-suggestions:
     # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_suggestions.yml@bbf3a5361149032a502fc0a5eee0b5750fed7d60
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_suggestions.yml@d1724c447930a70e717c455c6361c8c8522d54e1
     with:
-      workflow_ref: bbf3a5361149032a502fc0a5eee0b5750fed7d60
+      workflow_ref: d1724c447930a70e717c455c6361c8c8522d54e1
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
