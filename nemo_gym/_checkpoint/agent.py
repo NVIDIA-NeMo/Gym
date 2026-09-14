@@ -16,14 +16,16 @@
 
 import asyncio
 import hashlib
+import io
 import json
 import os
+import tarfile
 import tempfile
 import time
 from contextvars import ContextVar, Token
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Iterator, Literal, Optional, Sequence
 
 from fastapi import FastAPI, Header, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -44,10 +46,16 @@ AGENT_CHECKPOINT_URL_PREFIX = "/ng-control/v1/agent-checkpoint"
 AGENT_STATE_SUBDIR = "agent"
 AGENT_MANIFEST_NAME = "manifest.json"
 AGENT_CONTINUATION_INDEX_NAME = "continuations.jsonl"
+AGENT_RECORD_INDEX_NAME = "agent-index.jsonl"
 AGENT_CHECKPOINT_SCHEMA_VERSION = 2
+AGENT_STATE_MANIFEST_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
 DISCARD_RESTORED_CONTINUATION_FEATURE = "discard_restored_continuation_v1"
+_AGENT_ARCHIVE_PATTERN = r"^agent-part-[0-9]{6}\.tar$"
+_AGENT_ARCHIVE_MAX_MEMBERS = 512
+_AGENT_ARCHIVE_MAX_PAYLOAD_BYTES = 64 << 20
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 _CURRENT_AGENT_EXECUTION: ContextVar[Optional["AgentExecution"]] = ContextVar(
     "nemo_gym_current_agent_execution",
@@ -65,6 +73,39 @@ class AgentExecutionState(str, Enum):
 
 class AgentCheckpointError(ControlError):
     code = "agent_checkpoint_error"
+
+
+class _AgentArchiveReference(BaseModel):
+    """Digest-bound coordinate for one bounded agent-state tar shard."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=_AGENT_ARCHIVE_PATTERN)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    members: int = Field(ge=1)
+    bytes: int = Field(ge=0)
+
+
+class _AgentArchiveMember(BaseModel):
+    """Location and integrity metadata for one agent boundary record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
+    archive: str = Field(pattern=_AGENT_ARCHIVE_PATTERN)
+    member: str = Field(min_length=1)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    bytes: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_member_name(self) -> "_AgentArchiveMember":
+        expected = _agent_record_name(self.rollout_id, self.attempt_index)
+        if self.member != expected:
+            raise ValueError(
+                f"agent archive member does not match its rollout identity: expected={expected!r}, actual={self.member!r}"
+            )
+        return self
 
 
 class DuplicateExecutionError(ControlError):
@@ -648,7 +689,179 @@ def _result_receipt(result: Any) -> tuple[str, str]:
 
 
 def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _agent_record_name(rollout_id: str, attempt_index: int) -> str:
+    return f"{rollout_id}.a{attempt_index}.json"
+
+
+def _partition_agent_archives(
+    records: Sequence[AgentBoundaryRecord],
+) -> Iterator[list[tuple[AgentBoundaryRecord, bytes]]]:
+    """Serialize and yield one bounded shard at a time."""
+    current: list[tuple[AgentBoundaryRecord, bytes]] = []
+    current_bytes = 0
+    for record in records:
+        payload = record.model_dump_json(indent=2).encode()
+        member_bytes = len(payload)
+        if current and (
+            len(current) >= _AGENT_ARCHIVE_MAX_MEMBERS
+            or current_bytes + member_bytes > _AGENT_ARCHIVE_MAX_PAYLOAD_BYTES
+        ):
+            yield current
+            current = []
+            current_bytes = 0
+        current.append((record, payload))
+        current_bytes += member_bytes
+    if current:
+        yield current
+
+
+def _write_agent_archive(
+    directory: Path,
+    *,
+    archive_index: int,
+    members: list[tuple[AgentBoundaryRecord, bytes]],
+) -> tuple[_AgentArchiveReference, list[_AgentArchiveMember]]:
+    """Atomically write and fsync one deterministic agent-state tar shard."""
+    archive_name = f"agent-part-{archive_index:06d}.tar"
+    target = directory / archive_name
+    member_references: list[_AgentArchiveMember] = []
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=".agent-archive-", delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            with tarfile.open(fileobj=handle, mode="w") as archive:
+                for record, payload in members:
+                    member_name = _agent_record_name(record.rollout_id, record.attempt_index)
+                    info = tarfile.TarInfo(name=member_name)
+                    info.size = len(payload)
+                    info.mode = 0o600
+                    info.mtime = 0
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    archive.addfile(info, io.BytesIO(payload))
+                    member_references.append(
+                        _AgentArchiveMember(
+                            rollout_id=record.rollout_id,
+                            attempt_index=record.attempt_index,
+                            archive=archive_name,
+                            member=member_name,
+                            sha256=hashlib.sha256(payload).hexdigest(),
+                            bytes=len(payload),
+                        )
+                    )
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    archive_size = temporary.stat().st_size
+    archive_digest = _digest(temporary)
+    os.replace(temporary, target)
+    return (
+        _AgentArchiveReference(
+            name=archive_name,
+            sha256=archive_digest,
+            members=len(member_references),
+            bytes=archive_size,
+        ),
+        member_references,
+    )
+
+
+def _load_agent_archive_records(
+    directory: Path,
+    *,
+    checkpoint_root: Path,
+    manifest: dict[str, Any],
+) -> list[AgentBoundaryRecord]:
+    """Validate every archive and deserialize its agent boundary records."""
+    if manifest.get("schema_version") != AGENT_STATE_MANIFEST_SCHEMA_VERSION:
+        raise AgentCheckpointError(
+            "unsupported agent checkpoint manifest schema: "
+            f"expected={AGENT_STATE_MANIFEST_SCHEMA_VERSION}, actual={manifest.get('schema_version')!r}"
+        )
+    try:
+        archives = [_AgentArchiveReference.model_validate(item) for item in manifest["archives"]]
+        record_index = CheckpointArtifactReference.model_validate(manifest["record_index"])
+        members = read_jsonl_artifact(checkpoint_root, record_index, _AgentArchiveMember)
+    except (KeyError, TypeError, ValueError, CheckpointArtifactError) as error:
+        raise AgentCheckpointError("agent checkpoint archive metadata is missing or corrupted") from error
+
+    archive_names = [archive.name for archive in archives]
+    if len(set(archive_names)) != len(archive_names):
+        raise AgentCheckpointError("agent checkpoint manifest contains duplicate archives")
+    identities = [(member.rollout_id, member.attempt_index) for member in members]
+    archive_members = [(member.archive, member.member) for member in members]
+    if len(set(identities)) != len(identities) or len(set(archive_members)) != len(archive_members):
+        raise AgentCheckpointError("agent checkpoint record index contains duplicate records")
+    if manifest.get("records") != len(members) or record_index.records != len(members):
+        raise AgentCheckpointError("agent checkpoint record count does not match its index")
+
+    members_by_archive: dict[str, list[_AgentArchiveMember]] = {}
+    for member in members:
+        members_by_archive.setdefault(member.archive, []).append(member)
+    if set(archive_names) != set(members_by_archive):
+        raise AgentCheckpointError("agent checkpoint archive inventory does not match its index")
+
+    records_by_identity: dict[tuple[str, int], AgentBoundaryRecord] = {}
+    for archive_reference in archives:
+        path = directory / archive_reference.name
+        if not path.is_file():
+            raise AgentCheckpointError(f"agent checkpoint archive {archive_reference.name!r} is missing")
+        if path.stat().st_size != archive_reference.bytes or _digest(path) != archive_reference.sha256:
+            raise AgentCheckpointError(f"agent checkpoint archive {archive_reference.name!r} is corrupted")
+        expected = members_by_archive[archive_reference.name]
+        if archive_reference.members != len(expected):
+            raise AgentCheckpointError(
+                f"agent checkpoint archive {archive_reference.name!r} member count is corrupted"
+            )
+        try:
+            with tarfile.open(path, mode="r:") as archive:
+                infos = archive.getmembers()
+                if [info.name for info in infos] != [member.member for member in expected]:
+                    raise AgentCheckpointError(
+                        f"agent checkpoint archive {archive_reference.name!r} has an unexpected member inventory"
+                    )
+                for info, member in zip(infos, expected, strict=True):
+                    if not info.isfile():
+                        raise AgentCheckpointError(
+                            f"agent checkpoint archive member {archive_reference.name!r}/{info.name!r} is invalid"
+                        )
+                    extracted = archive.extractfile(info)
+                    if extracted is None:
+                        raise AgentCheckpointError(
+                            f"agent checkpoint archive member {archive_reference.name!r}/{info.name!r} cannot be read"
+                        )
+                    payload = extracted.read()
+                    if len(payload) != member.bytes or hashlib.sha256(payload).hexdigest() != member.sha256:
+                        raise AgentCheckpointError(
+                            f"agent checkpoint archive member {archive_reference.name!r}/{info.name!r} is corrupted"
+                        )
+                    try:
+                        record = AgentBoundaryRecord.model_validate_json(payload)
+                    except ValueError as error:
+                        raise AgentCheckpointError(
+                            f"agent checkpoint archive member {archive_reference.name!r}/{info.name!r} is invalid"
+                        ) from error
+                    identity = (record.rollout_id, record.attempt_index)
+                    if identity != (member.rollout_id, member.attempt_index):
+                        raise AgentCheckpointError(
+                            f"agent checkpoint archive member {archive_reference.name!r}/{info.name!r} has the wrong identity"
+                        )
+                    records_by_identity[identity] = record
+        except (OSError, tarfile.TarError) as error:
+            raise AgentCheckpointError(
+                f"agent checkpoint archive {archive_reference.name!r} cannot be read"
+            ) from error
+    return [records_by_identity[identity] for identity in identities]
 
 
 def _validate_instance_name(instance_name: Optional[str]) -> Optional[str]:
@@ -702,18 +915,25 @@ def _commit_agent_records(
             instance_name=instance_name,
         )
 
-    files: dict[str, str] = {}
-    for record in records:
-        name = f"{record.rollout_id}.a{record.attempt_index}.json"
-        target = directory / name
-        payload = record.model_dump_json(indent=2).encode()
-        with tempfile.NamedTemporaryFile(dir=directory, prefix=".agent-", delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        files[name] = _digest(target)
+    ordered_records = sorted(records, key=lambda record: (record.rollout_id, record.attempt_index))
+    identities = [(record.rollout_id, record.attempt_index) for record in ordered_records]
+    if len(set(identities)) != len(identities):
+        raise AgentCheckpointError("agent checkpoint contains duplicate rollout attempts")
+    archive_references: list[_AgentArchiveReference] = []
+    archive_members: list[_AgentArchiveMember] = []
+    for archive_index, archive_records in enumerate(_partition_agent_archives(ordered_records)):
+        archive_reference, members = _write_agent_archive(
+            directory,
+            archive_index=archive_index,
+            members=archive_records,
+        )
+        archive_references.append(archive_reference)
+        archive_members.extend(members)
+    record_index = write_jsonl_artifact(
+        checkpoint_dir,
+        directory.relative_to(checkpoint_dir) / AGENT_RECORD_INDEX_NAME,
+        archive_members,
+    )
     continuation_roots = sorted(
         (
             AgentContinuationRoot(
@@ -723,7 +943,7 @@ def _commit_agent_records(
                 last_committed_model_call_id=record.last_committed_model_call_id,
                 resource_state_revisions=dict(record.resource_state_revisions),
             )
-            for record in records
+            for record in ordered_records
             if record.last_committed_model_call_id is not None
         ),
         key=lambda root: (root.capture_key, root.last_committed_model_call_id),
@@ -736,10 +956,12 @@ def _commit_agent_records(
     _fsync_dir(directory)
 
     manifest = {
-        "schema_version": AGENT_CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": AGENT_STATE_MANIFEST_SCHEMA_VERSION,
         "checkpoint_id": checkpoint_id,
         "instance_name": instance_name,
-        "files": files,
+        "archives": [reference.model_dump(mode="json") for reference in archive_references],
+        "record_index": record_index.model_dump(mode="json"),
+        "records": len(archive_members),
         "continuation_index": continuation_index.model_dump(mode="json"),
     }
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -751,7 +973,7 @@ def _commit_agent_records(
     os.replace(temporary, manifest_path)
     _fsync_dir(directory)
     return {
-        "records": len(files),
+        "records": len(archive_members),
         "manifest_digest": hashlib.sha256(payload).hexdigest(),
         "continuation_index": continuation_index.model_dump(mode="json"),
     }
@@ -775,19 +997,30 @@ def _validate_agent_manifest(
         raise AgentCheckpointError(
             f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, not {instance_name!r}"
         )
-    records: list[AgentBoundaryRecord] = []
-    for name, digest in manifest.get("files", {}).items():
-        path = directory / name
-        if not path.exists() or _digest(path) != digest:
-            raise AgentCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
-        records.append(AgentBoundaryRecord.model_validate_json(path.read_bytes()))
+    records = _load_agent_archive_records(directory, checkpoint_root=checkpoint_root, manifest=manifest)
     continuation_index = _validate_continuation_index(checkpoint_root, manifest, records)
     result: dict[str, Any] = {
-        "records": len(manifest.get("files", {})),
+        "records": len(records),
         "manifest_digest": hashlib.sha256(payload).hexdigest(),
     }
     result["continuation_index"] = continuation_index.model_dump(mode="json")
     return result
+
+
+def load_agent_checkpoint_records(checkpoint_root: Path, manifest_path: Path) -> list[AgentBoundaryRecord]:
+    """Validate and load records from one committed agent participant manifest."""
+    manifest_path = Path(manifest_path)
+    if manifest_path.name != AGENT_MANIFEST_NAME or not manifest_path.is_file():
+        raise AgentCheckpointError(f"agent checkpoint manifest is missing at {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AgentCheckpointError(f"agent checkpoint manifest is corrupted at {manifest_path}") from error
+    return _load_agent_archive_records(
+        manifest_path.parent,
+        checkpoint_root=Path(checkpoint_root),
+        manifest=manifest,
+    )
 
 
 def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
@@ -801,12 +1034,7 @@ def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir:
             f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, "
             f"not {participant.instance_name!r}"
         )
-    records: list[AgentBoundaryRecord] = []
-    for name, digest in manifest["files"].items():
-        path = directory / name
-        if not path.exists() or _digest(path) != digest:
-            raise AgentCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
-        records.append(AgentBoundaryRecord.model_validate_json(path.read_bytes()))
+    records = _load_agent_archive_records(directory, checkpoint_root=checkpoint_dir, manifest=manifest)
     continuation_index = _validate_continuation_index(checkpoint_dir, manifest, records)
     participant.install_restored(records)
     result: dict[str, Any] = {

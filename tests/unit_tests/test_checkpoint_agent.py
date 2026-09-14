@@ -17,6 +17,7 @@
 import asyncio
 import hashlib
 import json
+import tarfile
 import threading
 import time
 
@@ -24,9 +25,11 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+import nemo_gym._checkpoint.agent as agent_checkpoint
 from nemo_gym._checkpoint import (
     AGENT_CONTINUATION_INDEX_NAME,
     AGENT_MANIFEST_NAME,
+    AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
     AgentBoundaryKind,
     AgentBoundaryRecord,
@@ -713,24 +716,72 @@ async def test_durable_agent_commit_retry_returns_original_result(tmp_path) -> N
     await participant.finish(execution, outcome="completed")
 
 
-def test_restore_rejects_corrupted_boundary_before_activation(tmp_path) -> None:
+def test_commit_uses_bounded_deterministic_agent_archives(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(agent_checkpoint, "_AGENT_ARCHIVE_MAX_MEMBERS", 2)
+    records = [
+        _boundary().model_copy(update={"rollout_id": f"rollout-{index}", "attempt_index": index}) for index in range(5)
+    ]
+
+    summary = agent_checkpoint._commit_agent_records(records, tmp_path, checkpoint_id="checkpoint-1")
+
     directory = tmp_path / AGENT_STATE_SUBDIR
-    directory.mkdir()
-    (directory / AGENT_MANIFEST_NAME).write_text(
-        '{"schema_version": 1, "checkpoint_id": "checkpoint-1", "files": {"missing.json": "bad"}}'
-    )
-    participant = AgentCheckpointParticipant()
-    with pytest.raises(AgentCheckpointError):
-        restore_agent_state(participant, tmp_path)
-    assert participant.resolve("rollout-a", 1) is None
+    manifest = json.loads((directory / AGENT_MANIFEST_NAME).read_text())
+    assert manifest["schema_version"] == 2
+    assert manifest["records"] == 5
+    assert [archive["members"] for archive in manifest["archives"]] == [2, 2, 1]
+    assert list(directory.glob("*.a*.json")) == []
+    assert summary["records"] == 5
+    assert (directory / AGENT_RECORD_INDEX_NAME).exists()
+    assert (directory / AGENT_CONTINUATION_INDEX_NAME).exists()
+
+    expected_members = [
+        ["rollout-0.a0.json", "rollout-1.a1.json"],
+        ["rollout-2.a2.json", "rollout-3.a3.json"],
+        ["rollout-4.a4.json"],
+    ]
+    for archive_reference, expected in zip(manifest["archives"], expected_members, strict=True):
+        archive_path = directory / archive_reference["name"]
+        assert archive_path.stat().st_size == archive_reference["bytes"]
+        assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_reference["sha256"]
+        with tarfile.open(archive_path, mode="r:") as archive:
+            assert archive.getnames() == expected
+
+    restored = AgentCheckpointParticipant()
+    assert restore_agent_state(restored, tmp_path)["records"] == 5
 
 
-def test_restore_rejects_manifest_without_continuation_index(tmp_path) -> None:
+def test_restore_rejects_legacy_agent_checkpoint_schema(tmp_path) -> None:
     directory = tmp_path / AGENT_STATE_SUBDIR
     directory.mkdir()
     (directory / AGENT_MANIFEST_NAME).write_text(
         '{"schema_version": 1, "checkpoint_id": "checkpoint-1", "instance_name": null, "files": {}}'
     )
+    participant = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="unsupported agent checkpoint manifest schema"):
+        restore_agent_state(participant, tmp_path)
+    assert participant.resolve("rollout-a", 1) is None
+
+
+def test_restore_rejects_corrupted_agent_archive_before_activation(tmp_path) -> None:
+    agent_checkpoint._commit_agent_records([_boundary()], tmp_path, checkpoint_id="checkpoint-1")
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    manifest = json.loads((directory / AGENT_MANIFEST_NAME).read_text())
+    archive_path = directory / manifest["archives"][0]["name"]
+    archive_path.write_bytes(archive_path.read_bytes() + b"corrupt")
+
+    participant = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="archive.*corrupted"):
+        restore_agent_state(participant, tmp_path)
+    assert participant.resolve("rollout-a", 1) is None
+
+
+def test_restore_rejects_manifest_without_continuation_index(tmp_path) -> None:
+    commit_agent_state(AgentCheckpointParticipant(), tmp_path, checkpoint_id="checkpoint-1")
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    manifest_path = directory / AGENT_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["continuation_index"]
+    manifest_path.write_text(json.dumps(manifest))
 
     participant = AgentCheckpointParticipant()
     with pytest.raises(AgentCheckpointError, match="missing its continuation index"):

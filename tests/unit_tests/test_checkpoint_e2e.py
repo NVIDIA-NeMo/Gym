@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym._checkpoint import (
     AGENT_CHECKPOINT_URL_PREFIX,
+    AGENT_RECORD_INDEX_NAME,
     GATED_MODEL_ROUTE_SUFFIXES,
     MODEL_ADMISSION_URL_PREFIX,
     MODEL_CHECKPOINT_URL_PREFIX,
@@ -424,6 +425,9 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
     )
     assert (checkpoint_dir / "model-ledger" / "policy" / "manifest.json").exists()
     assert agent_namespace.exists()
+    assert len(list(agent_namespace.parent.glob("agent-part-*.tar"))) == 1
+    assert (agent_namespace.parent / AGENT_RECORD_INDEX_NAME).exists()
+    assert list(agent_namespace.parent.glob("*.a*.json")) == []
     assert (checkpoint_dir / "resources" / "resources" / "manifest.json").exists()
     assert len(list(checkpoint_dir.rglob("manifest.json"))) == 3
 
