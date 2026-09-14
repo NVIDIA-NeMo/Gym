@@ -277,6 +277,12 @@ vllm = [
 ]
 
 sandbox = [
+    # gRPC and protobuf runtimes: used by the vendored MFN sandbox protocol client.
+    # Updated: Mon Sep 14, 2026 with grpcio==1.82.0rc1 and protobuf==6.33.6.
+    # Licenses: Apache 2.0 (grpcio), BSD 3-Clause (protobuf).
+    "grpcio>=1.62.3",
+    "protobuf>=6.31,<7",
+
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
     # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
@@ -757,6 +763,9 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
+    # Generated from the vendored MFN protobuf projection.
+    "nemo_gym/sandbox/providers/mfn/protos/*_pb2.py",
+    "nemo_gym/sandbox/providers/mfn/protos/*_pb2.pyi",
 ]
 [tool.ruff.lint]
 # Configure linting rules

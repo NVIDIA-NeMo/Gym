@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package poolside.sandbox;
+
+import "google/protobuf/duration.proto";
+
+// Minimal client-side projection of the sandbox protocol exposed by MFN.
+// The poolside.sandbox package and RPC paths are legacy wire-level identities.
+service SandboxService {
+  rpc Create(CreateOptions) returns (CreateResult);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Shutdown(ShutdownOptions) returns (ShutdownResult);
+  rpc AddFile(stream AddFileRequest) returns (AddFileResult);
+  rpc Exec(ExecRequest) returns (stream ExecResponse);
+  rpc ExecStream(stream ExecStreamRequest) returns (stream ExecStreamResponse);
+  rpc GetHost(GetHostRequest) returns (GetHostResponse);
+  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
+}
+
+message ResourceRequest {
+  string cpu_request = 1;
+  string memory_request = 2;
+  string memory_limit = 3;
+  string storage_request = 4;
+  string storage_limit = 5;
+  GpuRequest gpu = 6;
+}
+
+message GpuRequest {
+  uint32 count = 1;
+  repeated string type_preferences = 2;
+}
+
+message SandboxSpecs {
+  ResourceRequest resource_request = 1;
+  google.protobuf.Duration sandbox_ttl = 4;
+  map<string, string> env_vars = 5;
+  oneof source {
+    string image = 6;
+    string snapshot_id = 7;
+  }
+  google.protobuf.Duration idle_timeout = 8;
+  google.protobuf.Duration auto_pause_after = 9;
+  bool require_vm = 10;
+  bool beta_no_ttl_cap_use_only_when_really_needed = 11;
+}
+
+message SandboxAttributes {
+  map<string, string> attributes = 1;
+}
+
+message ContainerPort {
+  string name = 1;
+  int32 port = 2;
+}
+
+message NetworkConfig {
+  enum Mode {
+    ALLOW = 0;
+    BLOCK = 1;
+  }
+  repeated string allowed_cidrs = 1;
+  repeated string allowed_domains = 2;
+  Mode mode = 3;
+  repeated string blocked_cidrs = 4;
+  repeated string blocked_domains = 5;
+  string name = 6;
+}
+
+message ClientInfo {
+  string caller = 1;
+  string username = 2;
+}
+
+message CreateOptions {
+  SandboxSpecs specs = 1;
+  SandboxAttributes attributes = 2;
+  repeated ContainerPort ports = 3;
+  optional string idempotency_key = 4;
+  optional NetworkConfig network_config = 6;
+  optional ClientInfo client_info = 7;
+  optional string shard_pin = 9;
+}
+
+message CreateResult {
+  string sandbox_id = 1;
+  bool already_exists = 2;
+  bool is_ready = 3;
+}
+
+message GetRequest { string sandbox_id = 1; }
+
+message Status {
+  bool is_ready = 1;
+  string phase = 2;
+}
+
+message GetResponse {
+  string sandbox_id = 1;
+  Status status = 2;
+}
+
+message ShutdownOptions { string sandbox_id = 1; }
+message ShutdownResult {}
+
+message AddFileRequest { bytes content = 1; }
+message AddFileResult {}
+
+message Pty {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecRequest {
+  string sandbox_id = 1;
+  repeated string command = 2;
+  int32 output_buffer_size = 3;
+  map<string, string> env = 4;
+  string cwd = 5;
+  bool unbuffered = 6;
+  string container = 7;
+  optional Pty pty = 8;
+}
+
+message ExecDetails { string execution_id = 1; }
+
+message ExecOutput {
+  enum StreamType {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  StreamType stream = 1;
+  bytes data = 2;
+}
+
+message ExecComplete {
+  int32 exit_code = 1;
+  string error = 2;
+  string termination_detail = 3;
+}
+
+message ExecResponse {
+  oneof data {
+    ExecOutput output = 1;
+    ExecComplete complete = 2;
+    ExecDetails details = 3;
+  }
+}
+
+message SendStdInRequest { bytes data = 1; }
+
+message ExecStreamRequest {
+  oneof data {
+    ExecRequest request = 1;
+    SendStdInRequest stdin = 2;
+  }
+}
+
+message ExecStreamResponse {
+  oneof data {
+    ExecOutput output = 1;
+    ExecComplete complete = 2;
+  }
+}
+
+message GetHostRequest {
+  string sandbox_id = 1;
+  uint32 port = 2;
+}
+
+message GetHostResponse { string uri = 1; }
+
+message ReadFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+  string container = 3;
+}
+
+message ReadFileResponse { bytes content = 1; }

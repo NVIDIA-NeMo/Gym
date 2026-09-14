@@ -179,6 +179,12 @@ def _load_openshell_provider() -> ProviderClass:
     return OpenShellProvider
 
 
+def _load_mfn_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.mfn import MFNProvider
+
+    return MFNProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
@@ -188,3 +194,4 @@ _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
 _BUILTIN_PROVIDER_LOADERS["local"] = _load_local_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
 _BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider
+_BUILTIN_PROVIDER_LOADERS["mfn"] = _load_mfn_provider
