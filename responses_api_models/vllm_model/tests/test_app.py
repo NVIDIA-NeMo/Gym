@@ -160,7 +160,7 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
                     frozen_buffer_id="buffer-1",
-                    staging_key="prefix-1",
+                    staging_keys=("prefix-1",),
                     prefix_token_count=5,
                     prefix_digest="a" * 64,
                 )
@@ -191,7 +191,7 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
     assert sent["headers"] == {"Authorization": "Bearer test-control-token"}
     assert isinstance(sent["json"], dict)
     assert receipt.inventory == inventory
-    assert receipt.prefixes[0].staging_key == "prefix-1"
+    assert receipt.prefixes[0].staging_keys == ("prefix-1",)
 
 
 @mark.asyncio
@@ -265,7 +265,7 @@ async def test_generation_cut_contacts_owning_workers_concurrently(
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
                     frozen_buffer_id="buffer-1",
-                    staging_key=f"prefix-{prefix.ticket_id}",
+                    staging_keys=(f"prefix-{prefix.ticket_id}",),
                     prefix_token_count=5,
                     prefix_digest="a" * 64,
                 )
@@ -461,7 +461,10 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
                 **inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
                 frozen_buffer_id="active/checkpoint-1",
-                staging_key="__generation_cut__/checkpoint-1/rollout-1/old-call",
+                staging_keys=(
+                    "__generation_cut__/checkpoint-0/rollout-1/old-call",
+                    "__generation_cut__/checkpoint-1/rollout-1/old-call",
+                ),
                 prefix_token_count=2,
                 prefix_digest="a" * 64,
             ),
@@ -489,7 +492,10 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
         assert continuation == {
             "source_capture_key": "rollout-1",
             "source_model_call_id": "old-call",
-            "staging_key": "__generation_cut__/checkpoint-1/rollout-1/old-call",
+            "staging_keys": [
+                "__generation_cut__/checkpoint-0/rollout-1/old-call",
+                "__generation_cut__/checkpoint-1/rollout-1/old-call",
+            ],
             "generation_token_count": 2,
             "digest": "a" * 64,
         }

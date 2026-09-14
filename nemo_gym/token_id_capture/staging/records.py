@@ -98,9 +98,15 @@ class GenerationCutContinuation(_WireModel):
 
     source_capture_key: Identifier
     source_model_call_id: Identifier
-    staging_key: Identifier
+    staging_keys: tuple[Identifier, ...] = Field(min_length=1)
     generation_token_count: NonNegativeInt
     digest: DigestHex
+
+    @model_validator(mode="after")
+    def _validate_staging_keys(self) -> Self:
+        if len(self.staging_keys) != len(set(self.staging_keys)):
+            raise ValueError("generation-cut staging_keys must be unique")
+        return self
 
 
 class CaptureAdmission(_WireModel):
