@@ -750,6 +750,7 @@ def build_file_section(
     include_text: bool = True,
     audio_capable: bool = False,
     video_capable: bool = False,
+    recursive: bool = False,
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
@@ -766,6 +767,8 @@ def build_file_section(
     *video_capable* keep audio / video files (respectively) as native media
     blocks (vs stubbing them) when the judge reads that modality — they are
     independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
+    *recursive* includes nested files and ZIPs, retaining relative input labels
+    and resolving Office PDF sidecars in each file's own directory.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -819,14 +822,22 @@ def build_file_section(
         for block in blocks:
             _append_block(block)
 
-    extracted_dirs: list[Path] = []
+    file_names: list[str] = []
     if file_dir is not None and os.path.exists(file_dir):
-        for file_name in os.listdir(file_dir):
-            if file_name.lower().endswith(".zip"):
-                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
-                if extract_dir is not None:
-                    clean_up_list.append(extract_dir)
-                    extracted_dirs.append(extract_dir)
+        file_names = os.listdir(file_dir)
+        if recursive:
+            file_names.extend(
+                path.relative_to(file_dir).as_posix()
+                for path in sorted(Path(file_dir).rglob("*"))
+                if path.is_file() and path.parent != Path(file_dir)
+            )
+    extracted_dirs: list[tuple[Path, str]] = []
+    for file_name in file_names:
+        if file_name.lower().endswith(".zip"):
+            extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
+            if extract_dir is not None:
+                clean_up_list.append(extract_dir)
+                extracted_dirs.append((extract_dir, file_name))
 
     ignore_files = _ignore_files()
     provenance_by_dir: dict[Path, Any] = {}
@@ -882,16 +893,17 @@ def build_file_section(
         except Exception as exc:
             return f"[structured spreadsheet extraction failed: {exc}]"
 
-    def _emit(directory: str, file_name: str) -> None:
+    def _emit(directory: str, file_name: str, *, label: str | None = None) -> None:
         nonlocal no_files
         if file_name in ignore_files:
             return
+        label = label or file_name
         full_path = Path(directory) / file_name
         provenance = _provenance(directory)
         parent = Path(directory)
         if full_path in provenance.suppressed_pdfs or full_path in fallback_suppressed_by_dir[parent]:
             return
-        _append_block({"type": "text", "text": f"\n{file_name}:\n"})
+        _append_block({"type": "text", "text": f"\n{label}:\n"})
         info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
         av_identity: tuple[int, str] | None = None
         if info.get("type") in {"AUDIO", "VIDEO"}:
@@ -936,14 +948,14 @@ def build_file_section(
             if blocks:
                 _append_blocks(blocks)
                 if av_identity is not None and any(_attachment_payload(block)[0] for block in blocks):
-                    retained_av_payloads[av_identity] = file_name
+                    retained_av_payloads[av_identity] = label
                 no_files = False
             sheet_text = _structured_xlsx_text(full_path)
             if sheet_text:
                 _append_block(
                     {
                         "type": "text",
-                        "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}",
+                        "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}",
                     }
                 )
                 no_files = False
@@ -959,25 +971,26 @@ def build_file_section(
         if block is not None:
             _append_block(block)
             if av_identity is not None and _attachment_payload(block)[0]:
-                retained_av_payloads[av_identity] = file_name
+                retained_av_payloads[av_identity] = label
             no_files = False
         sheet_text = _structured_xlsx_text(full_path)
         if sheet_text:
-            _append_block({"type": "text", "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}"})
+            _append_block({"type": "text", "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}"})
             no_files = False
 
-    if file_dir is not None and os.path.exists(file_dir):
-        for file_name in sorted(os.listdir(file_dir)):
-            full_path = os.path.join(file_dir, file_name)
-            if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
-                continue
-            _emit(file_dir, file_name)
+    for file_name in sorted(file_names):
+        full_path = Path(file_dir) / file_name
+        if full_path.is_dir() or file_name.lower().endswith(".zip"):
+            continue
+        _emit(str(full_path.parent), full_path.name, label=file_name)
 
-    for extract_dir in extracted_dirs:
+    for extract_dir, archive_name in extracted_dirs:
         for member in sorted(extract_dir.rglob("*")):
             if not member.is_file():
                 continue
-            _emit(str(member.parent), member.name)
+            # Keep existing top-level ZIP labels unchanged when recursion is enabled.
+            label = f"{archive_name}!/{member.relative_to(extract_dir).as_posix()}" if "/" in archive_name else None
+            _emit(str(member.parent), member.name, label=label)
 
     if no_files:
         _append_block({"type": "text", "text": "None"})
