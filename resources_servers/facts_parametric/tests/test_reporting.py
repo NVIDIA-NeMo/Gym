@@ -10,6 +10,7 @@ import pytest
 from benchmarks.facts_parametric.reporting import model_card
 from benchmarks.facts_parametric.reporting.cli import main as cli_main
 from benchmarks.facts_parametric.reporting.common import load_run, reconcile
+from benchmarks.facts_parametric.reporting.model_card import PROMPT_TEMPLATE
 from benchmarks.facts_parametric.reporting.normalize import normalize, receipts_for
 from benchmarks.facts_parametric.reporting.package import validate_package, verify_checksums
 from benchmarks.facts_parametric.reporting.render import to_html, to_markdown
@@ -251,3 +252,13 @@ def test_openai_client_merges_extra_body_and_never_leaks_the_key(monkeypatch):
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert "secret-key" not in json.dumps(metadata) and "secret-key" not in json.dumps(captured["body"])
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
+
+
+def test_prompt_template_is_packaged_with_the_writer():
+    # The template must live outside any "temp*" directory (gitignored) and carry no underscore in its name
+    # (Markdown filename hook), or a fresh checkout cannot run the report writer.
+    assert PROMPT_TEMPLATE.is_file(), PROMPT_TEMPLATE
+    assert "temp" not in PROMPT_TEMPLATE.parent.name and "_" not in PROMPT_TEMPLATE.name
+    text = PROMPT_TEMPLATE.read_text(encoding="utf-8")
+    assert "{context_json}" in text
+    assert "320 characters" in text
