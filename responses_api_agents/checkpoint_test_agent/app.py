@@ -111,9 +111,12 @@ class CheckpointTestAgent(SimpleAgent):
             raise ValueError("metadata.extra_body must be an object or JSON string")
         extra_body["min_tokens"] = min_tokens
         metadata["extra_body"] = json.dumps(extra_body, sort_keys=True)
+        # Tools are part of Gym's prompt-shaping lineage envelope. Preserve the
+        # first turn's schema so the second request remains a valid continuation;
+        # tool_choice="none" prevents another tool call without changing that
+        # reusable prompt prefix.
         return body.model_copy(
             update={
-                "tools": [],
                 "tool_choice": "none",
                 "parallel_tool_calls": False,
                 "max_output_tokens": min_tokens,
