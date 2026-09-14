@@ -15,6 +15,7 @@ from openai import APIStatusError, AsyncOpenAI
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
+    AABriefcaseLiteVerifyRequest,
     _pairwise_task_prompt,
     _parse_binary_judgement,
     _requested_filenames,
@@ -184,3 +185,71 @@ async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover
                 await call
     assert len(requests) == 3
     assert requests[0] == requests[1] == requests[2]
+
+
+@pytest.mark.parametrize("empty_answers", [0, 2, 3])
+async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, tmp_path, empty_answers):
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
+    server = AABriefcaseLiteResourcesServer.model_construct(
+        config=AABriefcaseLiteResourcesServerConfig.model_construct(
+            dataset_dir=str(tmp_path), preconvert_office_to_pdf=False
+        )
+    )
+    server._aa_binary_system = "Judge the artifact."
+    server._aa_binary_user = (
+        "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
+    )
+    server._aa_checks = [
+        {
+            "task_id": "task",
+            "scoring_type": "binary",
+            "check_id": name,
+            "check_type": "format",
+            "check_description": name,
+            "score_1_criteria": "Pass",
+            "score_0_criteria": "Fail",
+            "taskdoer_output_file": "artifact.txt",
+        }
+        for name in ("first check", "second check")
+    ]
+    (tmp_path / "artifact.txt").write_text("Submitted artifact")
+    judge = ResolvedJudge(name="judge", model="model", base_url="http://upstream.invalid/v1", api_key="dummy")
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        first_check = "first check" in str(requests[-1]["messages"])
+        content = (
+            ""
+            if not first_check and len(requests) <= empty_answers + 1
+            else json.dumps({"passed": first_check, "reasoning": "Verdict"})
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "model",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+        monkeypatch.setattr(
+            "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
+            lambda **kwargs: AsyncOpenAI(http_client=transport, **kwargs),
+        )
+        reward, results, invalid = await server._verify_binary(
+            AABriefcaseLiteVerifyRequest.model_construct(task_id="task", deliverables_dir=str(tmp_path)),
+            "Task",
+            [judge],
+        )
+
+    assert reward == 0.5
+    assert results[0]["passed"] is True
+    assert results[1]["passed"] is (None if empty_answers == 3 else False)
+    assert invalid == (1 if empty_answers == 3 else 0)
+    assert len(requests) == 1 + min(empty_answers + 1, 3)
+    assert sum("first check" in str(request["messages"]) for request in requests) == 1
+    assert all(request == requests[1] for request in requests[1:])

@@ -61,7 +61,7 @@ class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     dataset_dir: str
     pairwise_reference_ids: List[str] = ["gpt-5-5"]
     pairwise_num_trials: int = Field(default=2, ge=1)
-    binary_formatting_retries: int = Field(default=1, ge=0, le=3)
+    binary_formatting_retries: int = Field(default=2, ge=0, le=3)
 
 
 class AABriefcaseLiteVerifyRequest(BaseVerifyRequest):
@@ -273,6 +273,10 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             parsed = _parse_binary_judgement(raw)
             if parsed is not None:
                 return parsed, raw
+            # Empty generations have nothing to repair: retry the same check without
+            # adding empty assistant turns or rerunning already completed checks.
+            if not raw:
+                continue
             messages.extend(
                 [
                     {"role": "assistant", "content": raw},

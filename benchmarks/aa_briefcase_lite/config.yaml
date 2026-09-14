@@ -39,7 +39,7 @@ aa_briefcase_lite_resources_server:
       reward_mode: ${oc.env:AA_BRIEFCASE_REWARD_MODE,all}
       pairwise_reference_ids: [gpt-5-5]
       pairwise_num_trials: 2
-      binary_formatting_retries: 1
+      binary_formatting_retries: 2
       preconvert_office_to_pdf: true
       preconvert_max_concurrent: 1
       judge_model_server:
