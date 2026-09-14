@@ -42,12 +42,24 @@ def _configure_async_http() -> None:
 
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
+    class E2BAiohttpTransport(GymAiohttpTransport):
+        async def handle_async_request(self, request):
+            response = await super().handle_async_request(request)
+            if response.status_code == 404:
+                await response.aread()
+                if not response.content:
+                    # Compatible gateways may return an empty 404. The SDK
+                    # expects a JSON error even when kill() will return False.
+                    await response.aclose()
+                    return httpx.Response(404, json={"message": "Not found"}, request=request)
+            return response
+
     def build_transport(
         config: Any,
         http2: bool = True,
         *,
         for_streaming: bool = False,
-    ) -> GymAiohttpTransport:
+    ) -> E2BAiohttpTransport:
         # aiohttp speaks HTTP/1.1; the E2B endpoints support it. Streamed and
         # regular requests share Gym's globally configured connection pool.
         del http2, for_streaming
@@ -58,7 +70,7 @@ def _configure_async_http() -> None:
                 raise ValueError("The E2B aiohttp integration requires an HTTP or HTTPS proxy URL")
             if not isinstance(proxy, httpx.Proxy):
                 proxy = httpx.Proxy(proxy_url)
-        return GymAiohttpTransport(proxy=proxy)
+        return E2BAiohttpTransport(proxy=proxy)
 
     client_async.get_transport = build_transport
     client_async.get_envd_transport = build_transport
