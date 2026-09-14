@@ -865,3 +865,25 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_and_lint_run_offline_with_container_baked_tools() -> None:
+    # The CI container pre-bakes uv and pre-commit, and the managed validation
+    # sandbox has no package-index egress. Both scripts must therefore reuse
+    # already-installed tools and resolve from the uv cache (--offline) when
+    # present, while keeping the online download path for GitHub Actions.
+    setup_dev = SETUP_DEV.read_text()
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    # setup_dev.sh: reuse a baked uv 0.11.29 and sync from cache offline; only
+    # download uv in the online fallback branch.
+    assert 'command -v uv >/dev/null 2>&1 && uv --version' in setup_dev
+    assert 'setup_uv_sync_args=(--offline)' in setup_dev
+    assert 'setup_uv_sync_args=()' in setup_dev
+    assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
+
+    # lint.sh: reuse a baked pre-commit when present; only pip-install it in the
+    # online fallback branch.
+    assert "command -v pre-commit >/dev/null 2>&1" in lint
+    assert lint.count("pip install") == 1
+    assert 'pip install --disable-pip-version-check "pre-commit==${pre_commit_version}"' in lint
