@@ -877,9 +877,9 @@ def test_setup_dev_and_lint_run_offline_with_container_baked_tools() -> None:
 
     # setup_dev.sh: reuse a baked uv 0.11.29 and sync from cache offline; only
     # download uv in the online fallback branch.
-    assert 'command -v uv >/dev/null 2>&1 && uv --version' in setup_dev
-    assert 'setup_uv_sync_args=(--offline)' in setup_dev
-    assert 'setup_uv_sync_args=()' in setup_dev
+    assert "command -v uv >/dev/null 2>&1 && uv --version" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
     assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
 
     # lint.sh: reuse a baked pre-commit when present; only pip-install it in the
