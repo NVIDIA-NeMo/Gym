@@ -19,6 +19,8 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "0 */4 * * *"
   workflow_dispatch:

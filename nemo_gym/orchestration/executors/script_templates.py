@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import re
 import shlex
 
@@ -28,9 +29,27 @@ export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
-_VLLM_RAY_SYMMETRIC_RUN = """\
+ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
+
+# Default node-join wait (30s) is too short for slow image pulls.
+RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
+
+# Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
+RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S = 1.0
+
+
+_VLLM_RAY_SYMMETRIC_RUN = (
+    """\
 bash -lc '
-    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
+    export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT="""
+    + str(RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S)
+    + """
+    export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S="""
+    + str(RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S)
+    + """
+    """
+    + ENSURE_RAY_INSTALLED
+    + """
     if ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
@@ -44,6 +63,7 @@ bash -lc '
         ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block
     fi
 '"""
+)
 
 
 _HEALTH_WAIT_MULTI = """\
@@ -105,6 +125,22 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
+def render_repo_checkout(repo: str, ref: str) -> str:
+    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`."""
+    repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+    ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
+    return (
+        f"({ensure_git})"
+        f" && git clone {shlex.quote(repo)} && cd {shlex.quote(repo_name)} && git checkout {shlex.quote(ref)}"
+    )
+
+
+def render_write_file_from_base64(content: str, dest_path: str) -> str:
+    """Render a command that reconstructs `content` at `dest_path` via a base64 round-trip."""
+    encoded = base64.b64encode(content.encode()).decode()
+    return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -118,24 +154,15 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            f"git clone {shlex.quote(repo)}",
-            f"cd {shlex.quote(repo_name)}",
-            f"git checkout {shlex.quote(ref)}",
-            # A real venv, not --system: --system targets whatever
-            # interpreter happens to be on the container's PATH, which
-            # sidesteps uv's own project-aware Python selection entirely --
-            # `uv venv` run inside this checkout instead reads
-            # requires-python from its pyproject.toml and auto-downloads a
-            # satisfying interpreter if the container's own Python doesn't
-            # qualify (e.g. a container shipping Python 3.12 against a
-            # nemo-gym pin requiring >=3.13.14 -- --system fails outright
-            # there, this doesn't). A fresh venv is also never
-            # EXTERNALLY-MANAGED (PEP 668), so this needs no
-            # --break-system-packages override either.
+            render_repo_checkout(repo, ref),
+            # A real venv, not --system: --system targets whatever interpreter happens to be on
+            # the container's PATH, sidestepping uv's own project-aware Python selection - `uv
+            # venv` instead reads requires-python from pyproject.toml and auto-downloads a
+            # satisfying interpreter if the container's own Python doesn't qualify. Also never
+            # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             "uv pip install -e .",
