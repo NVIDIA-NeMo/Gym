@@ -1,0 +1,8 @@
+# Ignore all files
+*
+
+# Except these
+!.gitignore
+!example.jsonl
+!example_metrics.json
+!example_rollouts.jsonl
