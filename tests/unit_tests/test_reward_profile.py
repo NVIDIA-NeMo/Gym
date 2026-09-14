@@ -19,7 +19,8 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.reward_profile import RewardProfiler, compute_aggregate_metrics, select_measured
 
 
 def _row(task_idx: int, rollout_idx: int) -> dict:
@@ -724,3 +725,82 @@ class TestWriteToDisk:
 
         written = orjson.loads(repeat_level_metrics_fpath.read_bytes())
         assert "histogram/reward" not in written[0]
+
+
+class TestTheTwoViewsAgree:
+    """`gym eval profile` and `/aggregate_metrics` read the same saved rollouts."""
+
+    def _verify_response(self, task: int, rollout: int, reward: float, masked: bool) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": masked,
+            "response": {},
+        }
+
+    def test_the_same_rollouts_give_the_same_mean_either_way(self) -> None:
+        """One valid reward of 1 and one masked reward of 0 is a mean of 1, not 0.5."""
+        verify_responses = [
+            self._verify_response(0, 0, reward=1.0, masked=False),
+            self._verify_response(0, 1, reward=0.0, masked=True),
+        ]
+
+        aggregated = compute_aggregate_metrics(verify_responses)
+
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: vr[TASK_INDEX_KEY_NAME],
+                ROLLOUT_INDEX_KEY_NAME: vr[ROLLOUT_INDEX_KEY_NAME],
+                "agent_ref": {"name": "agent"},
+            }
+            for vr in verify_responses
+        ]
+        measured_rows, measured_results, masked, coverage = select_measured(rows, verify_responses)
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(measured_rows, measured_results)
+
+        # The point is that the two views agree, not the scale either one uses.
+        assert aggregated.key_metrics["mean/reward"] == 1.0
+        assert agent_level_metrics[0]["mean/reward"] == aggregated.key_metrics["mean/reward"]
+        assert len(masked) == 1
+        assert coverage["coverage/masked_rollouts"] == 1
+
+    def test_the_profiling_view_does_not_publish_the_flag_as_a_metric(self) -> None:
+        measured_rows, measured_results, _, _ = select_measured(
+            [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "agent"}}],
+            [self._verify_response(0, 0, reward=1.0, masked=False)],
+        )
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(measured_rows, measured_results)
+
+        assert "mask_sample" not in measured_results[0]
+        assert not any("mask_sample" in key for key in agent_level_metrics[0])
+
+    def test_masking_does_not_make_a_complete_collection_look_partial(self) -> None:
+        """A masked rollout ran. Dropping its row alongside it keeps the keys aligned, so
+        profiling does not demand `allow_partial_rollouts` for a run that lost nothing."""
+        verify_responses = [
+            self._verify_response(0, 0, reward=1.0, masked=False),
+            self._verify_response(0, 1, reward=0.0, masked=True),
+        ]
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: vr[TASK_INDEX_KEY_NAME],
+                ROLLOUT_INDEX_KEY_NAME: vr[ROLLOUT_INDEX_KEY_NAME],
+                "agent_ref": {"name": "agent"},
+            }
+            for vr in verify_responses
+        ]
+        measured_rows, measured_results, _, _ = select_measured(rows, verify_responses)
+
+        # Would raise ValueError about missing rollout results if the rows were left behind.
+        RewardProfiler().profile_from_data(measured_rows, measured_results, allow_partial_rollouts=False)
+
+    def test_nothing_masked_leaves_both_sides_untouched(self) -> None:
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "agent"}}]
+        results = [self._verify_response(0, 0, reward=1.0, masked=False)]
+
+        measured_rows, _, masked, coverage = select_measured(rows, results)
+
+        assert measured_rows == rows
+        assert masked == []
+        assert coverage == {}

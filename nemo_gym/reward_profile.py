@@ -847,6 +847,42 @@ def _partition_on_mask(
     return scored, masked
 
 
+def _rollout_key(row: Dict[str, Any]) -> Tuple[Any, Any]:
+    return row.get(TASK_INDEX_KEY_NAME, 0), row.get(ROLLOUT_INDEX_KEY_NAME, 0)
+
+
+def select_measured(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Narrow a rollout set to what quality metrics may be computed from.
+
+    Both the aggregation path and ``gym eval profile`` go through here, so the same saved
+    rollouts produce the same quality numbers whichever view you look at.
+
+    Three things happen. Masked samples leave the quality set, because their reward is not
+    a measurement of the evaluated system. The flag itself is stripped from what remains:
+    it is a flag, not a measurement, and the profiler would otherwise coerce it to an int
+    and publish `mean/mask_sample` alongside real metrics. And the matching input rows are
+    dropped alongside their results, so the two stay aligned -- a masked rollout is absent
+    from the quality set but was never missing from the collection, and must not be
+    reported as an incomplete run or require ``allow_partial_rollouts`` to profile.
+
+    Masked rows are returned rather than discarded: completion and coverage accounting
+    still has to see them.
+    """
+    scored, masked = _partition_on_mask(results)
+    coverage = _coverage_metrics(results, scored, masked)
+    measured_results = [{k: v for k, v in vr.items() if k != MASK_SAMPLE_FIELD} for vr in scored]
+
+    if not masked:
+        return rows, measured_results, masked, coverage
+
+    measured_keys = {_rollout_key(vr) for vr in scored}
+    measured_rows = [row for row in rows if _rollout_key(row) in measured_keys]
+    return measured_rows, measured_results, masked, coverage
+
+
 def _coverage_metrics(
     all_responses: List[Dict[str, Any]],
     scored: List[Dict[str, Any]],
@@ -1018,20 +1054,16 @@ def compute_aggregate_metrics(
 
     rp = RewardProfiler()
 
-    rows = []
-    results = []
-    for vr in scored:
-        rows.append(
-            {
-                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
-                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
-                "agent_ref": {"name": "agent"},
-            }
-        )
-        # `mask_sample` is a flag, not a measurement; the profiler would otherwise coerce
-        # it to an int and publish `mean/mask_sample` as though it were a quality metric.
-        result = vr if "response" in vr else {**vr, "response": {}}
-        results.append({k: v for k, v in result.items() if k != MASK_SAMPLE_FIELD})
+    synthetic_rows = [
+        {
+            TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
+            ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
+            "agent_ref": {"name": "agent"},
+        }
+        for vr in verify_responses
+    ]
+    filled = [vr if "response" in vr else {**vr, "response": {}} for vr in verify_responses]
+    rows, results, _, _ = select_measured(synthetic_rows, filled)
 
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 

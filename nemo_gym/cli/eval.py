@@ -561,7 +561,7 @@ def reverify_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
-    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler, select_measured
     from nemo_gym.rollout_collection import loads_jsonl_line
 
     config = RewardProfileConfig.model_validate(get_global_config_dict())
@@ -586,9 +586,17 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
+
+    # Quality metrics come from the measured subset only, the same selection the
+    # aggregation path makes, so profiling the saved rollouts of a run agrees with the
+    # metrics that run published. Completion accounting below still sees every row: a
+    # masked rollout did run, and is not a gap in the collection.
+    measured_rows, measured_results, masked, coverage = select_measured(rows, results)
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
-        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
+        measured_rows, measured_results, allow_partial_rollouts=config.allow_partial_rollouts
     )
+    for entry in agent_level_metrics:
+        entry.update(coverage)
     completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
@@ -597,6 +605,7 @@ def reward_profile():  # pragma: no cover
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
+Masked from quality metrics: {len(masked)} rollout rows (kept in completion accounting above).
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")

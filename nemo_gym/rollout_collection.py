@@ -1603,12 +1603,16 @@ class RolloutCollectionHelper(BaseModel):
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
                             100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
                         )
-                    for agent_name in agent_name_to_counts:
+                    # The union, not just the scored agents: an agent whose every request
+                    # fails never lands in `agent_name_to_counts`, and reporting only the
+                    # agents that produced a result would hide exactly the total failure
+                    # this series exists to surface.
+                    for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
                         step_metrics.update(
                             _masking_step_metrics(
                                 agent_name,
-                                agent_name_to_scored[agent_name],
-                                agent_name_to_dropped[agent_name],
+                                agent_name_to_scored.get(agent_name, Counter()),
+                                agent_name_to_dropped.get(agent_name, Counter()),
                             )
                         )
 
