@@ -6,7 +6,7 @@ from copy import deepcopy
 from glob import glob
 from pathlib import Path
 from sys import stderr
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
@@ -289,10 +289,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         reward = 0.0
         if eval_result is not None:
             try:
-                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                # NOTE: `docker cp` REPLACES the target file (new inode), so a pre-opened
+                # handle would read the now-empty original. Download to a fresh path and
+                # re-open it to read the reward.
+                with TemporaryDirectory(prefix="nemo-gym-tb21-reward-") as temp_dir:
+                    reward_path = Path(temp_dir) / "reward.txt"
+                    await eval_sandbox.download("/logs/verifier/reward.txt", str(reward_path))
+                    reward = float(reward_path.read_text())
 
                 evaluation_completed = True
             except:
