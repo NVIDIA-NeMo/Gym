@@ -49,10 +49,8 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     import yaml
     from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
 
-    config = yaml.safe_load(Path("benchmarks/terminal_bench_4/opencode.yaml").read_text())
-    kwargs = config["terminal_bench_4_opencode"]["responses_api_agents"]["harbor_agent_general"]["harbor_environment"][
-        "kwargs"
-    ]
+    config = yaml.safe_load(Path("benchmarks/terminal_bench_4/resources.yaml").read_text())
+    kwargs = config["terminal_bench_4"]["resources_servers"]["terminal_bench_4"]["environment"]["kwargs"]
     provider = opensandbox_provider.OpenSandboxProvider(create=kwargs["sandbox_provider"]["opensandbox"]["create"])
     errors = {
         "client": opensandbox_provider.OpenSandboxCreateTimeoutError("create timeout"),

@@ -200,6 +200,34 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
             return self._compose.services[service]
         return super()._require_sandbox()
 
+    async def main_connection(self) -> dict:
+        """Expose main access only; the creator continues owning the collection."""
+        descriptor = await self._require_sandbox().serialize(scope="operate")
+        if "sandbox_id" not in descriptor:
+            raise ValueError("This environment requires an ID-based connectable provider")
+        cwd = await self.exec("pwd", timeout_sec=30)
+        if cwd.return_code:
+            raise RuntimeError("Unable to determine the task working directory")
+        return {
+            "provider": (self._sandbox_resource_pool or "default").lower(),
+            "sandbox_id": descriptor["sandbox_id"],
+            "workdir": (cwd.stdout or "").strip(),
+        }
+
+    async def quiesce_agent(self, session_id: str) -> None:
+        """Stop the external harness process group before artifact collection."""
+        pidfile = shlex.quote(f"/tmp/{session_id}.pids")
+        command = (
+            f"if [ -f {pidfile} ]; then groups=$(cat {pidfile}); for p in $groups; do "
+            "case $p in ''|*[!0-9]*) exit 1;; esac; "
+            'kill -TERM -- -"$p" 2>/dev/null || true; done; sleep 1; '
+            'for p in $groups; do if kill -0 -- -"$p" 2>/dev/null; then '
+            'kill -KILL -- -"$p" 2>/dev/null || exit 1; fi; done; sleep 1; fi'
+        )
+        result = await self.exec(command, timeout_sec=30)
+        if result.return_code:
+            raise RuntimeError("Could not stop the external agent before artifact collection")
+
     @contextmanager
     def _service_scope(self, service):
         if not self.is_main_service(service) and (self._compose is None or service not in self._compose.services):

@@ -379,3 +379,25 @@ async def test_service_context_isolated_across_concurrent_transfers(tmp_path):
     peer.stop.assert_not_awaited()
     with pytest.raises(ValueError, match="unavailable"):
         await env.service_exec("true", service="missing")
+
+
+async def test_external_connection_exposes_main_identity_and_workdir_only(tmp_path):
+    env = make_environment(tmp_path)
+    env._sandbox_resource_pool = "GPU"
+    env._sandbox = SimpleNamespace(serialize=AsyncMock(return_value={"sandbox_id": "main", "api_key": "private"}))
+    env.exec = AsyncMock(return_value=SandboxExecResult("/workspace\n", "", 0))
+    assert await env.main_connection() == {"provider": "gpu", "sandbox_id": "main", "workdir": "/workspace"}
+    env._sandbox.serialize.assert_awaited_once_with(scope="operate")
+    env.exec.return_value = SandboxExecResult("", "cannot read cwd", 1)
+    with pytest.raises(RuntimeError, match="working directory"):
+        await env.main_connection()
+    env._sandbox.serialize.return_value = {"path": "/local/unsupported"}
+    with pytest.raises(ValueError, match="ID-based"):
+        await env.main_connection()
+
+
+async def test_failed_agent_quiescence_prevents_collection(tmp_path):
+    env = make_environment(tmp_path)
+    env.exec = AsyncMock(return_value=SandboxExecResult("", "cannot stop process", 1))
+    with pytest.raises(RuntimeError, match="before artifact collection"):
+        await env.quiesce_agent("trial")
