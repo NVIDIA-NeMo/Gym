@@ -110,9 +110,35 @@ if ! PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -c "import orjson, i
 fi
 
 
-echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
-SWEEP_DIR="$SWEEP_DIR" NUM_SHARDS="$NUM_SHARDS" SHARDS_DIR="$SHARDS_DIR" \
-    bash "$RP_DIR/scripts/02_shard.sh"
+# True when the shards still need dealing. Restarting the watcher must NOT re-deal an existing
+# layout: _carry_existing_rollouts opens every shard's rollouts.jsonl with "w" (shard.py:239), so
+# a re-deal truncates files that live jobs are appending to. The early-return at shard.py:235 only
+# protects the very first run -- after the first absorb the parent file is non-empty forever, so
+# every later restart truncates. Fails safe toward dealing: a missing or unreadable report means
+# we cannot prove the layout is right, and dealing a fresh sweep is cheap.
+need_reshard() {
+    local shards_dir=$1 want=$2 verdict
+    # Prints "deal" or "skip". Anything else -- python missing, crash -- also means deal.
+    verdict=$(python - "$shards_dir" "$want" <<'INNER' 2>/dev/null
+import json, sys
+from pathlib import Path
+try:
+    have = json.loads((Path(sys.argv[1]) / "shard_report.json").read_text())["num_shards"]
+except Exception:
+    print("deal"); sys.exit(0)       # cannot prove the layout is right
+print("skip" if have == int(sys.argv[2]) else "deal")
+INNER
+)
+    [[ "$verdict" != "skip" ]]
+}
+
+if need_reshard "$SHARDS_DIR" "$NUM_SHARDS"; then
+    echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
+    SWEEP_DIR="$SWEEP_DIR" NUM_SHARDS="$NUM_SHARDS" SHARDS_DIR="$SHARDS_DIR" \
+        bash "$RP_DIR/scripts/02_shard.sh"
+else
+    echo ">>> already dealt $NUM_SHARDS ways; not resharding (jobs may be live)"
+fi
 
 # Work a shard has left, defined exactly as Gym defines it.
 #
@@ -166,6 +192,7 @@ print(sum(key(r) not in gated for r in rows("rollouts_materialized_inputs.jsonl"
 INNER
 }
 
+declare -a incomplete=()      # shards that ran out of attempts, for the exit status
 declare -A shard_rounds
 declare -A shard_last_outstanding
 round=0
@@ -198,6 +225,7 @@ while :; do
 
         if [[ "$attempts" -ge "$MAX_ROUNDS" ]]; then
             echo "    $shard_name still has $outstanding outstanding after $attempts attempts; giving up" >&2
+            incomplete+=("$shard_name:$outstanding")
             continue
         fi
 
@@ -240,3 +268,18 @@ echo "Per-entry output: $SWEEP_DIR/by_label/"
 echo "Profile the whole sweep, or any single entry, with:"
 echo "  gym eval profile --inputs <dir>/rollouts_materialized_inputs.jsonl \\"
 echo "                   --rollouts <dir>/rollouts.jsonl ++allow_partial_rollouts=True"
+
+# Merging is unconditional because partial data is still worth having, but the exit status must
+# not be. Previously this printed the same banner and exited 0 whether every shard finished or
+# every shard exhausted its attempts -- and since ALLOW_PARTIAL_ROLLOUTS defaults to True, a
+# 60%-complete sweep then profiles cleanly and reports a reward number. A partial sweep that is
+# indistinguishable from a finished one is the worst outcome this pipeline can produce.
+if (( ${#incomplete[@]} > 0 )); then
+    echo
+    echo "INCOMPLETE: ${#incomplete[@]} shard(s) ran out of attempts with work outstanding." >&2
+    for _entry in "${incomplete[@]}"; do
+        echo "  ${_entry%%:*}: ${_entry##*:} rollouts never collected" >&2
+    done
+    echo "The merge above contains only what was collected. Do not treat it as a full sweep." >&2
+    exit 1
+fi
