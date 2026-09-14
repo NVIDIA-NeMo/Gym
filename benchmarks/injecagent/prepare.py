@@ -134,7 +134,9 @@ def _parse_arguments(raw: str) -> dict[str, Any]:
 def _build_row(source: Mapping[str, Any], attack_kind: str, tool_index: Mapping[str, Mapping[str, Any]], row: int):
     user_tool = source["User Tool"]
     attacker_tools = source["Attacker Tools"]
-    available_tool_names = [user_tool, *attacker_tools]
+    # Upstream lists the user tool and the attacker tools even when they coincide; function-calling
+    # endpoints that validate the tool list reject duplicate names, so each tool is declared once.
+    available_tool_names = list(dict.fromkeys([user_tool, *attacker_tools]))
     missing = [name for name in available_tool_names if name not in tool_index]
     if missing:
         raise ValueError(f"row {row}: unknown tools {missing}")
@@ -150,7 +152,10 @@ def _build_row(source: Mapping[str, Any], attack_kind: str, tool_index: Mapping[
                     "type": "function_call",
                     "call_id": call_id,
                     "name": user_tool,
-                    "arguments": json.dumps(source["Tool Parameters"], ensure_ascii=False),
+                    # Upstream sends json.dumps() of the *string* "Tool Parameters" (a JSON string holding a
+                    # Python dict repr). Function-calling endpoints that validate tool-call arguments reject
+                    # that, so the same parameters are sent as a real JSON object.
+                    "arguments": json.dumps(initial_arguments, ensure_ascii=False),
                 },
                 {
                     "type": "function_call_output",

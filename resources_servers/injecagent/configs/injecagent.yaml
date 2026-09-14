@@ -15,7 +15,9 @@ injecagent_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
-      max_steps: 4
+      # Upstream evaluate_finetuned_agent.py makes one model call per step and at most two steps
+      # (data-stealing stage 2 only after a successful stage 1). Two turns reproduce that budget.
+      max_steps: 2
       resources_server:
         type: resources_servers
         name: injecagent
