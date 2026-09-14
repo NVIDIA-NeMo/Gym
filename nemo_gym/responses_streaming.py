@@ -106,13 +106,13 @@ def _input_message_text(item: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _synthetic_replay_item_id(item: dict[str, Any], prefix: str) -> str:
-    """Return a stable ID for a replay item whose wire representation omitted one."""
-    payload = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str).encode()
+def _synthetic_replay_item_id(item: dict[str, Any], prefix: str, item_index: int) -> str:
+    """Return a stable ID that distinguishes identical replay items by input position."""
+    payload = json.dumps([item_index, item], sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{prefix}_{sha256(payload).hexdigest()[:24]}"
 
 
-def _normalize_replayed_output_item(item: Any) -> Any:
+def _normalize_replayed_output_item(item: Any, item_index: int) -> Any:
     """Fill optional response metadata omitted when Codex replays prior output.
 
     The Responses wire API accepts output items without their server-generated
@@ -125,10 +125,10 @@ def _normalize_replayed_output_item(item: Any) -> Any:
         return item
     item_type = item.get("type")
     if item_type == "reasoning" and not item.get("id"):
-        item["id"] = _synthetic_replay_item_id(item, "rs")
+        item["id"] = _synthetic_replay_item_id(item, "rs", item_index)
     elif item_type == "message" and item.get("role") == "assistant":
         if not item.get("id"):
-            item["id"] = _synthetic_replay_item_id(item, "msg")
+            item["id"] = _synthetic_replay_item_id(item, "msg", item_index)
         for part in item.get("content") or []:
             if isinstance(part, dict) and part.get("type") == "output_text":
                 part.setdefault("annotations", [])
@@ -163,8 +163,8 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
     if isinstance(input_items, list):
         kept_items = []
         carrier_tools: list[Any] = []
-        for item in input_items:
-            item = _normalize_replayed_output_item(item)
+        for item_index, item in enumerate(input_items):
+            item = _normalize_replayed_output_item(item, item_index)
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the

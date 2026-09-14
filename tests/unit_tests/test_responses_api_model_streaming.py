@@ -22,6 +22,7 @@ strict-validation behavior.
 """
 
 import json
+from copy import deepcopy
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -415,6 +416,40 @@ class TestSanitizeStreamingBody:
         assert "id" not in body["input"][0]
         assert "annotations" not in body["input"][1]["content"][0]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    @pytest.mark.parametrize(
+        ("item", "prefix"),
+        [
+            ({"type": "reasoning", "summary": []}, "rs"),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "I inspected the files."}],
+                },
+                "msg",
+            ),
+        ],
+    )
+    def test_duplicate_replayed_output_items_have_unique_stable_ids(self, item: dict, prefix: str) -> None:
+        provided_id = f"{prefix}_provided"
+        body = {
+            "stream": True,
+            "input": [deepcopy(item), deepcopy(item), {**deepcopy(item), "id": provided_id}],
+        }
+
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        # Check IDs in the serialized Responses params, before any Chat downconversion.
+        params = validate_streaming_responses_params(cleaned)
+        ids = [entry["id"] for entry in params.model_dump()["input"]]
+
+        assert len(set(ids)) == 3
+        assert all(item_id.startswith(f"{prefix}_") for item_id in ids)
+        assert ids[2] == provided_id
+        assert sanitize_streaming_responses_body(body)[0] == cleaned
+        assert sanitize_streaming_responses_body(cleaned)[0] == cleaned
+        assert body["input"][:2] == [item, item]
 
     def test_drops_unsupported_input_items(self) -> None:
         # Codex's code_mode interleaves an `additional_tools` carrier item into the input history;
