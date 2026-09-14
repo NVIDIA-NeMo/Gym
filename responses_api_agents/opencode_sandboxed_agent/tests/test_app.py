@@ -43,6 +43,7 @@ from nemo_gym.rollout_observability import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
@@ -448,6 +449,10 @@ class TestOpenCodeSandboxedAgent:
                 1,
             ),
         )
+        for part_id, kind in [("start", "step-start"), ("finish", "step-finish")]:
+            connection.execute(
+                "insert into part values (?, 'm1', 'root', ?, 2)", (part_id, json.dumps({"type": kind}))
+            )
         connection.commit()
         assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
         main_only_path = tmp_path / "main-only.db"
@@ -538,6 +543,10 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
+        assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
+        assert turn.answer[0]["call_id"] == "call-1"
+        assert not turn.model_calls
         [invocation] = [
             record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
         ]
