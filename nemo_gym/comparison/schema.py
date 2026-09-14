@@ -141,6 +141,10 @@ class CandidateMetricValue(MetricValue):
 
     delta: Optional[float] = None
     delta_pct: Optional[float] = None
+    # Two-sided 95% Welch t-interval for candidate minus baseline, computed from each run's
+    # repeat-level values. Only available when both runs have `mean_across_repeats/<metric>`.
+    delta_ci_low: Optional[float] = None
+    delta_ci_high: Optional[float] = None
 
 
 class MetricRow(BaseModel):
