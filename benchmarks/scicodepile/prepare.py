@@ -16,9 +16,10 @@ Notes on the upstream data, verified against all 200 released rows:
   * ``setup_code`` is non-empty on 105 of 200 rows and must run before the
     model's code.
 
-The upstream ``prompt`` is passed through untouched, HumanEval-style. Upstream does
-not publish its own prompt, so any wrapper would be invention; measurements behind
-that choice are in this benchmark's README.
+The upstream ``prompt`` is passed through untouched, HumanEval-style, with no system
+message. The paper specifies only that models are evaluated zero-shot on the function
+signature and its natural-language specification, so any wrapper would be invention.
+See this benchmark's README.
 """
 
 import argparse

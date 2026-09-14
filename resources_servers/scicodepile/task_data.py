@@ -4,9 +4,14 @@
 
 Rows carry task data inside the legacy ``verifier_metadata`` bucket (the wire model
 types it only as ``Optional[Dict[str, Any]]``); the schema is written flat with
-``legacy_location`` annotations per the protocol. Required-ness follows verify()'s
-hard reads: ``test`` and ``entry_point`` are indexed with ``meta[...]`` (KeyError if
-absent), while everything else is read via ``.get`` or kept for provenance only.
+``legacy_location`` annotations per the protocol.
+
+``test`` and ``entry_point`` are required because a row without them cannot be
+scored at all; everything else is optional or kept for provenance only. ``verify()``
+does not enforce that by indexing, though — it reads every key with ``.get`` and
+returns ``status="malformed_task"`` with ``failure_reason=malformed_task`` when
+either is missing. Raising there would be an HTTP 500, and a 500 aborts the entire
+rollout run by default, so one bad row would end the job instead of being counted.
 """
 
 from typing import Optional

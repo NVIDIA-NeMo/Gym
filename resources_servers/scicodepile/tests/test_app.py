@@ -575,6 +575,35 @@ class TestRunnerExitPath:
         os.kill(pid, signal.SIGKILL)
         pytest.fail(f"grandchild {pid} outlived the runner")
 
+    def test_the_timeout_covers_request_delivery(self, tmp_path):
+        """A child that never reads stdin must not block the write past the deadline.
+
+        The request carries the model's code plus the task's test, so it routinely
+        exceeds the 64 KiB pipe buffer. With only the read timed, `stdin.drain()` was
+        unbounded and held a semaphore slot indefinitely.
+        """
+        wedged = tmp_path / "wedged_runner.py"
+        wedged.write_text("import time\ntime.sleep(600)\n")
+        server = _make_server(subprocess_timeout=self.TIMEOUT)
+        server._runner_path = wedged
+
+        payload_filler = "x" * (2 * 1024 * 1024)
+        started = time.monotonic()
+        result = asyncio.run(
+            asyncio.wait_for(
+                server._run_task(
+                    setup_code="",
+                    code=f"# {payload_filler}\ndef add(a, b):\n    return a + b\n",
+                    test=_task("")["test"],
+                    entry_point="add",
+                ),
+                timeout=self.TIMEOUT * 4,
+            )
+        )
+        elapsed = time.monotonic() - started
+        assert result["status"] == "timeout"
+        assert elapsed < self.TIMEOUT * 2, f"delivery ran past the deadline ({elapsed:.1f}s)"
+
     def test_a_genuine_hang_still_times_out(self):
         """The complement: making the exit path fast must not disarm the timeout."""
         result, elapsed = self._verdict("def add(a, b):\n    while True:\n        pass\n")
@@ -686,6 +715,59 @@ class TestModelCausedFaultsAreNotExcused:
             "builtins.callable = _boom\n"
         )
         result = json.loads(_run_subprocess(_task(code)).stdout)
+        assert result["details"]["reason"] == "runner_crashed"
+        assert result["details"]["phase"] == "model"
+        assert "harness_fault" not in result["details"]
+
+    def test_a_model_that_breaks_the_error_path_is_still_a_wrong_answer(self):
+        """The failure *reporting* path must not be sabotageable either.
+
+        `_phase_error` renders the exception type and message. If it resolved `type`
+        through builtins at call time, model code could rebind it and then raise: the
+        report itself throws, escapes `run_task` before the post-model guard, and the
+        last-resort handler labelled it `phase=runner`/`harness_fault=true` -- a
+        model-controlled outcome excused as ours, inflating `harness_failure`.
+
+        Distinct from the `callable` case above, which lets module execution complete
+        and so exercises the post-model guard instead of this one.
+        """
+        code = (
+            "import builtins\n"
+            "def _boom(*args, **kwargs):\n"
+            "    raise MemoryError('owned by model')\n"
+            "builtins.type = _boom\n"
+            "raise RuntimeError('model failed during exec')\n"
+        )
+        result = json.loads(_run_subprocess(_task(code)).stdout)
+        assert result["details"]["phase"] == "model"
+        assert "harness_fault" not in result["details"]
+        # The model's real error survives, not the sabotaged builtin's.
+        assert result["details"]["type"] == "RuntimeError"
+
+    def test_a_crash_outside_run_task_after_model_code_is_the_models(self, tmp_path):
+        """Reaches `main`'s last-resort handler, which cannot see where it came from.
+
+        `_working_directory` restores the CWD in a `finally` outside `run_task` and
+        catches only OSError, so model code that rebinds `os.chdir` to raise something
+        else escapes there -- after its own module body has run. The handler has to
+        consult whether model execution began; assuming it always predates model code
+        excuses this as a harness fault.
+        """
+        code = (
+            "import os\n"
+            "def add(a, b):\n    return a + b\n"
+            "def _boom(*args, **kwargs):\n    raise MemoryError('owned by model')\n"
+            "os.chdir = _boom\n"
+        )
+        task = {**_task(code), "max_as_limit": 0, "workdir": str(tmp_path)}
+        proc = subprocess.run(
+            [sys.executable, str(SERVER_DIR / "scp_runner.py")],
+            input=json.dumps(task),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        result = json.loads(proc.stdout)
         assert result["details"]["reason"] == "runner_crashed"
         assert result["details"]["phase"] == "model"
         assert "harness_fault" not in result["details"]

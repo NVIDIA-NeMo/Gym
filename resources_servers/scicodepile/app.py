@@ -308,6 +308,31 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
 
     @staticmethod
+    async def _deliver_and_read(proc, payload: bytes) -> bytes:
+        """Send the request and read back one newline-terminated verdict.
+
+        Both halves live here so a single `wait_for` bounds the whole transaction.
+
+        The verdict is read as a *line*, not to EOF and not via `proc.wait()`: a task
+        that calls `os.fork()` leaves a child holding inherited duplicates of both pipe
+        write ends, and asyncio's `Process.wait()` does not resolve until the pipe
+        transports close either — so both signals turned an already-written `pass` into
+        a `timeout`. `subprocess.Popen` hid this because `exec` closes non-inheritable
+        descriptors; `fork` does not.
+        """
+        try:
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # Runner died before reading its request; the empty verdict is reported
+            # as `unparseable_runner_output` by the caller.
+            pass
+        finally:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                proc.stdin.close()
+        return await proc.stdout.readline()
+
+    @staticmethod
     async def _drain(reader: "asyncio.Future") -> str:
         """Collect stderr, bounded, once the runner's process group is dead.
 
@@ -372,25 +397,16 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
         timed_out = False
         try:
             try:
-                proc.stdin.write(payload.encode())
-                await proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                # Runner died before reading its request; the empty verdict below
-                # reports it as `unparseable_runner_output`.
-                pass
-            finally:
-                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                    proc.stdin.close()
-
-            try:
-                # Read one newline-terminated verdict. Neither EOF nor process exit
-                # works as the completion signal: a task that calls `os.fork()` leaves
-                # a child holding inherited duplicates of both pipe write ends, and
-                # asyncio's `Process.wait()` does not resolve until the pipe transports
-                # close either — so both turned an already-written `pass` into a
-                # `timeout`. `subprocess.Popen` hid this because `exec` closes
-                # non-inheritable descriptors; `fork` does not.
-                verdict_line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.config.subprocess_timeout)
+                # One deadline covering delivery *and* read. Timing only the read left
+                # `stdin.drain()` unbounded: the request carries the model's code plus
+                # the task's test, so it routinely exceeds the 64 KiB pipe buffer, and
+                # a child that never reaches `sys.stdin.read()` then blocks the write
+                # forever — holding a semaphore slot and eventually starving every
+                # verifier slot.
+                verdict_line = await asyncio.wait_for(
+                    self._deliver_and_read(proc, payload.encode()),
+                    timeout=self.config.subprocess_timeout,
+                )
             except asyncio.TimeoutError:
                 timed_out = True
             except (ValueError, asyncio.IncompleteReadError):

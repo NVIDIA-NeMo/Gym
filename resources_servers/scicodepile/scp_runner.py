@@ -121,20 +121,52 @@ def _make_module_namespace() -> dict:
     return module.__dict__
 
 
+# Bound at import, before any model code can run. `_phase_error` must not resolve
+# these through `builtins` at call time: model code that rebinds `builtins.type` and
+# then raises would make the error-reporting path itself raise, and that escape was
+# reported as `phase="runner"`/`harness_fault=true` — a model-controlled outcome
+# excused as ours, which also corrupts the published `harness_failure` metric.
+_TYPE = type
+_STR = str
+
+
 def _phase_error(reason: str, exc: BaseException, phase: str) -> dict:
     """Build an error result, recording which compile unit raised.
 
     ``phase`` is ``setup``, ``model`` or ``test``. Only ``model`` is the model's own
     code; the other two are dataset-owned, and the parent uses ``harness_fault`` to
     keep them out of an accuracy figure instead of scoring them as wrong answers.
+
+    Nothing here may raise. It runs on the failure path, after arbitrary model code
+    has executed, so it uses the builtins captured at import and degrades to a
+    minimal result rather than letting an exception escape.
     """
-    details = {"reason": reason, "type": type(exc).__name__, "message": str(exc)[:500], "phase": phase}
+    details = {"reason": reason, "phase": phase}
+    try:
+        details["type"] = _TYPE(exc).__name__
+    except BaseException:
+        details["type"] = "unknown"
+    try:
+        details["message"] = _STR(exc)[:500]
+    except BaseException:
+        details["message"] = "<unrenderable>"
     if phase != "model":
         details["harness_fault"] = True
     return {"status": "error", "details": details}
 
 
+# Set once the model's compile unit starts executing. `main`'s last-resort handler
+# reads it: after this point model code has run and may have broken the runner's own
+# machinery, so an escape is the model's, not a harness fault. Module state rather
+# than a return value because the escape path is an exception — there is nothing to
+# return through.
+_MODEL_EXECUTION_STARTED = False
+
+
 def run_task(req: dict) -> dict:
+    global _MODEL_EXECUTION_STARTED
+    _MODEL_EXECUTION_STARTED = False
+
     setup_code = req.get("setup_code") or ""
     code = req.get("code") or ""
     test = req.get("test") or ""
@@ -160,6 +192,8 @@ def run_task(req: dict) -> dict:
             compiled = compile(src, filename, "exec")
         except SyntaxError as exc:
             return _phase_error("syntax_error", exc, phase)
+        if phase == "model":
+            _MODEL_EXECUTION_STARTED = True
         try:
             exec(compiled, namespace)
         except BaseException as exc:
@@ -250,19 +284,12 @@ def main() -> None:
     except BaseException as exc:  # pragma: no cover - defensive
         with contextlib.suppress(BaseException):
             os.write(stderr_fd, traceback.format_exc().encode("utf-8", "replace"))
-        # Reached only for failures outside `run_task` — setting up the working
-        # directory or the stream redirection — i.e. before any model code runs.
-        # A crash *after* model code runs is attributed to the model inside
-        # `run_task`, because model code can corrupt the runner's own machinery.
-        result = {
-            "status": "error",
-            "details": {
-                "reason": "runner_crashed",
-                "message": str(exc)[:500],
-                "phase": "runner",
-                "harness_fault": True,
-            },
-        }
+        # Last resort. Whether this is ours depends entirely on whether model code
+        # had begun: `run_task` attributes its own post-model escapes, but the error
+        # path itself can raise if model code rebound a builtin it uses, and that
+        # lands here. Only a failure before any model ran — setting up the working
+        # directory or the stream redirection — is a harness fault.
+        result = _phase_error("runner_crashed", exc, "model" if _MODEL_EXECUTION_STARTED else "runner")
 
     # Written to the private duplicate, not fd 1. A task that calls `os._exit`
     # skips this entirely; if it wrote nothing to the channel first, the parent
