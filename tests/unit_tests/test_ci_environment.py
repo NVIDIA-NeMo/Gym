@@ -448,12 +448,14 @@ def test_notification_workflows_pin_slack_rejection_handling() -> None:
 
 
 def test_notify_failure_message_reports_friendly_trigger_label() -> None:
-    expected_trigger_line = (
-        "\\u2022 Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
+    # The Slack message renders a "• Trigger: <expr>" bullet; assert the full
+    # GitHub expression (encoding-independent of the bullet) is present.
+    expected_trigger_expr = (
+        "Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
         "|| github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}"
     )
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        assert expected_trigger_line in workflow_file.read_text(), workflow_file
+        assert expected_trigger_expr in workflow_file.read_text(), workflow_file
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
