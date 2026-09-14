@@ -263,34 +263,46 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         body: AABriefcaseLiteVerifyRequest,
         task_markdown: str,
         judges: list[ResolvedJudge],
-        stage: Path,
-        missing: list[str],
     ) -> tuple[float, list[dict[str, Any]], int]:
         checks = self._checks_for_task(body.task_id, "binary")
-        section_cache: dict[str, list[dict[str, Any]]] = {}
+        section_cache: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
+        stages: dict[tuple[str, ...], tuple[Path, list[str]]] = {}
         results: list[dict[str, Any]] = []
         invalid = 0
         passed = 0
-        for check in checks:
-            rng = make_rng(self.config.judge_sampling_seed, body.task_id, check["check_id"], "binary")
-            selected = sample_judge(judges, rng)
-            if selected.name not in section_cache:
-                section_cache[selected.name] = await self._section(stage, selected, missing)
-            parsed, raw = await self._binary_call(selected, task_markdown, check, section_cache[selected.name])
-            result: dict[str, Any] = {
-                "check_id": check["check_id"],
-                "check_type": check["check_type"],
-                "judge_name": selected.name,
-                "passed": parsed["passed"] if parsed else None,
-                "reasoning": parsed["reasoning"] if parsed else "invalid judge response",
-            }
-            if self.config.persist_raw_judge_responses:
-                result["raw_response"] = raw
-            if parsed is None:
-                invalid += 1
-            elif parsed["passed"]:
-                passed += 1
-            results.append(result)
+        with ExitStack() as stack:
+            for check in checks:
+                filenames = tuple(_requested_filenames([check]))
+                if filenames not in stages:
+                    stages[filenames] = _stage_submission(body.deliverables_dir, list(filenames), stack)
+                    await self._preconvert(stages[filenames][0])
+                stage, missing = stages[filenames]
+                eligible = judges
+                modalities = dir_media_modalities(stage)
+                if modalities:
+                    eligible, _audio, _video = self._route_media_judges(
+                        judges, task_id=body.task_id, modalities=modalities, label="binary check artifact"
+                    )
+                rng = make_rng(self.config.judge_sampling_seed, body.task_id, check["check_id"], "binary")
+                selected = sample_judge(eligible, rng)
+                cache_key = (filenames, selected.name)
+                if cache_key not in section_cache:
+                    section_cache[cache_key] = await self._section(stage, selected, missing)
+                parsed, raw = await self._binary_call(selected, task_markdown, check, section_cache[cache_key])
+                result: dict[str, Any] = {
+                    "check_id": check["check_id"],
+                    "check_type": check["check_type"],
+                    "judge_name": selected.name,
+                    "passed": parsed["passed"] if parsed else None,
+                    "reasoning": parsed["reasoning"] if parsed else "invalid judge response",
+                }
+                if self.config.persist_raw_judge_responses:
+                    result["raw_response"] = raw
+                if parsed is None:
+                    invalid += 1
+                elif parsed["passed"]:
+                    passed += 1
+                results.append(result)
         return passed / len(checks), results, invalid
 
     @staticmethod
@@ -413,30 +425,29 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         filenames = _requested_filenames(binary_checks + pairwise_checks)
 
         with ExitStack() as stack:
-            eval_stage, missing = _stage_submission(body.deliverables_dir, filenames, stack)
-            await self._preconvert(eval_stage)
-            resolved = self._resolve_judges()
-            modalities = dir_media_modalities(eval_stage)
-            if modalities:
-                resolved, _audio, _video = self._route_media_judges(
-                    resolved,
-                    task_id=body.task_id,
-                    modalities=modalities,
-                    label="submitted artifact",
-                )
+            judges = self._resolve_judges()
+            resolved = judges
 
             binary_reward = 0.0
             binary_results: list[dict[str, Any]] = []
             binary_invalid = 0
             if self.config.reward_mode in {"binary", "all"}:
-                binary_reward, binary_results, binary_invalid = await self._verify_binary(
-                    body, task_markdown, resolved, eval_stage, missing
-                )
+                binary_reward, binary_results, binary_invalid = await self._verify_binary(body, task_markdown, judges)
 
             pairwise_reward = 0.0
             pairwise_results: list[dict[str, Any]] = []
             wins = losses = ties = pairwise_invalid = 0
             if self.config.reward_mode in {"pairwise", "all"}:
+                eval_stage, missing = _stage_submission(body.deliverables_dir, filenames, stack)
+                await self._preconvert(eval_stage)
+                modalities = dir_media_modalities(eval_stage)
+                if modalities:
+                    resolved, _audio, _video = self._route_media_judges(
+                        resolved,
+                        task_id=body.task_id,
+                        modalities=modalities,
+                        label="submitted artifact",
+                    )
                 if not self.config.pairwise_reference_ids:
                     raise ValueError("pairwise mode requires at least one pairwise_reference_id")
                 pairwise_reward, pairwise_results, wins, losses, ties, pairwise_invalid = await self._verify_pairwise(
