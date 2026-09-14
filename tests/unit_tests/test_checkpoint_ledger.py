@@ -108,6 +108,44 @@ def _ledger_manifest(checkpoint: Path, *, server_name: str | None = None) -> dic
     return json.loads((_ledger_dir(checkpoint, server_name=server_name) / LEDGER_MANIFEST_NAME).read_text())
 
 
+def _generation_cut_receipt(
+    *,
+    checkpoint_id: str = "checkpoint-1",
+    rollout_id: str = "rollout-a",
+    model_call_id: str = "call-1",
+) -> GenerationCutReceipt:
+    inventory = GenerationCutInventory.build(
+        checkpoint_id=checkpoint_id,
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id=f"ticket-{rollout_id}",
+                rollout_id=rollout_id,
+                attempt_index=0,
+                model_call_id=model_call_id,
+                admitted_at=1.0,
+            )
+        ],
+    )
+    return GenerationCutReceipt(
+        checkpoint_id=checkpoint_id,
+        cut_id=f"cut-{rollout_id}",
+        inventory_digest=inventory.inventory_digest,
+        inventory=inventory,
+        backend_snapshot_id=f"tq-{rollout_id}",
+        prefixes=(
+            GenerationCutPrefixAck(
+                **inventory.active_prefixes[0].model_dump(mode="json"),
+                disposition="durable_prefix",
+                frozen_buffer_id=f"active/{checkpoint_id}",
+                staging_key=f"__generation_cut__/{checkpoint_id}/{rollout_id}/{model_call_id}",
+                prefix_token_count=17,
+                prefix_digest="a" * 64,
+            ),
+        ),
+    )
+
+
 def _lineage_index(checkpoint: Path, *, server_name: str | None = None) -> list[dict]:
     manifest = _ledger_manifest(checkpoint, server_name=server_name)
     path = checkpoint / manifest["lineage_index"]["relative_path"]
@@ -146,6 +184,7 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
         "rows": 2,
         "excluded_tombstoned": 1,
         "excluded_inactive": 0,
+        "generation_cut_records": 0,
         "manifest_digest": summary["manifest_digest"],
         "storage_reference_index": summary["storage_reference_index"],
     }
@@ -207,6 +246,72 @@ def test_commit_packages_only_active_continuations_without_scanning_store(tmp_pa
         "opaque-rollout-a-1",
     ]
     assert {reference.boundary_model_call_id for reference in references} == {"rollout-a-call-1"}
+
+
+def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> None:
+    source = tmp_path / "source"
+    receipt = _generation_cut_receipt()
+    asyncio.run(FileLineageStore(source).record_generation_cut(receipt))
+    checkpoint = tmp_path / "checkpoint"
+
+    summary = CaptureLedgerCheckpointer(source, server_name="policy").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        source_attempts=[("rollout-a", 0)],
+        continuation_roots=[],
+        generation_cut_receipts=(receipt,),
+    )
+
+    assert summary["rollouts"] == 1
+    assert summary["generation_cut_records"] == 1
+    archived = _read_archived_custody(checkpoint, "rollout-a", server_name="policy")
+    assert json.loads(archived)["event"] == "generation_cut"
+    references = read_jsonl_artifact(
+        checkpoint,
+        CheckpointArtifactReference.model_validate(summary["storage_reference_index"]),
+        ExternalStorageReference,
+    )
+    assert [reference.key for reference in references] == [receipt.prefixes[0].staging_key]
+
+    restored = tmp_path / "restored"
+    result = CaptureLedgerCheckpointer(restored, server_name="policy").restore(checkpoint)
+    rebuilt = GenerationCutReceipt.model_validate(result["generation_cut_receipts"][0])
+    assert rebuilt.prefixes == receipt.prefixes
+
+
+def test_completed_call_supersedes_older_generation_cut(tmp_path) -> None:
+    source = tmp_path / "source"
+    receipt = _generation_cut_receipt(model_call_id="rollout-a-call-0")
+    store = FileLineageStore(source)
+    asyncio.run(store.record_generation_cut(receipt))
+    completed = {
+        "model_call_id": "rollout-a-call-0",
+        "staging_key": "opaque-rollout-a-0",
+        "staging_digest": "digest-0",
+        "parent_call_id": None,
+        "staging_chain": [],
+    }
+    with (source / "rollout-a.lineage.jsonl").open("a") as handle:
+        handle.write(json.dumps(completed, sort_keys=True) + "\n")
+    checkpoint = tmp_path / "checkpoint"
+
+    summary = CaptureLedgerCheckpointer(source, server_name="policy").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        source_attempts=[("rollout-a", 0)],
+        continuation_roots=[_continuation_root("rollout-a", last_call_index=0)],
+        generation_cut_receipts=(receipt,),
+    )
+    references = read_jsonl_artifact(
+        checkpoint,
+        CheckpointArtifactReference.model_validate(summary["storage_reference_index"]),
+        ExternalStorageReference,
+    )
+    assert [reference.key for reference in references] == ["opaque-rollout-a-0"]
+    result = CaptureLedgerCheckpointer(tmp_path / "restored", server_name="policy").restore(checkpoint)
+    assert result["generation_cut_receipts"] == []
 
 
 def test_commit_uses_bounded_deterministic_lineage_archives(tmp_path, monkeypatch) -> None:
@@ -587,6 +692,28 @@ class _RecordingGenerationCutBackend:
     def __init__(self) -> None:
         self.restored: list[tuple[GenerationCutReceipt, frozenset[tuple[str, int]]]] = []
 
+    async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+        return GenerationCutReceipt(
+            checkpoint_id=inventory.checkpoint_id,
+            cut_id="cut-1",
+            inventory_digest=inventory.inventory_digest,
+            inventory=inventory,
+            backend_snapshot_id="tq-cut-1",
+            prefixes=tuple(
+                GenerationCutPrefixAck(
+                    **prefix.model_dump(mode="json"),
+                    disposition="durable_prefix",
+                    frozen_buffer_id=f"active/{inventory.checkpoint_id}",
+                    staging_key=(
+                        f"__generation_cut__/{inventory.checkpoint_id}/{prefix.rollout_id}/{prefix.model_call_id}"
+                    ),
+                    prefix_token_count=2,
+                    prefix_digest="a" * 64,
+                )
+                for prefix in inventory.active_prefixes
+            ),
+        )
+
     async def restore_generation_cut(
         self,
         receipt: GenerationCutReceipt,
@@ -634,6 +761,53 @@ def _participant(
         auth_token=AUTH_TOKEN,
     )
     return TestClient(app), limiter
+
+
+def test_model_restore_loads_generation_cut_from_checkpointed_lineage(tmp_path) -> None:
+    source_backend = _RecordingGenerationCutBackend()
+    source_client, source_limiter = _participant(
+        tmp_path / "source",
+        generation_cut_backend=source_backend,
+    )
+    ticket = source_limiter.admit(rollout_id="rollout-a", attempt_index=0)
+    ticket.generation_started = True
+    ticket.model_call_id = "call-1"
+    checkpoint = tmp_path / "checkpoint"
+    control = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+
+    paused = source_client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+        json=control,
+        headers=AUTH_HEADERS,
+    )
+    assert paused.status_code == 200
+    committed = source_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={**control, "checkpoint_dir": str(checkpoint), "continuation_indexes": []},
+        headers=AUTH_HEADERS,
+    )
+    assert committed.status_code == 200
+    assert committed.json()["generation_cut_records"] == 1
+
+    restored_backend = _RecordingGenerationCutBackend()
+    restored_client, _ = _participant(
+        tmp_path / "restored",
+        generation_cut_backend=restored_backend,
+    )
+    restored = restored_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
+        json={
+            "checkpoint_id": "restore-1",
+            "deadline_ts": 4e9,
+            "checkpoint_dir": str(checkpoint),
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    assert restored.status_code == 200
+    assert restored.json()["generation_cuts_restored"] == 1
+    assert len(restored_backend.restored) == 1
+    assert restored_backend.restored[0][0].prefixes[0].model_call_id == "call-1"
 
 
 def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> None:
