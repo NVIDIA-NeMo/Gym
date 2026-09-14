@@ -111,5 +111,14 @@ Verified against all 200 released rows:
 
 ## Metrics
 
-`pass@1` on `accuracy` is the headline metric. Upstream reports the strongest
-evaluated model at 12.30% Pass@1; that figure has not been reproduced here.
+`pass@1` on `accuracy` is the headline metric. `pass@5` is also emitted when the
+benchmark is run with repeats.
+
+A second score, `harness_failure`, rides alongside `accuracy` and reports the fraction
+of rollouts whose zero reward came from a dataset-owned or runner-internal fault rather
+than from the model. Those rollouts still count as `accuracy` 0 — nothing is dropped
+silently — so read the two together. See the
+[server README](../../resources_servers/scicodepile/README.md#harness-faults).
+
+For reference, the paper reports **GPT-5.4-mini at 12.30% Pass@1 / 15.50% Pass@5** as
+the strongest of the 15 models it evaluates on this stratum (Table 3).
