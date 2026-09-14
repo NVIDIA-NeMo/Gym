@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from shlex import quote
 from threading import Thread
 from unittest.mock import MagicMock
 
@@ -19,6 +21,70 @@ from resources_servers.terminal_bench_2_1.app import (
 
 
 class TestApp:
+    @pytest.mark.parametrize("recover", [True, False])
+    def test_verifier_retries_pip_bootstrap_without_retrying_grading(self, tmp_path: Path, recover: bool) -> None:
+        attempts = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                attempts.append(self.path)
+                self.send_response(200 if recover and len(attempts) > 1 else 502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = Thread(target=http.serve_forever, daemon=True)
+        worker.start()
+        arguments = tmp_path / "pip-arguments"
+        graded = tmp_path / "graded"
+        pip = tmp_path / "pip"
+        # Exercise shell exit propagation from a real HTTP failure without
+        # modifying the developer's Python environment or contacting PyPI.
+        pip.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {quote(str(arguments))}\n"
+            f"curl -fsS http://127.0.0.1:{http.server_port}/pytest.whl.metadata\n"
+        )
+        pip.chmod(0o755)
+        config = TerminalBench21ResourcesServerConfig(
+            sandbox_provider="", sandbox_config={}, host="", port=0, entrypoint="", name=""
+        )
+        server = TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        script = tmp_path / "test.sh"
+        requirements = "install pytest==8.4.1 requests==2.32.5 pytest-json-ctrf==0.3.5"
+        grading = f"printf graded >> {quote(str(graded))}\nexit 7\n"
+        original = f"#!/bin/bash\nset -e\npip {requirements}\n" + grading
+        script.write_text(original)
+        try:
+            with server._patch_golden_patch_solve_sh(
+                "terminal-bench/headless-terminal", script, TEST_SH_PATCHES
+            ) as patched:
+                content = Path(patched).read_text()
+                assert content.endswith(grading)
+                result = subprocess.run(
+                    ["bash", "-c", content.replace("sleep 2", "sleep 0")],
+                    env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"},
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+        finally:
+            http.shutdown()
+            http.server_close()
+            worker.join()
+        expected_attempts = 2 if recover else 4
+        assert attempts == ["/pytest.whl.metadata"] * expected_attempts
+        assert arguments.read_text().splitlines() == [requirements] * expected_attempts
+        assert script.read_text() == original
+        if recover:
+            assert graded.read_text() == "graded"
+            assert result.returncode == 7
+        else:
+            assert not graded.exists()
+            assert result.returncode == 22
+
     @pytest.mark.parametrize("recover", [True, False])
     def test_verifier_installer_retries_without_executing_partial_downloads(
         self, tmp_path: Path, recover: bool
