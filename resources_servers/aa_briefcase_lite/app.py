@@ -46,7 +46,7 @@ from resources_servers.gdpval.judge_panel import (
     merge_create_kwargs,
     sample_judge,
 )
-from resources_servers.gdpval.preconvert import preconvert_dir_async
+from resources_servers.gdpval.preconvert import preconvert_dir_async, sidecar_pdf
 
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -214,15 +214,27 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         )
         # GDPval renders unknown extensions through a sibling PDF. AA also grades
         # the declared LaTeX source, so retain that source alongside the rendering.
-        text_used = sum(len(block.get("text", "")) for block in blocks)
         for source in sorted(stage.glob("*.tex")):
+            # The shared converter labels a sibling PDF as its source file.
+            # Identify the PDF actually attached, including the preferred sidecar.
+            pdf = sidecar_pdf(source)
+            if not pdf.is_file():
+                pdf = source.with_suffix(".pdf")
+            if pdf.is_file():
+                for index, block in enumerate(blocks[:-1]):
+                    content = blocks[index + 1]
+                    has_rendering = content["type"] != "text" or content.get("text", "").startswith(
+                        "[extracted text]\n"
+                    )
+                    if block.get("text") == f"\n{source.name}:\n" and has_rendering:
+                        block["text"] = f"\n{pdf.name} (rendering associated with {source.name}):\n"
+            text_used = sum(len(block.get("text", "")) for block in blocks)
             remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
             label = _bounded_text(f"\n{source.name} (LaTeX source):\n", remaining)
             text = await asyncio.to_thread(
                 _load_raw_text, source, min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining - len(label))
             )
             blocks.append({"type": "text", "text": label + text})
-            text_used += len(label) + len(text)
         blocks.extend({"type": "text", "text": f"[required submitted file missing: {name}]"} for name in missing)
         return blocks
 
