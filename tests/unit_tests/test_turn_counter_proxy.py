@@ -15,10 +15,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, ClientTimeout, web
 from pydantic import ValidationError
 
 from nemo_gym.adapters.turn_counter_proxy import (
@@ -29,12 +30,14 @@ from nemo_gym.adapters.turn_counter_proxy import (
 )
 
 
-async def _start_upstream() -> tuple[web.AppRunner, web.TCPSite, str, dict]:
+async def _start_upstream(delay: float = 0) -> tuple[web.AppRunner, web.TCPSite, str, dict]:
     hits = {"n": 0, "bodies": []}
 
     async def chat(request: web.Request) -> web.Response:
         hits["n"] += 1
         hits["bodies"].append(await request.json())
+        if delay:
+            await asyncio.sleep(delay)
         return web.json_response(
             {
                 "id": "chatcmpl-test",
@@ -148,6 +151,32 @@ def test_inject_threshold_user_message_appends_without_system_prefix():
     assert body["messages"][0]["content"].startswith("hi\n\n")
     assert "Begin wrapping up" in body["messages"][0]["content"]  # 90% → warn, not yet urgent
     assert "[SYSTEM]" not in body["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_does_not_apply_aiohttp_default_deadline_to_policy_requests(monkeypatch):
+    from nemo_gym.adapters import turn_counter_proxy as proxy_module
+
+    def short_default_session(**kwargs):
+        # Reproduce aiohttp's implicit deadline without waiting five minutes.
+        kwargs.setdefault("timeout", ClientTimeout(total=0.05))
+        return ClientSession(**kwargs)
+
+    monkeypatch.setattr(proxy_module, "ClientSession", short_default_session)
+    runner, site, upstream_url, hits = await _start_upstream(delay=0.1)
+    proxy = await start_turn_counter_proxy(upstream_base_url=upstream_url, api_key="test", max_turns=1)
+    try:
+        async with ClientSession() as client:
+            async with client.post(f"{proxy.base_url}/chat/completions", json={"messages": []}) as response:
+                assert response.status == 200
+                assert (await response.json())["choices"][0]["message"]["content"] == "ok"
+            async with client.post(f"{proxy.base_url}/chat/completions", json={"messages": []}) as response:
+                assert response.status == 429
+        assert hits["n"] == 1
+        assert proxy.turns_used == 2
+    finally:
+        await proxy.stop()
+        await _stop_upstream(runner, site)
 
 
 @pytest.mark.asyncio
