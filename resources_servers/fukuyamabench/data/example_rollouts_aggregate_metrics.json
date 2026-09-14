@@ -53,10 +53,11 @@
       "std/gt_steps": 0.8944271909999159,
       "std/input_tokens": 7.694153624668538,
       "std/output_tokens": 439.3591924610204,
-      "std/total_tokens": 443.8205718530857
+      "std/total_tokens": 443.8205718530857,
+      "S/pass@1/accuracy": 60.0,
+      "S/pass@1[avg-of-1]/accuracy": 60.0
     },
     "key_metrics": {
-      "mean/reward": 0.6,
       "mean/checkpoints_correct": 1.4,
       "mean/checkpoints_total": 2.0,
       "mean/checkpoint_accuracy": 0.7,
@@ -65,7 +66,9 @@
       "mean/gt_steps": 2.4,
       "mean/input_tokens": 698.2,
       "mean/output_tokens": 1206.0,
-      "mean/total_tokens": 1904.2
+      "mean/total_tokens": 1904.2,
+      "S/pass@1/accuracy": 60.0,
+      "S/pass@1[avg-of-1]/accuracy": 60.0
     },
     "group_level_metrics": [
       {

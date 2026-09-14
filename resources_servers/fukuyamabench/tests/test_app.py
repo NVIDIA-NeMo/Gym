@@ -15,6 +15,8 @@
 
 import importlib.util
 import json
+import shutil
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -23,9 +25,10 @@ from app import (
     FukuyamaBenchResourcesServer,
     FukuyamaBenchStatus,
     FukuyamaBenchVerifyRequest,
+    _extract_last_assistant_text,
     _extract_pathway,
 )
-from metrics import canonical_set, canonical_smiles, compare_step_products, score_pathway, strip_atom_mapping
+from metrics import canonical_smiles, canonical_species, compare_step_products, score_pathway, strip_atom_mapping
 from task_data import TaskData
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
@@ -44,6 +47,8 @@ def _load_prepare_module():
 
 
 prepare = _load_prepare_module()
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "synthetic_mechanisms"
 
 
 # A three-step oxidation with the middle step excluded from the checkpoints, which
@@ -107,9 +112,6 @@ def _pathway(*smiles: str) -> list[dict]:
 
 
 class TestVerify:
-    def test_sanity(self) -> None:
-        _make_server()
-
     async def test_gold_pathway_scores_one(self) -> None:
         result = await _make_server().verify(_make_request(_fenced(_pathway("CCO", "CC=O", "CC(=O)O"))))
         assert result.reward == 1.0
@@ -288,11 +290,6 @@ class TestPerTierMetrics:
             get_key_metrics_fn=server.get_key_metrics,
         )
 
-    def test_headline_metrics_are_per_tier(self) -> None:
-        key_metrics = self._aggregate().key_metrics
-        assert any(k.startswith("B/") for k in key_metrics), key_metrics
-        assert any(k.startswith("C/") for k in key_metrics), key_metrics
-
     def test_pooled_reward_is_not_a_headline_metric(self) -> None:
         key_metrics = self._aggregate().key_metrics
         assert "mean/reward" not in key_metrics, key_metrics
@@ -302,6 +299,14 @@ class TestPerTierMetrics:
         b = {k.split("/", 1)[1]: v for k, v in key_metrics.items() if k.startswith("B/")}
         c = {k.split("/", 1)[1]: v for k, v in key_metrics.items() if k.startswith("C/")}
         assert b and c and b != c
+
+
+class TestSingleTierMetrics:
+    """A single-tier run has no cross-tier average to suppress."""
+
+    def test_key_metrics_fall_back_when_no_tier_is_present(self) -> None:
+        metrics = {"mean/reward": 0.5, "mean/checkpoint_accuracy": 0.25}
+        assert _make_server().get_key_metrics(metrics) == metrics
 
 
 class TestInvalidPredictedProducts:
@@ -330,6 +335,37 @@ class TestInvalidPredictedProducts:
         result = score_pathway([{"product_smiles": "CCO"}], self.GT, [[1]])
         assert result["exact_match"] is True
 
+    @pytest.mark.parametrize("member", [None, 42, {}, []])
+    def test_non_string_list_member_fails_product_smiles(self, member) -> None:
+        result = score_pathway([{"product_smiles": ["CCO", member]}], self.GT, [[1]], lenient=False)
+        assert result["exact_match"] is False
+
+    @pytest.mark.parametrize("member", [None, 42, []])
+    def test_non_string_list_member_fails_products(self, member) -> None:
+        result = score_pathway([{"products": ["CCO", member]}], self.GT, [[1]], lenient=False)
+        assert result["exact_match"] is False
+
+    @pytest.mark.parametrize("field", ["product_smiles", "products"])
+    def test_a_product_field_of_the_wrong_type_fails(self, field) -> None:
+        """Neither a string nor a list — the shape is not a product at all."""
+        result = score_pathway([{field: 42}], self.GT, [[1]], lenient=False)
+        assert result["exact_match"] is False
+
+    def test_supported_list_shapes_still_match(self) -> None:
+        """The guard must not reject the documented list forms."""
+        assert score_pathway([{"product_smiles": ["CCO"]}], self.GT, [[1]])["exact_match"] is True
+        assert score_pathway([{"products": [{"smiles": "CCO"}]}], self.GT, [[1]])["exact_match"] is True
+
+    async def test_verify_rejects_a_malformed_list_member_end_to_end(self) -> None:
+        body = _make_request(
+            _fenced([{"step_id": 1, "product_smiles": ["CCO", None]}]),
+            gt_pathway=self.GT,
+            checkpoints=[[1]],
+        )
+        result = await _make_server().verify(body)
+        assert result.status == FukuyamaBenchStatus.SCORED.value
+        assert result.reward == 0.0
+
     async def test_verify_rejects_it_end_to_end(self) -> None:
         body = _make_request(
             _fenced([{"step_id": 1, "product_smiles": "CCO.not_a_smiles(("}]),
@@ -344,33 +380,71 @@ class TestInvalidPredictedProducts:
 class TestCorpusCompleteness:
     """A short corpus silently changes the denominator of every score.
 
-    An interrupted download or a stale cache leaves a valid-looking directory
-    with fewer cases, and preparation used to accept it and exit 0.
+    Counting directories is not enough: a complete listing whose contents are
+    unreadable skips those cases during parsing and still produced a short split.
     """
+
+    @staticmethod
+    def _cases(tier: str, count: int) -> list[dict]:
+        return [{"case_id": f"{tier}{i:03d}", "case_set": tier} for i in range(1, count + 1)]
 
     def test_short_tier_is_rejected(self) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            prepare.check_corpus_complete([Path("B001")], {"B"})
-        assert "found 1" in str(excinfo.value)
+            prepare.check_corpus_complete(self._cases("B", 1), {"B"})
+        assert "loaded 1" in str(excinfo.value)
 
     def test_complete_tier_is_accepted(self) -> None:
-        dirs = [Path(f"B{i:03d}") for i in range(1, prepare.EXPECTED_CASES["B"] + 1)]
-        prepare.check_corpus_complete(dirs, {"B"})
+        prepare.check_corpus_complete(self._cases("B", prepare.EXPECTED_CASES["B"]), {"B"})
 
     def test_duplicate_case_is_rejected(self) -> None:
+        duplicated = self._cases("B", 1) * 2
         with pytest.raises(SystemExit) as excinfo:
-            prepare.check_corpus_complete([Path("B001"), Path("B001")], {"B"})
+            prepare.check_corpus_complete(duplicated, {"B"})
         assert "Duplicate" in str(excinfo.value)
 
-    def test_synthetic_fixtures_are_not_held_to_the_manifest(self) -> None:
-        """The synthetic tier is deliberately outside upstream's manifest."""
-        prepare.check_corpus_complete([Path("S001")], {"S"})
+    def test_synthetic_fixtures_are_exempt_from_the_manifest(self) -> None:
+        prepare.check_corpus_complete(self._cases("S", 1), {"S"})
+
+    def test_cli_fails_when_a_present_case_cannot_be_read(self, tmp_path, monkeypatch) -> None:
+        """The directory is there and counted; its required content is not."""
+        source = tmp_path / "mechanisms"
+        shutil.copytree(FIXTURES, source)
+        (source / "S003" / "ckpt.txt").unlink()
+        output = tmp_path / "out.jsonl"
+        monkeypatch.setattr(prepare, "EXPECTED_CASES", {"S": 5})
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["prepare", "--output", str(output), "--sets", "S", "--source-dir", str(source)],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            prepare.main()
+        assert "loaded 4" in str(excinfo.value)
+        assert not output.exists(), "a short split must not be left on disk"
+
+    def test_cli_rejects_an_unknown_set_name(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["prepare", "--output", str(tmp_path / "out.jsonl"), "--sets", "Z"],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            prepare.main()
+        assert "Unknown set" in str(excinfo.value)
 
 
 class TestTaskDataSchema:
     def test_every_documented_field_is_declared(self) -> None:
-        fields = set(TaskData.model_fields)
-        assert {"gt_pathway", "checkpoints", "lenient", "case_id", "case_set"} <= fields
+        assert set(TaskData.model_fields) == {
+            "gt_pathway",
+            "checkpoints",
+            "lenient",
+            "case_id",
+            "case_set",
+            "n_gt_steps",
+            "conditions",
+            "starting_reactants",
+        }
 
     def test_extra_metadata_is_tolerated(self) -> None:
         """verifier_metadata carries provenance the scorer never reads."""
@@ -414,6 +488,21 @@ class TestExtraction:
     def test_prose_yields_nothing(self) -> None:
         assert _extract_pathway("No JSON here at all.") is None
 
+    def test_a_json_array_that_is_not_a_pathway_yields_nothing(self) -> None:
+        """A results array of bare values is not a step list."""
+        assert _extract_pathway("## Result\n\n[1, 2, 3]") is None
+
+    def test_plain_string_content_is_read(self) -> None:
+        """Some responses carry content as a string rather than a parts list."""
+        response = _make_response("ignored")
+        response.output[0].content = _fenced(_pathway("CCO"))
+        request = FukuyamaBenchVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Q"}]},
+            response=response,
+            verifier_metadata={"gt_pathway": GT_PATHWAY, "checkpoints": [[1]]},
+        )
+        assert _extract_last_assistant_text(request).startswith("## Reasoning")
+
     def test_malformed_json_yields_nothing(self) -> None:
         assert _extract_pathway('```json\n[{"step_id": 1, "product_smiles":}]\n```') is None
 
@@ -422,14 +511,15 @@ class TestHelpers:
     def test_strip_atom_mapping(self) -> None:
         assert strip_atom_mapping("[CH3:1][O:22]") == "[CH3][O]"
 
-    def test_canonical_set_drops_unparseable(self) -> None:
-        assert canonical_set(["CCO", "not_a_smiles(("]) == {"CCO"}
+    def test_canonical_species_reports_unparseable_components(self) -> None:
+        assert canonical_species(["CCO", "not_a_smiles(("]) == ({"CCO"}, False)
+        assert canonical_species(["CCO"]) == ({"CCO"}, True)
 
     def test_empty_and_blank_input_is_handled(self) -> None:
         """Models emit empty strings and stray separators; neither is an error."""
         assert strip_atom_mapping("") == ""
         assert canonical_smiles("") is None
-        assert canonical_set(["", None, "CCO..", "  "]) == {"CCO"}
+        assert canonical_species(["", None, "CCO..", "  "]) == ({"CCO"}, True)
 
     def test_compare_reports_why_it_failed(self) -> None:
         assert compare_step_products(["CCO"], ["CC=O"])[1] == "mismatch"

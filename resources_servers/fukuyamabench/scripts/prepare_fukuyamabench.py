@@ -238,25 +238,29 @@ def load_case(case_dir: Path) -> Optional[dict]:
     }
 
 
-def check_corpus_complete(case_dirs: list[Path], wanted: set[str]) -> None:
-    """Fail before writing if a requested upstream tier is not fully present.
+def check_corpus_complete(cases: list[dict], wanted: set[str]) -> None:
+    """Fail before writing if a requested upstream tier is not fully loaded.
 
-    A truncated download, a partially extracted cache, or a wrong ``--source-dir``
-    otherwise produces a smaller corpus that still exits 0, quietly changing the
-    denominator of every score derived from it. Tiers outside the upstream
-    manifest — the synthetic fixtures — are skipped deliberately.
+    A truncated download, a partially extracted cache, an unreadable case file,
+    or a wrong ``--source-dir`` otherwise produces a smaller corpus that still
+    exits 0, quietly changing the denominator of every score derived from it.
+
+    This counts cases that actually **loaded**, not directories that merely
+    exist: a complete directory listing whose contents are missing skips those
+    cases during parsing and would otherwise pass a directory-count check. Tiers
+    outside the upstream manifest — the synthetic fixtures — are exempt.
     """
-    names = [d.name for d in case_dirs]
-    duplicates = sorted({n for n in names if names.count(n) > 1})
+    ids = [c["case_id"] for c in cases]
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:
-        raise SystemExit(f"Duplicate case directories: {', '.join(duplicates)}")
+        raise SystemExit(f"Duplicate case identities: {', '.join(duplicates)}")
 
     problems = []
     for tier in sorted(wanted & EXPECTED_CASES.keys()):
-        found = sum(1 for n in names if n[0].upper() == tier)
+        found = sum(1 for c in cases if c["case_set"] == tier)
         expected = EXPECTED_CASES[tier]
         if found != expected:
-            problems.append(f"set {tier}: found {found}, expected {expected}")
+            problems.append(f"set {tier}: loaded {found}, expected {expected}")
     if problems:
         raise SystemExit(
             "Incomplete benchmark corpus; refusing to write a short split.\n  "
@@ -324,29 +328,47 @@ def main() -> None:
 
     mechanisms = args.source_dir or fetch_mechanisms(args.cache_dir)
     wanted = {s.upper() for s in args.sets}
+
+    # An unrecognised tier would otherwise intersect to nothing in the manifest
+    # check and quietly produce an empty split.
+    unknown = sorted(wanted - EXPECTED_CASES.keys())
+    if unknown and not args.source_dir:
+        raise SystemExit(
+            f"Unknown set(s): {', '.join(unknown)}. Upstream tiers are {', '.join(sorted(EXPECTED_CASES))}."
+        )
+
     case_dirs = sorted(d for d in mechanisms.iterdir() if d.is_dir() and d.name[0].upper() in wanted)
+
+    # Load everything before writing anything, so an incomplete corpus cannot
+    # leave a short split behind on disk.
+    cases = []
+    skipped = []
+    for case_dir in case_dirs:
+        case = load_case(case_dir)
+        if case is None:
+            skipped.append(case_dir.name)
+            continue
+        cases.append(case)
+        if args.limit and len(cases) >= args.limit:
+            break
+
+    if not cases:
+        raise SystemExit(f"No cases loaded from {mechanisms} for set(s) {', '.join(sorted(wanted))}.")
     if not args.limit:
-        check_corpus_complete(case_dirs, wanted)
+        check_corpus_complete(cases, wanted)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    written = 0
-    skipped = 0
     with open(output_path, "w", encoding="utf-8") as fout:
-        for case_dir in case_dirs:
-            case = load_case(case_dir)
-            if case is None:
-                skipped += 1
-                continue
+        for case in cases:
             fout.write(json.dumps(format_row(case, not args.strict), ensure_ascii=False) + "\n")
-            written += 1
-            if args.limit and written >= args.limit:
-                break
 
-    print(f"Wrote {written} rows to {output_path}", file=sys.stderr)
+    print(f"Wrote {len(cases)} rows to {output_path}", file=sys.stderr)
     if skipped:
-        print(f"WARNING: skipped {skipped} cases with missing or empty mechanism/checkpoint files", file=sys.stderr)
+        print(
+            f"WARNING: skipped {len(skipped)} unreadable case(s): {', '.join(skipped[:5])}",
+            file=sys.stderr,
+        )
 
 
 # python scripts/prepare_fukuyamabench.py --output data/val.jsonl

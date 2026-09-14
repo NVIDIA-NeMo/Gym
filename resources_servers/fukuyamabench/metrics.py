@@ -123,48 +123,64 @@ def canonical_species(smiles_list: list[str]) -> tuple[set[str], bool]:
     return species, all_parsed
 
 
-def canonical_set(smiles_list: list[str]) -> set[str]:
-    """Canonical species set, ignoring whether every component parsed."""
-    return canonical_species(smiles_list)[0]
+def _split(smiles: str) -> list[str]:
+    return [part.strip() for part in strip_atom_mapping(smiles).split(".") if part.strip()]
 
 
-def product_smiles_from_step(step: dict) -> list[str]:
-    """Pull the product SMILES out of one predicted or gold step.
+def product_smiles_from_step(step: dict) -> tuple[list[str], bool]:
+    """Pull product SMILES out of one predicted step, reporting well-formedness.
 
     Accepts ``product_smiles`` (a dot-joined string or a list) or ``products``
     (a list of strings or of ``{"smiles": ...}`` dicts), matching the shapes the
     upstream prompt and dataset both produce.
 
-    A model can emit a well-formed array holding a malformed element, e.g.
-    ``[{...}, null]``. Extraction keeps such an array because *some* element is a
-    step, so a non-mapping element must score as "no products" here rather than
-    raising and turning a formatting error into a server error.
+    The second return value is false when the step, or any member of a list it
+    holds, is not one of those shapes. Dropping unrecognised members silently is
+    what let ``["CCO", null]`` score an exact match against gold ``CCO`` — the
+    same invalid-output credit the parse-validity rule exists to prevent — so
+    callers must treat a malformed member as disqualifying rather than absent.
     """
     if not isinstance(step, dict):
-        return []
+        return [], False
+
     if "product_smiles" in step:
         smiles = step["product_smiles"]
         if isinstance(smiles, str):
-            return [s.strip() for s in strip_atom_mapping(smiles).split(".") if s.strip()]
+            return _split(smiles), True
         if isinstance(smiles, list):
-            return [strip_atom_mapping(s) for s in smiles if isinstance(s, str) and s]
-    elif "products" in step:
+            out: list[str] = []
+            well_formed = True
+            for member in smiles:
+                if isinstance(member, str):
+                    out.extend(_split(member))
+                else:
+                    well_formed = False
+            return out, well_formed
+        return [], False
+
+    if "products" in step:
         products = step["products"]
         if isinstance(products, list):
             out = []
-            for p in products:
-                if isinstance(p, str) and p:
-                    out.append(strip_atom_mapping(p))
-                elif isinstance(p, dict) and isinstance(p.get("smiles"), str):
-                    out.append(strip_atom_mapping(p["smiles"]))
-            return out
-    return []
+            well_formed = True
+            for member in products:
+                if isinstance(member, str):
+                    out.extend(_split(member))
+                elif isinstance(member, dict) and isinstance(member.get("smiles"), str):
+                    out.extend(_split(member["smiles"]))
+                else:
+                    well_formed = False
+            return out, well_formed
+        return [], False
+
+    return [], False
 
 
 def compare_step_products(
     pred_products: list[str],
     gt_products: list[str],
     lenient: bool = True,
+    pred_well_formed: bool = True,
 ) -> tuple[bool, Optional[str]]:
     """Compare one predicted step's products against one gold step's products.
 
@@ -188,7 +204,7 @@ def compare_step_products(
         return False, "invalid_pred"
     if not gt_canon:
         return False, "invalid_gt"
-    if not pred_all_parsed:
+    if not pred_all_parsed or not pred_well_formed:
         return False, "invalid_pred_component"
 
     if pred_canon == gt_canon:
@@ -246,9 +262,11 @@ def score_pathway(
 
         found = False
         while pred_idx < pred_length and not found:
-            pred_products = product_smiles_from_step(pred_pathway[pred_idx])
+            pred_products, pred_well_formed = product_smiles_from_step(pred_pathway[pred_idx])
             for gt_step_id, gt_products in candidates:
-                is_match, _ = compare_step_products(pred_products, gt_products, lenient)
+                is_match, _ = compare_step_products(
+                    pred_products, gt_products, lenient, pred_well_formed=pred_well_formed
+                )
                 if is_match:
                     match.update(
                         match=True,

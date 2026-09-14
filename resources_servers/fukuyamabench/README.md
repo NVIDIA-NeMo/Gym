@@ -136,7 +136,11 @@ Both halves are needed. The default selection keeps every `mean/*` key, so
 emitting tier metrics alone would leave `mean/reward` as the headline that
 dashboards read — and since the published B and C baselines differ by close to an
 order of magnitude, that pooled average describes no benchmark anyone reports.
-A mixed-tier run therefore reports per-tier results and no cross-tier scalar.
+
+Precisely: the pooled reward is removed from **`key_metrics`**, the headline set.
+The shared aggregator still records `mean/reward` inside `agent_metrics`, which
+is deliberate and outside this server's control — so it exists in the aggregate,
+it is simply not presented as a result. Read the per-tier keys.
 
 ### Reproducing published pass@k
 
