@@ -17,12 +17,11 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from http.cookiejar import CookieJar
 from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from http.cookiejar import CookieJar
-
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
@@ -264,7 +263,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             client_kwargs: dict[str, Any] = {}
             if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
                 # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
-                connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
+                connect = (
+                    self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
+                )
                 other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
                 client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
             if self.config.client_max_retries is not None:
