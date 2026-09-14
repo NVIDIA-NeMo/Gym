@@ -704,7 +704,7 @@ async def test_terminal_skips_can_be_explicitly_scored_as_zero(runner_config, mo
     assert len(aggregate.await_args.args[0]) == 3
 
 
-async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_config, monkeypatch):
+async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_config, monkeypatch, capsys):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
 
     async def post(**kwargs):
@@ -730,7 +730,14 @@ async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_con
     failures = list(read_records(collection.failures_path_for(output)))
     assert len(failures) == 4
     assert all("reward" not in row and "_ng_no_persist" not in row for row in failures)
-    assert json.loads(coverage_path_for(output).read_text())["attempts"] == 5
+    coverage = json.loads(coverage_path_for(output).read_text())
+    assert coverage["attempts"] == 5
+    assert coverage["attempts_exhausted"] == 2
+    assert coverage["max_rollout_attempts"] == 2
+    printed = capsys.readouterr().out
+    assert "attempt 2 of 2" in printed
+    assert "Retry budget exhausted for 2 rollout(s) at the cap of 2" in printed
+    assert str(collection.failures_path_for(output)) in printed
 
 
 async def test_cancelled_reverify_append_stops_requests_before_closing_journal(runner_config, monkeypatch):

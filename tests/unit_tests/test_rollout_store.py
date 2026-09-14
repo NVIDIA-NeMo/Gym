@@ -404,3 +404,33 @@ def test_unsafe_rebuild_does_not_hide_other_corruption(prepared_run, corruption)
     with pytest.raises(ConfigError):
         RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True)
     assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("cap, expected_exhausted", [(1, 2), (2, 0)])
+def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
+    tmp_path, monkeypatch, cap, expected_exhausted
+):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(6)]
+    source = tmp_path / "source.jsonl"
+    source.write_text("source")
+    output = tmp_path / "out.jsonl"
+    with RolloutStore.start_or_resume(
+        output, lambda: (rows, RunManifest.create(source, rows, {}, {})), resume=False
+    ) as store:
+        dispatched = store.pending(cap)
+        for row in dispatched[:5]:
+            store.record_dispatch(row)
+            store.record_dispatch(row)  # Repeated bookkeeping is not another attempt.
+        store.record_outcome(dispatched[0] | {"reward": 0.0, "response": {}})
+        store.record_outcome(dispatched[1] | {"_ng_failure_class": "agent_run_error"})
+        store.record_outcome(dispatched[2] | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+        store.record_omission(dispatched[3], "intentional")
+        # Row 4 has an unknown dispatched outcome; row 5 was never dispatched.
+    reopened = RolloutStore.read(output)
+    report = reopened.coverage()
+    assert report["attempts_exhausted"] == expected_exhausted
+    assert (report["failed"], report["unknown"], report["never_dispatched"], report["attempts"]) == (2, 2, 1, 5)
+    from nemo_gym.rollout_journal import coverage_path_for
+
+    assert orjson.loads(coverage_path_for(output).read_bytes())["attempts_exhausted"] == expected_exhausted

@@ -84,6 +84,28 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
 _SERVER_KINDS = ("responses_api_agents", "responses_api_models", "resources_servers")
 
 
+_DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _get_max_rollout_attempts() -> int:
+    """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
+    raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+    try:
+        n = int(raw)
+        if n < 1:
+            raise ValueError(f"must be >= 1, got {n}")
+        return n
+    except (TypeError, ValueError) as e:
+        print(
+            f"WARNING: could not parse NEMO_GYM_MAX_ROLLOUT_ATTEMPTS={raw!r} ({e}); "
+            f"falling back to default {_DEFAULT_MAX_ROLLOUT_ATTEMPTS}.",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+
 def _plain(value: Any) -> Any:
     """Pydantic's Python dump may still contain nested Hydra containers."""
     if OmegaConf.is_config(value):

@@ -258,7 +258,17 @@ class RolloutStore:
     def pending(self, max_attempts: int) -> list[dict]:
         # The caller supplies its attempt budget; the stored selection policy is
         # latest_dispatched, including newer attempts with unknown outcomes.
+        exhausted = self._state.exhausted_count(max_attempts)
+        if exhausted:
+            print(
+                f"Retry budget exhausted for {exhausted} rollout(s) at the cap of {max_attempts} dispatched attempts. "
+                f"They will not be dispatched with this cap. Failures: {failures_path_for(self.output)}; "
+                f"dispatch history (including unknown outcomes): {journal_path_for(self.output)}."
+            )
         return [dict(row, **{RUN_ID_KEY: self.manifest.run_id}) for row in self._state.pending(max_attempts)]
+
+    def attempt_count(self, row: dict) -> int:
+        return self._state.attempt_counts[logical_rollout_id(row)]
 
     def selected(self, disposition: str) -> list[dict]:
         return self._state.selected(disposition)

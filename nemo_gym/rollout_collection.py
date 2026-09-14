@@ -16,7 +16,6 @@ import asyncio
 import glob as glob_module
 import json
 import logging
-import os
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -92,7 +91,17 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailure
-from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
+from nemo_gym.rollout_recovery import (
+    _DEFAULT_MAX_ROLLOUT_ATTEMPTS as _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
+)
+from nemo_gym.rollout_recovery import (
+    RunManifest,
+    atomic_write_json,
+    manifest_path_for,
+)
+from nemo_gym.rollout_recovery import (
+    _get_max_rollout_attempts as _get_max_rollout_attempts,
+)
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -161,8 +170,6 @@ _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGEN
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
-
-_DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -555,25 +562,6 @@ def _attach_ng_perf(
         return
     if ng_perf is not None:
         result[NG_PERF_KEY] = ng_perf
-
-
-def _get_max_rollout_attempts() -> int:
-    """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
-    raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
-    if raw is None or raw == "":
-        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
-    try:
-        n = int(raw)
-        if n < 1:
-            raise ValueError(f"must be >= 1, got {n}")
-        return n
-    except (TypeError, ValueError) as e:
-        print(
-            f"WARNING: could not parse NEMO_GYM_MAX_ROLLOUT_ATTEMPTS={raw!r} ({e}); "
-            f"falling back to default {_DEFAULT_MAX_ROLLOUT_ATTEMPTS}.",
-            flush=True,
-        )
-        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
 def _normalize_health_check_ignored_checks(value) -> List[str]:
@@ -1614,7 +1602,7 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(
                         "🚨 [rollout_collection] rollout dropped from the score: "
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
-                        f"class={failure_class} error={detail}"
+                        f"class={failure_class} attempt {store.attempt_count(row)} of {_get_max_rollout_attempts()} error={detail}"
                     )
                     store.record_outcome(result)
                 else:
@@ -1747,6 +1735,7 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/failed": completion["failed"],
                     "coverage/omitted": completion["intentionally_omitted"],
                     "coverage/unknown": completion["unknown"],
+                    "coverage/attempts_exhausted": completion["attempts_exhausted"],
                 }
             )
 
@@ -2288,14 +2277,14 @@ def _expand_input_glob(input_glob: str) -> List[str]:
       'a/*.jsonl, b/*.jsonl'   -> matches of both patterns, deduplicated
     """
     patterns = [p.strip() for p in input_glob.split(",") if p.strip()]
-    seen: Dict[str, None] = {}  # preserve insertion order while deduping
+    seen: Dict[Path, str] = {}  # retain the first spelling of each resolved path
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
             if Path(path).stem.endswith(("_attempts", "_failures", "_materialized_inputs")):
                 # Broad shard globs must not score recovery artifacts as results.
                 continue
-            seen.setdefault(path, None)
-    return list(seen)
+            seen.setdefault(Path(path).resolve(), path)
+    return list(seen.values())
 
 
 class RolloutAggregationHelper(BaseModel):
@@ -2387,6 +2376,8 @@ class RolloutAggregationHelper(BaseModel):
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "unknown": sum(c["unknown"] for c in components) if inventory_known else None,
+            "attempts_exhausted": sum(c["attempts_exhausted"] for c in components) if inventory_known else None,
+            "max_rollout_attempts": _get_max_rollout_attempts(),
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
@@ -2425,6 +2416,7 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/failed"] = completion["failed"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
                 metrics["coverage/unknown"] = completion["unknown"]
+                metrics["coverage/attempts_exhausted"] = completion["attempts_exhausted"]
             export_metrics(metrics)
 
         print(f"""Finished rollout aggregation! View results at:

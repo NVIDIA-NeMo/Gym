@@ -304,8 +304,8 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
         with output_fpaths.output.open("rb") as f:
             successful_keys = {key for line in f if (key := _parse_output_line_key(line)) is not None}
 
-    # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
-    # per key + flag terminal rows so chain-hop 2 retries the right ones.
+    # Legacy output only: count persisted sidecar failures and terminal markers.
+    # Journal-backed recovery uses the store and counts every dispatch, including kill_shaped.
     attempts_by_key: Counter = Counter()
     terminal_keys: set = set()
     if output_fpaths.failures.exists():
@@ -851,19 +851,20 @@ class RolloutReverificationHelper(BaseModel):
                 serialized = orjson.dumps(result)
 
                 if no_persist:
-                    # kill_shaped: don't write anywhere. Set-difference on resume
-                    # naturally re-dispatches; per-task timeout bounds wallclock.
+                    # The journal-backed store already recorded the disposition above.
+                    # Only loose legacy outputs retain no-persist suppression.
                     pass
                 elif failure_class is not None:
-                    # Non-kill_shaped failure → sidecar. The aggregator only reads
+                    # Reported failure → sidecar. The aggregator only reads
                     # the main jsonl, so this keeps win-rate uncontaminated.
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.
                     detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    attempt = f"attempt {store.attempt_count(row)} of {_get_max_rollout_attempts()} " if store else ""
                     tqdm.write(
                         "🚨 [rollout_reverification] rollout dropped from the score: "
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
-                        f"class={failure_class} error={detail}"
+                        f"class={failure_class} {attempt}error={detail}"
                     )
                     if store is None:
                         failures_file.write(serialized + b"\n")

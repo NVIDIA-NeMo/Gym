@@ -32,7 +32,7 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_recovery import RunManifest, _digest
+from nemo_gym.rollout_recovery import RunManifest, _digest, _get_max_rollout_attempts
 
 
 RUN_ID_KEY = "_ng_run_id"
@@ -138,6 +138,7 @@ class RolloutJournal:
                 raise ConfigError(f"Duplicate logical rollout id {identity!r} in materialized inputs.")
             self.expected[identity] = row
         self.dispatched: set[tuple[str, int]] = set()
+        self.attempt_counts: Counter = Counter()
         self.latest: dict[str, int] = {}
         self.payloads: dict[tuple[str, int], dict] = {}
         self.omitted: set[tuple[str, int]] = set()
@@ -157,6 +158,8 @@ class RolloutJournal:
         return identity, index
 
     def _dispatch(self, key: tuple[str, int]) -> None:
+        if key not in self.dispatched:
+            self.attempt_counts[key[0]] += 1
         self.dispatched.add(key)
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
 
@@ -289,15 +292,19 @@ class RolloutJournal:
             if self.disposition(identity) == disposition and (identity, self.latest.get(identity)) in self.payloads
         ]
 
+    def _retryable(self, identity: str) -> bool:
+        payload = self.payloads.get((identity, self.latest.get(identity)), {})
+        return self.disposition(identity) not in {"success", "omitted"} and not payload.get("_ng_failure_terminal")
+
+    def exhausted_count(self, max_attempts: int) -> int:
+        return sum(
+            self._retryable(identity) and self.attempt_counts[identity] >= max_attempts for identity in self.expected
+        )
+
     def pending(self, max_attempts: int) -> list[dict]:
-        attempts = Counter(identity for identity, _ in self.dispatched)
         pending = []
         for identity, original in self.expected.items():
-            disposition = self.disposition(identity)
-            payload = self.payloads.get((identity, self.latest.get(identity)), {})
-            if disposition in {"success", "omitted"} or payload.get("_ng_failure_terminal"):
-                continue
-            if attempts[identity] >= max_attempts:
+            if not self._retryable(identity) or self.attempt_counts[identity] >= max_attempts:
                 continue
             row = dict(original)
             if identity in self.latest:
@@ -308,6 +315,7 @@ class RolloutJournal:
     def coverage(self) -> dict:
         counts = Counter(self.disposition(identity) for identity in self.expected)
         expected = len(self.expected)
+        max_attempts = _get_max_rollout_attempts()
         # A producer-masked result completed execution, so recovery still reuses
         # it. Report its measurement status separately, after selecting attempts.
         masked = sum(bool(row.get("mask_sample")) for row in self.selected("success"))
@@ -324,6 +332,8 @@ class RolloutJournal:
             "unknown": counts["unknown"],
             "never_dispatched": expected - len(self.latest),
             "attempts": len(self.dispatched),
+            "attempts_exhausted": self.exhausted_count(max_attempts),
+            "max_rollout_attempts": max_attempts,
             "completion_fraction": counts["success"] / expected if expected else 1.0,
             "complete": counts["success"] == expected,
             "reconciled": counts["unknown"] == 0,

@@ -4058,3 +4058,21 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+@pytest.mark.parametrize("alias_kind", ["dotdot", "symlink"])
+def test_aggregate_expansion_deduplicates_legacy_path_aliases(tmp_path, alias_kind):
+    directory = tmp_path / "shard"
+    directory.mkdir()
+    output = directory / "rollouts.jsonl"
+    output.write_text("{}\n")
+    if alias_kind == "dotdot":
+        alias = directory / ".." / "shard" / "rollouts.jsonl"
+    else:
+        alias = tmp_path / "alias.jsonl"
+        alias.symlink_to(output)
+    assert _expand_input_glob(f"{output},{alias}") == [str(output)]
+    # Independent runs may have identical input inventories and results.
+    independent = tmp_path / "independent.jsonl"
+    independent.write_bytes(output.read_bytes())
+    assert _expand_input_glob(f"{output},{independent}") == [str(output), str(independent)]
