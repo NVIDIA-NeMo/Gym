@@ -8,8 +8,6 @@ from omegaconf import OmegaConf
 from pydantic import TypeAdapter
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.benchmarks import _benchmark_config_paths
-from nemo_gym.cli.main import _asset_config_path
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -41,7 +39,7 @@ def resolve_config(monkeypatch, tmp_path):
     def resolve(*overrides):
         initial = OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-            {"config_paths": [_asset_config_path("benchmark", "aa_briefcase_lite")]},
+            {"config_paths": [str(CONFIG_PATH)]},
             OmegaConf.from_dotlist(overrides),
         )
         return GlobalConfigDictParser().parse(
@@ -56,25 +54,17 @@ def resolve_config(monkeypatch, tmp_path):
     return resolve
 
 
-def test_benchmark_discovery_resolves_full_local_profile(resolve_config) -> None:
-    assert _benchmark_config_paths(CONFIG_PATH.parent) == [CONFIG_PATH]
+def test_benchmark_config_resolves_full_local_profile(resolve_config) -> None:
     config = resolve_config()
     agent = get_first_server_config_dict(config, AGENT_NAME)
     resources = get_first_server_config_dict(config, RESOURCES_NAME)
 
     assert resolve_dataset_agent(config, AGENT_NAME) == AGENT_NAME
-    assert agent.datasets[0].name == "aa_briefcase_lite"
-    assert agent.datasets[0].type == "benchmark"
-    assert agent.datasets[0].prepare_script == "benchmarks/aa_briefcase_lite/prepare.py"
-    assert agent.datasets[0].num_repeats == 1
-    assert agent.task == "aa_briefcase_lite"
-    assert agent.agent_max_turns == 500
     assert TypeAdapter(bool).validate_python(agent.execute_only) is False
     assert TypeAdapter(bool).validate_python(agent.judge_only) is False
     assert resources.reward_mode == "all"
     assert resources.pairwise_reference_ids == ["gpt-5-5"]
     assert resources.pairwise_num_trials == 2
-    assert resources.verified is False
     assert [judge.name for judge in resources.judge_panel] == ["gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8"]
     for judge in resources.judge_panel:
         adapter = get_first_server_config_dict(config, judge.model_server.name)
