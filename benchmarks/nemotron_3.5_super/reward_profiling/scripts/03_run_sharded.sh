@@ -90,6 +90,12 @@ POLL_S=${POLL_S:-60}
 # is the normal healthy case. Set it well above what you expect to need; a shard that is genuinely
 # broken shows up as "no progress last attempt" in this log, repeatedly.
 MAX_ROUNDS=${MAX_ROUNDS:-100}
+# Must match 03_run_single.sh's default exactly. The watcher decides a shard is done using the same
+# gating Gym uses, so if the two disagree on the budget the watcher declares rows abandoned while
+# Gym is still retrying them -- and the shard is merged with work it was about to do. Exported so
+# both the probe below and every 03_run_single.sh child see the same number.
+export MAX_ROLLOUT_ATTEMPTS=${MAX_ROLLOUT_ATTEMPTS:-1000}
+export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=$MAX_ROLLOUT_ATTEMPTS
 
 cd "$REPO_ROOT"
 

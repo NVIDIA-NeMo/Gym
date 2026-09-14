@@ -39,6 +39,8 @@
 #   NUM_SAMPLES_IN_PARALLEL   512 x decode_nodes, or the manifest's value if it sets one
 #   MAX_NUM_SEQS_PER_DECODE_ENGINE         512
 #   ALLOW_PARTIAL_ROLLOUTS                 True
+#   MAX_ROLLOUT_ATTEMPTS                   1000. Gym's own default is 3, counted across the whole
+#                                          sweep, which silently drops hard rollouts
 #   ENV_PORT_RANGE_LOW / _HIGH             unset; the manifest's gym_env_start sets the range
 #   RUN_PORT_RANGE_LOW / _HIGH             unset; the driver's own range, separate from the above
 #   GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST  unset; Gym's 1024/num_workers applies. Per Gym server
@@ -210,6 +212,18 @@ RUN_PORT_RANGE_HIGH=${RUN_PORT_RANGE_HIGH:-}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-}
 ALLOW_PARTIAL_ROLLOUTS=${ALLOW_PARTIAL_ROLLOUTS:-True}
+# Per-rollout retry budget, read by Gym as NEMO_GYM_MAX_ROLLOUT_ATTEMPTS.
+#
+# Gym's default is 3, and the count accumulates across the WHOLE sweep, not per job: attempts are
+# rebuilt from rollouts_failures.jsonl, which survives every resume. Three strikes spread over a
+# multi-day run -- one judge hiccup, one sandbox timeout, one bad minute -- and that rollout is
+# permanently excluded from the profile. For reward profiling that is a silent bias: the rollouts
+# most likely to fail are exactly the hard ones whose reward distribution we are trying to measure.
+#
+# So the budget is deliberately high. A row is retried on every subsequent job until it succeeds;
+# the outer bound is the watcher's MAX_ROUNDS, which stops loudly and names what is missing rather
+# than dropping it quietly.
+MAX_ROLLOUT_ATTEMPTS=${MAX_ROLLOUT_ATTEMPTS:-1000}
 
 # Returns 0 either way: under `set -e` a bare [[ -n "" ]] would abort the script.
 _override() {
@@ -377,6 +391,10 @@ if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
 else
   ulimit -Sn "\$(ulimit -Hn)"
 fi
+
+# Never abandon a rollout after N failures -- see MAX_ROLLOUT_ATTEMPTS above. Gym reads this from
+# the environment (rollout_collection.py:549), so it has to be exported inside the container.
+export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=$MAX_ROLLOUT_ATTEMPTS
 
 # Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_materialize.sh wrote.
 source /opt/Gym_venv/bin/activate
