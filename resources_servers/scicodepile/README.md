@@ -87,9 +87,12 @@ for that reasoning and the non-attempt rate it costs.
 
 ### Code extraction
 
-`code_extraction.py` carries the same extraction logic as the BigCodeBench server's
-module, kept in sync deliberately so a score difference between the two servers can
-never be an extractor artifact. One inherited quirk is worth knowing: with an
+`code_extraction.py` is duplicated from the BigCodeBench server's module and
+currently differs from it only in the docstring. Keeping the two identical is what
+stops a score difference between the servers being an extractor artifact — but
+nothing enforces it: there is no shared import and no test comparing them, so an
+edit to either file silently breaks the invariant. One inherited quirk is worth
+knowing: with an
 **untagged** ` ``` ` fence followed by trailing prose, extraction returns empty and
 the task scores `no_code_block`. Nothing asks the model for a ` ```python ` tag —
 the upstream prompt is passed through unmodified (see above), so untagged fences are

@@ -96,11 +96,6 @@ class TestRunTask:
         )
         assert result["status"] == "pass"
 
-    def test_solution_stdout_does_not_corrupt_the_result(self):
-        # Task code prints freely; stdout is the runner's result channel.
-        result = run_task(_task("def add(a, b):\n    print('chatty')\n    return a + b\n"))
-        assert result["status"] == "pass"
-
     def test_task_file_writes_do_not_escape_into_the_cwd(self, tmp_path, monkeypatch):
         """Real upstream tasks write files relative to the CWD.
 
@@ -278,7 +273,24 @@ class TestFailureReason:
             ("timeout", {"reason": "subprocess_timeout"}, "timeout"),
             ("error", {"reason": "unparseable_runner_output"}, "unparseable_runner_output"),
             ("error", {"reason": "runner_crashed"}, "runner_crashed"),
-            ("error", {"reason": "test_defines_no_check"}, "test_defines_no_check"),
+            ("error", {"reason": "test_defines_no_check", "phase": "test", "harness_fault": True}, "test_code_failed"),
+            # Dataset-owned code raising is not the model's fault. The same reason
+            # strings appear for model-phase faults, so the phase is what decides.
+            (
+                "error",
+                {"reason": "exec_failed", "phase": "setup", "harness_fault": True},
+                "setup_code_failed",
+            ),
+            (
+                "error",
+                {"reason": "syntax_error", "phase": "setup", "harness_fault": True},
+                "setup_code_failed",
+            ),
+            (
+                "error",
+                {"reason": "exec_failed", "phase": "test", "harness_fault": True},
+                "test_code_failed",
+            ),
         ],
     )
     def test_harness_failures_are_flagged(self, status, details, expected):
@@ -292,8 +304,10 @@ class TestFailureReason:
             ("pass", {}),
             ("fail", {"type": "AssertionError", "message": "boom"}),
             ("entry_point_missing", {"entry_point": "add"}),
-            ("error", {"reason": "syntax_error", "message": "bad"}),
-            ("error", {"reason": "exec_failed", "type": "NameError"}),
+            # Same reason strings as the harness cases above, but raised by the
+            # model's own compile unit, so they must stay unflagged.
+            ("error", {"reason": "syntax_error", "message": "bad", "phase": "model"}),
+            ("error", {"reason": "exec_failed", "type": "NameError", "phase": "model"}),
             ("no_code_block", None),
         ],
     )

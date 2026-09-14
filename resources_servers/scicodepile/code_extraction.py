@@ -5,10 +5,12 @@
 def preprocess_code_completion(completion: str, language: str = "python", strip_whitespace: bool = True) -> str:
     r"""Port of NeMo-Skills' nemo_skills.evaluation.evaluator.code.preprocess_code.
 
-    Shared with ``resources_servers/bigcodebench/code_extraction.py``: the extraction
-    logic is kept identical so both servers extract code the same way and a score
-    difference between them can never be an extractor artifact. Only these module
-    docstrings differ.
+    Duplicated from ``resources_servers/bigcodebench/code_extraction.py``, where the
+    two files currently differ only in this docstring. Keeping them identical is the
+    intent — it is what stops a score difference between the two servers being an
+    extractor artifact — but **nothing enforces it**: there is no shared import, no
+    symlink and no test comparing the two, so an edit to either file silently breaks
+    the invariant. Change both, or make them share one module.
 
     Behaviour:
       1. Drop everything up to and including the first ``</think>`` (model
