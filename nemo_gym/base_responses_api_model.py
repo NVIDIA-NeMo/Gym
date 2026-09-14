@@ -63,7 +63,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import RolloutContextPeekMiddleware, maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -210,6 +210,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
         )
+        # Added after install_model_call_capture() (which installs _CaptureMiddleware) so
+        # this ends up outermost and sees the raw `/ng-rollout/<id>` prefix before
+        # _CaptureMiddleware strips it -- see RolloutContextPeekMiddleware. Unlike resources
+        # and agent servers, model servers never exposed current_rollout_id() to their own
+        # handlers even though the id reaches them on every correlated call.
+        app.add_middleware(RolloutContextPeekMiddleware)
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
         app.post("/v1/chat/completions")(
