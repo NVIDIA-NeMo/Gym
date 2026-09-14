@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LENIENT = True
 
+# compute_subset_metrics prefixes each key with the case_set value, e.g.
+# "B/pass@1/accuracy". Tiers are single upper-case letters upstream.
+_TIER_METRIC_RE = re.compile(r"^[A-Z]/")
+
 
 class FukuyamaBenchStatus(str, Enum):
     SCORED = "scored"
@@ -75,6 +79,20 @@ class FukuyamaBenchResourcesServer(SimpleResourcesServer):
         so per-tier metrics are added here and a mixed run always carries them.
         """
         return compute_subset_metrics(tasks, "case_set")
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Promote the per-tier results and drop the pooled reward.
+
+        Emitting tier metrics is not enough on its own: the inherited selection
+        keeps every ``mean/*`` key, so ``mean/reward`` stays the headline that
+        dashboards read — the exact cross-tier average this server exists to
+        avoid. Once tier metrics are present, that pooled reward is removed.
+        """
+        tiers = {k: v for k, v in agent_metrics.items() if _TIER_METRIC_RE.match(k)}
+        if not tiers:
+            return super().get_key_metrics(agent_metrics)
+        means = {k: v for k, v in agent_metrics.items() if k.startswith("mean/") and k != "mean/reward"}
+        return {**means, **tiers}
 
     async def verify(self, body: FukuyamaBenchVerifyRequest) -> FukuyamaBenchVerifyResponse:
         meta = body.verifier_metadata or {}

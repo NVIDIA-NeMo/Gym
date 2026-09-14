@@ -216,7 +216,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 |-----------|---------|-------------|---------|
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
-| ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template reproduced verbatim in `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml`) | https://github.com/HaCTang/ReactionMechanismReasoning |
+| ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`

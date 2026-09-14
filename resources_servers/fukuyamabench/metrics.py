@@ -91,8 +91,8 @@ def canonical_smiles(smiles: str) -> Optional[str]:
         return None
 
 
-def canonical_set(smiles_list: list[str]) -> set[str]:
-    """Canonicalise a list of SMILES into a set of individual species.
+def canonical_species(smiles_list: list[str]) -> tuple[set[str], bool]:
+    """Canonicalise into a set of species, reporting whether everything parsed.
 
     Entries are split on ``.`` so that one dotted string and several separate
     entries describing the same species compare equal. Upstream splits only the
@@ -100,14 +100,32 @@ def canonical_set(smiles_list: list[str]) -> set[str]:
     dotted entry unmatchable by construction: feeding gold back in as the
     prediction fails 11 of the 241 set-B/C cases under upstream's rule.
     Splitting both sides is a deliberate divergence that makes them scoreable.
+
+    The second return value matters because dropping unparseable components
+    silently is what lets a prediction earn credit for output it never wrote
+    validly. Callers decide whether a parse failure is disqualifying; it always
+    is on the prediction side.
     """
-    return {
-        canon
-        for smi in smiles_list
-        if smi
-        for part in str(smi).split(".")
-        if part.strip() and (canon := canonical_smiles(part.strip()))
-    }
+    species: set[str] = set()
+    all_parsed = True
+    for smi in smiles_list:
+        if not smi:
+            continue
+        for part in str(smi).split("."):
+            part = part.strip()
+            if not part:
+                continue
+            canon = canonical_smiles(part)
+            if canon is None:
+                all_parsed = False
+            else:
+                species.add(canon)
+    return species, all_parsed
+
+
+def canonical_set(smiles_list: list[str]) -> set[str]:
+    """Canonical species set, ignoring whether every component parsed."""
+    return canonical_species(smiles_list)[0]
 
 
 def product_smiles_from_step(step: dict) -> list[str]:
@@ -154,9 +172,15 @@ def compare_step_products(
     a non-empty proper subset of the gold products counts as a match, which is
     how a model that names the main product but omits a leaving group is
     credited.
+
+    A prediction containing any unparseable component fails outright. Upstream
+    drops such components before comparing, so a prediction of the right product
+    plus one malformed fragment scores an exact match even under ``strict`` —
+    crediting output the model never wrote validly, and making strict mode mean
+    something other than product-set equality.
     """
-    pred_canon = canonical_set(pred_products)
-    gt_canon = canonical_set(gt_products)
+    pred_canon, pred_all_parsed = canonical_species(pred_products)
+    gt_canon, _ = canonical_species(gt_products)
 
     if not pred_canon and not gt_canon:
         return False, "both_invalid"
@@ -164,6 +188,8 @@ def compare_step_products(
         return False, "invalid_pred"
     if not gt_canon:
         return False, "invalid_gt"
+    if not pred_all_parsed:
+        return False, "invalid_pred_component"
 
     if pred_canon == gt_canon:
         return True, None

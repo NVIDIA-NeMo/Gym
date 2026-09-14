@@ -66,6 +66,10 @@ checkpoints; see `task_data.py` for the full field documentation.
 }
 ```
 
+`prepare.py` writes the `agent_ref` form above. The tracked
+`data/example.jsonl` carries `task_source` instead, because `gym dataset collate`
+rewrites the routing key; `verifier_metadata` is identical in both.
+
 ## Scoring
 
 The model emits a JSON array of steps, each with a `product_smiles`. Scoring
@@ -89,7 +93,7 @@ walks the case's **checkpoints** in order:
   names the main product but omits a leaving group. `--strict` at prepare time
   requires exact set equality.
 
-### Two deliberate departures from upstream
+### Three deliberate departures from upstream
 
 **Gold products are split on `.` just as predictions are.** Upstream splits only
 the prediction side, so a gold entry written as a single dotted string (e.g.
@@ -115,13 +119,24 @@ recovered species maps to its own form, and no previously-separate species are
 merged. Gold-as-prediction goes from 236/241 to **241/241** with all negative
 controls still at zero.
 
+**A prediction containing an unparseable component fails.** Upstream drops
+components RDKit cannot read before comparing, so the correct product plus one
+malformed fragment scores an exact match — under `--strict` as well, which makes
+strict mode mean something other than product-set equality and pays reward for
+output the model never wrote validly. Invalid predicted components are now
+disqualifying. Gold is unaffected, so this cannot mask a data problem.
+
 ### Metrics are reported per tier
 
 `compute_metrics` emits `B/...` and `C/...` keys via `compute_subset_metrics`
-keyed on `case_set`. The default Gym aggregation would report only a pooled
-`mean/reward`, and since the published B and C baselines differ by close to an
-order of magnitude, a mean over a mixed split describes no benchmark anyone
-reports. Read the per-tier keys; treat the pooled mean as an artifact.
+keyed on `case_set`, and `get_key_metrics` promotes those to the headline while
+**dropping the pooled `mean/reward`**.
+
+Both halves are needed. The default selection keeps every `mean/*` key, so
+emitting tier metrics alone would leave `mean/reward` as the headline that
+dashboards read — and since the published B and C baselines differ by close to an
+order of magnitude, that pooled average describes no benchmark anyone reports.
+A mixed-tier run therefore reports per-tier results and no cross-tier scalar.
 
 ### Reproducing published pass@k
 
@@ -153,20 +168,35 @@ gym eval run --no-serve \
     --output resources_servers/fukuyamabench/data/example_rollouts.jsonl
 ```
 
+All commands in this section run from the **repository root**.
+
 Prepare a full split (downloads the pinned upstream tarball; no Hugging Face
-dataset exists for this benchmark):
+dataset exists for this benchmark). A full-tier preparation fails closed if the
+source is incomplete, so a truncated download cannot silently shrink the
+denominator; pass `--limit` for an intentional subset:
 
 ```bash
-python scripts/prepare_fukuyamabench.py --output data/val.jsonl
-python scripts/prepare_fukuyamabench.py --output data/val_c.jsonl --sets C
+python resources_servers/fukuyamabench/scripts/prepare_fukuyamabench.py \
+    --output resources_servers/fukuyamabench/data/val.jsonl
+python resources_servers/fukuyamabench/scripts/prepare_fukuyamabench.py \
+    --output resources_servers/fukuyamabench/data/val_c.jsonl --sets C
 ```
 
-Regenerate the committed example:
+Regenerate the committed example. This is **two** stages: preparation writes
+agent-routed rows, then collation rewrites them into the `task_source` form that
+is actually tracked, and emits `example_metrics.json`. Running only the first
+stage produces a different file from the committed one:
 
 ```bash
-python scripts/prepare_fukuyamabench.py \
-    --output data/example.jsonl \
-    --sets S --source-dir tests/fixtures/synthetic_mechanisms
+python resources_servers/fukuyamabench/scripts/prepare_fukuyamabench.py \
+    --output resources_servers/fukuyamabench/data/example.jsonl \
+    --sets S \
+    --source-dir resources_servers/fukuyamabench/tests/fixtures/synthetic_mechanisms
+
+gym dataset collate \
+    "+config_paths=[resources_servers/fukuyamabench/configs/fukuyamabench.yaml]" \
+    +output_dirpath=resources_servers/fukuyamabench/data \
+    +mode=example_validation
 ```
 
 ### The committed example is synthetic
@@ -191,18 +221,27 @@ committed.
 
 The model-free check is **gold-as-prediction**: feed each case's gold pathway
 back in and confirm it scores 1.0. Over sets B and C this passes **241/241**.
-Negative controls (empty pathway, wrong-but-valid chemistry, unparseable SMILES,
-and the gold pathway reversed) all score 0 on all 241 cases.
 
-The two directions matter together: gold-as-prediction shows the scorer never
-rejects a correct answer, and the negative controls show it never accepts a
-wrong one. Either alone is passable by a scorer that always returns the same
-value.
+Negative controls, each scoring 0 exact matches:
+
+| Control | Denominator |
+| --- | --- |
+| Empty pathway | 241 |
+| Wrong-but-valid chemistry | 241 |
+| Wholly unparseable SMILES | 241 |
+| Gold pathway reversed | **233** — cases with ≥2 checkpoints, the only ones where order can differ |
+
+The two directions matter together: gold-as-prediction shows the scorer does not
+reject correct answers, and the controls show it rejects several named classes of
+wrong one. That is the accurate claim — these controls cover specific failure
+modes, not every possible wrong output. A prediction pairing the correct product
+with an unparseable extra fragment used to score an exact match, which no control
+above would have caught; it is now rejected and separately tested.
 
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/fukuyamabench
+gym env test --resources-server fukuyamabench
 ```
 
 ## Dependencies

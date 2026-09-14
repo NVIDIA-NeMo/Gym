@@ -21,7 +21,12 @@ fukuyamabench_simple_agent:
         type: example
         jsonl_fpath: resources_servers/fukuyamabench/data/example.jsonl
         license: Apache 2.0
+      # Upstream declares the benchmark Apache 2.0, but its mechanisms are
+      # transcribed from a commercial textbook and no permission is stated, so
+      # the effective licence of the downloaded corpus is unresolved. TBD is
+      # recorded deliberately rather than asserting a grant we cannot verify;
+      # see README "Licensing". Resolve with Legal before publishing results.
       - name: val
         type: validation
         jsonl_fpath: resources_servers/fukuyamabench/data/val.jsonl
-        license: Apache 2.0
+        license: TBD

@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from app import (
     FukuyamaBenchResourcesServer,
     FukuyamaBenchStatus,
@@ -23,10 +26,24 @@ from app import (
     _extract_pathway,
 )
 from metrics import canonical_set, canonical_smiles, compare_step_products, score_pathway, strip_atom_mapping
+from task_data import TaskData
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
+
+
+def _load_prepare_module():
+    """Load the preparation script, which lives outside the import path."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "prepare_fukuyamabench.py"
+    spec = importlib.util.spec_from_file_location("prepare_fukuyamabench", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+prepare = _load_prepare_module()
 
 
 # A three-step oxidation with the middle step excluded from the checkpoints, which
@@ -190,11 +207,6 @@ class TestDottedProducts:
     string can never be matched. That silently caps the attainable score.
     """
 
-    def test_dotted_gold_matches_dotted_prediction(self) -> None:
-        gt = [{"step_id": "1", "products": ["CCO.[Pd]"]}]
-        result = score_pathway([{"product_smiles": "CCO.[Pd]"}], gt, [[1]])
-        assert result["exact_match"] is True
-
     def test_dotted_gold_matches_under_strict_scoring(self) -> None:
         """Strict mode removes the subset escape hatch.
 
@@ -240,10 +252,6 @@ class TestMalformedPathway:
 
     GT = [{"step_id": "1", "products": ["CCO"]}, {"step_id": "2", "products": ["CC=O"]}]
 
-    def test_null_element_does_not_raise(self) -> None:
-        result = score_pathway([{"step_id": 1, "product_smiles": "CCCC"}, None], self.GT, [[1], [2]])
-        assert result["exact_match"] is False
-
     def test_assorted_non_mappings_do_not_raise(self) -> None:
         result = score_pathway(["a string", 42, [], None], self.GT, [[1]])
         assert result["exact_match"] is False
@@ -258,28 +266,115 @@ class TestMalformedPathway:
 class TestPerTierMetrics:
     """Set B and Set C differ by nearly an order of magnitude upstream.
 
-    A mean pooled across tiers describes no published benchmark, and the default
-    aggregation emits only that pooled scalar, so per-tier keys must be present.
+    A mean pooled across tiers describes no published benchmark. Asserting on
+    ``compute_metrics`` alone is not enough — emitting tier keys while the
+    inherited selection still promotes ``mean/reward`` leaves the invalid
+    cross-tier number as the headline, so these go through the real aggregate
+    path that consumers read.
     """
 
-    def _tasks(self) -> list[list[dict]]:
-        return [
-            [{"case_set": "B", "case_id": "B001", "reward": 1.0}],
-            [{"case_set": "C", "case_id": "C001", "reward": 0.0}],
-        ]
+    # One perfect B case and one failed C case: pooling them gives 0.5, a number
+    # that describes neither tier.
+    VERIFY_RESPONSES = [
+        {"case_set": "B", "case_id": "B001", "reward": 1.0, "_ng_task_index": 0, "_ng_rollout_index": 0},
+        {"case_set": "C", "case_id": "C001", "reward": 0.0, "_ng_task_index": 1, "_ng_rollout_index": 0},
+    ]
 
-    def test_metrics_are_reported_per_tier(self) -> None:
-        metrics = _make_server().compute_metrics(self._tasks())
-        assert any(k.startswith("B/") for k in metrics), metrics
-        assert any(k.startswith("C/") for k in metrics), metrics
+    def _aggregate(self):
+        server = _make_server()
+        return compute_aggregate_metrics(
+            self.VERIFY_RESPONSES,
+            compute_metrics_fn=server.compute_metrics,
+            get_key_metrics_fn=server.get_key_metrics,
+        )
 
-    def test_tiers_are_not_collapsed_into_one_number(self) -> None:
-        """The pooled 0.5 of a 1.0/0.0 mixture must not be the only signal."""
-        metrics = _make_server().compute_metrics(self._tasks())
-        b = {k: v for k, v in metrics.items() if k.startswith("B/")}
-        c = {k: v for k, v in metrics.items() if k.startswith("C/")}
-        assert b and c
-        assert b != c
+    def test_headline_metrics_are_per_tier(self) -> None:
+        key_metrics = self._aggregate().key_metrics
+        assert any(k.startswith("B/") for k in key_metrics), key_metrics
+        assert any(k.startswith("C/") for k in key_metrics), key_metrics
+
+    def test_pooled_reward_is_not_a_headline_metric(self) -> None:
+        key_metrics = self._aggregate().key_metrics
+        assert "mean/reward" not in key_metrics, key_metrics
+
+    def test_tiers_carry_different_results(self) -> None:
+        key_metrics = self._aggregate().key_metrics
+        b = {k.split("/", 1)[1]: v for k, v in key_metrics.items() if k.startswith("B/")}
+        c = {k.split("/", 1)[1]: v for k, v in key_metrics.items() if k.startswith("C/")}
+        assert b and c and b != c
+
+
+class TestInvalidPredictedProducts:
+    """A prediction is only correct if everything it wrote is a real structure.
+
+    Unparseable components used to be dropped before comparison, so the right
+    product plus one malformed fragment scored an exact match — in strict mode
+    too, which made "strict" mean something other than set equality.
+    """
+
+    GT = [{"step_id": "1", "products": ["CCO"]}]
+
+    def test_extra_unparseable_component_fails_when_lenient(self) -> None:
+        result = score_pathway([{"product_smiles": "CCO.not_a_smiles(("}], self.GT, [[1]], lenient=True)
+        assert result["exact_match"] is False
+
+    def test_extra_unparseable_component_fails_when_strict(self) -> None:
+        result = score_pathway([{"product_smiles": "CCO.not_a_smiles(("}], self.GT, [[1]], lenient=False)
+        assert result["exact_match"] is False
+
+    def test_error_names_the_unparseable_component(self) -> None:
+        assert compare_step_products(["CCO", "not_a_smiles(("], ["CCO"])[1] == "invalid_pred_component"
+
+    def test_a_wholly_valid_prediction_still_matches(self) -> None:
+        """The guard must not reject good answers."""
+        result = score_pathway([{"product_smiles": "CCO"}], self.GT, [[1]])
+        assert result["exact_match"] is True
+
+    async def test_verify_rejects_it_end_to_end(self) -> None:
+        body = _make_request(
+            _fenced([{"step_id": 1, "product_smiles": "CCO.not_a_smiles(("}]),
+            gt_pathway=self.GT,
+            checkpoints=[[1]],
+        )
+        result = await _make_server().verify(body)
+        assert result.status == FukuyamaBenchStatus.SCORED.value
+        assert result.reward == 0.0
+
+
+class TestCorpusCompleteness:
+    """A short corpus silently changes the denominator of every score.
+
+    An interrupted download or a stale cache leaves a valid-looking directory
+    with fewer cases, and preparation used to accept it and exit 0.
+    """
+
+    def test_short_tier_is_rejected(self) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            prepare.check_corpus_complete([Path("B001")], {"B"})
+        assert "found 1" in str(excinfo.value)
+
+    def test_complete_tier_is_accepted(self) -> None:
+        dirs = [Path(f"B{i:03d}") for i in range(1, prepare.EXPECTED_CASES["B"] + 1)]
+        prepare.check_corpus_complete(dirs, {"B"})
+
+    def test_duplicate_case_is_rejected(self) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            prepare.check_corpus_complete([Path("B001"), Path("B001")], {"B"})
+        assert "Duplicate" in str(excinfo.value)
+
+    def test_synthetic_fixtures_are_not_held_to_the_manifest(self) -> None:
+        """The synthetic tier is deliberately outside upstream's manifest."""
+        prepare.check_corpus_complete([Path("S001")], {"S"})
+
+
+class TestTaskDataSchema:
+    def test_every_documented_field_is_declared(self) -> None:
+        fields = set(TaskData.model_fields)
+        assert {"gt_pathway", "checkpoints", "lenient", "case_id", "case_set"} <= fields
+
+    def test_extra_metadata_is_tolerated(self) -> None:
+        """verifier_metadata carries provenance the scorer never reads."""
+        assert TaskData(case_id="B001", unknown_future_field=1).case_id == "B001"
 
 
 class TestEquivalentSteps:
@@ -330,7 +425,44 @@ class TestHelpers:
     def test_canonical_set_drops_unparseable(self) -> None:
         assert canonical_set(["CCO", "not_a_smiles(("]) == {"CCO"}
 
+    def test_empty_and_blank_input_is_handled(self) -> None:
+        """Models emit empty strings and stray separators; neither is an error."""
+        assert strip_atom_mapping("") == ""
+        assert canonical_smiles("") is None
+        assert canonical_set(["", None, "CCO..", "  "]) == {"CCO"}
+
     def test_compare_reports_why_it_failed(self) -> None:
         assert compare_step_products(["CCO"], ["CC=O"])[1] == "mismatch"
         assert compare_step_products(["CCO", "c1ccccc1"], ["CCO"])[1] == "superset_match"
         assert compare_step_products([], ["CCO"])[1] == "invalid_pred"
+
+    def test_unparseable_gold_is_never_a_match(self) -> None:
+        """An organometallic RDKit still cannot read must not pass by default."""
+        assert compare_step_products(["CCO"], ["not_a_smiles(("]) == (False, "invalid_gt")
+        assert compare_step_products([], []) == (False, "both_invalid")
+
+
+class TestAlternativeStepShapes:
+    """Upstream's extractor accepts `products` as well as `product_smiles`.
+
+    A model emitting the alternative shape must still be scored rather than
+    silently reading as an empty prediction.
+    """
+
+    GT = [{"step_id": "1", "products": ["CCO"]}]
+
+    def test_product_smiles_as_a_list(self) -> None:
+        result = score_pathway([{"product_smiles": ["CCO"]}], self.GT, [[1]])
+        assert result["exact_match"] is True
+
+    def test_products_as_a_list_of_strings(self) -> None:
+        result = score_pathway([{"products": ["CCO"]}], self.GT, [[1]])
+        assert result["exact_match"] is True
+
+    def test_products_as_a_list_of_dicts(self) -> None:
+        result = score_pathway([{"products": [{"smiles": "CCO"}]}], self.GT, [[1]])
+        assert result["exact_match"] is True
+
+    def test_a_step_with_no_recognised_product_field_scores_nothing(self) -> None:
+        result = score_pathway([{"step_id": 1, "reaction_type": "addition"}], self.GT, [[1]])
+        assert result["exact_match"] is False

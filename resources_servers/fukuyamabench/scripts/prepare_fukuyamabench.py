@@ -46,6 +46,14 @@ REPO = "HaCTang/ReactionMechanismReasoning"
 REVISION = "63bb79f912f0b2de593996b80ffeea894f6f1a59"
 TARBALL_URL = f"https://codeload.github.com/{REPO}/tar.gz/{REVISION}"
 
+# Case counts per tier at the pinned revision. A run that silently prepares
+# fewer cases changes the denominator of every score computed from it, and an
+# interrupted download or a stale cache does exactly that, so a full-tier
+# preparation is checked against this manifest before it reports success.
+EXPECTED_CASES = {"A": 78, "B": 131, "C": 110}
+
+DOWNLOAD_TIMEOUT_SECONDS = 120
+
 # From upstream eval/prompts/infer_pathway_prompts.yaml, key
 # `pathway_student_system_prompt`. Content-preserving copy: trailing whitespace
 # after three Markdown lines is stripped by this repository's whitespace hook.
@@ -144,7 +152,7 @@ def fetch_mechanisms(dest: Path) -> Path:
 
     print(f"Downloading {TARBALL_URL}", file=sys.stderr)
     with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp:
-        with urllib.request.urlopen(TARBALL_URL) as response:
+        with urllib.request.urlopen(TARBALL_URL, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
             tmp.write(response.read())
         tmp.flush()
         with tarfile.open(tmp.name) as tar:
@@ -230,6 +238,33 @@ def load_case(case_dir: Path) -> Optional[dict]:
     }
 
 
+def check_corpus_complete(case_dirs: list[Path], wanted: set[str]) -> None:
+    """Fail before writing if a requested upstream tier is not fully present.
+
+    A truncated download, a partially extracted cache, or a wrong ``--source-dir``
+    otherwise produces a smaller corpus that still exits 0, quietly changing the
+    denominator of every score derived from it. Tiers outside the upstream
+    manifest — the synthetic fixtures — are skipped deliberately.
+    """
+    names = [d.name for d in case_dirs]
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        raise SystemExit(f"Duplicate case directories: {', '.join(duplicates)}")
+
+    problems = []
+    for tier in sorted(wanted & EXPECTED_CASES.keys()):
+        found = sum(1 for n in names if n[0].upper() == tier)
+        expected = EXPECTED_CASES[tier]
+        if found != expected:
+            problems.append(f"set {tier}: found {found}, expected {expected}")
+    if problems:
+        raise SystemExit(
+            "Incomplete benchmark corpus; refusing to write a short split.\n  "
+            + "\n  ".join(problems)
+            + "\nRe-download (delete --cache-dir) or pass --limit for an intentional subset."
+        )
+
+
 def format_row(case: dict, lenient: bool) -> dict:
     user_prompt = USER_TEMPLATE.replace("{starting_reactants}", case["starting_reactants"]).replace(
         "{conditions}", case["conditions"]
@@ -290,13 +325,15 @@ def main() -> None:
     mechanisms = args.source_dir or fetch_mechanisms(args.cache_dir)
     wanted = {s.upper() for s in args.sets}
     case_dirs = sorted(d for d in mechanisms.iterdir() if d.is_dir() and d.name[0].upper() in wanted)
+    if not args.limit:
+        check_corpus_complete(case_dirs, wanted)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     written = 0
     skipped = 0
-    with open(output_path, "w") as fout:
+    with open(output_path, "w", encoding="utf-8") as fout:
         for case_dir in case_dirs:
             case = load_case(case_dir)
             if case is None:
