@@ -13,6 +13,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+import yaml
+
 from nemo_gym.web.datasets import adapt_webvoyager_record, load_json_records, write_jsonl
 
 
@@ -21,8 +23,8 @@ REPO_ROOT = BENCHMARK_DIR.parents[1]
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "webvoyager.jsonl"
 DEFAULT_ENV_FPATH = BENCHMARK_DIR / "env.yaml"
 DEFAULT_ROLLOUT_FPATH = REPO_ROOT / "results" / "webvoyager" / "rollouts.jsonl"
-PROVENANCE_FPATH = BENCHMARK_DIR / "provenance.json"
-PROVENANCE = json.loads(PROVENANCE_FPATH.read_text(encoding="utf-8"))
+PROVENANCE_FPATH = BENCHMARK_DIR / "provenance.yaml"
+PROVENANCE = yaml.safe_load(PROVENANCE_FPATH.read_text(encoding="utf-8"))
 DATASET_PROVENANCE = PROVENANCE["dataset"]
 SOURCE_COMMIT = DATASET_PROVENANCE["commit"]
 SOURCE_URL = DATASET_PROVENANCE["raw_url"]

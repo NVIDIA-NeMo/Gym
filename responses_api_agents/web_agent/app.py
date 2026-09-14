@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
@@ -94,7 +95,11 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall"
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
+    # None preserves the reference's complete response call list. Individual
+    # action validation and resource operation timeouts remain in force.
+    nano_omni_max_tool_calls: int | None = Field(default=8, ge=1)
     nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    nano_omni_retry_invalid_tool_calls: bool = True
     nano_omni_parse_retry_feedback: bool = False
     nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     nano_omni_parse_retry_delay_secs: float = Field(default=0.0, ge=0.0, le=60.0)
@@ -145,6 +150,7 @@ class WebAgentRunResponse(BaseVerifyResponse):
     failure_kind: str | None = None
     terminated: bool = False
     truncated: bool = False
+    truncation_reason: str | None = None
     environment_steps: int = 0
     model_turns: int = 0
     execution_failures: int = 0
@@ -182,6 +188,7 @@ def _parse_response_action(
     *,
     policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall",
     qwen_state: QwenPolicyState | None = None,
+    nano_omni_max_tool_calls: int | None = 8,
     nano_omni_max_computer_actions: int = 20,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
@@ -189,6 +196,7 @@ def _parse_response_action(
     if policy_protocol == "nano_omni_toolcall":
         return parse_nano_omni_tool_calls(
             response.output,
+            max_calls=nano_omni_max_tool_calls,
             max_computer_actions=nano_omni_max_computer_actions,
         )
     if qwen_state is None:
@@ -263,6 +271,8 @@ def _is_model_context_overflow(exc: Exception) -> bool:
     """Recognize deterministic vLLM context-limit failures, including wrapped 5xx responses."""
 
     if not isinstance(exc, ClientResponseError):
+        return False
+    if exc.status != 400 and not 500 <= exc.status < 600:
         return False
     response_content = getattr(exc, "response_content", None)
     if isinstance(response_content, bytes):
@@ -554,6 +564,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         final_answer: str | None = None
         terminated = False
         truncated = False
+        truncation_reason: str | None = None
         environment_steps = 0
         model_turns = 0
         execution_failures = 0
@@ -630,6 +641,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             rollout_finished = False
             for step_index in range(self.config.max_steps):
                 action = None
+                invalid_tool_call_terminal = False
                 parse_feedback: list[Any] = []
                 for parse_attempt in range(self.config.max_parse_retries + 1):
                     if qwen_state is not None:
@@ -682,11 +694,27 @@ class WebAgent(SimpleResponsesAPIAgent):
                             )
                             break
                         except Exception as exc:  # Bounded reference API parity retry.
+                            if _is_model_context_overflow(exc):
+                                # Exhausting the policy's context budget is a
+                                # terminal rollout outcome, not a reason to
+                                # replay browser actions. Keep the live session
+                                # until the normal evaluator has scored it.
+                                truncated = True
+                                truncation_reason = "model_context_overflow"
+                                LOG.warning(
+                                    "event=web_model_context_exhausted benchmark=%s task=%s step=%d "
+                                    "environment_steps=%d model_turns=%d http_status=%d evaluate_before_close=True",
+                                    task.benchmark.value,
+                                    task.task_id,
+                                    step_index,
+                                    environment_steps,
+                                    model_turns,
+                                    exc.status,
+                                )
+                                break
                             model_error = exc
-                            retry_model_request = (
-                                model_attempt < self.config.model_turn_max_retries
-                                and not _is_model_context_overflow(exc)
-                                and not (isinstance(exc, ClientResponseError) and _failure_route(exc)[1])
+                            retry_model_request = model_attempt < self.config.model_turn_max_retries and not (
+                                isinstance(exc, ClientResponseError) and _failure_route(exc)[1]
                             )
                             LOG.warning(
                                 "event=web_model_request_failed benchmark=%s task=%s step=%d parse_attempt=%d "
@@ -705,6 +733,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                             if not retry_model_request:
                                 raise
                             await asyncio.sleep(self.config.model_retry_delay_secs)
+                    if truncated:
+                        break
                     if model_error is not None:
                         raise model_error
                     model_response = NeMoGymResponse.model_validate(model_payload)
@@ -731,6 +761,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         # a valid truncated policy outcome and does not retry
                         # the action parser against the same empty response.
                         truncated = True
+                        truncation_reason = incomplete_reason
                         LOG.warning(
                             "event=web_model_output_truncated benchmark=%s task=%s step=%d parse_attempt=%d reason=%s",
                             task.benchmark.value,
@@ -746,6 +777,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             task.action_profile,
                             policy_protocol=self.config.policy_protocol,
                             qwen_state=qwen_state,
+                            nano_omni_max_tool_calls=self.config.nano_omni_max_tool_calls,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
                         )
                         # Both maintained policy adapters add only a
@@ -777,6 +809,29 @@ class WebAgent(SimpleResponsesAPIAgent):
                             str(exc)[:500],
                             parse_attempt >= self.config.max_parse_retries,
                         )
+                        if (
+                            self.config.policy_protocol == "nano_omni_toolcall"
+                            and not self.config.nano_omni_retry_invalid_tool_calls
+                            and any(item.type == "function_call" for item in model_response.output)
+                        ):
+                            # The reference executes calls in order: an invalid
+                            # later call must not undo its valid predecessors.
+                            # Never execute or repair the rejected call, or skip
+                            # ahead to later calls. Keep the raw response intact.
+                            invalid_tool_call_terminal = True
+                            action = exc.validated_prefix
+                            if action is None:
+                                truncation_reason = "invalid_tool_arguments"
+                            trajectory.extend(model_response.output)
+                            LOG.warning(
+                                "event=web_invalid_tool_call_terminal benchmark=%s task=%s step=%d "
+                                "validated_prefix_calls=%d evaluate_before_close=True",
+                                task.benchmark.value,
+                                task.task_id,
+                                step_index,
+                                len(action.arguments["calls"]) if action is not None else 0,
+                            )
+                            break
                         if parse_attempt >= self.config.max_parse_retries:
                             break
                         if self.config.policy_protocol == "nano_omni_toolcall":
@@ -889,6 +944,11 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if action.terminal:
                     final_answer = action.answer
                 if action.terminal or terminated or truncated:
+                    rollout_finished = True
+                    break
+                if invalid_tool_call_terminal:
+                    truncated = True
+                    truncation_reason = "invalid_tool_arguments"
                     rollout_finished = True
                     break
                 if consecutive_execution_failures >= self.config.max_consecutive_execution_failures:
@@ -1013,7 +1073,24 @@ class WebAgent(SimpleResponsesAPIAgent):
                     )
 
         if last_model_response is None:
-            raise RuntimeError("web rollout ended before the policy returned a response")
+            if truncation_reason != "model_context_overflow":
+                raise RuntimeError("web rollout ended before the policy returned a response")
+            # A first-turn context rejection has no provider response or token
+            # usage. Supply only a clearly named empty rollout envelope so the
+            # recorded initial observation can still be judged; invent no
+            # model output, tool call, usage, or final answer.
+            last_model_response = NeMoGymResponse(
+                id=f"web-agent-context-limit-{uuid4().hex}",
+                created_at=time.time(),
+                model=base_body.model or "web-policy",
+                object="response",
+                status="incomplete",
+                incomplete_details={"reason": "max_output_tokens"},
+                output=[],
+                tools=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+            )
         last_model_response.output = trajectory
         last_model_response.usage = usage
 
@@ -1075,6 +1152,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             failure_kind=verifier_result.failure_kind,
             terminated=terminated,
             truncated=truncated,
+            truncation_reason=truncation_reason,
             environment_steps=environment_steps,
             model_turns=model_turns,
             execution_failures=execution_failures,

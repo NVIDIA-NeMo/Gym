@@ -69,6 +69,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _is_context_length_error,
     _transport_images,
     _transport_log_context,
 )
@@ -79,6 +80,22 @@ FIXED_TIME = 1691418000
 FIXED_UUID = "123"
 
 _TEST_LINEAGE = InMemoryLineageStore()
+
+
+@mark.parametrize(
+    "status, message",
+    [
+        (400, "Unknown tool schema"),
+        (400, "The configured maximum model length is invalid"),
+        (401, "The decoder prompt is longer than the maximum model length"),
+        (500, "CUDA unspecified launch failure"),
+        (500, "The decoder prompt is longer than the maximum model length"),
+    ],
+)
+def test_context_normalization_preserves_unrelated_provider_failures(status, message):
+    error = ClientResponseError(MagicMock(), (), status=status)
+    error.response_content = json.dumps({"error": {"message": message}}).encode()
+    assert not _is_context_length_error(error)
 
 
 def lineage_index():
@@ -786,13 +803,25 @@ class TestApp:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
     @mark.parametrize("propagate", [False, True])
-    def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
+    @mark.parametrize("use_completions_api", [False, True])
+    @mark.parametrize(
+        "message",
+        [
+            "maximum context length",
+            "The decoder prompt (length 128379) is longer than the maximum model length of 128000.",
+        ],
+    )
+    def test_context_overflow_propagation_flag(
+        self, monkeypatch: MonkeyPatch, propagate: bool, use_completions_api: bool, message: str
+    ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        server.config.use_completions_api = use_completions_api
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
-        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        error.response_content = json.dumps({"error": {"message": message, "code": 400}}).encode()
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
         server._clients = [mock_client]
 
         app = server.setup_webserver()
@@ -804,10 +833,14 @@ class TestApp:
 
         if propagate:
             assert response.status_code == 400
-            assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+            assert response.json() == {"error": {"message": message, "code": 400}}
         else:
             assert response.status_code == 200
             assert '"finish_reason": "length"' in response.text
+        used = mock_client.create_completion if use_completions_api else mock_client.create_chat_completion
+        unused = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
+        used.assert_awaited_once()
+        unused.assert_not_called()
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

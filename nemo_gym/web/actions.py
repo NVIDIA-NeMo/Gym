@@ -47,6 +47,12 @@ MAX_SCROLL_AMOUNT = 50
 class ActionParseError(ValueError):
     """Raised when a policy adapter emits an unsafe or unsupported action."""
 
+    def __init__(self, message: str, *, validated_prefix: WebAction | None = None) -> None:
+        super().__init__(message)
+        # Only complete, validated calls preceding the error may be exposed.
+        # The caller chooses whether its execution policy permits this prefix.
+        self.validated_prefix = validated_prefix
+
 
 def _native_number(value: Any, *, field: str, minimum: float, maximum: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -154,16 +160,34 @@ def _validate_native_tool_arguments(
     return normalized, 0
 
 
+def _nano_omni_action(calls: list[dict[str, Any]], parse_records: list[dict[str, Any]]) -> WebAction:
+    terminal = calls[-1]["name"] == "terminate"
+    answer = calls[-1]["arguments"].get("answer") if terminal else None
+    return WebAction(
+        name=calls[0]["name"] if len(calls) == 1 else "computer_use_tool_calls",
+        script="",
+        arguments={"calls": calls},
+        terminal=terminal,
+        answer=None if answer is None else str(answer),
+        raw_model_output=json.dumps(calls, ensure_ascii=False),
+        metadata={"nano_omni_parse": {"calls": parse_records}},
+    )
+
+
 def parse_nano_omni_tool_calls(
     items: list[Any],
     *,
-    max_calls: int = 8,
+    max_calls: int | None = 8,
     max_computer_actions: int = 20,
 ) -> WebAction:
     """Validate parser-produced Nano Omni calls without repairing their contents."""
 
     calls: list[dict[str, Any]] = []
     parse_records: list[dict[str, Any]] = []
+    call_count = sum(
+        (item.get("type") if isinstance(item, dict) else getattr(item, "type", None)) == "function_call"
+        for item in items
+    )
     for item in items:
         item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
         if item_type != "function_call":
@@ -172,20 +196,29 @@ def parse_nano_omni_tool_calls(
         raw_arguments = item.get("arguments") if isinstance(item, dict) else getattr(item, "arguments", None)
         call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
         try:
-            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-        except json.JSONDecodeError as exc:
-            raise ActionParseError(f"invalid JSON arguments for Nano Omni tool {name!r}") from exc
-        if arguments is None:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            raise ActionParseError(f"Nano Omni tool {name!r} arguments must be an object")
-        if name not in NANO_OMNI_TOOL_NAMES:
-            raise ActionParseError(f"unsupported Nano Omni browser tool: {name!r}")
-        arguments, computer_actions = _validate_native_tool_arguments(
-            name,
-            arguments,
-            max_computer_actions=max_computer_actions,
-        )
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError as exc:
+                raise ActionParseError(f"invalid JSON arguments for Nano Omni tool {name!r}") from exc
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                raise ActionParseError(f"Nano Omni tool {name!r} arguments must be an object")
+            if name not in NANO_OMNI_TOOL_NAMES:
+                raise ActionParseError(f"unsupported Nano Omni browser tool: {name!r}")
+            arguments, computer_actions = _validate_native_tool_arguments(
+                name,
+                arguments,
+                max_computer_actions=max_computer_actions,
+            )
+        except ActionParseError as exc:
+            if (
+                calls
+                and (max_calls is None or call_count <= max_calls)
+                and not any(call["name"] == "terminate" for call in calls)
+            ):
+                exc.validated_prefix = _nano_omni_action(calls, parse_records)
+            raise
         calls.append({"id": call_id, "name": name, "arguments": arguments})
         parse_records.append(
             {
@@ -197,24 +230,13 @@ def parse_nano_omni_tool_calls(
 
     if not calls:
         raise ActionParseError("model response did not contain a Nano Omni function call")
-    if len(calls) > max_calls:
+    if max_calls is not None and len(calls) > max_calls:
         raise ActionParseError(f"Nano Omni response exceeded the {max_calls}-call limit")
     terminal_indices = [index for index, call in enumerate(calls) if call["name"] == "terminate"]
     if terminal_indices and terminal_indices != [len(calls) - 1]:
         raise ActionParseError("Nano Omni terminate must be the final tool call")
 
-    terminal = bool(terminal_indices)
-    terminal_args = calls[-1]["arguments"] if terminal else {}
-    answer = terminal_args.get("answer") if terminal else None
-    return WebAction(
-        name=calls[0]["name"] if len(calls) == 1 else "computer_use_tool_calls",
-        script="",
-        arguments={"calls": calls},
-        terminal=terminal,
-        answer=None if answer is None else str(answer),
-        raw_model_output=json.dumps(calls, ensure_ascii=False),
-        metadata={"nano_omni_parse": {"calls": parse_records}},
-    )
+    return _nano_omni_action(calls, parse_records)
 
 
 __all__ = [
