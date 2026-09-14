@@ -101,7 +101,26 @@ EOF""",
     ],
 }
 
+
+def _verifier_apt_patches(packages: str) -> List[Tuple[str, str]]:
+    # These images include CA certificates. Refresh through HTTPS to avoid stale
+    # HTTP mirror metadata, and wait for an agent's package-manager operation.
+    refresh = """find /etc/apt -maxdepth 2 -type f \\( -name '*.list' -o -name '*.sources' \\) \\
+  -exec sed -i 's|http://deb.debian.org|https://deb.debian.org|g' {} +
+apt-get -o Acquire::Retries=3 -o Acquire::https::No-Cache=true update || exit $?"""
+    return [
+        ("apt-get update", refresh),
+        (
+            f"apt-get install -y {packages}",
+            f"apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 install -y {packages} || exit $?",
+        ),
+    ]
+
+
 TEST_SH_PATCHES = {
+    "terminal-bench/qemu-startup": _verifier_apt_patches("curl expect"),
+    "terminal-bench/qemu-alpine-ssh": _verifier_apt_patches("curl sshpass"),
+    "terminal-bench/code-from-image": _verifier_apt_patches("curl"),
     "terminal-bench/mcmc-sampling-stan": [
         ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
     ],
