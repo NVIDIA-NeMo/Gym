@@ -8,7 +8,7 @@ from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServerConfig,
     AABriefcaseLiteVerifyRequest,
 )
-from resources_servers.gdpval.judge_panel import ResolvedJudge
+from resources_servers.gdpval.judge_panel import ResolvedJudge, sample_judge
 
 
 async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(monkeypatch, tmp_path):
@@ -41,7 +41,7 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
 
     def choose(panel, rng):
         eligible_panels.append([judge.name for judge in panel])
-        return panel[0]
+        return sample_judge(panel, rng)
 
     call = AsyncMock(return_value=({"passed": True, "reasoning": "test response"}, "{}"))
     monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.sample_judge", choose)
@@ -61,3 +61,16 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
     assert "Unrelated content" not in str(call.call_args_list)
     assert {"type": "text", "text": "[required submitted file missing: absent.srt]"} in missing_blocks
     assert subtitles not in str(missing_blocks)
+
+    # Removing a required artifact changes the evidence, not the assigned judge.
+    (tmp_path / "clip.mp4").unlink()
+    await server._verify_binary(
+        AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t4", deliverables_dir=str(tmp_path)),
+        "Create a video and captions.",
+        judges,
+    )
+    assert eligible_panels[3:] == eligible_panels[:3]
+    first_judges = [entry.args[0].name for entry in call.call_args_list[:3]]
+    second_judges = [entry.args[0].name for entry in call.call_args_list[3:]]
+    assert first_judges == second_judges
+    assert {"type": "text", "text": "[required submitted file missing: clip.mp4]"} in call.call_args_list[4].args[3]

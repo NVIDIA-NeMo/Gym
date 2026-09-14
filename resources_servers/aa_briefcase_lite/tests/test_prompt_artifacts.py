@@ -72,7 +72,7 @@ async def test_tex_source_and_rendered_pdf_both_reach_judge(server, tmp_path, me
     assert any(block["type"] != "text" for block in blocks)
     assert "report.tex (LaTeX source)" in str(blocks)
     pdf_name = "report.tex.pdf" if sidecar else "report.pdf"
-    heading = {"type": "text", "text": f"\n{pdf_name} (rendering associated with report.tex):\n"}
+    heading = {"type": "text", "text": f"\n{pdf_name} (submitted alongside report.tex):\n"}
     content_index = blocks.index(heading) + 1
     rendered = blocks[content_index + (media_mode == "images_and_text")]
     assert rendered["type"] == "image_url"

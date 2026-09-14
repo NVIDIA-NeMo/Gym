@@ -42,6 +42,8 @@ from resources_servers.gdpval.comparison import (
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_media_modalities,
+    is_audio_file,
+    is_video_file,
     make_rng,
     merge_create_kwargs,
     sample_judge,
@@ -227,7 +229,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                         "[extracted text]\n"
                     )
                     if block.get("text") == f"\n{source.name}:\n" and has_rendering:
-                        block["text"] = f"\n{pdf.name} (rendering associated with {source.name}):\n"
+                        block["text"] = f"\n{pdf.name} (submitted alongside {source.name}):\n"
             text_used = sum(len(block.get("text", "")) for block in blocks)
             remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
             label = _bounded_text(f"\n{source.name} (LaTeX source):\n", remaining)
@@ -318,6 +320,12 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 stage, missing = stages[filenames]
                 eligible = judges
                 modalities = dir_media_modalities(stage)
+                # Missing required media must not change this check's judge panel
+                # across submissions; retain capability checks for attached media too.
+                if any(is_audio_file(name) for name in filenames):
+                    modalities.add("audio")
+                if any(is_video_file(name) for name in filenames):
+                    modalities.add("video")
                 if modalities:
                     eligible, _audio, _video = self._route_media_judges(
                         judges, task_id=body.task_id, modalities=modalities, label="binary check artifact"
