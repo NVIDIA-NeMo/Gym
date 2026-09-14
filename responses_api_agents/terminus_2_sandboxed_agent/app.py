@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -81,6 +82,10 @@ class Terminus2AgentVerifyRequest(BaseVerifyRequest):
 
 class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     terminus2_completed: bool
     command_exec_times: List[float]
@@ -334,13 +339,19 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
         instruction = _instruction(body.input)
+        run_body = await request.json()
+        invocation_id = f"terminus2_{uuid4().hex}" if self.rollout_id_from_run(run_body) is not None else None
 
         model_base_url = (
-            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
-            + "/v1"
+            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=run_body) + "/v1"
         )
         llm = NeMoGymLLM(
-            client=NeMoGymAsyncOpenAI(base_url=model_base_url, api_key="dummy", internal=True),
+            client=NeMoGymAsyncOpenAI(
+                base_url=model_base_url,
+                api_key="dummy",
+                internal=True,
+                default_headers={"x-session-id": invocation_id} if invocation_id is not None else {},
+            ),
             model_name=self.config.model_server.name,
             model_context_limit=self.config.model_context_limit,
             model_output_limit=self.config.model_output_limit,
@@ -387,12 +398,18 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
                 error = None
+                invocation_status = "completed"
+                error_type = None
             except TimeoutError:
                 terminus2_completed = False
                 error = format_exc()
-            except:
+                invocation_status = "incomplete"
+                error_type = "TimeoutError"
+            except BaseException as exc:
                 terminus2_completed = False
                 error = format_exc()
+                invocation_status = "failed"
+                error_type = type(exc).__name__
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
                 pass
@@ -436,6 +453,19 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "error": error,
             "usages": llm.usages,
         }
+        if invocation_id is not None:
+            metrics["ng_agent_observations"] = AgentObservationBundle(
+                source="terminus2",
+                records=[
+                    AgentInvocation(
+                        invocation_id=invocation_id,
+                        status=invocation_status,
+                        duration_ms=total_time * 1000,
+                        error_type=error_type,
+                    )
+                ],
+                gaps=[ObservationGap(code="turns_unavailable", invocation_id=invocation_id)],
+            )
         return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:

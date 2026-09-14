@@ -113,3 +113,18 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
 - Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
   fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
 - C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
+
+### Terminus2 invocation ownership
+
+With model-call capture enabled as described above, `terminus_2_sandboxed_agent` emits an `AgentInvocation` for each
+identified rollout execution. Its execution-specific `x-session-id` header lets the collector link captured model
+calls to that invocation, including retries without a response ID and summarization calls. Saved observations include
+the execution outcome and duration; these do not establish whether the task was solved.
+
+This ownership enables `model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
+`model_call_runaway_generation`, and `trajectory_capture_mismatch` under their documented capture and payload
+requirements. See [Rollout health checks](/evaluation/rollout-health).
+
+The adapter does not emit canonical turns and reports `turns_unavailable`. Turn-dependent checks remain unobserved,
+so invocation ownership alone does not establish an overall healthy rollout. Calls are owned at invocation scope;
+summarization calls are not separated into per-turn evidence.
