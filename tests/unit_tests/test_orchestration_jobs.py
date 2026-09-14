@@ -68,10 +68,34 @@ def test_record_defaults_to_current_schema_version():
     assert _record().schema_version == SCHEMA_VERSION
 
 
+def test_load_record_accepts_an_older_record_after_an_upgrade():
+    """The upgrade path: a record written by an older Gym must stay readable.
+
+    Simulated the way it really happens -- the payload predates a field, so the
+    key is simply absent and the model's default fills it. Refusing this is what
+    would strand every job already on disk the moment nemo-gym is upgraded.
+    """
+    payload = json.loads(dumps(_record()))
+    payload["schema_version"] = SCHEMA_VERSION - 1
+    payload.pop("hostname")
+
+    record = load_record(payload)
+
+    assert record.schema_version == SCHEMA_VERSION - 1
+    assert record.hostname is None
+
+
+def test_load_record_rejects_a_payload_with_no_version():
+    payload = json.loads(dumps(_record()))
+    del payload["schema_version"]
+    with pytest.raises(ValueError, match="no usable schema_version"):
+        load_record(payload)
+
+
 def test_load_record_refuses_a_newer_schema_version():
     payload = json.loads(_record().model_dump_json())
     payload["schema_version"] = SCHEMA_VERSION + 1
-    with pytest.raises(ValueError, match="schema_version"):
+    with pytest.raises(ValueError, match="written by a newer nemo-gym"):
         load_record(payload)
 
 

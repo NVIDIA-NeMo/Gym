@@ -28,6 +28,17 @@ k8s or a local runner later. Two consequences, both enforced by
   the sbatch templates into its import path.
 * No field is typed or named after one executor's vocabulary. Where a docstring
   explains a value by example, it says which executor the example comes from.
+
+Compatibility. A record outlives the Gym that wrote it, so `schema_version` is
+read in one direction only: a reader accepts anything at or below its own
+version and refuses only what is newer than it understands. Upgrading nemo-gym
+therefore never strands records already on disk.
+
+That is only sound if the schema keeps its side of the bargain, so within one
+schema version a field may only be ADDED WITH A DEFAULT, or removed. A field
+must never be repurposed or have its meaning changed -- an older record would
+then be read as if it meant the new thing. Anything of that kind needs a
+`SCHEMA_VERSION` bump and an explicit migration, not a silent reinterpretation.
 """
 
 import os
@@ -140,15 +151,25 @@ def write_local_index(record: SubmissionRecord) -> Path | None:
 
 
 def load_record(payload: dict) -> SubmissionRecord:
-    """Parse a record, refusing one this version does not understand.
+    """Parse a record, refusing only one written by a NEWER Gym.
 
-    A v1 reader silently accepting a v2 record would read fields that may have
-    moved; failing loudly is the only honest option.
+    Older records stay readable: fields added since take their defaults, which
+    the module docstring's compatibility rule is there to guarantee. Refusing
+    them instead would mean an upgrade silently orphaned every job already
+    submitted.
+
+    A newer record is the one case that cannot be read safely -- it may carry
+    fields whose meaning this version does not know -- so it fails, and says
+    which way round the mismatch is.
     """
     version = payload.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if not isinstance(version, int):
         raise ValueError(
-            f"Unsupported job record schema_version {version!r}: this Gym understands {SCHEMA_VERSION}. "
-            "Upgrade nemo-gym to read this record."
+            f"Job record has no usable schema_version (got {version!r}); it was not written by `gym eval submit`."
+        )
+    if version > SCHEMA_VERSION:
+        raise ValueError(
+            f"Job record schema_version {version} was written by a newer nemo-gym; this one understands "
+            f"up to {SCHEMA_VERSION}. Upgrade nemo-gym to read it."
         )
     return SubmissionRecord.model_validate(payload)
