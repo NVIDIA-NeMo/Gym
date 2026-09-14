@@ -399,8 +399,10 @@ def test_inconclusive_reason_flags_runs_that_produced_no_verdict() -> None:
     sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
     only_one = {"tests": [{"name": "test_old", "status": "PASSED"}]}
 
-    assert "never reported an outcome" in inconclusive_reason(_result(test_results=only_one), sample)
-    assert "no tests at all" in inconclusive_reason(_result(), sample)
+    assert inconclusive_reason(_result(test_results=only_one), sample) is None
+    assert not grade_output(only_one, sample)
+    assert inconclusive_reason(_result(), sample) is None
+    assert not grade_output({"tests": []}, sample)
     assert "no usable output" in inconclusive_reason(_result(test_results=None), sample)
     assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"), sample)
 

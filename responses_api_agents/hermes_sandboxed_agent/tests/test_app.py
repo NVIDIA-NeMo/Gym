@@ -92,18 +92,22 @@ def test_trajectory_contains_actual_reasoning_tools_and_usage():
 
 
 @pytest.mark.parametrize(
-    ("result", "error", "status"),
+    ("result", "error", "status", "budget_stop"),
     [
-        ({"completed": False}, None, "incomplete"),
-        ({"completed": True, "interrupted": True}, None, "incomplete"),
-        ({"completed": True}, "timeout", "failed"),
-        ({"completed": True, "failed": True}, None, "failed"),
+        ({"completed": False}, None, "incomplete", "false"),
+        ({"completed": True, "interrupted": True}, None, "incomplete", "false"),
+        ({"completed": True}, "timeout", "failed", "false"),
+        ({"completed": True, "failed": True}, None, "failed", "false"),
+        ({"completed": False, "budget_exhausted": True}, None, "incomplete", "true"),
+        ({"completed": False, "budget_exhausted": True, "failed": True}, None, "failed", "false"),
+        ({"completed": False, "budget_exhausted": True, "interrupted": True}, None, "incomplete", "false"),
     ],
 )
-def test_failed_or_aborted_never_marked_completed(result, error, status):
+def test_failed_or_aborted_never_marked_completed(result, error, status, budget_stop):
     response = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="problem"), "model", error)
     assert response.status == status
     assert response.output == []  # Never fabricate training tokens or a successful answer.
+    assert response.metadata["budget_exhausted"] == budget_stop
 
 
 @pytest.mark.asyncio
@@ -166,24 +170,29 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed_endpoint", [None, "/verify", "/close_session"])
 @pytest.mark.parametrize(
-    ("finished", "evaluation_completed", "failure"),
+    ("finished", "budget_exhausted", "evaluation_completed", "failure"),
     [
-        (False, True, "Hermes response status: incomplete"),
-        (True, False, "Verification did not complete"),
-        (True, True, None),
+        (False, False, True, "Hermes response status: incomplete"),
+        (True, False, False, "Verification did not complete"),
+        (True, False, True, None),
+        (False, True, True, None),
+        (False, True, False, "Verification did not complete"),
     ],
 )
+@pytest.mark.parametrize("verifier_reward", [0, 1])
 async def test_run_cookies_descriptor_reward_and_cleanup(
-    agent, monkeypatch, failed_endpoint, finished, evaluation_completed, failure
+    agent, monkeypatch, failed_endpoint, finished, budget_exhausted, evaluation_completed, failure, verifier_reward
 ):
     import responses_api_agents.hermes_sandboxed_agent.app as module
 
     body = HermesSandboxedRunRequest.model_validate({"responses_create_params": {"input": "fix"}, "patch": "gold"})
-    response = trajectory_response({"completed": finished}, body.responses_create_params, "real-model")
+    response = trajectory_response(
+        {"completed": finished, "budget_exhausted": budget_exhausted}, body.responses_create_params, "real-model"
+    )
     seeded = SimpleNamespace(cookies={"session": "seeded"}, data={"sandbox_descriptor": {"sandbox_id": "box"}})
     verified = SimpleNamespace(
         data=body.model_dump()
-        | {"response": response.model_dump(), "reward": 1, "evaluation_completed": evaluation_completed}
+        | {"response": response.model_dump(), "reward": verifier_reward, "evaluation_completed": evaluation_completed}
     )
 
     async def post(*, url_path, **kwargs):
@@ -220,7 +229,7 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
     else:
         result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
-        assert result.verifier_reward == 1
+        assert result.verifier_reward == verifier_reward
         wire = result.model_dump(mode="json")
         if failure:
             assert result.reward is None
@@ -228,8 +237,8 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             assert wire["_ng_failure_message"] == failure
             assert "reward" not in wire and "response" not in wire
         else:
-            assert wire["reward"] == 1
-            assert wire["response"]["status"] == "completed"
+            assert wire["reward"] == verifier_reward
+            assert wire["response"]["status"] == ("completed" if finished else "incomplete")
             assert "_ng_failure_class" not in wire
     assert agent.server_client.post.call_args_list[0].kwargs["json"]["create_pty"] is False
     assert agent.server_client.post.call_args.kwargs["url_path"] == "/close_session"

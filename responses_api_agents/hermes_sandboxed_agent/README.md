@@ -85,11 +85,12 @@ For a reference-patch control, use Pro's existing
 
 The agent runs through `/run`, which prepares a benchmark session. Text input and
 terminal/file tools are supported. Unsupported multimodal or tool-history input
-fails explicitly. Failed or unfinished runs retain `verifier_reward`, omit
+fails explicitly. Harness failures retain `verifier_reward`, omit
 `reward` and `response` from their HTTP result, and set Gym's existing
 `_ng_failure_class=agent_run_error` marker. Gym's collector puts them in its
 `*_failures.jsonl` sidecar and excludes them from scores. Incomplete verification
-is excluded too. Completed, conclusive wrong answers still score zero.
+is excluded too. Reaching the turn budget retains the patch's score and records
+`response.metadata.budget_exhausted=true`. Missing or failing graded tests score zero.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
 This agent requires a resources server that accepts `create_pty=false` and

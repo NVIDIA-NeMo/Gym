@@ -36,13 +36,14 @@ class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_run_root: str = "/tmp"
     results_dir: str = "responses_api_agents/hermes_sandboxed_agent/results"
     concurrency: int = Field(default=4, ge=1)
-    sandbox_timeout: float = Field(default=10800, gt=0)
+    sandbox_timeout: float = Field(default=2700, gt=0)
     api_timeout: float = Field(default=1800, gt=0)
     max_turns: int = Field(default=90, gt=0)
     max_tokens: int | None = None
     temperature: float = 1.0
     terminal_timeout: int = 180
-    enabled_toolsets: list[str] = Field(default_factory=lambda: ["terminal", "file"])
+    enabled_toolsets: list[str] | None = None
+    disabled_toolsets: list[str] | None = None
     compression_enabled: bool = True
     system_prompt: str | None = None
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -114,6 +115,11 @@ def trajectory_response(result, body, model, error_type=None):
             "model": model,
             "status": "failed" if failed else "completed" if completed else "incomplete",
             "error": {"code": "server_error", "message": str(result.get("error") or error_type)} if failed else None,
+            "metadata": {
+                "budget_exhausted": str(
+                    bool(result.get("budget_exhausted")) and not failed and not result.get("interrupted", False)
+                ).lower(),
+            },
             "output": output,
             "tool_choice": body.tool_choice,
             "tools": body.tools,
@@ -167,6 +173,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     "terminal_timeout",
                     "api_timeout",
                     "enabled_toolsets",
+                    "disabled_toolsets",
                     "compression_enabled",
                     "system_prompt",
                     "chat_template_kwargs",
@@ -256,7 +263,10 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 result = await get_response_json(verified)
                 result["agent_image_provenance"] = seed.get("image_provenance")
                 result["verifier_reward"] = result["reward"]
-                if response.status != "completed":
+                budget_stop = (
+                    response.status == "incomplete" and (response.metadata or {}).get("budget_exhausted") == "true"
+                )
+                if response.status != "completed" and not budget_stop:
                     failure = f"Hermes response status: {response.status}"
                 elif result.get("evaluation_completed") is False:
                     failure = result.get("error") or "Verification did not complete"

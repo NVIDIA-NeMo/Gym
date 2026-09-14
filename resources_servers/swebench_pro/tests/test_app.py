@@ -114,7 +114,15 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     sandbox.stop.assert_awaited_once()
 
 
-def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "tests",
+    [
+        [{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}],
+        [{"name": "old_test", "status": "PASSED"}],
+        [],  # A bad patch can fail compilation before any named test runs.
+    ],
+)
+def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict]) -> None:
     server = make_server(golden=False)
     sandbox = SimpleNamespace(stop=AsyncMock())
     monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
@@ -124,9 +132,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
             completed=True,
             resolved=False,
             patch_applied=True,
-            test_results={
-                "tests": [{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}]
-            },
+            test_results={"tests": tests},
             test_output="test run output",
         )
     )
@@ -139,6 +145,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
     assert response.json()["reward"] == 0.0
     assert response.json()["test_output"] == "test run output"
     assert response.json()["evaluation_completed"] is True
+    verify.assert_awaited_once()  # A wrong answer must not be retried or excluded.
 
 
 def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
@@ -384,25 +391,12 @@ def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: Mon
     assert response.json()["error"] == "parser produced no usable output"
 
 
-@pytest.mark.parametrize(
-    ("test_results", "expected_error"),
-    [
-        (None, "parser produced no usable output"),
-        ({"tests": []}, "parser reported no tests at all"),
-        (
-            {"tests": [{"name": "old_test", "status": "PASSED"}]},
-            "1 of 2 graded tests never reported an outcome",
-        ),
-    ],
-)
-def test_verify_uses_every_attempt_when_no_budget_is_set(
-    monkeypatch: MonkeyPatch, test_results: dict | None, expected_error: str
-) -> None:
+def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
     """Leaving both ceilings unset preserves the previous unbounded behaviour."""
     server = make_server(golden=True, verification_attempt_timeout=None, verification_total_timeout=None)
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
     verify = AsyncMock(
-        return_value=VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=test_results)
+        return_value=VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
     )
     monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
 
@@ -411,7 +405,7 @@ def test_verify_uses_every_attempt_when_no_budget_is_set(
     assert response.status_code == 200
     assert verify.await_count == 3
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["error"] == expected_error
+    assert response.json()["error"] == "parser produced no usable output"
 
 
 def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: MonkeyPatch) -> None:

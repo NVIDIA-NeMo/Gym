@@ -84,6 +84,9 @@ def run(params):
             "streaming": False,  # Gym's Chat Completions endpoint is non-streaming.
         },
         "memory": {"memory_enabled": False, "user_profile_enabled": False},
+        "toolsets": ["hermes-cli"],
+        "agent": {"max_turns": params["max_turns"]},
+        "delegation": {"max_iterations": 50},
         "compression": {"enabled": params["compression_enabled"], "threshold": 0.85},
         "terminal": {"backend": "local", "cwd": params["workdir"], "timeout": params["terminal_timeout"]},
         "checkpoints": {"enabled": False},
@@ -110,6 +113,7 @@ def run(params):
         request_overrides=request_overrides,
         reasoning_config={"enabled": True},
         enabled_toolsets=params["enabled_toolsets"],
+        disabled_toolsets=params["disabled_toolsets"],
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
@@ -119,6 +123,9 @@ def run(params):
     )
     signal.signal(signal.SIGTERM, lambda *_: agent.interrupt("sandbox timeout"))
     result = agent.run_conversation(query, params["system_prompt"] or input_system, history)
+    result["budget_exhausted"] = (
+        agent.iteration_budget.remaining <= 0 or result.get("api_calls", 0) >= params["max_turns"]
+    )
     result["n_input"] = len(history) + 1
     result["usage"] = {
         "input_tokens": agent.session_input_tokens,

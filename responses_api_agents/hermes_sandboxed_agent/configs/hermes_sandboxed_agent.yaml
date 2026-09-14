@@ -14,7 +14,7 @@ hermes_sandboxed_agent:
       runtime_python: /opt/hermes/bin/python3
       concurrency: 4
       max_turns: 90
-      sandbox_timeout: 10800
+      sandbox_timeout: 2700
       api_timeout: 1800
-      enabled_toolsets: [terminal, file]
+      enabled_toolsets: null
       datasets: []
