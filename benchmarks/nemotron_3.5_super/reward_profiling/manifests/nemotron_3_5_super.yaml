@@ -1,109 +1,55 @@
 
 
 # The reward-profiling sweep: every environment, one Gym deployment, one input file.
-#
-# Rows carry their own agent_ref and rollout collection dispatches per row, so 36 environments
-# across judge / sandbox / neither run as one job rather than 36. That is the whole point of the
-# sweep abstraction -- the pre-sweep infrastructure ran ~110 separate sbatch jobs for this.
-#
-# Requires SANDBOX_CONTAINER (ns_tools, math_formal_lean) and env.yaml (the judge entries). Without
-# a sandbox those environments fail per rollout rather than at startup, so check the launcher's
-# /health gate rather than waiting on the rollout count.
+# Needs SANDBOX_CONTAINER (ns_tools, math_formal_lean) and env.yaml (the judge entries).
+# See README "Why these settings" for the reasoning behind the values below.
 #
 # Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final.
 
 nickname: nemotron_3_5_super
 
-# How many Slurm jobs the sweep is split across, i.e. NUM_SHARDS. Nodes = num_shards x
-# (vllm.prefill_nodes + vllm.decode_nodes), so this is 16 x 3 = 48 nodes. One job cannot exceed
-# ~16 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack is 18.
+# Slurm jobs to split across. Nodes = num_shards x (prefill_nodes + decode_nodes).
 num_shards: 16
 
-# What gets served, i.e. `vllm serve <model>`; also passed as ++policy_model_name.
-# Pinned so the manifest is reproducible on its own and a run needs no arguments at all. Profiling
-# a different checkpoint means MODEL=<ckpt> on the command line, which overrides this -- change
-# `nickname` too, or the new run's artifacts land in the same directory as the old one's.
 vllm:
   model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
-  # Nodes per shard = prefill + decode, so this is 3. Capped near 16 by --segment, which needs a
-  # topology-contiguous allocation and an NVL72 rack is 18 nodes. Decode limits throughput, so
-  # widen that side first.
+  # Nodes per shard. One job cannot exceed ~16; decode limits throughput, so widen it first.
   prefill_nodes: 1
   decode_nodes: 2
 
-# The P/D front end, i.e. `vllm-router`. One process carries every Gym server's traffic, and its
-# stock defaults turn load into apparent failure: job 6706202 logged ~483,000 ClientOSErrors here
-# while the engines sat at 4.5% KV cache. The health check is the culprit -- 5 s timeout, eject
-# after 3 misses -- because a busy engine misses easily and each ejection drops its in-flight
-# connections. See RATES.md, "What is actually starving the GPUs".
+# P/D front end. The stock health-check defaults eject engines for being busy.
 vllm_router:
-  # A slow /health means the engine is working, not dead.
   health_timeout_s: 60
   health_interval_s: 120
   health_failures: 10
-  # Finite and shorter than the walltime. The old 86400 meant "never" inside a 4 h job, so a
-  # wedged request held a driver concurrency slot until the job died.
-  request_timeout_s: 3600
-  # The router's own default queue is 100 deep and returns 429 past it. Deliberately NOT set here:
-  # the launcher defaults ROUTER_QUEUE_SIZE to NUM_SAMPLES_IN_PARALLEL, so it tracks the shape
-  # (512 x decode_nodes). A literal value here would be right for one shape and wrong for the next
-  # -- 4096 was carried over from P2D8 while this file declares 1+2, whose driver is 1024.
+  request_timeout_s: 3600        # must be finite and shorter than the walltime
   queue_timeout_s: 600
-  # Nowhere to fail over to inside one job, so opening the breaker only kills a slow engine.
   circuit_breaker: false
   log_level: info
 
-# Which rows enter the sweep, read by `01_materialize.sh`.
-# Unset limits mean every row of every dataset, which is what a real profiling run wants.
-# Uncomment to commit a subset -- LIMIT_PER_ENTRY is for smoke runs and only lowers these.
+# Which rows enter the sweep. Unset means every row of every dataset.
 # materialize:
-#   limit_per_entry: 10000   # rows per entry, unless the entry sets its own `limit`
-#   sample: random           # head (default, stops reading at the limit) | random (reads all)
-#   seed: 0                  # seeds `random`; mixed with each entry's label
+#   limit_per_entry: 10000
+#   sample: random               # head (default) | random
+#   seed: 0
 
-# Slurm settings, read by the launchers that shell out to `sbatch`. Each key becomes
-# SBATCH_<KEY>, so anything under INPUT ENVIRONMENT VARIABLES in `man sbatch` works. A launcher's
-# own env var wins, so override per run without editing this file.
+# Each key becomes SBATCH_<KEY>. A launcher's own env var wins.
 sbatch:
   account: nemotron_n3_post
-  # `normal`, not `interactive`: interactive is capped at node=4 and 8 submitted jobs per user,
-  # with DenyOnLimit, so sbatch *fails* rather than queueing. num_shards above needs
-  # num_shards x (prefill + decode) nodes -- 48 at 16 x (1+2) -- and even a 2-shard run exceeds
-  # the 4-node cap. `normal` allows node=1512 and 2000 submitted jobs.
-  # There is no `batch` qos on this cluster -- batch is the partition; the qos names are
-  # normal / free / interactive / short / cpu-*.
-  # Use interactive only for a single-shard smoke run, via SBATCH_QOS=interactive.
-  qos: normal
+  qos: normal                    # interactive caps at 4 nodes / 8 jobs and fails at submit
   timelimit: "04:00:00"
 
-# Containers, for `srun --container-image`.
 srun:
-  # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
-  # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
+  # Only one arm64 build exists. ns_tools and math_formal_lean fail per rollout without it.
   sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
-  # Sandbox concurrency is sandbox_nodes x sandbox_workers, and it is a separate axis from GPU
-  # count. The image forces one uWSGI process per worker, so the worker count *is* the number of
-  # simultaneous executions: 32 on a single node against a driver concurrency of 4,096 produced
-  # 1,168 session timeouts in job 6706202 and left ns_tools and lean with zero rollouts.
-  # Sandboxes ride along on the vLLM nodes (--overlap, --gpus=0) and are fronted by an nginx
-  # balancer that consistent-hashes X-Session-ID, so they cost no extra nodes.
-  #
-  # sandbox_nodes is deliberately left unset: the launcher then uses every node in the job, so the
-  # tier tracks prefill_nodes + decode_nodes instead of capping at whatever this file happened to
-  # say when the shape was smaller. Set it only to hold the sandbox below the job size.
+  # Concurrent code executions per node. sandbox_nodes is unset, so every node in the job runs one.
   sandbox_workers: 64
-  # Built by ../../build_eval_container.sh from configs/container_config.yaml, which is generated
-  # from this manifest -- so the image has exactly these entries' servers baked in. Rebuild and
-  # update this when an entry pulls in a new server; running against an image built for a different
-  # manifest presents as a hang, not an error. Override with CONTAINER for a one-off.
+  # Built from this manifest's entries. A mismatched image hangs rather than erroring.
   container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
 
-# Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
-  num_repeats: 8
+  num_repeats: 8                 # rollouts per task; the spread across them is the profile
 
-# Settings for `gym eval profile`. Kept apart from gym_eval_run because they are different
-# commands -- allow_partial_rollouts exists only on the profiler.
 gym_eval_profile:
   allow_partial_rollouts: true
 

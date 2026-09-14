@@ -500,6 +500,51 @@ rewards before a run finishes.
 - `agent_ref_override` rewrites `agent_ref` while concatenating. Use it only to deliberately run a
   dataset through a different agent; the override is recorded in the build report.
 
+## Why these settings
+
+The manifest values that are not self-explanatory, and what happens if you change them.
+Numbers are measured; see [RATES.md](./RATES.md).
+
+**`sbatch.qos: normal`** — `interactive` is capped at 4 nodes and 8 submitted jobs per user with
+`DenyOnLimit`, so `sbatch` *fails* rather than queueing. A sharded run needs
+`num_shards x (prefill + decode)` nodes, 48 at the default, and even two shards exceed the cap.
+There is no `batch` qos here; `batch` is the partition. Use `SBATCH_QOS=interactive` for a
+single-shard smoke run, which fits in 3 nodes.
+
+**`vllm_router.*`** — one process carries every Gym server's traffic, and the stock defaults turn
+load into apparent failure: a 5 s health-check timeout with ejection after 3 misses, against
+engines that are simply busy. Each ejection drops that engine's in-flight connections. Job 6706202
+logged ~483,000 `ClientOSError`s this way while the GPUs sat at 4.5% KV cache. The timeouts here
+are deliberately generous, the circuit breaker is off because there is nowhere to fail over to
+inside one job, and `request_timeout_s` must stay finite and shorter than the walltime — the old
+86400 meant "never", so a wedged request held a driver slot until the job died.
+
+**`srun.sandbox_workers: 64`** — sandbox capacity is `sandbox_nodes x sandbox_workers` concurrent
+executions, and it is an axis independent of GPU count. The image forces one uWSGI process per
+worker, so the worker count *is* the concurrency; passing `UWSGI_PROCESSES` is a no-op. 32 workers
+on a single node against a driver concurrency of 4,096 produced 1,168 session timeouts and left
+`ns_tools` and `lean` with zero rollouts. `sandbox_nodes` is left unset so the tier tracks the job
+shape rather than a number pinned when the shape was smaller; the sandboxes ride along on the vLLM
+nodes (`--overlap`, `--gpus=0`) behind an nginx balancer that consistent-hashes `X-Session-ID`, so
+they cost no extra nodes.
+
+**`srun.container`** — built by `../../build_eval_container.sh` from `configs/container_config.yaml`,
+which is generated from this manifest, so the image has exactly these entries' servers baked in.
+Rebuild it when an entry pulls in a new server. Running against an image built for a different
+manifest presents as a hang, not an error.
+
+**`vllm.model`** — pinned so the manifest is reproducible on its own and a run needs no arguments.
+`MODEL=<ckpt>` overrides it; change `nickname` too, or the new run's artifacts land in the old
+run's directory.
+
+**`num_shards`** — one job cannot exceed ~16 nodes: `--segment` needs a topology-contiguous
+allocation and an NVL72 rack is 18. Decode is the throughput-limiting side, so widen `decode_nodes`
+before `prefill_nodes`.
+
+**`gym_eval_run.num_repeats`** — rollouts per task; the spread across them is the profile.
+`01_materialize.sh` writes this many copies of each row, so collection itself runs at
+`++num_repeats=1`.
+
 ## Appendix
 
 ### A1 - Sharding and unsharding by hand
