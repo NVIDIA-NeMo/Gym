@@ -8,7 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APIStatusError, AsyncOpenAI
 
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
@@ -121,3 +123,59 @@ def test_pairwise_prompt_is_criterion_specific_and_source_blind() -> None:
     assert "Prefer stronger analysis." in prompt
     assert "A wins" in prompt and "B wins" in prompt
     assert "external source files" in prompt
+
+
+@pytest.mark.parametrize("recover", [True, False])
+async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover):
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
+    server = AABriefcaseLiteResourcesServer.model_construct(
+        config=AABriefcaseLiteResourcesServerConfig.model_construct(dataset_dir="unused")
+    )
+    server._aa_binary_system = "Judge the artifact."
+    server._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}"
+    judge = ResolvedJudge(name="judge", model="model", base_url="http://upstream.invalid/v1", api_key="dummy")
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        if not recover or len(requests) < 3:
+            return httpx.Response(408, json={"error": {"message": "Request timed out"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"passed": false, "reasoning": "Verdict"}'},
+                    }
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+        monkeypatch.setattr(
+            "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
+            lambda **kwargs: AsyncOpenAI(http_client=transport, **kwargs),
+        )
+        call = server._binary_call(
+            judge,
+            "Task",
+            {
+                "check_description": "Check",
+                "score_1_criteria": "Pass",
+                "score_0_criteria": "Fail",
+            },
+            [{"type": "text", "text": "Artifact"}],
+        )
+        if recover:
+            parsed, _ = await call
+            assert parsed == {"passed": False, "reasoning": "Verdict"}
+        else:
+            with pytest.raises(APIStatusError):
+                await call
+    assert len(requests) == 3
+    assert requests[0] == requests[1] == requests[2]

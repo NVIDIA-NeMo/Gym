@@ -232,7 +232,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             base_url=judge.base_url,
             api_key=judge.api_key,
             timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-            max_retries=0,
+            max_retries=2,
         )
         raw = ""
         for _attempt in range(self.config.binary_formatting_retries + 1):
