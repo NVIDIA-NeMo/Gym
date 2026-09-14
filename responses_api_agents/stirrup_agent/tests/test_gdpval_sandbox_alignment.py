@@ -203,13 +203,50 @@ def test_prompt_states_the_real_command_timeout():
     )
 
 
-def test_prompt_describes_the_persistent_shell_not_e2b_semantics():
+def test_exec_backend_really_discards_shell_state_between_calls():
+    """The prompt's shell-state claim must match what the backend does.
+
+    An earlier revision told the model that `cd` and environment variables
+    carry over, reasoning from the fact that the provider keeps one long-lived
+    bash process. That was wrong, and a prompt that is wrong about this is
+    expensive: the model `cd`s once and then silently operates in the wrong
+    directory for the rest of the task.
+
+    Assert against the command the provider actually builds, not against the
+    prompt's wording -- wording can be made to agree with itself.
+    """
+    pytest.importorskip("stirrup", reason="apptainer_provider imports stirrup; runs in the per-server venv")
+    from responses_api_agents.stirrup_agent.apptainer_provider import (
+        ApptainerCodeExecToolProvider,
+    )
+
+    provider = ApptainerCodeExecToolProvider("/nonexistent.sif", working_dir="/workspace")
+    provider._has_timeout_cmd = True  # what the built image gives us; gdpval.def asserts it
+    script, _ = provider._build_command_script("echo hi", 300, ".stderr_x", "MARK")
+
+    # Three independent reasons state cannot survive, any one of which is fatal
+    # to a `cd` carrying over.
+    assert script.startswith("cd /workspace &&"), (
+        "the working directory is reset before every command; if that ever stops "
+        "being true the prompt must be updated in the same change"
+    )
+    assert "bash -c " in script, "each command runs in its own `bash -c` subshell"
+    assert "( " in script and " )" in script, "and is further wrapped in a subshell"
+
+
+def test_prompt_tells_the_model_state_does_not_carry_over():
+    """Wording check, paired with the behavioural test above.
+
+    On its own this proves nothing -- it is the behavioural test that anchors
+    it. Together they fail in opposite directions if prompt and backend drift.
+    """
     prompt = _prompt()
-    # Our Apptainer backend feeds commands to one long-lived bash, so state does
-    # carry over. The published AA prompt says the opposite because E2B runs
-    # each command independently; copying that text would misinform the model.
-    assert "persistent" in prompt.lower()
-    assert "carry over" in prompt.lower()
+    runtime = prompt.split("## Reference Files")[0].lower()
+    assert "every command runs independently" in runtime
+    assert "does not" in runtime or "no working directory" in runtime
+    # The claim that was wrong. Guard the exact phrasing so it cannot return.
+    assert "shell is persistent" not in runtime
+    assert "carry over from one call to the next" not in runtime or "no working directory" in runtime
 
 
 def test_verifier_script_is_staged_into_the_image():
