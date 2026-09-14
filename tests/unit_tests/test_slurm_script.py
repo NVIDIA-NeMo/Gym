@@ -28,6 +28,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_pool_directives,
     _render_service_command,
     _resolve_env,
+    _with_default_capture_dir,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -215,6 +216,33 @@ def test_build_vllm_command_no_extra_args_by_default(vllm_service):
     assert cmd.endswith("--tensor-parallel-size 1")
 
 
+def test_build_vllm_command_served_model_name():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="super-bf16",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name super-bf16" in cmd
+
+
+def test_build_vllm_command_no_served_model_name_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--served-model-name" not in cmd
+
+
+def test_build_vllm_command_served_model_name_quoted_if_needed():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="name with spaces",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name 'name with spaces'" in cmd
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
 # ---------------------------------------------------------------------------
@@ -314,7 +342,11 @@ def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     assert "git checkout main" in out
-    assert "uv pip install -e . --system" in out
+    assert "uv venv --seed .venv" in out
+    assert "source .venv/bin/activate" in out
+    assert "uv pip install -e ." in out
+    assert "--system" not in out
+    assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
@@ -333,9 +365,107 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert 'exec "$@"' in out
 
 
+def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
+    # The trivial path isn't wrapped in bash -c at all, so there's no
+    # preamble for a failure to silently fall through in the first place.
+    out = render_driver_entrypoint(None, None, None)
+    assert "set -euo pipefail" not in out
+
+
+def test_render_driver_entrypoint_with_gym_install_sets_e():
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "set -euo pipefail" in out
+    # Must be the first statement, ahead of the clone/checkout/install, so a
+    # failure anywhere in the preamble aborts instead of falling through to
+    # exec "$@" against whatever was already on disk/PATH.
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[0] == "bash -c '"
+    assert lines[1] == "set -euo pipefail"
+
+
+def test_render_driver_entrypoint_with_prepare_sets_e():
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
+    assert "set -euo pipefail" in out
+
+
+# ---------------------------------------------------------------------------
+# _with_default_capture_dir
+# ---------------------------------------------------------------------------
+
+
+def test_with_default_capture_dir_injects_when_observability_on():
+    run = {"observability_enabled": True}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
+
+
+def test_with_default_capture_dir_explicit_value_wins():
+    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/custom/path"
+
+
+def test_with_default_capture_dir_no_injection_when_observability_off():
+    run = {"split": "benchmark"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in out
+
+
+def test_with_default_capture_dir_does_not_mutate_input():
+    run = {"observability_enabled": True}
+    _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in run
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
+
+
+def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {
+                    "gsm8k": {"run": {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}}
+                },
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+model_call_capture_dir=/custom/path" in script
+    assert "model-calls" not in script
+
+
+def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "model_call_capture_dir" not in script
 
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
