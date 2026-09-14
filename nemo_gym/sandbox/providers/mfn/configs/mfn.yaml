@@ -1,0 +1,37 @@
+# MFN SandboxService provider config.
+sandbox:
+  default_metadata:
+    sandbox-api: mfn-grpc
+  mfn:
+    connection:
+      # Plaintext gRPC host:port. MFN deployments conventionally listen on 10128.
+      address: ${oc.env:SANDBOX_SERVICE_ADDRESS,localhost:10128}
+      caller: ${oc.env:MFN_SANDBOX_CALLER,nemo-gym}
+      username: ${oc.env:MFN_SANDBOX_USERNAME,nemo-gym}
+      keepalive_time_s: 60
+      keepalive_timeout_s: 20
+      max_receive_message_mib: 1024
+    create:
+      request_timeout_s: 60
+      ready_timeout_s: 300
+      poll_initial_delay_s: 5
+      poll_interval_s: 2
+      poll_max_interval_s: 10
+      retries: 2
+      retry_delay_s: 1
+    resources:
+      # MFN requires CPU and memory on every Create request.
+      cpu: 1
+      memory_mib: 1024
+      disk_gib: null
+    probe:
+      command: printf mfn-sandbox-ready
+      expected_stdout: mfn-sandbox-ready
+      timeout_s: 30
+    operations:
+      default_exec_timeout_s: 300
+      file_timeout_s: 600
+      status_timeout_s: 30
+      close_timeout_s: 60
+      exec_shell: /bin/sh
+      upload_chunk_bytes: 65536
