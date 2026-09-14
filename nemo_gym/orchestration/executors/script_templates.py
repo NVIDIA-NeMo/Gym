@@ -159,22 +159,38 @@ def render_driver_entrypoint(
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
+            # Clone OUT of the working directory. The driver's cwd is the job
+            # directory, so cloning into it would leave a full Gym checkout plus
+            # its .venv inside every benchmark's rundir on lustre -- slow to
+            # write and noise in the artifacts. /tmp is node-local and the
+            # driver's output path is absolute, so nothing depends on the clone
+            # being reachable afterwards.
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             f'git clone {shlex.quote(repo)} "$GYM_SRC/gym"',
             f'git -C "$GYM_SRC/gym" checkout {shlex.quote(ref)}',
-            'uv pip install -e "$GYM_SRC/gym" --system',
             # Run from the install root. A benchmark's prepare_script and
             # jsonl_fpath are relative and resolved against cwd, not through the
             # install-root search that config_paths gets, so from anywhere else
             # `gym eval prepare` reports the benchmark as "missing a valid
             # prepare script" for a file that is right there. A runtime image
             # bakes no Gym, so without this there is no cwd where it resolves.
-            #
-            # Safe only because the clone is OUTSIDE the job directory and the
-            # driver's output path is absolute: cwd and the install root are now
-            # the same directory, so named assets resolve once rather than
-            # ambiguously, and artifacts still land in the job directory.
+            # It also puts cwd and the install root in the same directory, so a
+            # named asset resolves once rather than ambiguously.
             'cd "$GYM_SRC/gym"',
+            # A real venv, not --system: --system targets whatever
+            # interpreter happens to be on the container's PATH, which
+            # sidesteps uv's own project-aware Python selection entirely --
+            # `uv venv` run inside this checkout instead reads
+            # requires-python from its pyproject.toml and auto-downloads a
+            # satisfying interpreter if the container's own Python doesn't
+            # qualify (e.g. a container shipping Python 3.12 against a
+            # nemo-gym pin requiring >=3.13.14 -- --system fails outright
+            # there, this doesn't). A fresh venv is also never
+            # EXTERNALLY-MANAGED (PEP 668), so this needs no
+            # --break-system-packages override either.
+            "uv venv --seed .venv",
+            "source .venv/bin/activate",
+            "uv pip install -e .",
         ]
 
     if prepare_cmd:
@@ -184,6 +200,6 @@ def render_driver_entrypoint(
         return '"${GYM_CMD[@]}"'
 
     preamble.append('exec "$@"')
-    body = "\n    ".join(preamble)
+    body = "\n    ".join(["set -euo pipefail", *preamble])
     body = escape_for_single_quoted_block(body)
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""

@@ -16,7 +16,9 @@
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
+from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
@@ -136,6 +138,8 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
         f" --port {service.port}"
         f" --tensor-parallel-size {service.tensor_parallel_size}"
     )
+    if service.served_model_name:
+        cmd += f" --served-model-name {shlex.quote(service.served_model_name)}"
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
     if service.extra_args:
@@ -257,6 +261,21 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     return total_nodes, total_ntasks
 
 
+def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+    """Auto-derive model_call_capture_dir from this benchmark's own real output
+    directory when observability is on and the caller didn't set one.
+
+    Hydra interpolation resolves before remote_bench_dir exists (it's computed
+    here, in build_sbatch_script, well after SubmitConfig validation), so
+    there's no way for a YAML value to reference it -- this has to happen in
+    Python, once the real path is known. An explicit model_call_capture_dir in
+    run always wins over this default.
+    """
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -306,16 +325,17 @@ def build_sbatch_script(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    # ABSOLUTE, not relative. The driver's cwd has to stay wherever the image
-    # puts it, because a benchmark's own `prepare_script` / `jsonl_fpath` are
-    # relative paths resolved against cwd rather than through Gym's install-root
-    # search -- point cwd elsewhere and `gym eval prepare` reports "missing a
-    # valid prepare script" for a file that is plainly there. Making the OUTPUT
-    # absolute is what keeps artifacts in the job directory without moving cwd.
+    # ABSOLUTE, not relative. The driver `cd`s into the Gym checkout so that a
+    # benchmark's own relative `prepare_script` / `jsonl_fpath` resolve, which
+    # means a relative output path would write every artifact inside that
+    # checkout instead of the job directory -- the run completes, exits 0, and
+    # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
+    # in the job directory without constraining cwd.
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
