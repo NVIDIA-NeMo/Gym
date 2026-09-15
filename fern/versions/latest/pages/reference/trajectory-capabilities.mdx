@@ -95,7 +95,7 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
 | `tau2` | V | V | X | V | X | X | X |
 | `tool_simulation_agent` | V | V | X | V | X | X | X |
 | `toolsandbox_agent` | V | V | X | V | X | X | X |
-| `verifiers_agent` | X | X | X | X | X | X | X |
+| `verifiers_agent` | V | V | X | V | X | X | X |
 
 ### Coverage notes
 
@@ -108,8 +108,43 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
   - Raised failures omitted by Simple-derived agents.
   - Stirrup calls outside its policy path.
 - OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
+- Verifiers C1, C2, and C4 cover the Gym Model Server path: the agent routes the client it
+  hands to `verifiers` through the rollout capture prefix, so calls the environment makes on its
+  own are captured and correlated. C5 and C6 are unavailable because the agent emits no
+  `ng_agent_observations`, so tool attempts carry no status or timing, and rollout-health checks
+  that read agent turns or bound calls stay unobserved.
 - OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The
   decoupled path composes agent observations with verifier-sandbox evidence returned by its resources server.
 - Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
   fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
 - C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
+
+### Terminus2 decisions and invocation ownership
+
+With model-call capture enabled as described above, `terminus_2_sandboxed_agent` emits an `AgentInvocation` for each
+identified rollout execution. Its execution-specific `x-session-id` header lets the collector link captured model
+calls to that invocation, including retries without a response ID and summarization calls.
+
+The adapter records `TrajectoryTurn` entries at Harbor's main-agent decision boundary, before terminal commands
+execute. Each observed decision retains the exact input sent for its selected response, the answer and reasoning,
+and an exact model-server/response-ID reference. Its timestamp is the observed response time. `turn_no` counts main
+decision attempts; `step_count` counts completed nonempty terminal-command batch attempts before that decision. A
+returned batch timeout counts as an attempt, not proof that every command ran. One decision can request several
+commands. `resolved` remains unset because a model's completion claim does not establish task success.
+
+Decisions remain available after parser errors, tool failures, or cancellation. Responses rejected by the adapter and
+synthetic Harbor fallback messages are not presented as accepted main-agent decisions. Their available model-call
+evidence remains invocation-owned, with diagnostic gaps. Known summarization boundaries also emit
+`ContextCompactionObservation` records with exact response references; auxiliary fallback calls are not mislabeled as
+main decisions. Missing or reused response IDs produce gaps instead of guessed associations. `turns_unavailable` is
+reported only when no actual decision response could be represented.
+
+Observed turns enable `rollout_missing_agent_turns` and `agent_turn_hollow`. Invocation ownership enables
+`model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
+`model_call_runaway_generation`, and `trajectory_capture_mismatch` under their documented capture and payload
+requirements. See [Rollout health checks](/evaluation/rollout-health).
+
+The underlying HTTP transport can retry after server admission without notifying the adapter. Complete turn-call
+accounting therefore remains unavailable: `transport_retry_visibility_unavailable` and
+`turn_model_call_scope_incomplete` keep rollout token reconciliation and full policy-call coverage unobserved while
+preserving those seven checks. This producer does not establish an overall healthy rollout or task success from calls.
