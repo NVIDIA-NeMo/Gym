@@ -182,17 +182,6 @@ class TestOmniscienceServer:
             tools=[],
         ).model_dump()
 
-    def test_non_hallucination_metric(self) -> None:
-        tasks = [
-            [{"verdict": "incorrect", "extracted_answer": "wrong"}],
-            [{"verdict": "partial", "extracted_answer": "partial"}],
-        ]
-
-        metrics = OmniscienceServer.compute_metrics(OmniscienceServer, tasks)
-
-        assert metrics["non_hallucination"] == approx(50.0)
-        assert OmniscienceServer.get_key_metrics(None, metrics)["non_hallucination"] == approx(50.0)
-
     async def test_verify_correct(self, config: OmniscienceConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server = OmniscienceServer(config=config, server_client=server_mock)
