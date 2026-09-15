@@ -109,8 +109,47 @@ denominators and the same pass@1 estimator this server uses. Figures below are v
 | Claude-Opus-4.5 | 40.00 / 55.00 | 0.63 / 2.50 | 0.00 / 0.00 | 8.25 / 12.00 | no |
 | GPT-5.2 | 27.50 / 35.00 | 0.00 / 0.00 | 0.00 / 0.00 | 5.50 / 7.00 | no |
 | DeepSeek-V3.2 | 20.00 / 40.00 | 0.00 / 0.00 | 0.00 / 0.00 | 4.00 / 8.00 | **yes** |
+| ↳ *measured here, run 1* | *13.75 / 40.00* | *0.00 / 0.00* | *0.00 / 0.00* | *2.75 / 8.00* | |
+| ↳ *measured here, run 2* | *15.00 / 30.00* | *0.00 / 0.00* | *0.00 / 0.00* | *3.00 / 6.00* | |
 | Gemini-3-Pro | 13.75 / 30.00 | 1.25 / 5.00 | 0.00 / 0.00 | 3.25 / 8.00 | no |
 | Kimi-K2 | 10.00 / 20.00 | 0.00 / 0.00 | 0.00 / 0.00 | 2.00 / 4.00 | **yes** |
+
+The two measured rows are **two independent 400-rollout runs at `k=4`, reported separately**, both scored under
+the full `EVALUATION.md` criteria. They are not pooled: upstream's reporting guidance is "a task is counted as
+solved if at least one of the k independent attempts satisfies the valid proof criteria", which is what a single
+`k=4` run measures. Pooling to `n=8` and estimating `pass@4` from it would be a different protocol.
+
+In raw counts, which is the unit upstream asks for:
+
+| | Easy (20) | Medium (40) | High (40) | Overall (100) |
+|---|---|---|---|---|
+| paper | 4 | 0 | 0 | **8** |
+| run 1 | 8 | 0 | 0 | **8** |
+| run 2 | 6 | 0 | 0 | **6** |
+
+**Run 1 reproduces the published count exactly**; run 2 lands two tasks lower. Medium and High are a flat zero in
+both, which is the paper's central claim. Both runs solve more Easy tasks than the paper (8 and 6 against 4) while
+landing at or below it overall, so the tier profile is shifted toward Easy even where the total matches.
+
+Two things worth knowing before quoting these:
+
+- **Two tasks is the whole spread between the runs**, and upstream's own guidance notes one High task is 2.5
+  percentage points. With 6–8 tasks solved out of 100, percentage differences between runs are one or two tasks
+  moving. Report counts, and do not read a trend into a single run.
+- **The statement criterion is not cosmetic on High.** The single non-Easy compile in 800 rollouts — problem
+  `0064`, once — altered the statement. Under upstream's shipped script, which never checks this, it would show as
+  a High solve and contradict the paper's headline claim; under the documented criteria it is correctly rejected.
+  This is the concrete reason the guard exists.
+
+Reproduced with `deepseek-ai/DeepSeek-V3.2` served on vLLM 0.19.1 (TP=16, fp8, `--reasoning-parser deepseek_v3`),
+thinking enabled per request. Note the paper's model is **DeepSeek-V3.2-Thinking** (§Standard Baselines); the table
+abbreviates it. A third run in which the `thinking` kwarg never reached the chat template solves **3 of 100 tasks**
+against the 8 and 6 above, so the mode is not optional.
+
+The reasoning traces themselves are not persisted in the rollouts — `response.reasoning` and `reasoning_tokens` are
+null, and the parser strips the trace rather than inlining it. What distinguishes a thinking run in the stored
+artifacts is output length: mean 14.7k and 15.0k output tokens for the two runs above, against 2.9k for the
+non-thinking third run. Use that, not a trace count, to confirm the mode was live.
 
 ### Table 3 — specialized provers, **pass@32** (not pass@4)
 
@@ -151,10 +190,14 @@ Three things that were caveats against v1 are **not** problems against v2:
 
 One real divergence remains:
 
-- **This server's statement guard is stricter than upstream's scorer.** `verify_lean` is `has_invalid_tokens(code)`
-  then compile; it never compares against the reference statement, even though `configs/evaluation_protocol.json`
-  sets `"statement_changes_allowed": false`. Set `require_statement_preserved: false` to match upstream exactly;
-  `statement_preserved` reports the difference either way. Running both is the informative thing to do.
+- **Upstream's shipped scorer does not implement upstream's own protocol.** `verify_lean` is
+  `has_invalid_tokens(code)` then compile; it never compares against the reference statement, even though
+  `EVALUATION.md` requires the statement, definitions and assumptions to be unchanged and
+  `configs/evaluation_protocol.json` sets `"statement_changes_allowed": false`. This server follows the documented
+  protocol, so its numbers sit at or below anything produced with the reference script. Set
+  `require_statement_preserved: false` to match the script rather than the protocol; `statement_preserved` is
+  reported either way, so the size of the gap is always visible. Measured over 16,800 rollouts, 7 submissions
+  compiled clean but altered the statement.
 
 ## Prompt
 
@@ -191,11 +234,16 @@ The two open identically; the fourth line differs:
 | upstream repo | "You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no `sorry`, `admit`, `axiom`, or `unsafe` declarations." |
 | paper D.1 | "Please solve the statement step by step and provide your complete Lean4 code between ```` ```lean4 ```` and ```` ``` ```` after careful reasoning." |
 
-We ran both with Goedel-Prover-V2-32B at pass@32. Upstream's prompt is not what Table 3's numbers were produced
-under: 26% of submissions omitted `import Mathlib` entirely despite the instruction to include the complete header,
-median output ran to 3015 tokens with visible degeneration, and Easy sat at 1/10 against a published 20.0%. The
-paper's reproduces Table 3 — Easy 5/20, Medium 1/40, High 0/40, so 6.0% pass@32 against a published 5.0%. The repo
-is a release mirror synced from a private development repo, so its prompt most likely post-dates the paper.
+We ran both with Goedel-Prover-V2-32B at pass@32, full 3200-rollout runs each. The paper's prompt reproduces
+Table 3 across four runs — 5, 5, 5 and 4 tasks solved against a published 5 — while the upstream-repo prompt gives
+4. That is a one-task difference on a benchmark where only 3–5 tasks are ever solved, so it is weak evidence on its
+own; the reason the paper's is the default is that it is the prompt the published numbers were produced under. The
+repo is a release mirror synced from a private development repo, so its prompt most likely post-dates the paper.
+
+An earlier note here claimed the upstream prompt collapsed (imports omitted, degenerate output, Easy at 1/10). The
+full runs do not support it: the upstream prompt omits `import Mathlib` in 27.8% of submissions against 46.7% for
+the paper's, runs shorter (median 6,959 output tokens against 11,212), and reaches Easy 4/20 — the published
+count. Whatever that observation came from, it was not a full run, and it should not be cited.
 
 `upstream-repo.yaml` is a verbatim transcription of the pinned `prompts/static_passk.md` into Gym's prompt-config
 form. `tests/test_app.py::TestPrompt::test_upstream_template_still_matches_upstream` refetches the pinned file and
