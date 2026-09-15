@@ -1,0 +1,15 @@
+single_agent_legacy_episode_processor:
+  episode_processors:
+    single_agent_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      task_input_contract: nemo_gym.single_agent.v1
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
