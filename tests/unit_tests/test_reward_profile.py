@@ -56,6 +56,7 @@ class TestRewardProfile:
                     "num_rollouts",
                     "reward_profile_completion_pct",
                     "rollout_infos",
+                    "raw_rewards_and_lengths",
                 }:
                     row.pop(key)
 
@@ -421,6 +422,22 @@ class TestRewardProfile:
         ]
         assert row["mean/input_tokens"] == 4.0
         assert row["mean/verifier_score"] == 2.5
+        assert row["raw_rewards_and_lengths"] == [
+            {
+                "_ng_rollout_index": 0,
+                "reward": 0.0,
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "total_tokens": 7,
+            },
+            {
+                "_ng_rollout_index": 1,
+                "reward": 1.0,
+                "input_tokens": 5,
+                "output_tokens": 7,
+                "total_tokens": 12,
+            },
+        ]
 
     def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
         rows = [_row(0, 0), _row(0, 1)]
