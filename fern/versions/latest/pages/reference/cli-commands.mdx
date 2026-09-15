@@ -698,6 +698,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
+| `--rollouts-file-compress` | Write Zstandard-compressed rollout JSONL; appends `.zst` to `--output` if absent. A `.jsonl.zst` output filename also enables compression. Defaults to off. |
 | `--limit` | Maximum number of tasks to run. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
@@ -781,6 +782,29 @@ How it works:
 If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
 </Warning>
 
+#### Compressed rollout files
+
+With Gym's built-in collector, pass `--rollouts-file-compress` or use an output filename such as
+`results/rollouts.jsonl.zst`. Each completed rollout is flushed as an independent Zstandard frame;
+readers process the frames as one JSONL stream. Resume reads the compressed file directly. A truncated
+or corrupt compressed stream raises an error rather than silently skipping saved data.
+
+Compression preserves the JSON records. Gym's collection resume, aggregation, reverification, profiling,
+and health-check readers accept `.jsonl` and `.jsonl.zst`. External scripts must recognize the compressed
+suffix and decompress before parsing JSON. Include `.jsonl.zst` in shard globs when aggregating compressed
+outputs. Custom `rollout_collection_driver` implementations do not support this flag and are rejected
+before collection starts.
+
+Health checks decompress compressed rollout files in one streaming pass. With multiple workers, queued
+row payloads are bounded by both bytes and row count; individual large rows and worker parsing need
+additional memory. No complete uncompressed file is written. The existing aggregation and resume
+algorithms still retain records in memory; compression does not change their memory requirements.
+
+Materialized inputs, failure sidecars, aggregate metrics, and health reports remain uncompressed and keep
+their existing names: `rollouts.jsonl.zst` still uses `rollouts_materialized_inputs.jsonl` and
+`rollouts_aggregate_metrics.json`. Compression of the main rollout file is independent of compression
+of raw model-call captures.
+
 ### `gym eval aggregate`
 
 Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
@@ -790,6 +814,7 @@ Merge sharded rollout results into a single rollouts file with aggregate metrics
 | `--config PATH` | Config file to load. Repeatable. |
 | `--input-glob`, `-i` | Glob (or comma-separated globs) matching the rollout shards to aggregate. |
 | `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
+| `--rollouts-file-compress` | Compress the merged rollout output with Zstandard. A `.jsonl.zst` output filename also enables compression. |
 | `--no-health-check` | Skip the automatic post-aggregation health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
@@ -907,6 +932,7 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--rollouts-file-compress` | Compress recomputed rollout output with Zstandard. A `.jsonl.zst` output filename also enables compression. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
