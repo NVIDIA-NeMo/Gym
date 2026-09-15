@@ -137,6 +137,7 @@ def _generation_cut_receipt(
             GenerationCutPrefixAck(
                 **inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
+                cut_kind="active_prefix",
                 frozen_buffer_id=f"active/{checkpoint_id}",
                 staging_keys=(
                     f"__generation_cut__/previous/{rollout_id}/{model_call_id}",
@@ -621,6 +622,7 @@ def test_model_commit_accepts_agent_continuation_index_and_returns_reference_ind
             GenerationCutPrefixAck(
                 **cut_inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
+                cut_kind="active_prefix",
                 frozen_buffer_id="active/checkpoint-1",
                 staging_keys=("__generation_cut__/checkpoint-1/rollout-a/call-1",),
                 prefix_token_count=2,
@@ -706,6 +708,7 @@ class _RecordingGenerationCutBackend:
                 GenerationCutPrefixAck(
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
+                    cut_kind="active_prefix",
                     frozen_buffer_id=f"active/{inventory.checkpoint_id}",
                     staging_keys=(
                         f"__generation_cut__/{inventory.checkpoint_id}/{prefix.rollout_id}/{prefix.model_call_id}",

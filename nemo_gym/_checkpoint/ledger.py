@@ -1252,8 +1252,7 @@ def install_model_checkpoint(
                     raise LedgerMismatchError("generation-cut restore did not acknowledge the persisted receipt")
                 restored_cuts += sum(
                     prefix.disposition == "durable_prefix"
-                    and prefix.frozen_buffer_id is not None
-                    and prefix.frozen_buffer_id.startswith("active/")
+                    and prefix.cut_kind == "active_prefix"
                     and (prefix.rollout_id, prefix.attempt_index + 1) not in exclusions
                     for prefix in receipt.prefixes
                 )

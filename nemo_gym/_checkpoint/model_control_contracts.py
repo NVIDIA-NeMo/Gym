@@ -76,6 +76,7 @@ class GenerationCutPrefixAck(_GenerationCutModel):
     model_call_id: str = Field(min_length=1)
     admitted_at: float
     disposition: Literal["durable_prefix", "durable_failure"]
+    cut_kind: Literal["active_prefix", "terminal_completion"] | None = None
     frozen_buffer_id: str | None = Field(default=None, min_length=1)
     staging_keys: tuple[str, ...] = ()
     prefix_token_count: int | None = Field(default=None, ge=0)
@@ -85,17 +86,18 @@ class GenerationCutPrefixAck(_GenerationCutModel):
     def _validate_prefix_evidence(self) -> "GenerationCutPrefixAck":
         evidence = (self.frozen_buffer_id, self.prefix_token_count, self.prefix_digest)
         if self.disposition == "durable_prefix" and (
-            any(value is None for value in evidence) or not self.staging_keys
+            self.cut_kind is None or any(value is None for value in evidence) or not self.staging_keys
         ):
             raise ValueError(
-                "durable_prefix requires frozen_buffer_id, staging_keys, prefix_token_count, and prefix_digest"
+                "durable_prefix requires cut_kind, frozen_buffer_id, staging_keys, "
+                "prefix_token_count, and prefix_digest"
             )
         if len(self.staging_keys) != len(set(self.staging_keys)) or any(not key for key in self.staging_keys):
             raise ValueError("generation-cut staging_keys must be unique and non-empty")
         if self.disposition == "durable_failure" and (
-            self.staging_keys or any(value is not None for value in evidence)
+            self.cut_kind is not None or self.staging_keys or any(value is not None for value in evidence)
         ):
-            raise ValueError("durable_failure cannot carry prefix evidence")
+            raise ValueError("durable_failure cannot carry cut or prefix evidence")
         return self
 
 
