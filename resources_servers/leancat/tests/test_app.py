@@ -48,7 +48,6 @@ from resources_servers.leancat.prepare import (
     UPSTREAM_PROMPT_URL,
 )
 from resources_servers.leancat.proof_utils import check_statement_preserved
-from resources_servers.math_formal_lean.toolchain import parse_lean_version
 
 
 DATA_DIR = Path(__file__).absolute().parent.parent / "data"
@@ -385,7 +384,8 @@ class TestPrompt:
         assert paper != upstream
         # The substantive divergence, and the whole reason both are shipped: upstream permits
         # auxiliary declarations and names the banned tokens; the paper asks for step-by-step
-        # reasoning instead. Running upstream's took Easy from a published 20.0% to 1/10.
+        # reasoning instead. The paper's is the default because it is what the published
+        # numbers were produced under; see the README for the measured comparison.
         assert "step by step" in paper and "step by step" not in upstream
         assert "auxiliary definitions" in upstream and "auxiliary definitions" not in paper
 
@@ -427,7 +427,12 @@ class TestPrompt:
 
 
 class TestToolchainCheck:
-    """A Mathlib mismatch must be logged, since it has no other symptom than failing compiles."""
+    """LeanCat wires the probe up; the probe itself is tested in math_formal_lean.
+
+    ``parse_lean_version``, the mismatch/unusable-sandbox logging and the run-once guarantee
+    all live in ``math_formal_lean.toolchain`` and are covered by its own tests. All that is
+    LeanCat-specific is that the server reaches them at all, with the row's pinned toolchain.
+    """
 
     @pytest.fixture
     def server(self) -> LeanCatResourcesServer:
@@ -442,48 +447,13 @@ class TestToolchainCheck:
         )
         return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    @pytest.mark.parametrize(
-        "output,expected",
-        [
-            ({"stdout": '"4.19.0"', "stderr": ""}, "4.19.0"),
-            ({"stdout": "", "stderr": "4.12.0"}, "4.12.0"),
-            ({"stdout": "info: 4.19.0", "stderr": ""}, "4.19.0"),
-            # A failed `import Mathlib` must not be read as a version.
-            ({"stdout": "", "stderr": "error: unknown package 'Mathlib'"}, None),
-            ({"stdout": "", "stderr": ""}, None),
-        ],
-    )
-    def test_parse_lean_version(self, output, expected):
-        assert parse_lean_version(output) == expected
-
     @pytest.mark.asyncio
-    async def test_mismatch_is_logged_as_an_error(self, server, caplog):
+    async def test_mismatch_against_the_rows_pin_is_logged(self, server, caplog):
         server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.12.0"', "stderr": ""})
         with caplog.at_level("ERROR"):
             await server._check_toolchain_once("leanprover/lean4:v4.19.0")
         assert "MATHLIB MISMATCH" in caplog.text
         assert "4.12.0" in caplog.text and "4.19.0" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_matching_version_logs_no_error(self, server, caplog):
-        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.19.0"', "stderr": ""})
-        with caplog.at_level("ERROR"):
-            await server._check_toolchain_once("leanprover/lean4:v4.19.0")
-        assert caplog.text == ""
-
-    @pytest.mark.asyncio
-    async def test_unusable_sandbox_is_logged(self, server, caplog):
-        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": "", "stderr": "error: boom"})
-        with caplog.at_level("ERROR"):
-            await server._check_toolchain_once("leanprover/lean4:v4.19.0")
-        assert "Could not determine" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_probe_runs_only_once(self, server):
-        probe = AsyncMock(return_value={"stdout": '"4.19.0"', "stderr": ""})
-        server._sandbox_client.execute_lean4 = probe
-        await asyncio.gather(*(server._check_toolchain_once("leanprover/lean4:v4.19.0") for _ in range(10)))
-        assert probe.await_count == 1, "concurrent verifies must share one probe"
 
 
 class TestReverifyMode:
