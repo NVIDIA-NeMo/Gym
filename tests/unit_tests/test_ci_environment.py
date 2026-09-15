@@ -899,9 +899,18 @@ def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
     lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
 
     # Reuse a present pinned uv; verify the version before trusting it.
-    assert "command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.11.29" ]]" in setup_dev
-    # Only the no-uv fallback downloads the installer.
-    assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
+    assert "command -v uv >/dev/null 2>&1" in setup_dev
+    assert 'uv --version | awk \'{print $2}\'' in setup_dev
+    # The pinned uv version is read from the Dockerfile (single source of truth).
+    assert "sed -n 's/^ARG UV_VERSION=//p'" in setup_dev
+    # The no-uv fallback must NOT pipe a remote install script to a shell. It
+    # downloads the standalone uv binary archive and verifies its pinned SHA-256
+    # before use, mirroring how docker/Dockerfile installs uv.
+    assert "astral.sh/uv" not in setup_dev
+    assert "install.sh" not in setup_dev
+    assert "UV_UNMANAGED_INSTALL" not in setup_dev
+    assert "https://github.com/astral-sh/uv/releases/download/" in setup_dev
+    assert "sha256sum -c -" in setup_dev
     assert "setup_uv_sync_args=(--offline)" in setup_dev
     assert "setup_uv_sync_args=()" in setup_dev
 
