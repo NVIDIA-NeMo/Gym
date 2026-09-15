@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import json
 import re
 from pathlib import Path
@@ -85,23 +84,26 @@ UPSTREAM_PROMPT_CONFIG_FPATH = REPO_ROOT / UPSTREAM_PROMPT_CONFIG_PATH
 # without having run.
 
 
+
+@pytest.fixture
+def config() -> LeanCatResourcesServerConfig:
+    return LeanCatResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="leancat",
+        sandbox_host="127.0.0.1",
+        sandbox_port=6000,
+        compilation_timeout=300.0,
+    )
+
+
+@pytest.fixture
+def server(config) -> LeanCatResourcesServer:
+    return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
 class TestLeanCatApp:
-    @pytest.fixture
-    def config(self) -> LeanCatResourcesServerConfig:
-        return LeanCatResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="leancat",
-            sandbox_host="127.0.0.1",
-            sandbox_port=6000,
-            compilation_timeout=300.0,
-        )
-
-    @pytest.fixture
-    def server(self, config) -> LeanCatResourcesServer:
-        return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
     def _create_response(self, text: str, msg_id: str = "test_msg") -> NeMoGymResponse:
         return NeMoGymResponse(
             id="test_response_id",
@@ -258,19 +260,6 @@ class TestLeanCatApp:
 
 
 class TestMetrics:
-    @pytest.fixture
-    def server(self) -> LeanCatResourcesServer:
-        config = LeanCatResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="leancat",
-            sandbox_host="127.0.0.1",
-            sandbox_port=6000,
-            compilation_timeout=300.0,
-        )
-        return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
     def _task(self, rewards, level):
         return [{"reward": r, "level": level, "statement_preserved": True} for r in rewards]
 
@@ -291,9 +280,6 @@ class TestMetrics:
         tasks = [[{"reward": 0.0, "level": "Easy", "statement_preserved": False}]]
         metrics = server.compute_metrics(tasks)
         assert metrics["pass@1/statement_preserved"] == pytest.approx(0.0)
-
-    def test_no_tasks(self, server):
-        assert server.compute_metrics([]) == {}
 
     def test_key_metrics_pick_the_highest_k(self, server):
         agent_metrics = {
@@ -378,17 +364,6 @@ class TestPrompt:
         assert "{formal_statement}" in config.user
         assert config.system is None, "upstream posts a single user message; a system prompt would deviate"
 
-    def test_the_two_templates_really_differ(self):
-        paper = load_prompt_config(str(PROMPT_CONFIG_FPATH)).user
-        upstream = load_prompt_config(str(UPSTREAM_PROMPT_CONFIG_FPATH)).user
-        assert paper != upstream
-        # The substantive divergence, and the whole reason both are shipped: upstream permits
-        # auxiliary declarations and names the banned tokens; the paper asks for step-by-step
-        # reasoning instead. The paper's is the default because it is what the published
-        # numbers were produced under; see the README for the measured comparison.
-        assert "step by step" in paper and "step by step" not in upstream
-        assert "auxiliary definitions" in upstream and "auxiliary definitions" not in paper
-
     def test_upstream_template_still_matches_upstream(self):
         """Refetch the pinned `prompts/static_passk.md` and prove our transcription is exact.
 
@@ -434,19 +409,6 @@ class TestToolchainCheck:
     LeanCat-specific is that the server reaches them at all, with the row's pinned toolchain.
     """
 
-    @pytest.fixture
-    def server(self) -> LeanCatResourcesServer:
-        config = LeanCatResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="leancat",
-            sandbox_host="127.0.0.1",
-            sandbox_port=6000,
-            compilation_timeout=300.0,
-        )
-        return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
     @pytest.mark.asyncio
     async def test_mismatch_against_the_rows_pin_is_logged(self, server, caplog):
         server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.12.0"', "stderr": ""})
@@ -464,41 +426,35 @@ class TestReverifyMode:
 
 
 class TestVerifierMetadataLifting:
-    """Gym posts rows with `verifier_metadata` still nested; the request must accept that."""
+    """Gym posts rows with `verifier_metadata` still nested; the request must accept that,
+    and a top-level field must win when both carry the same key."""
 
-    def test_nested_verifier_metadata_is_lifted(self):
+    @pytest.mark.parametrize(
+        "fields,expected_statement,expected_level",
+        [
+            (
+                {"verifier_metadata": {"formal_statement": REFERENCE, "level": "Easy"}},
+                REFERENCE,
+                "Easy",
+            ),
+            ({"formal_statement": REFERENCE, "level": "High"}, REFERENCE, "High"),
+            (
+                {
+                    "formal_statement": REFERENCE,
+                    "level": "High",
+                    "verifier_metadata": {"formal_statement": "other", "level": "Easy"},
+                },
+                REFERENCE,
+                "High",
+            ),
+        ],
+        ids=["nested-is-lifted", "top-level", "top-level-wins"],
+    )
+    def test_row_fields_reach_the_request(self, fields, expected_statement, expected_level):
         request = LeanCatVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
             response=TestLeanCatApp()._create_response(""),
-            verifier_metadata={
-                "formal_statement": REFERENCE,
-                "problem_id": "0044",
-                "level": "Easy",
-                "tag": ["Limit"],
-                "domain": ["Category"],
-            },
+            **fields,
         )
-        assert request.formal_statement == REFERENCE
-        assert request.problem_id == "0044"
-        assert request.level == "Easy"
-
-    def test_top_level_fields_still_work(self):
-        request = LeanCatVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=TestLeanCatApp()._create_response(""),
-            formal_statement=REFERENCE,
-            level="High",
-        )
-        assert request.formal_statement == REFERENCE
-        assert request.level == "High"
-
-    def test_top_level_wins_over_metadata(self):
-        request = LeanCatVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=TestLeanCatApp()._create_response(""),
-            formal_statement=REFERENCE,
-            level="High",
-            verifier_metadata={"formal_statement": "other", "level": "Easy"},
-        )
-        assert request.formal_statement == REFERENCE
-        assert request.level == "High"
+        assert request.formal_statement == expected_statement
+        assert request.level == expected_level

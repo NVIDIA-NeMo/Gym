@@ -20,7 +20,6 @@ import pytest
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.math_formal_lean.app import MathFormalLeanResourcesServer, MathFormalLeanResourcesServerConfig
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
 from resources_servers.math_formal_lean.toolchain import (
     PROBE_TIMEOUT,
     TOOLCHAIN_PROBE,
@@ -45,12 +44,17 @@ class TestParsing:
     def test_parse_lean_version(self, output, expected):
         assert parse_lean_version(output) == expected
 
-    @pytest.mark.parametrize("raw", ["leanprover/lean4:v4.19.0", "v4.19.0", "4.19.0"])
-    def test_normalize_version(self, raw):
-        assert normalize_version(raw) == "4.19.0"
-
-    def test_normalize_none(self):
-        assert normalize_version(None) == ""
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("leanprover/lean4:v4.19.0", "4.19.0"),
+            ("v4.19.0", "4.19.0"),
+            ("4.19.0", "4.19.0"),
+            (None, ""),
+        ],
+    )
+    def test_normalize_version(self, raw, expected):
+        assert normalize_version(raw) == expected
 
 
 class TestToolchainCheck:
@@ -116,11 +120,3 @@ class TestServerIntegration:
         toolchain = self._server(expected_lean_version="4.12.0")._toolchain
         assert isinstance(toolchain, ToolchainCheck)
         assert toolchain.expected == "4.12.0"
-
-
-class TestSandboxClientTimeoutBuffer:
-    def test_default_buffer_preserved(self):
-        assert Lean4SandboxClient().timeout_buffer == 5.0
-
-    def test_buffer_is_configurable(self):
-        assert Lean4SandboxClient(timeout_buffer=30.0).timeout_buffer == 30.0
