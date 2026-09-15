@@ -19,6 +19,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -38,6 +39,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.sandbox.agent_runtime_config import AgentRuntimeConfig
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -50,6 +52,7 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
+    runtime: AgentRuntimeConfig = Field(default_factory=AgentRuntimeConfig)
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
     # Whether this agent's rollouts participate in training token capture.
@@ -66,6 +69,15 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+
+    @classmethod
+    def create_server(cls, config, server_client):
+        """Choose process placement before executing harness initialization."""
+        if config.runtime.type == "sandbox":
+            from nemo_gym.sandbox.agent_runtime import SandboxedAgentHost
+
+            return SandboxedAgentHost(config=config, server_client=server_client, harness_class=cls)
+        return super().create_server(config, server_client)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

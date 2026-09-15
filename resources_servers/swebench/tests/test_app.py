@@ -23,7 +23,7 @@ from pytest import MonkeyPatch
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
@@ -48,6 +48,55 @@ def make_sandbox(
 
 
 class TestApp:
+    async def test_seed_hands_off_complete_descriptor_and_cleanup_is_idempotent(self, monkeypatch):
+        config = SwebenchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            sandbox_provider="task_runtime",
+            sandbox_config={},
+            apply_anti_cheating=False,
+        )
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = make_sandbox()
+        descriptor = {"sandbox_id": "sandbox-123", "workdir": "/testbed", "opaque": {"lease": "123"}}
+        sandbox.serialize = AsyncMock(return_value=descriptor)
+        monkeypatch.setattr(SwebenchResourcesServer, "_make_test_spec", MagicMock())
+        monkeypatch.setattr(SwebenchResourcesServer, "_create_sandbox", AsyncMock(return_value=sandbox))
+        request = MagicMock(session={SESSION_ID_KEY: "task-session"})
+
+        response = await server.seed_session(request, MagicMock())
+
+        assert response.sandbox_handle == "sandbox-123"
+        assert response.workspace.provider == "task_runtime"
+        assert response.workspace.descriptor == descriptor
+        sandbox.stop.assert_not_awaited()
+        await server.cleanup_session(request)
+        await server.cleanup_session(request)
+        sandbox.stop.assert_awaited_once()
+        assert server._session_sandboxes == {}
+
+    async def test_failed_workspace_serialization_cleans_up(self, monkeypatch):
+        config = SwebenchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            sandbox_provider="task_runtime",
+            sandbox_config={},
+            apply_anti_cheating=False,
+        )
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = make_sandbox()
+        sandbox.serialize = AsyncMock(side_effect=RuntimeError("cannot serialize"))
+        monkeypatch.setattr(SwebenchResourcesServer, "_make_test_spec", MagicMock())
+        monkeypatch.setattr(SwebenchResourcesServer, "_create_sandbox", AsyncMock(return_value=sandbox))
+        with pytest.raises(RuntimeError, match="cannot serialize"):
+            await server.seed_session(MagicMock(session={SESSION_ID_KEY: "task-session"}), MagicMock())
+        sandbox.stop.assert_awaited_once()
+        assert server._session_sandboxes == {}
+
     def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SwebenchResourcesServerConfig(
             host="0.0.0.0",

@@ -1,0 +1,167 @@
+---
+title: "Agent Runtime Placement"
+description: "Run an agent harness process inside a per-task sandbox using shared base-class configuration."
+position: 8
+---
+
+# Agent Runtime Placement
+
+<Note>
+This is a proof of concept. The runtime configuration is inherited from
+`BaseResponsesAPIAgentConfig`; the launcher integration is provided by
+`SimpleResponsesAPIAgent`. Local placement remains the default.
+</Note>
+
+Runtime placement runs the harness's Python process and its child processes in
+the task sandbox. The harness can use normal filesystem access and subprocesses.
+It does not need separate local and sandbox execution branches.
+
+## Use an environment's task sandbox
+
+For SWE-bench, compose
+`responses_api_agents/opencode_agent/configs/opencode_swebench.yaml` with the
+SWE-bench resources config, a model config, and a connect-capable provider such as
+OpenSandbox. The agent's relevant configuration is:
+
+```yaml
+runtime:
+  type: sandbox
+  sandbox_source: environment
+  dependencies:
+    enabled: true
+    python_version: 3.13.14
+  timeout_s: 10800
+  concurrency: 8
+  agent_config:
+    repo_dir: /testbed
+    workspace_root: /tmp/opencode-workspaces
+```
+
+Dependency installation is enabled by default. Gym snapshots the current checkout's
+core code and selected harness, including uncommitted changes, uploads the snapshot,
+and creates a sandbox-local virtual environment with Python 3.13.14. It installs Gym
+and the harness's `requirements.txt` (including `overrides.txt` when present) or its
+`pyproject.toml`. The task's existing Python environment is left intact. OpenCode's
+normal startup then installs its CLI if it is missing.
+
+The sandbox needs a POSIX shell, `curl`, `tar`, and outbound access to the Python,
+uv, package, and harness distribution endpoints. Gym uses an existing `uv` binary
+or bootstraps version 0.12.3 without modifying shell profiles. Python, dependency
+caches, and source files live in the per-task worker directory outside the task
+repository. Each new runtime gets a fresh installation; this proof of concept does
+not cache installed environments across tasks.
+
+The host needs a Git checkout. Set `runtime.dependencies.source_root` when it is
+not the checkout containing the running Gym module. Custom harness layouts also
+set `runtime.dependencies.harness_path`, relative to that checkout. Only Gym core
+and the selected harness are bundled; environments with additional local source
+dependencies should use a prepared image or provision those dependencies explicitly.
+Host virtual environments, ignored files, symlinks, task datasets, and verifier code
+are excluded. Python dependencies resolve from the declared manifests, not `uv.lock`.
+
+For a prepared image, disable installation and select its existing interpreter:
+
+```yaml
+runtime:
+  type: sandbox
+  dependencies:
+    enabled: false
+  python: /opt/nemo-gym/bin/python
+```
+
+`runtime.uploads` (local file to sandbox destination) and `runtime.setup_command`
+remain available for OS packages or custom provisioning and run before automatic
+Python installation. The setup timeout is controlled by `runtime.setup_timeout_s`.
+`runtime.env` supplies the worker and setup process environment.
+`runtime.agent_config` overrides harness settings only inside the sandbox; it
+cannot override runtime placement.
+
+The resources server selects the task image and provider. Agent runtime resource
+specs are therefore rejected with `sandbox_source: environment`.
+
+## Create an agent-owned runtime
+
+For an environment that does not provide a task sandbox, the runtime host can
+create one:
+
+```yaml
+runtime:
+  type: sandbox
+  sandbox_source: runtime
+  provider: sandbox
+  spec:
+    image: your-registry/gym-harness:your-version
+    workdir: /workspace
+    ttl_s: 1800
+    resources:
+      cpu: 2
+      memory_mib: 4096
+  dependencies:
+    enabled: true
+```
+
+`provider` resolves a named provider block in the merged Gym configuration.
+`spec` uses the fields of `SandboxSpec`. In this mode the host creates and stops
+the sandbox. It rejects a resources server that supplies a different workspace,
+because silently running the harness elsewhere would disconnect it from the task.
+
+## Execution lifecycle
+
+1. The server factory selects a generic runtime host before constructing the harness.
+2. `/run` calls the resources server's `/seed_session`.
+3. The host connects to the environment workspace or creates its own runtime.
+4. A per-task Python worker constructs the configured harness and invokes its
+   existing `/v1/responses` ASGI route, including the rollout capture prefix.
+5. The host retrieves the JSON response and calls `/verify` with the original
+   task metadata and session cookies.
+6. Cleanup runs after success, failure, or cancellation.
+
+The worker uses JSON files outside the task repository, so no inbound HTTP port
+is required. Model and resources-server endpoints must still be reachable from
+the sandbox. Override their root URLs when necessary:
+
+```yaml
+runtime:
+  type: sandbox
+  sandbox_source: environment
+  server_urls:
+    policy_model: http://gym-model.internal:8000
+```
+
+The worker receives the configured harness settings and referenced server routes.
+It does not receive the entire global configuration or the run's verifier metadata.
+
+## Resources-server integration
+
+The resources-server base provides a workspace registry and an idempotent
+`/cleanup_session` endpoint. After preparing a sandbox in `/seed_session`, publish it:
+
+```python
+workspace = await self.register_sandbox_workspace(request, sandbox, self.config.sandbox_provider)
+return BaseSeedSessionResponse(workspace=workspace)
+```
+
+During verification, `self.session_sandbox(request)` returns the original object.
+The resource server can extract a patch and evaluate it in a fresh sandbox, as
+SWE-bench does. The provider must support `serialize()` and `connect()` for this
+handoff. Workspace registration is process-local: seed, verify, and cleanup must
+reach the same resources-server process.
+
+## Compatibility limits
+
+- Gym's launcher uses `create_server()`. Programmatic callers must also use
+  `HarnessClass.create_server(config, server_client)` to enable placement;
+  constructing the class directly does not move the process.
+- The harness must be importable inside the runtime and able to execute through
+  `/responses` independently of its own `/run`. Custom `/run` setup and
+  postprocessing are not executed by the generic host.
+- The host preserves verifier response fields and OpenCode's existing observation
+  envelope. It does not reproduce arbitrary harness-specific `/run` return fields.
+- Sandbox mode requires `/run`; a direct `/responses` request to the outer host
+  has no task workspace and is rejected.
+- This implements agent placement and environment workspace ownership. It does
+  not relocate the resources-server process or add a separate generic verifier
+  runtime. SWE-bench continues to manage its fresh verification sandbox.
+- Provider-side command cancellation varies. Cleanup destroys an owned sandbox
+  or asks the environment to destroy its workspace; it does not promise to
+  preserve a cancelled worker's partial transcript.
