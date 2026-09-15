@@ -10,7 +10,7 @@ import os
 import shlex
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any, Literal
 
@@ -47,6 +47,8 @@ class EnvironmentConfig(Settings):
     exec_shell: str | None = "bash -c"
     image_rewrites: list[dict[str, str]] = Field(default_factory=list)
     workdir: str | None = None
+    efs_logs_host_path: str | None = None
+    efs_logs_init_image: str = "python:3.13-slim"
 
 
 class HealthcheckError(RuntimeError):
@@ -69,6 +71,9 @@ class Environment:
         self.cleanup_errors = []
         self.resources = []
         self._cleanup_task = None
+        self.shared_logs = None
+        self.efs_logs_fallback = None
+        self.log_role = "verifier" if verifier else "agent"
         self.task_env = resolve_env(self.settings.env)
         self.startup_env = (
             self.task_env | config.sandbox_env_by_task.get(task.name.split("/")[-1], {}) | config.sandbox_env
@@ -93,6 +98,8 @@ class Environment:
                 "api_key", os.environ["OPENSANDBOX_API_KEY"]
             )
         resolve_provider_config(self.provider_config)
+        if config.efs_logs_host_path and "opensandbox" not in self.provider_config:
+            raise ValueError("EFS logs require OpenSandbox")
         if self.settings.network_mode == "no-network" and (
             self.uses_compose or "opensandbox" not in self.provider_config
         ):
@@ -111,6 +118,19 @@ class Environment:
         if self.pool != "default":
             metadata["nemo-gym.nvidia.com/resource-pool"] = self.pool
         options = deepcopy(config.sandbox_provider_options)
+        if self.shared_logs is not None:
+            volumes = list(options.get("volumes") or [])
+            for volume in volumes:
+                target, logs = PurePosixPath(volume.get("mountPath", "")), PurePosixPath("/logs")
+                if (
+                    target == logs
+                    or target in logs.parents
+                    or logs in target.parents
+                    or volume.get("name") == "tb4-logs"
+                ):
+                    raise ValueError("EFS logs conflict with a configured /logs mount")
+            volumes.append(self.shared_logs.volume(self.log_role))
+            options["volumes"] = volumes
         if settings.network_mode == "no-network":
             options["network_policy"] = {"defaultAction": "deny", "egress": []}
         return SandboxSpec(
@@ -157,7 +177,14 @@ class Environment:
                 resolve_provider_config(self.provider_config),
                 path,
                 service_specs={
-                    name: spec if name == "main" else replace(spec, resources=SandboxResources(), env={})
+                    name: spec
+                    if name == "main"
+                    else replace(
+                        spec,
+                        resources=SandboxResources(),
+                        env={},
+                        provider_options=deepcopy(self.config.sandbox_provider_options),
+                    )
                     for name in document["services"]
                 },
                 timeout_s=self.config.sandbox_ready_timeout_s,
@@ -166,7 +193,25 @@ class Environment:
             self.main = self.compose.services["main"]
         else:
             self.main = AsyncSandbox(resolve_provider_config(self.provider_config), spec)
-            await self.main.start()
+            try:
+                await self.main.start()
+            except Exception as exc:
+                # Older endpoints (including the current GPU deployment) reject
+                # host mounts before allocating a sandbox. Keep their existing
+                # lifecycle usable, but never mask other provisioning failures.
+                if (
+                    self.shared_logs is None
+                    or "VOLUME::HOST_PATH_NOT_ALLOWED" not in str(exc)
+                    or self.shared_logs.host_path not in str(exc)
+                ):
+                    raise
+                await self.main.stop()
+                self.efs_logs_fallback = str(exc)
+                self.shared_logs = None
+                self.main = AsyncSandbox(resolve_provider_config(self.provider_config), self.build_spec())
+                await self.main.start()
+        if self.shared_logs is not None:
+            await self.shared_logs.initialize_role(self)
         result = await self.exec("mkdir -p /logs/agent /logs/verifier /logs/artifacts", timeout_sec=60)
         if result.return_code:
             raise RuntimeError(f"Failed to initialize task log directories: {result.stderr}")

@@ -66,6 +66,9 @@ async def fixture(tmp_path, monkeypatch):
             closed=False,
             resources=[],
             cleanup_errors=[],
+            shared_logs=None,
+            efs_logs_fallback=None,
+            build_spec=lambda: None,
             resource_identities=lambda: [],
             main=MagicMock(),
             main_connection=AsyncMock(return_value={"provider": "gpu", "sandbox_id": "box", "workdir": "/task"}),
@@ -92,6 +95,66 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "run_verifier", grade)
     yield SimpleNamespace(server=server, request=request, body=body, envs=envs, grade=grade, events=events)
     await lifecycle.shutdown(list(server._sessions.values()), 0.01)
+
+
+@pytest.mark.parametrize("failure", [None, "start", "prepare", "cleanup", "unsupported"])
+async def test_efs_session_owns_helper_until_workloads_are_stopped(fixture, monkeypatch, failure):
+    f = fixture
+    f.server.config.environment.efs_logs_host_path = "/mnt/efs/data/shared"
+    logs = SimpleNamespace(
+        session_id="logs",
+        closed=False,
+        resources=[],
+        cleanup_errors=[],
+        resource_identities=lambda: [{"efs_subpath": "owned"}],
+        restored_archive="/logs/snapshot.tar.gz",
+    )
+
+    async def initialize():
+        f.events.append("logs_start")
+        if failure == "start":
+            raise RuntimeError("logs start failed")
+        if failure == "unsupported":
+            raise RuntimeError("VOLUME::HOST_PATH_NOT_ALLOWED /mnt/efs/data/shared")
+
+    async def prepare():
+        assert f.envs[0].closed and not f.envs[1].closed
+        f.events.append("logs_prepare")
+        if failure == "prepare":
+            raise RuntimeError("snapshot unavailable; use host transfer")
+
+    async def close(*, remove_data=True):
+        if failure != "unsupported":
+            assert all(env.closed for env in f.envs)
+        assert remove_data
+        f.events.append("logs_stop")
+        if failure == "cleanup":
+            raise RuntimeError("EFS cleanup failed")
+        logs.closed = True
+
+    logs.start = AsyncMock(side_effect=initialize)
+    logs.prepare_verifier = AsyncMock(side_effect=prepare)
+    logs.stop = AsyncMock(side_effect=close)
+    monkeypatch.setattr(lifecycle, "SharedLogs", lambda env: logs)
+    if failure == "start":
+        with pytest.raises(HTTPException):
+            await seed(f)
+        f.grade.assert_not_awaited()
+    else:
+        session_id = await start(f)
+        response = await f.server.verify(f.request, verify_body(session_id))
+        assert response.evaluation_completed and response.reward == 0.75
+        assert response.infrastructure_error is None
+        if failure == "unsupported":
+            assert all(env.shared_logs is None for env in f.envs)
+        if failure == "cleanup":
+            session = f.server._sessions[session_id]
+            assert session.result["exception_info"]["exception_message"] == "EFS cleanup failed"
+        assert f.events.index("logs_start") < f.events.index("agent_start")
+        assert f.events.index("agent_stop") < f.events.index("logs_prepare") < f.events.index("verifier_start")
+    assert f.events[-1] == "logs_stop"
+    assert logs.stop.await_count == (2 if failure == "unsupported" else 1)
+    assert f.server._slots._value == f.server.config.max_concurrent_sessions
 
 
 def verify_body(session_id, reason="completed"):

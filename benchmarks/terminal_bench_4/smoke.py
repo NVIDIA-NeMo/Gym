@@ -70,6 +70,7 @@ async def main(args):
             "resources_servers/terminal_bench_4/lifecycle.py",
             "resources_servers/terminal_bench_4/task.py",
             "resources_servers/terminal_bench_4/environment.py",
+            "resources_servers/terminal_bench_4/shared_logs.py",
             "resources_servers/terminal_bench_4/transfers.py",
             "resources_servers/terminal_bench_4/collection.py",
             "resources_servers/terminal_bench_4/verifier.py",

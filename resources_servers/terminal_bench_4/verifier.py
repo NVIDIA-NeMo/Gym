@@ -6,6 +6,7 @@
 import asyncio
 import json
 import math
+import shlex
 from pathlib import Path, PurePosixPath
 
 from resources_servers.terminal_bench_4.task import resolve_env
@@ -51,6 +52,7 @@ def parse_reward(directory):
 
 async def restore(environment, artifacts_dir):
     await prepare_directory(environment, "/logs/verifier", empty=True)
+    shared_logs = getattr(environment, "shared_logs", None)
     for artifact in environment.task.config.collected_artifacts:
         host = Path(artifacts_dir) / artifact.host_path
         if not host.exists():
@@ -58,6 +60,17 @@ async def restore(environment, artifacts_dir):
         target = artifact.source
         if host.is_dir():
             await prepare_directory(environment, target, empty=True)
+            if shared_logs and shared_logs.restored_archive and target == "/logs/artifacts":
+                archive = shlex.quote(shared_logs.restored_archive)
+                result = await environment.main.exec(
+                    f"tar -xzf {archive} -C /logs/artifacts; status=$?; rm -f {archive}; exit $status",
+                    timeout_s=600,
+                )
+                if result.return_code == 0:
+                    continue
+                # Retain the normal transfer fallback if remote extraction is
+                # unavailable, clearing any partial extraction first.
+                await prepare_directory(environment, target, empty=True)
             await upload_dir(environment.main, host, target)
         else:
             parent = str(PurePosixPath(target).parent)

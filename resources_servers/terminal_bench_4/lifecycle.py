@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from nemo_gym.sandbox.handoff import AgentTermination, SandboxedSeedResponse
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
+from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.transfers import download_dir
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier
 
@@ -43,6 +44,7 @@ class Session:
     task: Any = None
     environment: Any = None
     verifier_environment: Any = None
+    shared_logs: Any = None
     seed: SandboxedSeedResponse | None = None
     termination: AgentTermination | None = None
     verify_body: Any = None
@@ -79,6 +81,16 @@ async def cleanup(session):
             continue
         try:
             await env.stop()
+        except Exception as exc:
+            exception(session, exc)
+    if session.shared_logs is not None:
+        try:
+            # A failed sandbox deletion must not race removal of its live mount.
+            await session.shared_logs.stop(
+                remove_data=all(
+                    env is None or env.closed for env in (session.environment, session.verifier_environment)
+                )
+            )
         except Exception as exc:
             exception(session, exc)
     if session.owns_slot:
@@ -119,9 +131,38 @@ async def prepare_session(session, loader):
             session.directory,
             verifier=True,
         )
+        if session.config.environment.efs_logs_host_path:
+            session.shared_logs = SharedLogs(session.environment)
+            session.environment.shared_logs = session.shared_logs
+            session.verifier_environment.shared_logs = session.shared_logs
+            # Reject mount conflicts before allocating the helper or workloads.
+            session.environment.build_spec()
+            session.verifier_environment.build_spec()
+
+        async def provision():
+            if session.shared_logs:
+                try:
+                    await session.shared_logs.start()
+                except Exception as exc:
+                    if "VOLUME::HOST_PATH_NOT_ALLOWED" not in str(
+                        exc
+                    ) or session.config.environment.efs_logs_host_path not in str(exc):
+                        raise
+                    await session.shared_logs.stop()
+                    session.environment.shared_logs = None
+                    session.verifier_environment.shared_logs = None
+                    session.diagnostics.append({"operation": "efs_logs_fallback", "role": "helper", "error": str(exc)})
+                session.persist()
+            await session.environment.start()
+            if getattr(session.environment, "efs_logs_fallback", None):
+                session.verifier_environment.shared_logs = None
+                session.diagnostics.append(
+                    {"operation": "efs_logs_fallback", "role": "agent", "error": session.environment.efs_logs_fallback}
+                )
+
         session.result["environment_setup"] = {"started_at": now()}
         try:
-            await asyncio.wait_for(session.environment.start(), session.task.config.environment.build_timeout_sec)
+            await asyncio.wait_for(provision(), session.task.config.environment.build_timeout_sec)
         except TimeoutError as exc:
             exception(session, exc, "EnvironmentStartTimeoutError")
             raise
@@ -273,6 +314,17 @@ async def finalize_session(session, *, grade):
             await session.environment.stop()
         except Exception as exc:
             exception(session, exc)
+        if session.shared_logs and session.environment.closed:
+            try:
+                await session.shared_logs.prepare_verifier()
+                session.diagnostics.append(
+                    {
+                        "operation": "efs_artifact_restore",
+                        "snapshot_ready": bool(session.shared_logs.restored_archive),
+                    }
+                )
+            except Exception as exc:
+                session.diagnostics.append({"operation": "efs_artifact_restore", "error": str(exc)})
         session.subphase = "verifier_setup"
         session.result["verifier"] = {"started_at": now()}
         session.persist()
@@ -283,6 +335,14 @@ async def finalize_session(session, *, grade):
                 session.verifier_environment.start(),
                 session.task.config.environment.build_timeout_sec,
             )
+            if getattr(session.verifier_environment, "efs_logs_fallback", None):
+                session.diagnostics.append(
+                    {
+                        "operation": "efs_logs_fallback",
+                        "role": "verifier",
+                        "error": session.verifier_environment.efs_logs_fallback,
+                    }
+                )
             await restore(session.verifier_environment, session.directory / "artifacts")
             session.subphase = "verifier_execution"
             session.persist()

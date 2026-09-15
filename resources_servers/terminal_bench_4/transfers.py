@@ -3,6 +3,7 @@
 
 """File and directory transfer through Gym sandbox operations."""
 
+import hashlib
 import shlex
 import tarfile
 import tempfile
@@ -43,10 +44,11 @@ async def download_file(sandbox, source, target):
     await sandbox.download(source, target)
 
 
-async def download_dir(sandbox, source, target, *, exclude=None, exec_command=None):
+async def download_dir(sandbox, source, target, *, exclude=None, exec_command=None, shared_archive=None):
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
-    remote = f"/tmp/.nemo-gym-download-{uuid4().hex}.tar.gz"
+    remote = shared_archive or f"/tmp/.nemo-gym-download-{uuid4().hex}.tar.gz"
+    retained = False
     flags = " ".join(f"--exclude={shlex.quote(pattern)}" for pattern in (exclude or []))
     command = f"tar -czf {remote} {flags} -C {shlex.quote(source)} ."
     # The reference uses role shell/root for exclusions; plain directory
@@ -72,8 +74,14 @@ async def download_dir(sandbox, source, target, *, exclude=None, exec_command=No
             await sandbox.download(remote, archive)
             with tarfile.open(archive, "r:gz") as tar:
                 tar.extractall(target, filter="data")
+            if shared_archive:
+                with archive.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                retained = True
+                return digest
     finally:
-        await sandbox.exec(f"rm -f {remote}", timeout_s=60)
+        if not retained:
+            await sandbox.exec(f"rm -f {remote}", timeout_s=60)
 
 
 async def prepare_directory(environment, path, *, empty=False):

@@ -47,5 +47,39 @@ infrastructure failure adds `infrastructure_error` and `_ng_failure_class`, even
 when a reward was retrieved. Artifacts include the compatible trial directory and
 worker trajectory references. Failure diagnostics are written before teardown.
 
+## Shared EFS logs
+
+The benchmark profile sets `environment.efs_logs_host_path` to
+`/mnt/efs/data/shared`. Each episode creates a unique EFS directory with separate
+agent and verifier subdirectories mounted read-write at `/logs`. The image's
+default UID/GID owns its log root with mode `755`; workloads keep their original
+execution user. This allows non-root images to initialize their log directories
+and keeps root verifier reward-directory protections effective. Compose mounts
+these logs in `main`; sidecar mounts and collection order remain unchanged.
+
+A CPU helper (`environment.efs_logs_init_image`, default `python:3.13-slim`)
+initializes ownership and remains alive until both workloads are stopped. It
+reuses the collected `/logs/artifacts` archive through EFS after agent teardown,
+avoiding its upload from the resources host to the verifier. The archive is
+checked against its collected digest, data-filtered, and repacked just as in the
+host transfer. Exclusions and the local artifact manifest/files remain intact.
+Overlapping artifact declarations and unavailable snapshots use the existing
+ordered host restore. Agent logs, undeclared files, and agent-written reward
+files do not leak into the fresh verifier role.
+
+Both endpoint pools must expose the same EFS share. An endpoint that explicitly
+rejects the host mount with `VOLUME::HOST_PATH_NOT_ALLOWED` uses the original
+filesystem/transfer lifecycle, recording `efs_logs_fallback` in diagnostics.
+This preserves existing healthy GPU tasks on deployments without EFS support;
+it does not fix non-root log creation on those deployments. Other provisioning
+errors remain errors. Set `efs_logs_host_path: null` to disable EFS explicitly.
+
+Normal completion, cancellation, and handled failures remove the owned EFS
+directory after workload teardown and then destroy the helper. If workload
+deletion fails, EFS data is retained to avoid deleting a live mount. Persistent
+session records include the helper ID and exact EFS host path/subdirectory for
+recovery. Provider TTL expires sandboxes after abrupt process death, but EFS data
+requires separate cleanup in that case.
+
 This server is not marked verified: deployment smoke evidence and category gaps
 are recorded in the [native lifecycle notes](../../benchmarks/terminal_bench_4/native-lifecycle.md).

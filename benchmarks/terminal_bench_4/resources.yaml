@@ -9,6 +9,7 @@ terminal_bench_4:
         cpu_enforcement_policy: limit
         memory_enforcement_policy: limit
         exec_shell: bash -c
+        efs_logs_host_path: /mnt/efs/data/shared
         sandbox_request_gpu_type: false
         sandbox_split_endpoints: ${oc.select:tb4_split_sandbox_endpoints,false}
         sandbox_env_by_task:
