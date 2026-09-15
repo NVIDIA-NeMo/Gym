@@ -1,0 +1,17 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- resources_servers/math_formal_lean/configs/math_formal_lean.yaml
+math_formal_lean:
+  resources_servers:
+    math_formal_lean:
+      sandbox_backend: gym_sandbox
+      opensandbox:
+        provider:
+          opensandbox: ${sandbox.opensandbox}
+        image: ${oc.env:NS_SANDBOX_IMAGE}
+        max_concurrent: ${oc.decode:${oc.env:LEAN_SANDBOX_MAX_CONCURRENT,8}}
+        pool_size: ${oc.decode:${oc.env:LEAN_SANDBOX_POOL_SIZE,0}}
+        pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,""}
+        create_ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_TTL_S,3600}}
+        ready_timeout_s: ${oc.decode:${oc.env:LEAN_SANDBOX_READY_TIMEOUT_S,1200}}
+      verified: false

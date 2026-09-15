@@ -30,7 +30,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 import httpx
 from fastapi import FastAPI, Request
@@ -48,6 +48,10 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+if TYPE_CHECKING:
+    from sandbox_pool import SandboxPool
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,13 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # Sandbox configuration for code execution tools
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
+
+    # Sandbox backend: "local" (default — today's colocated server) or "sandbox_pool"
+    # (disaggregated pods on OpenSandbox; requires the sandbox_pool block below).
+    sandbox_type: Literal["local", "sandbox_pool"] = "local"
+    # SandboxPool constructor kwargs (see sandbox_pool.py). Only read when
+    # sandbox_type == "sandbox_pool"; the default backend never touches it.
+    sandbox_pool: Dict[str, Any] = Field(default_factory=dict)
 
     # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
@@ -132,6 +143,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
+    _sandbox_pool: Optional["SandboxPool"] = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -145,6 +157,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         @asynccontextmanager
         async def lifespan_wrapper(app):
             try:
+                if self._sandbox_pool is not None:
+                    # Budgeted warmup launches creation tasks without gating server boot.
+                    await self._sandbox_pool.start()
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
             finally:
@@ -260,14 +275,22 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         logger.info(f"Initializing NeMo Skills ToolManager with tools: {self.config.nemo_skills_tools}")
 
-        context = {
-            "sandbox": {
-                "sandbox_type": "local",
-                "host": self.config.sandbox_host,
-                "port": self.config.sandbox_port,
-                "disable_session_restore": self.config.disable_session_restore,
-            }
+        sandbox_context: Dict[str, Any] = {
+            "sandbox_type": self.config.sandbox_type,
+            "host": self.config.sandbox_host,
+            "port": self.config.sandbox_port,
+            "disable_session_restore": self.config.disable_session_restore,
         }
+        if self.config.sandbox_type == "sandbox_pool":
+            from gym_sandbox import GymSandbox
+            from nemo_skills.code_execution.sandbox import sandboxes
+            from sandbox_pool import SandboxPool
+
+            sandboxes["sandbox_pool"] = GymSandbox
+            self._sandbox_pool = SandboxPool(**self.config.sandbox_pool)
+            sandbox_context["pool"] = self._sandbox_pool
+
+        context = {"sandbox": sandbox_context}
 
         overrides = {
             tool_name: dict(tool_config) for tool_name, tool_config in self.config.nemo_skills_tool_overrides.items()
@@ -462,25 +485,32 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
     async def shutdown(self):
         """Cleanup resources on server shutdown."""
-        if self.tool_manager:
-            await self.tool_manager.shutdown()
-
-        # Terminate the python_tool subprocess if one was started.
-        if self._python_tool_process:
-            pid: int = self._python_tool_process.pid
-            logger.info(f"Terminating python_tool server (PID: {pid})")
-            self._python_tool_process.terminate()
+        try:
+            if self.tool_manager:
+                await self.tool_manager.shutdown()
+        finally:
             try:
-                self._python_tool_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.warning("python_tool server did not terminate gracefully, killing...")
-                self._python_tool_process.kill()
-                # Reap the child after SIGKILL so it doesn't linger as <defunct>.
-                try:
-                    self._python_tool_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    logger.error(f"python_tool server (PID: {pid}) did not exit after SIGKILL; may leak as a zombie")
-            self._python_tool_process = None
+                if self._sandbox_pool is not None:
+                    await self._sandbox_pool.aclose()
+            finally:
+                # Terminate the python_tool subprocess if one was started.
+                if self._python_tool_process:
+                    pid: int = self._python_tool_process.pid
+                    logger.info(f"Terminating python_tool server (PID: {pid})")
+                    self._python_tool_process.terminate()
+                    try:
+                        self._python_tool_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("python_tool server did not terminate gracefully, killing...")
+                        self._python_tool_process.kill()
+                        # Reap the child after SIGKILL so it doesn't linger as <defunct>.
+                        try:
+                            self._python_tool_process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            logger.error(
+                                f"python_tool server (PID: {pid}) did not exit after SIGKILL; may leak as a zombie"
+                            )
+                    self._python_tool_process = None
 
 
 if __name__ == "__main__":
