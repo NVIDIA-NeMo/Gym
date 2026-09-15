@@ -218,6 +218,7 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
                 url_path="/verify",
                 json=verify_request.model_dump(),
             )
+            verify_response.raise_for_status()
             return ToolSandboxVerifyResponse.model_validate(await verify_response.json())
         except Exception:
             logger.exception("Error in run")

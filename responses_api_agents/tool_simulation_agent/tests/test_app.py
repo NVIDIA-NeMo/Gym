@@ -67,7 +67,7 @@ class TestApp:
         server_client_post_mock: AsyncMock,
         first_response: dict[str, Any],
         *additional_responses: dict[str, Any],
-    ) -> None:
+    ) -> list[AsyncMock]:
         server_client_post_mock.reset_mock(
             return_value=True,
             side_effect=True,
@@ -83,12 +83,14 @@ class TestApp:
             post_response_mock.ok = True
             post_response_mock.json.return_value = response
             post_response_mock.read.return_value = json.dumps(response).encode()
+            post_response_mock.cookies = {}
             post_responses.append(post_response_mock)
 
         if additional_responses_present:
             server_client_post_mock.side_effect = post_responses
         else:
             server_client_post_mock.return_value = post_responses[0]
+        return post_responses
 
     async def test_responses(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
@@ -111,6 +113,7 @@ class TestApp:
                 json={
                     "input": [],
                 },
+                cookies={"incoming_session": "response-cookie"},
             )
 
         server_client_post_mock.assert_called_once_with(
@@ -119,6 +122,7 @@ class TestApp:
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
             ),
+            cookies={"incoming_session": "response-cookie"},
         )
 
         chat_response_object = {
@@ -145,7 +149,8 @@ class TestApp:
             "tool_choice": "auto",
             "tools": [],
         }
-        self._set_server_client_post_responses(server_client_post_mock, chat_response_object)
+        post_responses = self._set_server_client_post_responses(server_client_post_mock, chat_response_object)
+        post_responses[0].cookies = {"model_session": "model-cookie"}
         chat_response = test_client.post(
             "/v1/responses",
             json={
@@ -156,8 +161,11 @@ class TestApp:
                     }
                 ]
             },
+            cookies={"incoming_session": "response-cookie"},
         )
         assert chat_response.status_code == 200
+        assert chat_response.cookies["incoming_session"] == "response-cookie"
+        assert chat_response.cookies["model_session"] == "model-cookie"
         expected_chat_response_json = {
             "id": "chat_response_id",
             "created_at": 1,
@@ -217,6 +225,7 @@ class TestApp:
                     )
                 ],
             ),
+            cookies={"incoming_session": "response-cookie"},
         )
 
     async def test_run(self, agent_config: ToolSimulationAgentConfig) -> None:
@@ -250,6 +259,7 @@ class TestApp:
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
             ),
+            cookies={},
         )
 
         tools = [
@@ -281,9 +291,10 @@ class TestApp:
         invalid_verify_response_object = {
             "reward": 0.5,
         }
-        self._set_server_client_post_responses(
+        post_responses = self._set_server_client_post_responses(
             server_client_post_mock, tool_call_response_object, invalid_verify_response_object
         )
+        post_responses[0].cookies = {"model_session": "verify-cookie"}
         with raises(ValidationError, match="ToolSimulationAgentVerifyResponse"):
             test_client.post(
                 "/run",
@@ -298,6 +309,7 @@ class TestApp:
                         "tools": tools,
                     }
                 },
+                cookies={"incoming_session": "run-cookie"},
             )
 
         full_tool_call_response = {
@@ -354,6 +366,7 @@ class TestApp:
                     ],
                     tools=tools,
                 ),
+                cookies={"incoming_session": "run-cookie"},
             ),
             call(
                 server_name="tool_resources_server",
@@ -392,6 +405,7 @@ class TestApp:
                     },
                     "response": full_tool_call_response,
                 },
+                cookies={"incoming_session": "run-cookie", "model_session": "verify-cookie"},
             ),
         ]
         assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(
@@ -412,9 +426,10 @@ class TestApp:
             "response": tool_call_response_object,
             "reward": 1,
         }
-        self._set_server_client_post_responses(
+        post_responses = self._set_server_client_post_responses(
             server_client_post_mock, tool_call_response_object, valid_verify_response_object
         )
+        post_responses[0].cookies = {"model_session": "verify-cookie"}
         valid_verify_response = test_client.post(
             "/run",
             json={
@@ -428,6 +443,7 @@ class TestApp:
                     "tools": tools,
                 }
             },
+            cookies={"incoming_session": "run-cookie"},
         )
         assert valid_verify_response.status_code == 200
         expected_valid_verify_response_json = {
@@ -529,4 +545,5 @@ class TestApp:
                     )
                 ],
             ),
+            cookies={},
         )

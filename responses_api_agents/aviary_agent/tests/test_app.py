@@ -590,6 +590,8 @@ class TestApp:
         assert verify_response.reward == 1.0
         assert verify_response.success is True
         assert verify_response.response.contains_transitions is True
+        # seed, model, step, and verify must all reject unsuccessful HTTP responses.
+        assert dotjson_mock.raise_for_status.call_count == 4
         assert [item.type for item in verify_response.response.output[0]] == [
             "message",
             "function_call",
