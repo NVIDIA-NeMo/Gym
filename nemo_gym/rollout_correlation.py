@@ -94,18 +94,14 @@ def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
         _ROLLOUT_ID.reset(token)
 
 
-# Match the same id characters as ``ROLLOUT_ID_PATTERN``.
-# Anchor the id between the prefix and the remaining path.
-# Shared by both middlewares below so the two never drift apart.
-_ROLLOUT_PATH_RE = re.compile(
-    rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
-)
-
-
 class RolloutContextMiddleware:
     """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
 
-    _PREFIX = _ROLLOUT_PATH_RE
+    # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
+    # Anchor the id between the prefix and the remaining path.
+    _PREFIX = re.compile(
+        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
+    )
 
     def __init__(self, app: Any) -> None:
         self._app = app
@@ -118,34 +114,5 @@ class RolloutContextMiddleware:
 
         path = match.group("rest")
         scope = {**scope, "path": path, "raw_path": path.encode()}
-        with rollout_context(match.group("rollout_id")):
-            await self._app(scope, receive, send)
-
-
-class RolloutContextPeekMiddleware:
-    """Expose the rollout id to this request's handler without touching the path.
-
-    ``RolloutContextMiddleware`` above is for resources and agent servers: it owns
-    stripping the ``/ng-rollout/<id>`` prefix before routing. Model servers must not
-    strip that prefix themselves -- ``_CaptureMiddleware`` (installed by
-    ``SimpleResponsesAPIModel.setup_webserver``) still needs to see it intact for
-    evaluation/training capture. This middleware only reads the id and publishes it
-    through ``current_rollout_id()`` for the duration of the request; the scope
-    reaching the rest of the app, including ``_CaptureMiddleware``, is unchanged.
-
-    Install it *after* the capture middleware is installed, so it ends up outermost
-    (Starlette runs the most-recently-added middleware first) and sees the request
-    before ``_CaptureMiddleware`` strips the prefix.
-    """
-
-    def __init__(self, app: Any) -> None:
-        self._app = app
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        match = _ROLLOUT_PATH_RE.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
-            await self._app(scope, receive, send)
-            return
-
         with rollout_context(match.group("rollout_id")):
             await self._app(scope, receive, send)

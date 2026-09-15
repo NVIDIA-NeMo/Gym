@@ -36,12 +36,12 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
+    _CaptureMiddleware,
     install_model_call_capture,
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
-    RolloutContextPeekMiddleware,
     current_rollout_id,
     maybe_rollout_id_from_run_body,
 )
@@ -254,27 +254,29 @@ def test_explicit_rollout_alias_stays_request_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rollout_context_peek_middleware_exposes_id_without_stripping_path() -> None:
-    """The peek middleware must publish the id but leave routing untouched.
+async def test_capture_middleware_exposes_current_rollout_id_on_plain_forward() -> None:
+    """``_CaptureMiddleware`` already parses and strips the ``/ng-rollout/<id>`` prefix on
+    every request, capture enabled or not. It should publish that id through
+    ``current_rollout_id()`` around each place it dispatches to the wrapped app, rather than
+    requiring a second middleware to re-parse the same prefix.
 
-    Unlike ``RolloutContextMiddleware`` (used by resources/agent servers), a model
-    server's own ``_CaptureMiddleware`` still needs to see the intact
-    ``/ng-rollout/<id>`` prefix downstream of this middleware.
+    This exercises the plain-forward path (no store, capture not requested) -- the common
+    case for a model server with observability disabled.
     """
     observed: dict[str, object] = {}
 
     async def inner_app(scope, receive, send) -> None:
         observed["path"] = scope["path"]
-        observed["raw_path"] = scope["raw_path"]
         observed["rollout_id_inside"] = current_rollout_id()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    middleware = RolloutContextPeekMiddleware(inner_app)
+    middleware = _CaptureMiddleware(inner_app, store=None, model_server_name="policy")
     scope = {
         "type": "http",
         "path": "/ng-rollout/rollout-42/v1/chat/completions",
         "raw_path": b"/ng-rollout/rollout-42/v1/chat/completions",
+        "headers": [],
     }
 
     async def receive():
@@ -287,10 +289,32 @@ async def test_rollout_context_peek_middleware_exposes_id_without_stripping_path
 
     await middleware(scope, receive, send)
 
-    assert observed["path"] == "/ng-rollout/rollout-42/v1/chat/completions"
-    assert observed["raw_path"] == b"/ng-rollout/rollout-42/v1/chat/completions"
+    assert observed["path"] == "/v1/chat/completions"  # the prefix is still stripped
     assert observed["rollout_id_inside"] == "rollout-42"
     assert current_rollout_id() is None  # does not leak past the request
+
+
+def test_capture_middleware_exposes_current_rollout_id_when_capture_is_enabled(tmp_path) -> None:
+    """Same guarantee on the buffering/full-capture dispatch path (observability
+    enabled), not just the plain-forward path above -- this is the branch with
+    streaming/exception handling around the downstream call.
+    """
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def responses() -> dict:
+        return {"rollout_id": current_rollout_id()}
+
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+        model_server_name="policy",
+    )
+    client = TestClient(app)
+
+    response = client.post("/ng-rollout/rollout-9/v1/responses", json={})
+    assert response.status_code == 200
+    assert response.json() == {"rollout_id": "rollout-9"}
 
 
 class _EchoRolloutIdConfig(BaseResponsesAPIModelConfig):
