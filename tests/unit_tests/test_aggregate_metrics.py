@@ -379,6 +379,60 @@ class TestMajorityNoAnswerCounting:
         assert m["majority@2/accuracy"] == pytest.approx(0.0)
 
 
+class TestUnansweredRolloutDenominators:
+    """pass@k and pass@1[avg-of-k] score an unanswered rollout as 0, matching majority@k (#2574)."""
+
+    def test_pass_and_majority_agree_on_unanswered_task(self) -> None:
+        tasks = [
+            # Task 0: answer extracted, both rollouts correct
+            [{"reward": 1.0, "extracted_answer": "7"}, {"reward": 1.0, "extracted_answer": "7"}],
+            # Task 1: rewarded as correct, but no answer could be extracted
+            [{"reward": 1.0, "extracted_answer": None}, {"reward": 1.0, "extracted_answer": None}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        assert m["pass@2/accuracy"] == pytest.approx(50.0)
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(50.0)
+        assert m["majority@2/accuracy"] == pytest.approx(50.0)
+
+    def test_only_unanswered_task_scores_zero_everywhere(self) -> None:
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": None}, {"reward": 1.0, "extracted_answer": None}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        assert m["pass@2/accuracy"] == pytest.approx(0.0)
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(0.0)
+        assert m["majority@2/accuracy"] == pytest.approx(0.0)
+
+    def test_all_answers_present_unchanged(self) -> None:
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 0.0, "extracted_answer": "B"}],
+            [{"reward": 0.0, "extracted_answer": "C"}, {"reward": 0.0, "extracted_answer": "C"}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        # Task 0 has one correct rollout, Task 1 has none
+        assert m["pass@2/accuracy"] == pytest.approx(50.0)
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(25.0)
+        assert m["majority@2/accuracy"] == pytest.approx(25.0)
+
+    def test_no_answer_key_path_unchanged(self) -> None:
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": None}, {"reward": 1.0, "extracted_answer": None}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks)
+        # Without answer_key the reward is the whole story
+        assert m["pass@2/accuracy"] == pytest.approx(100.0)
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(100.0)
+
+    def test_answered_low_score_is_not_coerced(self) -> None:
+        tasks = [
+            [{"reward": 0.25, "extracted_answer": "A"}, {"reward": 0.75, "extracted_answer": "A"}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        # Continuous scores from answered rollouts survive as real scores
+        assert m["pass@2/accuracy"] == pytest.approx(75.0)
+        assert m["pass@1[avg-of-2]/accuracy"] == pytest.approx(50.0)
+
+
 class TestComputeAggregateMetricsPerTask:
     """Test that compute_aggregate_metrics merges per_task_metrics from compute_metrics_fn."""
 
