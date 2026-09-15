@@ -2,10 +2,6 @@
 
 GYM_MODEL_PARAMS=()
 
-# @bxyu-nvidia: May not need these params
-# --kv-cache-dtype fp8
-# --no-disable-hybrid-kv-cache-manager
-# --block-size 128
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -19,6 +15,9 @@ VLLM_COMMON_ARGS=(
     --enable-prefix-caching
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
+    --kv-cache-dtype fp8
+    --no-disable-hybrid-kv-cache-manager
+    --block-size 128
     --data-parallel-size 1
     --data-parallel-size-local 1
     --tensor-parallel-size 4
