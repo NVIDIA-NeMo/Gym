@@ -36,7 +36,17 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def load_baseline(paths):
+    """Later health files replace earlier observations for the same harness/task."""
+    baseline = {}
+    for path in paths:
+        for row in json.loads(path.read_text()):
+            baseline[row["harness"], row["task"]] = bool(row["healthy"])
+    return baseline
+
+
 async def main(args):
+    baseline = load_baseline(args.baseline_health)
     if args.env_file:
         for key, value in dotenv_values(args.env_file).items():
             if value and (key.startswith("OPENSANDBOX_") or key == "OPENAI_API_KEY"):
@@ -50,9 +60,19 @@ async def main(args):
             "nemo_gym/sandbox/api.py",
             "nemo_gym/sandbox/agent.py",
             "nemo_gym/sandbox/handoff.py",
-            "responses_api_agents/harbor_agent_general/sandbox_environment.py",
+            "nemo_gym/sandbox/adapters/docker_compose.py",
+            "nemo_gym/sandbox/providers/opensandbox/provider.py",
+            "benchmarks/terminal_bench_4/resources.yaml",
+            "benchmarks/terminal_bench_4/manifest.json",
+            "benchmarks/terminal_bench_4/compose-images.json",
+            "responses_api_agents/harbor_agent_general/compose_config.py",
             "resources_servers/terminal_bench_4/app.py",
-            "resources_servers/terminal_bench_4/runtime.py",
+            "resources_servers/terminal_bench_4/lifecycle.py",
+            "resources_servers/terminal_bench_4/task.py",
+            "resources_servers/terminal_bench_4/environment.py",
+            "resources_servers/terminal_bench_4/transfers.py",
+            "resources_servers/terminal_bench_4/collection.py",
+            "resources_servers/terminal_bench_4/verifier.py",
             "responses_api_agents/opencode_sandboxed_agent/borrowed.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
@@ -69,6 +89,7 @@ async def main(args):
                 "category": args.category,
                 "tasks": args.tasks,
                 "excluded_tasks": args.exclude_tasks,
+                "baseline_health": [str(path) for path in args.baseline_health],
                 "source_sha256": {
                     str(path.relative_to(source_root)): hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in source_paths
@@ -89,7 +110,7 @@ async def main(args):
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
     resource_config = config.terminal_bench_4.resources_servers.terminal_bench_4
     resource_config.task_download_dir = str(args.task_cache)
-    resource_config.environment.kwargs.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
+    resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
     agent_config = next(iter(config[agent_name].responses_api_agents.values()))
     if args.harness == "opencode":
         agent_config.opencode_config.model = "tb4_smoke/" + args.model
@@ -198,6 +219,8 @@ async def main(args):
             except Exception as exc:
                 row |= {"healthy": False, "error": str(exc)}
                 (args.output / f"{task['name']}.error.txt").write_text(traceback.format_exc())
+            row["baseline_healthy"] = baseline.get((args.harness, task["name"]))
+            row["regression"] = not row["healthy"] and row["baseline_healthy"] is not False
             rows.append(row)
             (args.output / "health.json").write_text(json.dumps(rows, indent=2))
             print(f"END {task['name']} healthy={row['healthy']} reward={row.get('reward')}", flush=True)
@@ -213,9 +236,10 @@ async def main(args):
                 and (not args.category or args.category == category)
             ]
             await asyncio.gather(*(check(t) for t in tasks))
-            if any(not row["healthy"] for row in rows if row["category"] == category):
+            if any(row["regression"] for row in rows if row["category"] == category):
                 print(
-                    f"Category {category} has unhealthy tasks; inspect health.json before the next stage.", flush=True
+                    f"Category {category} has new or unbaselined unhealthy tasks; inspect health.json before the next stage.",
+                    flush=True,
                 )
                 break
     finally:
@@ -224,7 +248,7 @@ async def main(args):
         await asyncio.gather(*workers, return_exceptions=True)
         await http.close()
         server_utils._GLOBAL_AIOHTTP_CLIENT = None
-    return bool(rows) and all(row["healthy"] for row in rows)
+    return bool(rows) and not any(row["regression"] for row in rows)
 
 
 if __name__ == "__main__":
@@ -235,6 +259,7 @@ if __name__ == "__main__":
     parser.add_argument("--category", choices=["cpu", "compose", "gpu"])
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--baseline-health", type=Path, nargs="*", default=[])
     parser.add_argument("--task-cache", type=Path, default=Path("/tmp/tb4-packages"))
     parser.add_argument("--model", default="gpt-5.4-mini-2026-03-17")
     parser.add_argument("--model-url", default="https://api.openai.com/v1")

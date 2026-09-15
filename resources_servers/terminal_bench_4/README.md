@@ -2,7 +2,8 @@
 
 This server owns pinned task resolution, environments, sidecars, official budgets,
 verification, artifacts, and cleanup. Agent workers own the evaluated harness.
-Runtime: Harbor 0.23.0 with Gym's existing Harbor sandbox environment adapter.
+Runtime: `gym-tb4-native` version 1, using Gym's sandbox and Compose APIs directly.
+Harbor is not required for TB4 preparation, server startup, or execution.
 
 ## Contract
 
@@ -16,7 +17,7 @@ Runtime: Harbor 0.23.0 with Gym's existing Harbor sandbox environment adapter.
    budget. Repeating this call does not restart the clock.
 3. `/verify` accepts the session ID, Gym response/usage, termination reason, and
    artifact references. Resources stop tracked harness process groups, collect
-   task-declared state using Harbor, run the official verifier, and destroy the
+   task-declared state, run the official verifier, and destroy the
    collection. Official zero and nonzero rewards survive agent failure/timeout.
 4. `/cancel_session` ends an abandoned setup or running episode. A running
    cancellation still permits official grading. Closing a borrowed client never
@@ -33,7 +34,7 @@ requests share one lifecycle and the first accepted agent result. Completed
 verification retries return the recorded response, including after restart.
 
 The server retains the Compose creator and its relay/volume ownership for the
-whole lifecycle. Shutdown cancels owner tasks, allowing Harbor cleanup. Client
+whole lifecycle. Shutdown cancels preparation and drains or interrupts finalization, then awaits cleanup. Client
 HTTP disconnection does not cancel the resources task. Abandoned setup expires
 at the setup deadline; abandoned execution expires at the official agent deadline.
 Abrupt process death stops renewal; provider TTL is the cleanup fallback. Active
@@ -43,8 +44,8 @@ new rollout identity for a new attempt, not a stale descriptor.
 `evaluation_completed` means an official reward was retrieved. A scored negative
 has `reward=0` with no infrastructure error. A missing verifier result or an agent
 infrastructure failure adds `infrastructure_error` and `_ng_failure_class`, even
-when a reward was retrieved. Artifacts include the Harbor trial directory and
+when a reward was retrieved. Artifacts include the compatible trial directory and
 worker trajectory references. Failure diagnostics are written before teardown.
 
 This server is not marked verified: deployment smoke evidence and category gaps
-are recorded in the [benchmark migration notes](../../benchmarks/terminal_bench_4/migration.md).
+are recorded in the [native lifecycle notes](../../benchmarks/terminal_bench_4/native-lifecycle.md).

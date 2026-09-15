@@ -700,9 +700,10 @@ class OpenSandboxNetworkingConfig:
 
 @dataclass
 class OpenSandboxRuntimeRequirementsConfig:
-    """Operator-supplied capability probes and create-time shared-memory metadata key."""
+    """Operator-supplied capability probes and create-time runtime metadata."""
 
     capability_probes: dict[str, str] = field(default_factory=dict)
+    capability_metadata: dict[str, dict[str, str]] = field(default_factory=dict)
     shm_size_metadata_key: str | None = None
 
 
@@ -750,17 +751,19 @@ class OpenSandboxProvider:
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
+        metadata = {}
         for capability in cap_add:
             if not self._runtime_requirements.capability_probes.get(capability, "").strip():
                 raise NotImplementedError(f"OpenSandbox requires a capability probe for {capability!r}")
+            metadata.update(self._runtime_requirements.capability_metadata.get(capability, {}))
         if shm_size is not None:
             if isinstance(shm_size, bool) or not isinstance(shm_size, int) or shm_size <= 0:
                 raise ValueError("shm_size must be a positive number of bytes")
             key = self._runtime_requirements.shm_size_metadata_key
             if not key:
                 raise NotImplementedError("OpenSandbox shm_size requires runtime_requirements.shm_size_metadata_key")
-            return {key: str(shm_size)}
-        return {}
+            metadata[key] = str(shm_size)
+        return metadata
 
     async def configure_runtime(
         self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None

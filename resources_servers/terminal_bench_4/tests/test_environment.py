@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import yaml
+
+from resources_servers.terminal_bench_4 import environment as module
+from resources_servers.terminal_bench_4.environment import Environment, EnvironmentConfig, HealthcheckError
+from resources_servers.terminal_bench_4.task import TaskSettings
+
+
+def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
+    raw = {
+        "environment": {
+            "docker_image": "public/agent",
+            "cpus": 2,
+            "memory_mb": 4096,
+            "storage_mb": 15000,
+            "env": {"TASK": "value"},
+        },
+        "agent": {"user": "task-user"},
+        "verifier": {"environment": {"docker_image": "public/verifier", "cpus": 8, "gpus": 1, "gpu_types": ["H100"]}},
+    }
+    for key, value in (task_config or {}).items():
+        raw.setdefault(key, {}).update(value)
+    task = SimpleNamespace(
+        config=TaskSettings.model_validate(raw), name="terminal-bench/test", path=tmp_path / "package"
+    )
+    (task.path / "environment").mkdir(parents=True, exist_ok=True)
+    (task.path / "tests").mkdir(exist_ok=True)
+    (task.path / "environment/Dockerfile").write_text("FROM public")
+    (task.path / "tests/Dockerfile").write_text("FROM public")
+    provider = {"opensandbox": {"connection": {"domain": "example.invalid"}}}
+    cfg = EnvironmentConfig(sandbox_provider=provider, **(config or {}))
+    if compose:
+        (task.path / "environment/docker-compose.yaml").write_text(
+            "services: {main: {image: public}, db: {image: db}}"
+        )
+        cfg.compose_image_configs = tmp_path / "images.json"
+        cfg.compose_image_configs.write_text("{}")
+        monkeypatch.setattr(
+            module,
+            "resolve_compose",
+            lambda *a: {"services": {"main": {"image": "main", "shm_size": 64}, "db": {"image": "db"}}},
+        )
+    box = MagicMock()
+    box._handle = SimpleNamespace(sandbox_id="owned-box")
+    box.start = AsyncMock()
+    box.stop = AsyncMock()
+    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/app\n", stderr=""))
+    box.serialize = AsyncMock(return_value={"sandbox_id": "owned-box", "credentials": "must not be copied"})
+    create = MagicMock(return_value=box)
+    monkeypatch.setattr(module, "AsyncSandbox", create)
+    group = SimpleNamespace(services={"main": box, "db": box}, start=AsyncMock(), stop=AsyncMock(), project="project")
+    compose_create = MagicMock(return_value=group)
+    monkeypatch.setattr(module, "AsyncSandboxCompose", compose_create)
+    env = Environment(task, cfg, "session", tmp_path / "result", verifier=verifier)
+    return env, box, create, compose_create
+
+
+def test_specs_keep_resource_units_and_independent_verifier_pools(tmp_path, monkeypatch):
+    for pool in ["CPU", "GPU"]:
+        monkeypatch.setenv("OPENSANDBOX_DOMAIN_" + pool, pool + ".invalid")
+        monkeypatch.setenv("OPENSANDBOX_API_KEY_" + pool, "credential")
+    args = {
+        "sandbox_split_endpoints": True,
+        "sandbox_request_gpu_type": False,
+        "sandbox_provider_options": {"resource_requests": "limits"},
+        "sandbox_env_by_task": {"test": {"OVERRIDE": "task"}},
+        "sandbox_env": {"OVERRIDE": "global"},
+    }
+    env, *_ = make_environment(tmp_path, monkeypatch, config=args)
+    verifier = Environment(env.task, env.config, "verify", tmp_path, verifier=True)
+    agent_spec, verifier_spec = env.build_spec(), verifier.build_spec()
+    assert env.pool == "cpu" and verifier.pool == "gpu"
+    assert agent_spec.resources.cpu == 2 and agent_spec.resources.memory_mib == 4096
+    assert agent_spec.resources.disk_gib == 15
+    assert verifier_spec.resources.gpu == 1 and verifier_spec.resources.gpu_type is None
+    assert agent_spec.env == {"TASK": "value", "OVERRIDE": "global"}
+    assert agent_spec.provider_options == {"resource_requests": "limits"}
+    assert "credential" not in str(agent_spec)
+    assert verifier.provider_config["opensandbox"]["connection"]["domain"] == "GPU.invalid"
+
+
+async def test_single_start_descriptor_env_user_quiescence_cleanup(tmp_path, monkeypatch):
+    env, box, create, _ = make_environment(tmp_path, monkeypatch)
+    await env.start()
+    box.start.assert_awaited_once()
+    assert create.call_args.args[1].image == "public/agent"
+    descriptor = await env.main_connection()
+    assert descriptor == {"provider": "default", "sandbox_id": "owned-box", "workdir": "/app"}
+    assert box.exec.await_args.kwargs["user"] == "task-user"
+    await env.exec("echo test", env={"TASK": "changed"}, user="another", timeout_sec=12)
+    assert box.exec.await_args.kwargs["env"] == {"TASK": "changed"}
+    assert box.exec.await_args.kwargs["user"] == "another"
+    assert box.exec.await_args.kwargs["timeout_s"] == 12
+    await env.quiesce_agent("session")
+    assert "/tmp/session.pids" in box.exec.await_args.args[0]
+    await env.stop()
+    await env.stop()
+    box.stop.assert_awaited_once()
+    assert env.closed and env.resources[0]["sandbox_id"] == "owned-box"
+
+
+async def test_compose_specs_startup_metadata_sidecar_operations(tmp_path, monkeypatch):
+    env, box, _, create = make_environment(tmp_path, monkeypatch, compose=True)
+    await env.start()
+    kwargs = create.call_args.kwargs
+    assert kwargs["service_specs"]["main"].resources.cpu == 2
+    assert kwargs["service_specs"]["db"].resources.cpu is None
+    document = yaml.safe_load(create.call_args.args[1].read_text())
+    assert document["services"]["main"]["labels"] == {"nemo.nvidia.com/shm": "64"}
+    await env.exec("echo sidecar", service="db")
+    assert box.exec.await_args.args[0].startswith("sh -c ")
+    assert box.exec.await_args.kwargs["env"] is None
+    await env.stop_main()
+    await env.stop()
+    assert env.closed and env.resources[-1]["compose_project"] == "project"
+
+
+async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    (env.environment_dir / "Dockerfile").unlink()
+    (env.environment_dir / "asset.txt").write_text("asset")
+    from resources_servers.terminal_bench_4 import transfers
+
+    upload = AsyncMock()
+    monkeypatch.setattr(transfers, "upload_dir", upload)
+    await env.start()
+    upload.assert_awaited_once_with(box, env.environment_dir, "/app")
+
+
+@pytest.mark.parametrize("failure", ["logs", "descriptor_id", "descriptor_pwd", "quiesce", "delete", "unavailable"])
+async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, monkeypatch, failure):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    if failure == "unavailable":
+        with pytest.raises(RuntimeError):
+            env.sandbox()
+        with pytest.raises(ValueError):
+            env.sandbox("missing")
+        return
+    if failure == "logs":
+        box.exec.return_value.return_code = 1
+    if failure == "logs":
+        with pytest.raises(RuntimeError, match="log directories"):
+            await env.start()
+    else:
+        await env.start()
+    if failure == "descriptor_id":
+        box.serialize.return_value = {}
+        with pytest.raises(ValueError):
+            await env.main_connection()
+    if failure == "descriptor_pwd":
+        box.exec.return_value.return_code = 1
+        with pytest.raises(RuntimeError):
+            await env.main_connection()
+    if failure == "quiesce":
+        box.exec.return_value.return_code = 1
+        with pytest.raises(RuntimeError):
+            await env.quiesce_agent("session")
+    if failure == "delete":
+        box.stop.side_effect = RuntimeError("delete failed")
+        with pytest.raises(RuntimeError):
+            await env.stop()
+        assert env.cleanup_errors[0]["resources"][0]["sandbox_id"] == "owned-box"
+    else:
+        await env.stop()
+
+
+async def test_readiness_success_and_failure(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(
+        tmp_path,
+        monkeypatch,
+        task_config={"environment": {"healthcheck": {"command": "ready", "retries": 2, "interval_sec": 0}}},
+    )
+    await env.start()
+    await env.healthcheck()
+    box.exec.return_value.return_code = 1
+    with pytest.raises(HealthcheckError):
+        await env.healthcheck()
+    env.settings.healthcheck.start_period_sec = 0.01
+    env.settings.healthcheck.start_interval_sec = 0.01
+    with pytest.raises(HealthcheckError):
+        await env.healthcheck()
+
+
+def test_offline_policy_and_unsupported_config(tmp_path, monkeypatch):
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        verifier=True,
+        task_config={"verifier": {"environment": {"docker_image": "offline", "allow_internet": False}}},
+    )
+    assert env.build_spec().provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+    with pytest.raises(ValueError, match="Split endpoints"):
+        Environment(
+            env.task, EnvironmentConfig(sandbox_provider={"local": {}}, sandbox_split_endpoints=True), "id", tmp_path
+        )
+    with pytest.raises(ValueError, match="Missing environment"):
+        make_environment(tmp_path, monkeypatch, config={"sandbox_split_endpoints": True})
+    with pytest.raises(ValueError, match="Offline"):
+        make_environment(tmp_path, monkeypatch, compose=True, task_config={"environment": {"allow_internet": False}})

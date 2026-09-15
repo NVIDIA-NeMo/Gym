@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,17 +14,17 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxHandle
 from nemo_gym.sandbox.agent import empty_response
 from nemo_gym.sandbox.handoff import AgentTermination, SandboxedVerifyRequest, SessionRequest
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from resources_servers.terminal_bench_4 import app as module
+from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
     TerminalBench4ResourcesServer,
     TerminalBench4SeedRequest,
 )
-from resources_servers.terminal_bench_4.runtime import ExternalAgent
+from resources_servers.terminal_bench_4.task import TaskSettings
 
 
 @pytest.fixture
-def fixture(tmp_path, monkeypatch):
+async def fixture(tmp_path, monkeypatch):
     server = TerminalBench4ResourcesServer(
         config=TerminalBench4Config(
             host="localhost",
@@ -33,40 +34,64 @@ def fixture(tmp_path, monkeypatch):
             environment={},
             artifacts_dir=tmp_path,
             agent_max_timeout_sec=2,
+            shutdown_timeout_sec=0.01,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
-    task = next(iter(server._tasks.values()))
+    pin = next(iter(server._tasks.values()))
     body = TerminalBench4SeedRequest(
-        task_name="terminal-bench/" + task["name"],
-        task_ref=task["ref"],
+        task_name="terminal-bench/" + pin["name"],
+        task_ref=pin["ref"],
         dataset_ref=server._manifest["ref"],
-        rollout_id="rollout-1",
+        rollout_id="rollout",
     )
     request = SimpleNamespace(session={SESSION_ID_KEY: "owner"})
-    env = SimpleNamespace(
-        main_connection=AsyncMock(return_value={"provider": "gpu", "sandbox_id": "box", "workdir": "/task"}),
-        quiesce_agent=AsyncMock(),
+    config = TaskSettings.model_validate(
+        {
+            "environment": {"docker_image": "agent"},
+            "agent": {"timeout_sec": 28800, "user": "task-user"},
+            "verifier": {"environment": {"docker_image": "verifier"}},
+        }
     )
-    adapter = ExternalAgent(logs_dir=tmp_path)
-    trial = SimpleNamespace(
-        agent=adapter,
-        task=SimpleNamespace(
-            has_steps=False,
-            instruction="Solve task",
-            config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=28800, user="task-user")),
-        ),
-    )
+    task = SimpleNamespace(config=config, instruction="Solve task")
+    server._loader.load = AsyncMock(return_value=task)
+    envs = []
+    events = []
 
-    async def run():
-        await adapter.setup(env)
-        await adapter.run("Solve task", env, None)
-        return SimpleNamespace(model_dump=lambda **_: {"verifier_result": {"rewards": {"reward": 0.75}}})
+    def create(task, config, session_id, directory, verifier=False):
+        name = "verifier" if verifier else "agent"
+        env = SimpleNamespace(
+            task=task,
+            session_id=session_id,
+            closed=False,
+            resources=[],
+            cleanup_errors=[],
+            resource_identities=lambda: [],
+            main=MagicMock(),
+            main_connection=AsyncMock(return_value={"provider": "gpu", "sandbox_id": "box", "workdir": "/task"}),
+            healthcheck=AsyncMock(),
+            quiesce_agent=AsyncMock(side_effect=lambda _: events.append("quiesce")),
+        )
 
-    trial.run = AsyncMock(side_effect=run)
-    create = AsyncMock(return_value=trial)
-    monkeypatch.setattr(module.Trial, "create", create)
-    return server, request, body, trial, env, create
+        async def start():
+            events.append(name + "_start")
+
+        async def stop():
+            events.append(name + "_stop")
+            env.closed = True
+
+        env.start, env.stop = AsyncMock(side_effect=start), AsyncMock(side_effect=stop)
+        envs.append(env)
+        return env
+
+    monkeypatch.setattr(lifecycle, "Environment", create)
+    monkeypatch.setattr(lifecycle, "download_dir", AsyncMock())
+    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
+    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
+    grade = AsyncMock(return_value={"rewards": {"reward": 0.75}})
+    monkeypatch.setattr(lifecycle, "run_verifier", grade)
+    yield SimpleNamespace(server=server, request=request, body=body, envs=envs, grade=grade, events=events)
+    await lifecycle.shutdown(list(server._sessions.values()), 0.01)
 
 
 def verify_body(session_id, reason="completed"):
@@ -79,233 +104,402 @@ def verify_body(session_id, reason="completed"):
     )
 
 
+async def seed(f):
+    return await f.server.seed_session(f.request, f.body)
+
+
+async def start(f):
+    result = await seed(f)
+    await f.server.start_session(f.request, SessionRequest(session_id=result.session_id))
+    return result.session_id
+
+
+def restart(f):
+    return TerminalBench4ResourcesServer(config=f.server.config, server_client=MagicMock(spec=ServerClient))
+
+
 async def test_pins_duplicates_handoff_verification_and_restart(fixture):
-    server, request, body, trial, env, create = fixture
-    first, duplicate = await asyncio.gather(server.seed_session(request, body), server.seed_session(request, body))
+    f = fixture
+    first, duplicate = await asyncio.gather(seed(f), seed(f))
     assert first == duplicate
-    assert first.sandbox.provider == "gpu"
-    assert first.sandbox.workdir == "/task"
-    assert first.user == "task-user"
-    assert first.agent_timeout_sec == 2
-    assert first.setup_timeout_sec == 360
-    assert create.await_count == 1
-    assert create.await_args.args[0].task.path is None
-    assert create.await_args.args[0].task.ref == body.task_ref
-    assert not trial.agent.episode.running.is_set()
-    budget = await server.start_session(request, SessionRequest(session_id=first.session_id))
-    assert 0 < budget["agent_timeout_sec"] <= 2
-    retry_budget = await server.start_session(request, SessionRequest(session_id=first.session_id))
-    assert 0 < retry_budget["agent_timeout_sec"] <= budget["agent_timeout_sec"]
+    assert first.sandbox.provider == "gpu" and first.sandbox.workdir == "/task"
+    assert first.user == "task-user" and first.agent_timeout_sec == 2 and first.setup_timeout_sec == 360
+    f.server._loader.load.assert_awaited_once_with(f.body.task_name, f.body.task_ref)
+    f.envs[0].main_connection.assert_awaited_once()
+    directory = f.server._sessions[first.session_id].directory
+    assert all((directory / name).is_dir() for name in ("agent", "verifier", "artifacts/logs/artifacts"))
+    budgets = [await f.server.start_session(f.request, SessionRequest(session_id=first.session_id)) for _ in range(2)]
+    assert 0 < budgets[1]["agent_timeout_sec"] <= budgets[0]["agent_timeout_sec"] <= 2
     verified, retry = await asyncio.gather(
-        server.verify(request, verify_body(first.session_id)),
-        server.verify(request, verify_body(first.session_id)),
+        *(f.server.verify(f.request, verify_body(first.session_id)) for _ in range(2))
     )
-    assert verified == retry
-    assert verified.reward == 0.75
-    assert verified.evaluation_completed
+    assert verified == retry and verified.reward == 0.75 and verified.evaluation_completed
     assert verified.infrastructure_error is None
-    env.quiesce_agent.assert_awaited_once_with(first.session_id)
-    assert trial.run.await_count == 1
-    restarted = TerminalBench4ResourcesServer(config=server.config, server_client=MagicMock(spec=ServerClient))
-    assert await restarted.verify(request, verify_body(first.session_id, "timeout")) == verified
-    with pytest.raises(HTTPException) as exc:
-        await restarted.seed_session(request, body)
-    assert exc.value.status_code == 409
+    assert verified.provenance["runtime"] == "gym-tb4-native"
+    assert "harbor_version" not in verified.provenance
+    assert f.events == [
+        "agent_start",
+        "quiesce",
+        "collect",
+        "agent_stop",
+        "verifier_start",
+        "restore",
+        "verifier_stop",
+    ]
+    f.grade.assert_awaited_once()
+    assert await restart(f).verify(f.request, verify_body(first.session_id, "timeout")) == verified
+    with pytest.raises(HTTPException):
+        await restart(f).seed_session(f.request, f.body)
+    assert f.server._slots._value == f.server.config.max_concurrent_sessions
 
 
 @pytest.mark.parametrize(
-    "field,value", [("task_name", "../../etc/passwd"), ("task_ref", "latest"), ("dataset_ref", "wrong")]
+    "field,value", [("task_name", "../../secret"), ("task_ref", "latest"), ("dataset_ref", "wrong")]
 )
 async def test_untrusted_pins_rejected_before_allocation(fixture, field, value):
-    server, request, body, _, _, create = fixture
+    f = fixture
     with pytest.raises(HTTPException) as exc:
-        await server.seed_session(request, body.model_copy(update={field: value}))
+        await f.server.seed_session(f.request, f.body.model_copy(update={field: value}))
     assert exc.value.status_code == 422
-    create.assert_not_awaited()
+    f.server._loader.load.assert_not_awaited()
 
 
-async def test_session_isolation_and_cancel_during_setup(fixture):
-    server, request, body, trial, _, _ = fixture
-    seed = await server.seed_session(request, body)
-    stranger = SimpleNamespace(session={SESSION_ID_KEY: "stranger"})
+async def test_cookie_isolation_and_worker_conflict(fixture):
+    f = fixture
+    f.body = f.body.model_copy(update={"client_session_id": "stable", "execution_id": "worker1"})
+    first = await seed(f)
+    new_request = SimpleNamespace(session={SESSION_ID_KEY: "another-cookie"})
+    assert await f.server.seed_session(new_request, f.body) == first
     with pytest.raises(HTTPException) as exc:
-        await server.verify(stranger, verify_body(seed.session_id))
-    assert exc.value.status_code == 404
-    with pytest.raises(HTTPException) as exc:
-        await server.verify(request, verify_body(seed.session_id))
+        await f.server.seed_session(new_request, f.body.model_copy(update={"execution_id": "worker2"}))
     assert exc.value.status_code == 409
-    await server.cancel_session(request, SessionRequest(session_id=seed.session_id))
-    assert server._sessions[seed.session_id].task.cancelled()
-    assert not trial.agent.episode.running.is_set()
+    with pytest.raises(HTTPException) as exc:
+        await f.server.verify(SimpleNamespace(session={SESSION_ID_KEY: "stranger"}), verify_body(first.session_id))
+    assert exc.value.status_code == 404
+    f.server._loader.load.assert_awaited_once()
 
 
-async def test_disconnected_verify_does_not_cancel_owner(fixture):
-    server, request, body, trial, _, _ = fixture
-    seed = await server.seed_session(request, body)
-    await server.start_session(request, SessionRequest(session_id=seed.session_id))
-    task = asyncio.create_task(server.verify(request, verify_body(seed.session_id)))
+async def test_setup_cancel_does_not_grade_and_premature_verify_rejected(fixture):
+    f = fixture
+    session_id = (await seed(f)).session_id
+    with pytest.raises(HTTPException) as exc:
+        await f.server.verify(f.request, verify_body(session_id))
+    assert exc.value.status_code == 409
+    for _ in range(2):
+        assert await f.server.cancel_session(f.request, SessionRequest(session_id=session_id)) == {
+            "session_id": session_id,
+            "phase": "closed",
+        }
+    f.grade.assert_not_awaited()
+    assert f.envs[0].closed
+    result = await restart(f).verify(f.request, verify_body(session_id))
+    assert not result.evaluation_completed and result.termination.reason == "cancelled"
+
+
+async def test_start_rejected_after_setup_cancellation_wins(fixture):
+    f = fixture
+    session_id = (await seed(f)).session_id
+    session = f.server._sessions[session_id]
+    # Request cancellation without yielding to the cleanup task: start must
+    # honor the accepted cancellation even while the phase is still ready.
+    finish = await lifecycle.request_finish(session, AgentTermination(reason="cancelled"))
+    with pytest.raises(HTTPException) as exc:
+        await lifecycle.start_session(session)
+    assert exc.value.status_code == 409
+    await finish
+    assert session.termination.reason == "cancelled"
+    assert "agent_execution" not in session.result
+    f.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize("phase", ["seed", "verify"])
+async def test_http_disconnect_does_not_cancel_resource_work(fixture, phase):
+    f = fixture
+    gate = asyncio.Event()
+    if phase == "seed":
+        task = f.server._loader.load.return_value
+
+        async def load(*args):
+            await gate.wait()
+            return task
+
+        f.server._loader.load.side_effect = load
+        call = asyncio.create_task(seed(f))
+    else:
+        session_id = await start(f)
+
+        async def grade(*args):
+            await gate.wait()
+            return {"rewards": {"reward": 1}}
+
+        f.grade.side_effect = grade
+        call = asyncio.create_task(f.server.verify(f.request, verify_body(session_id)))
     await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    result = await server.verify(request, verify_body(seed.session_id))
-    assert result.evaluation_completed
-    assert trial.run.await_count == 1
+    await asyncio.sleep(0)
+    call.cancel()
+    await asyncio.gather(call, return_exceptions=True)
+    gate.set()
+    if phase == "seed":
+        assert (await seed(f)).instruction == "Solve task"
+    else:
+        assert (await f.server.verify(f.request, verify_body(session_id))).reward == 1
+        f.grade.assert_awaited_once()
 
 
+@pytest.mark.parametrize("reason", ["completed", "cancelled", "timeout", "nonzero_exit", "infrastructure_error"])
 @pytest.mark.parametrize("reward", [0, 1, None])
-async def test_official_grades_and_missing_reward_are_distinct(fixture, reward):
-    server, request, body, trial, _, _ = fixture
-    seed = await server.seed_session(request, body)
-    await server.start_session(request, SessionRequest(session_id=seed.session_id))
-    session = server._sessions[seed.session_id]
-    session.episode.finished.set()
-    session.episode.termination = AgentTermination(reason="completed")
-    await session.task
-    session.result = {"verifier_result": {"rewards": {} if reward is None else {"reward": reward}}}
-    result = await server.verify(request, verify_body(seed.session_id, "timeout"))
-    assert result.evaluation_completed == (reward is not None)
+async def test_official_grades_and_agent_failure(fixture, reason, reward):
+    f = fixture
+    f.grade.return_value = {"rewards": {} if reward is None else {"reward": reward}}
+    session_id = await start(f)
+    result = await f.server.verify(f.request, verify_body(session_id, reason))
     assert result.reward == (reward or 0)
-    assert bool(result.model_dump().get("_ng_failure_class")) == (reward is None)
+    assert result.evaluation_completed == (reward is not None)
+    assert result.termination.reason == reason
+    assert bool(result.infrastructure_error) == (reward is None or reason == "infrastructure_error")
 
 
-@pytest.mark.parametrize("operation", ["release", "stop"])
-async def test_borrowed_release_cannot_destroy_owner(operation):
-    provider = MagicMock()
-    provider.close = AsyncMock()
-    provider.aclose = AsyncMock()
-    sandbox = AsyncSandbox(provider, owns_sandbox=False)
-    sandbox._handle = SandboxHandle(sandbox_id="borrowed", provider_name="test", raw=None)
+async def test_deadline_grades_without_worker_and_late_first_verify_replays(fixture):
+    f = fixture
+    f.server.config.agent_max_timeout_sec = 0.01
+    session_id = await start(f)
+    await asyncio.sleep(0.04)
+    session = f.server._sessions[session_id]
+    await session.finalization
+    assert session.phase == "closed" and session.verify_body is None
+    f.grade.assert_awaited_once()
+    saved = json.loads(f.server._state_path(session.identity).read_text())
+    body = verify_body(session_id)
+    body.termination.artifacts = ["worker/trajectory.json"]
+    response = await restart(f).verify(f.request, body)
+    assert response.termination.reason == "timeout"
+    assert response.termination.artifacts == body.termination.artifacts
+    assert response.evaluation_completed
+    assert await restart(f).verify(f.request, verify_body(session_id, "cancelled")) == response
+    replayed = json.loads(f.server._state_path(session.identity).read_text())
+    for field in ("resources", "deadlines", "diagnostics"):
+        assert replayed[field] == saved[field]
+
+
+async def test_expired_deadline_wins_even_when_watchdog_delayed(fixture):
+    f = fixture
+    session_id = await start(f)
+    session = f.server._sessions[session_id]
+    session.watchdog.cancel()
+    session.deadline = 0
+    result = await f.server.verify(f.request, verify_body(session_id))
+    assert result.termination.reason == "timeout"
+    f.grade.assert_awaited_once()
+
+
+@pytest.mark.parametrize("first", ["verify", "cancel"])
+async def test_finish_race_first_winner_and_exact_response(fixture, first):
+    f = fixture
+    session_id = await start(f)
+    calls = [
+        f.server.verify(f.request, verify_body(session_id)),
+        f.server.cancel_session(f.request, SessionRequest(session_id=session_id)),
+    ]
+    if first == "cancel":
+        calls.reverse()
+    await asyncio.gather(*calls)
+    result = await f.server.verify(f.request, verify_body(session_id, "infrastructure_error"))
+    assert result.termination.reason == ("completed" if first == "verify" else "cancelled")
+    f.grade.assert_awaited_once()
+
+
+async def test_setup_budget_excludes_queue_and_provisioning_includes_descriptor(fixture, monkeypatch):
+    f = fixture
+    monkeypatch.setattr(lifecycle, "SETUP_TIMEOUT_SEC", 0.03)
+    await f.server._slots.acquire()
+    f.server._slots = asyncio.Semaphore(0)
+    call = asyncio.create_task(seed(f))
+    await asyncio.sleep(0.04)
+    f.server._slots.release()
+    result = await call
+    session = f.server._sessions[result.session_id]
+    assert session.phase == "ready"
+    await asyncio.sleep(0.06)
+    await session.finalization
+    assert session.phase == "closed"
+    assert session.result["exception_info"]["exception_type"] == "AgentSetupTimeoutError"
+    f.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure", ["load", "start", "healthcheck", "descriptor", "quiesce", "collect", "verifier", "cleanup"]
+)
+async def test_failures_release_slots_and_attempt_remaining_cleanup(fixture, monkeypatch, failure):
+    f = fixture
+    if failure == "load":
+        f.server._loader.load.side_effect = RuntimeError("load failed")
+    else:
+        original = lifecycle.Environment
+
+        def create(*args, **kwargs):
+            env = original(*args, **kwargs)
+            method = {
+                "start": "start",
+                "healthcheck": "healthcheck",
+                "descriptor": "main_connection",
+                "quiesce": "quiesce_agent",
+                "cleanup": "stop",
+            }.get(failure)
+            if method and not kwargs.get("verifier"):
+                getattr(env, method).side_effect = RuntimeError(failure + " failed")
+            return env
+
+        monkeypatch.setattr(lifecycle, "Environment", create)
+    if failure in {"load", "start", "healthcheck", "descriptor"}:
+        with pytest.raises(HTTPException):
+            await seed(f)
+    else:
+        session_id = await start(f)
+        if failure == "collect":
+            monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=RuntimeError("collection failed")))
+        if failure == "verifier":
+            f.grade.side_effect = RuntimeError("verification failed")
+        result = await f.server.verify(f.request, verify_body(session_id))
+        assert result.evaluation_completed == (failure == "cleanup")
+    session = next(iter(f.server._sessions.values()))
+    assert session.phase == "closed" and not session.owns_slot
+    if f.envs:
+        f.envs[-1].stop.assert_awaited()
+    if failure == "quiesce":
+        f.grade.assert_not_awaited()
+
+
+async def test_shutdown_and_interrupted_restart(fixture):
+    f = fixture
+    app = f.server.setup_webserver()
+    async with app.router.lifespan_context(app):
+        result = await seed(f)
+        with pytest.raises(HTTPException) as exc:
+            restart(f)._session(f.request, result.session_id)
+        assert exc.value.status_code == 409
+    assert f.envs[0].closed
+    with pytest.raises(HTTPException) as exc:
+        await seed(f)
+    assert exc.value.status_code == 503
+
+
+async def test_legacy_closed_result_without_response(fixture):
+    f = fixture
+    session_id = await start(f)
+    result = await f.server.verify(f.request, verify_body(session_id))
+    session = f.server._sessions[session_id]
+    path = f.server._state_path(session.identity)
+    state = json.loads(path.read_text())
+    state.pop("record_version")
+    state.pop("verify_body")
+    state["verified_response"] = None
+    state["result"].pop("runtime")
+    state["result"].pop("runtime_version")
+    path.write_text(json.dumps(state))
+    replay = await restart(f).verify(f.request, verify_body(session_id))
+    assert replay.reward == result.reward and replay.evaluation_completed
+    assert replay.provenance["harbor_version"] == "0.23.0"
+
+
+@pytest.mark.parametrize("owned,operation", [(False, "release"), (False, "stop"), (True, "stop")])
+async def test_borrowed_handles_do_not_destroy_owned_collection(owned, operation):
+    provider = MagicMock(close=AsyncMock(), aclose=AsyncMock())
+    sandbox = AsyncSandbox(provider, owns_sandbox=owned)
+    sandbox._handle = SandboxHandle(sandbox_id="box", provider_name="test", raw=None)
     sandbox._stopped = False
     await getattr(sandbox, operation)()
     await sandbox.stop()
-    provider.close.assert_not_awaited()
+    assert provider.close.await_count == int(owned)
     provider.aclose.assert_awaited_once()
 
 
-async def test_owner_stop_still_destroys_remote():
-    provider = MagicMock(close=AsyncMock(), aclose=AsyncMock())
-    sandbox = AsyncSandbox(provider)
-    sandbox._handle = SandboxHandle(sandbox_id="owned", provider_name="test", raw=None)
-    sandbox._stopped = False
-    await sandbox.stop()
-    provider.close.assert_awaited_once()
+async def test_descriptor_timeout_is_owned_and_cleans_partial_preparation(fixture, monkeypatch):
+    f = fixture
+    monkeypatch.setattr(lifecycle, "SETUP_TIMEOUT_SEC", 0.01)
+    original = lifecycle.Environment
+
+    def create(*args, **kwargs):
+        env = original(*args, **kwargs)
+
+        async def blocked():
+            await asyncio.Event().wait()
+
+        env.main_connection.side_effect = blocked
+        return env
+
+    monkeypatch.setattr(lifecycle, "Environment", create)
+    with pytest.raises(HTTPException):
+        await seed(f)
+    session = next(iter(f.server._sessions.values()))
+    await session.finalization
+    assert f.envs[0].closed and not session.owns_slot
+    assert session.result["exception_info"]["exception_type"] == "AgentSetupTimeoutError"
+    assert session.result["agent_setup"]["finished_at"]
+    f.grade.assert_not_awaited()
 
 
-async def test_seed_retry_before_cookie_response_reuses_episode(fixture):
-    server, request, body, _, _, create = fixture
-    body = body.model_copy(update={"client_session_id": "stable-agent-session"})
-    first = await server.seed_session(request, body)
-    retried_request = SimpleNamespace(session={SESSION_ID_KEY: "new-resources-cookie"})
-    retry = await server.seed_session(retried_request, body)
-    assert first == retry
-    create.assert_awaited_once()
-    await server.cancel_session(retried_request, SessionRequest(session_id=retry.session_id))
-    assert await server.cancel_session(retried_request, SessionRequest(session_id=retry.session_id)) == {
-        "session_id": retry.session_id,
-        "phase": "closed",
-    }
+async def test_delayed_start_cannot_extend_setup_or_execution(fixture):
+    f = fixture
+    session_id = (await seed(f)).session_id
+    session = f.server._sessions[session_id]
+    session.watchdog.cancel()
+    session.setup_deadline = 0
+    with pytest.raises(HTTPException):
+        await f.server.start_session(f.request, SessionRequest(session_id=session_id))
+    assert session.phase == "closed"
+    f.body = f.body.model_copy(update={"rollout_id": "second"})
+    session_id = await start(f)
+    session = f.server._sessions[session_id]
+    session.watchdog.cancel()
+    session.deadline = 0
+    with pytest.raises(HTTPException):
+        await f.server.start_session(f.request, SessionRequest(session_id=session_id))
+    assert session.termination.reason == "timeout"
+    f.grade.assert_awaited_once()
 
 
-async def test_authoritative_timeout_keeps_worker_artifact_references(fixture):
-    server, request, body, _, _, _ = fixture
-    seed = await server.seed_session(request, body)
-    await server.start_session(request, SessionRequest(session_id=seed.session_id))
-    session = server._sessions[seed.session_id]
-    session.episode.termination = AgentTermination(reason="timeout", detail="Resources deadline reached")
-    submitted = verify_body(seed.session_id)
-    submitted.termination.artifacts = ["worker/trajectory.json", "worker/trajectory.json"]
-    result = await server.verify(request, submitted)
-    assert result.termination.reason == "timeout"
-    assert result.termination.detail == "Resources deadline reached"
-    assert result.termination.artifacts == ["worker/trajectory.json"]
+async def test_shutdown_interrupts_verification_and_preserves_cleanup(fixture):
+    f = fixture
+    session_id = await start(f)
+    entered = asyncio.Event()
+
+    async def blocked(*args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    f.grade.side_effect = blocked
+    verify = asyncio.create_task(f.server.verify(f.request, verify_body(session_id)))
+    await entered.wait()
+    await lifecycle.shutdown(list(f.server._sessions.values()), 0.01)
+    result = await verify
+    assert not result.evaluation_completed and result.infrastructure_error == "CancelledError"
+    assert all(env.closed for env in f.envs)
+    assert not f.server._sessions[session_id].owns_slot
 
 
-async def test_another_worker_cannot_execute_the_same_active_rollout(fixture):
-    server, request, body, _, _, create = fixture
-    body = body.model_copy(update={"execution_id": "first-worker"})
-    seed = await server.seed_session(request, body)
-    assert await server.seed_session(request, body) == seed
-    with pytest.raises(HTTPException) as exc:
-        await server.seed_session(request, body.model_copy(update={"execution_id": "another-worker"}))
-    assert exc.value.status_code == 409
-    create.assert_awaited_once()
-    await server.cancel_session(request, SessionRequest(session_id=seed.session_id))
+async def test_build_timeout_and_missing_agent_logs_are_diagnostic(fixture, monkeypatch):
+    f = fixture
+    f.server._loader.load.return_value.config.environment.build_timeout_sec = 0.01
+    original = lifecycle.Environment
 
+    def create(*args, **kwargs):
+        env = original(*args, **kwargs)
 
-async def test_shutdown_cancels_owner_and_closed_episode_cannot_restart(fixture):
-    server, request, body, _, _, _ = fixture
-    app = server.setup_webserver()
-    async with app.router.lifespan_context(app):
-        seed = await server.seed_session(request, body)
-    session = server._sessions[seed.session_id]
-    assert session.task.cancelled()
-    restarted = TerminalBench4ResourcesServer(config=server.config, server_client=MagicMock(spec=ServerClient))
-    for instance in [server, restarted]:
-        with pytest.raises(HTTPException) as exc:
-            await instance.start_session(request, SessionRequest(session_id=seed.session_id))
-        assert exc.value.status_code == 409
-        result = await instance.verify(request, verify_body(seed.session_id))
-        assert not result.evaluation_completed
-        assert result.termination.reason == "cancelled"
-        assert result.infrastructure_error
+        async def blocked():
+            await asyncio.Event().wait()
 
+        env.start.side_effect = blocked
+        return env
 
-@pytest.mark.parametrize("failure", ["create", "steps"])
-async def test_partial_preparation_failure_is_recorded(fixture, failure):
-    server, request, body, trial, _, create = fixture
-    if failure == "create":
-        create.side_effect = RuntimeError("provisioning failed")
-    else:
-        trial.task.has_steps = True
-    with pytest.raises(HTTPException) as exc:
-        await server.seed_session(request, body)
-    assert exc.value.status_code == 409
-    assert next(iter(server._sessions.values())).episode.phase == "closed"
-    assert next(iter(server._sessions.values())).result["exception_info"]
-    trial.run.assert_not_awaited()
-
-
-async def test_rollout_conflict_and_interrupted_restart_rejected(fixture):
-    server, request, body, _, _, _ = fixture
-    seed = await server.seed_session(request, body)
-    second = list(server._tasks.values())[1]
-    with pytest.raises(HTTPException) as exc:
-        await server.seed_session(
-            request,
-            body.model_copy(update={"task_name": "terminal-bench/" + second["name"], "task_ref": second["ref"]}),
-        )
-    assert exc.value.status_code == 409
-    restarted = TerminalBench4ResourcesServer(config=server.config, server_client=MagicMock(spec=ServerClient))
-    with pytest.raises(HTTPException) as exc:
-        restarted._session(request, seed.session_id)
-    assert exc.value.status_code == 409
-    stranger = SimpleNamespace(session={SESSION_ID_KEY: "stranger"})
-    with pytest.raises(HTTPException) as exc:
-        restarted._session(stranger, seed.session_id)
-    assert exc.value.status_code == 404
-    for missing in ["../../secret", "tb4-" + "0" * 32]:
-        with pytest.raises(HTTPException) as exc:
-            restarted._session(request, missing)
-        assert exc.value.status_code == 404
-    await server.cancel_session(request, SessionRequest(session_id=seed.session_id))
-
-
-@pytest.mark.parametrize("reason", ["cancelled", "timeout", "nonzero_exit", "infrastructure_error"])
-async def test_running_termination_survives_verification(fixture, reason):
-    server, request, body, _, env, _ = fixture
-    seed = await server.seed_session(request, body)
-    await server.start_session(request, SessionRequest(session_id=seed.session_id))
-    if reason == "cancelled":
-        await server.cancel_session(request, SessionRequest(session_id=seed.session_id))
-    else:
-        await server.verify(request, verify_body(seed.session_id, reason))
-    session = server._sessions[seed.session_id]
-    # Simulate Harbor's official grade after its graded-agent exception path.
-    session.result = {"verifier_result": {"rewards": {"reward": 1}}}
-    session.verified_response = None
-    result = await server.verify(request, verify_body(seed.session_id, reason))
-    assert result.reward == 1
-    assert result.evaluation_completed
-    assert result.termination.reason == reason
-    assert bool(result.infrastructure_error) == (reason == "infrastructure_error")
-    env.quiesce_agent.assert_awaited_once()
+    monkeypatch.setattr(lifecycle, "Environment", create)
+    with pytest.raises(HTTPException):
+        await seed(f)
+    session = next(iter(f.server._sessions.values()))
+    assert session.result["exception_info"]["exception_type"] == "EnvironmentStartTimeoutError"
+    monkeypatch.setattr(lifecycle, "Environment", original)
+    monkeypatch.setattr(lifecycle, "download_dir", AsyncMock(side_effect=RuntimeError("logs unavailable")))
+    f.body = f.body.model_copy(update={"rollout_id": "second"})
+    session_id = await start(f)
+    response = await f.server.verify(f.request, verify_body(session_id))
+    assert response.evaluation_completed
+    assert any(d.get("operation") == "agent_logs" for d in f.server._sessions[session_id].diagnostics)

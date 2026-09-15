@@ -16,11 +16,10 @@ provisioning, CPU/GPU endpoint aliases, task budgets, and cleanup live in the
 resources configuration. The existing general Harbor and SWE-bench integrations
 remain available with their existing dependencies and defaults.
 
-The resources runtime pins Harbor **0.23.0** and uses its custom-agent extension
-as a rendezvous adapter. The adapter does not execute OpenCode or mini-SWE.
-Harbor retains environment setup and health checks, task MCP/skills declarations,
-artifact collection from main and sidecar services, separate verifier state
-transfer, grading, and cleanup. See [the handoff contract](../../resources_servers/terminal_bench_4/README.md).
+The resources runtime uses Gym's native TB4 lifecycle, with no Harbor package
+required. Resources own preparation, deadlines, main/sidecar artifact collection,
+separate verification, and cleanup. See the [handoff contract](../../resources_servers/terminal_bench_4/README.md)
+and [native lifecycle notes](native-lifecycle.md).
 
 ## Dataset and deployment
 
@@ -73,7 +72,7 @@ for its pinned task-local `mcp==1.29.0` client.
 For capped smoke runs, add `++tb4_max_steps=3` and
 `++tb4_agent_max_timeout_sec=900`. The cap can only shorten the task's official
 agent budget. Default runs have no step cap or timeout override. Installation
-uses the separate 360-second Harbor agent-setup budget. Provider renewal keeps
+uses the separate 360-second harness-setup budget. Provider renewal keeps
 resources alive without extending agent execution.
 
 Select tasks during preparation:
@@ -105,6 +104,7 @@ It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 ```sh
 PYTHONPATH=. python benchmarks/terminal_bench_4/smoke.py \
   --harness opencode --category cpu --env-file /path/to/private.env \
+  --baseline-health benchmarks/terminal_bench_4/health-baseline.json \
   --output results/tb4-smoke/cpu
 ```
 
@@ -113,4 +113,6 @@ requires both model-output evidence and an official grade. Inspect trajectories,
 verifier output, and resource cleanup before promoting coverage. Capped runs are
 not benchmark scores; missing submissions can exit grading before deeper tests.
 
-See [migration notes](migration.md) for the branch baseline and validation record.
+See [native lifecycle notes](native-lifecycle.md) for the current implementation and
+validation record. The [earlier migration notes](migration.md) describe the historical
+Harbor-backed reference.
