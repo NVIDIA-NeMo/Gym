@@ -151,5 +151,8 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
     forwarded = server._client.create_chat_completion.await_args.kwargs
     assert forwarded["model"] == expected_model
     assert {key: forwarded[key] for key in expected_parameters} == expected_parameters
-    assert forwarded["max_tokens"] == expected_parameters.get("max_tokens", default_max_tokens)
+    if judge_mode == "binary" and judge_name == "gpt-5.5":
+        assert forwarded["max_tokens"] == 16384
+    else:
+        assert forwarded["max_tokens"] == expected_parameters.get("max_tokens", default_max_tokens)
     assert "temperature" not in forwarded

@@ -172,6 +172,7 @@ class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     pairwise_reference_ids: List[str] = ["gpt-5-5"]
     pairwise_num_trials: int = Field(default=2, ge=1)
     binary_formatting_retries: int = Field(default=2, ge=0, le=3)
+    binary_max_tokens_by_judge: Dict[str, int] = Field(default_factory=dict)
 
 
 class AABriefcaseLiteVerifyRequest(BaseVerifyRequest):
@@ -394,6 +395,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     },
                     judge.create_overrides,
                 )
+                # Binary budgets are independent of the larger pairwise comparison budget.
+                if judge.name in self.config.binary_max_tokens_by_judge:
+                    kwargs["max_tokens"] = self.config.binary_max_tokens_by_judge[judge.name]
                 response = await client.chat.completions.create(**kwargs)
                 raw = (response.choices[0].message.content or "").strip()
                 parsed = _parse_binary_judgement(raw)
