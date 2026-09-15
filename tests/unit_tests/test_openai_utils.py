@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock
 
 import openai
 import pytest
+from aiohttp import ClientTimeout
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -68,6 +69,7 @@ from openai.types.responses.response_output_item import (
 )
 from pydantic import ValidationError
 
+from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -142,6 +144,103 @@ class TestOpenAIUtils:
 
         assert request.await_count == MAX_NUM_TRIES
 
+    async def test_explicit_attempt_cap_reaches_low_level_transport(
+        self,
+        monkeypatch,
+    ) -> None:
+        captured = {}
+        response = SimpleNamespace(status=200)
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return response
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            max_num_tries=1,
+            max_connection_retries=2,
+            request_timeout_seconds=300,
+            connect_timeout_seconds=60,
+        )
+
+        assert await client._request(method="POST", url="https://example.test") is response
+        assert captured["_max_num_tries"] == 1
+        assert captured["_max_connection_retries"] == 2
+        assert isinstance(captured["timeout"], ClientTimeout)
+        assert captured["timeout"].total == 300
+        assert captured["timeout"].connect == 60
+
+    @pytest.mark.parametrize("internal", [False, True])
+    @pytest.mark.parametrize("status", [429, 500, 504])
+    async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(
+        self,
+        monkeypatch,
+        internal,
+        status,
+    ) -> None:
+        sleeps = []
+        calls = 0
+
+        class Body:
+            async def read(self):
+                return b"rate limited"
+
+        response = SimpleNamespace(status=status, content=Body())
+
+        async def fake_request(**kwargs):
+            nonlocal calls
+            del kwargs
+            calls += 1
+            return response
+
+        async def fake_raise_for_status(actual_response):
+            assert actual_response is response
+            raise RuntimeError("rate limited")
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        monkeypatch.setattr(
+            openai_utils_module,
+            "raise_for_status",
+            fake_raise_for_status,
+        )
+        monkeypatch.setattr(openai_utils_module, "sleep", fake_sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            max_num_tries=1,
+            internal=internal,
+        )
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            await client._request(method="POST", url="https://example.test")
+
+        assert calls == 1
+        assert sleeps == []
+
+    def test_explicit_attempt_cap_only_supports_disabling_inner_retries(self) -> None:
+        with pytest.raises(ValidationError, match="Input should be 1"):
+            NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url="https://api.openai.com/v1",
+                max_num_tries=2,
+            )
+
+    def test_connect_timeout_requires_request_timeout(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="connect_timeout_seconds requires request_timeout_seconds",
+        ):
+            NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url="https://api.openai.com/v1",
+                connect_timeout_seconds=60,
+            )
+
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_seed_rejected_at_top_level(self) -> None:
@@ -215,6 +314,162 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
             InputComputerCallOutput.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True)
             == replay_dump
         )
+
+    @pytest.mark.parametrize(
+        "tool_type",
+        [
+            "web_search",
+            "web_search_2025_08_26",
+            "web_search_preview",
+            "web_search_preview_2025_03_11",
+        ],
+    )
+    def test_web_search_tool_variants_validate(self, tool_type: str) -> None:
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": "Find the current documentation.",
+                "tools": [{"type": tool_type}],
+            }
+        )
+
+        assert params.model_dump(mode="json")["tools"] == [{"type": tool_type}]
+
+
+class TestNeMoGymResponse:
+    def test_web_search_call_round_trip(self) -> None:
+        response_payload = {
+            "id": "resp_123",
+            "created_at": 1_725_000_000,
+            "model": "gpt-5-mini-2025-08-07",
+            "object": "response",
+            "output": [
+                {
+                    "id": "rs_123",
+                    "type": "reasoning",
+                    "summary": [],
+                },
+                {
+                    "id": "ws_123",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "Python package documentation",
+                        "provider_trace": "forward-compatible",
+                        "sources": [
+                            {
+                                "type": "url",
+                                "url": "https://docs.python.org/3/",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "id": "msg_123",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The Python documentation is available.",
+                            "annotations": [],
+                        }
+                    ],
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        response = NeMoGymResponse.model_validate(response_payload)
+
+        web_search_call = response.output[1]
+        assert isinstance(web_search_call, NeMoGymResponseFunctionWebSearch)
+        assert web_search_call.status == "completed"
+        assert web_search_call.action == response_payload["output"][1]["action"]
+
+        serialized = response.model_dump(mode="json")
+        assert serialized["output"][1] == response_payload["output"][1]
+        assert NeMoGymResponse.model_validate(serialized).model_dump(mode="json") == serialized
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            {
+                "type": "search",
+                "queries": ["Python package documentation", "Python package API"],
+                "provider_trace": "queries-only",
+            },
+            {
+                "type": "open_page",
+                "url": None,
+                "provider_trace": "nullable-url",
+            },
+            {
+                "type": "find_in_page",
+                "url": "https://docs.python.org/3/",
+                "pattern": "socket",
+                "provider_trace": "current-action-name",
+            },
+            {
+                "type": "browse",
+                "url": "https://example.com",
+                "provider_trace": "future-action",
+            },
+        ],
+    )
+    def test_web_search_call_accepts_current_action_shapes_and_preserves_payload(
+        self,
+        action: dict,
+    ) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": action,
+        }
+
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+
+        assert web_search_call.action == action
+        assert web_search_call.model_dump(mode="json") == payload
+        assert (
+            NeMoGymResponseFunctionWebSearch.model_validate(web_search_call.model_dump(mode="json")).model_dump(
+                mode="json"
+            )
+            == payload
+        )
+
+    def test_web_search_call_can_be_replayed_as_input(self) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "query": "provider bookkeeping",
+            },
+        }
+
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [payload]})
+
+        assert isinstance(params.input, list)
+        assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
+        assert params.input[0].model_dump(mode="json") == payload
+
+    def test_web_search_call_accepts_missing_action_and_preserves_omission(self) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+        }
+
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+
+        assert web_search_call.action is None
+        assert web_search_call.model_dump(mode="json") == payload
 
 
 class TestTokenMetadataValidation:
