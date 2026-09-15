@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "osworld-resources-server"
+version = "0.0.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    # This immutable revision supplies the generic per-instance
+    # remote_docker and setup/evaluator contracts used by this server.
+    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/0a65076f6f686588697343da59295cefc6bb7e56.tar.gz",
+    "requests-toolbelt~=1.0.0",
+    # Support deployment-scoped SOCKS routing to remote Docker-published
+    # OSWorld service endpoints without proxying Ray or model traffic.
+    "PySocks~=1.7.1",
+    "chardet<6",
+    "cryptography",
+    "cffi",
+    "scipy",
+    # Python 3.13 has no NumPy 1.x wheel. Keep NumPy and OpenCV on the
+    # compatible pair already exercised by the OSWorld agent role.
+    "numpy>=2.1,<2.5",
+    "pynput",
+    "ag2",
+    "opencv-python-headless~=4.10.0.84",
+    "Pillow>=12,<13",
+    "scikit-learn",
+    "matplotlib>=3.10,<3.11",
+    "flask~=3.0.0",
+    "func-timeout",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61"]
+
+[tool.setuptools.packages.find]
+where = ["../.."]
+include = ["resources_servers.osworld*"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+
+[tool.uv]
+# The pinned OSWorld metadata predates CPython 3.13 wheels for this family.
+# These are role-local compatibility ranges, not requirements for the agent,
+# model, or trainer environments. The experiment record captures the exact
+# versions selected by uv for a particular platform.
+override-dependencies = [
+    "numpy>=2.1,<2.5",
+    "opencv-python-headless~=4.10.0.84",
+    "Pillow>=12,<13",
+    "matplotlib>=3.10,<3.11",
+    "torch>=2.11,<2.12",
+    # OSWorld's EasyOCR dependency asks for an unconstrained torchvision. The
+    # resources-server control path does not use OCR; keep the codec-bearing
+    # optional wheel out of this default environment.
+    "torchvision; sys_platform == 'never'",
+]
+exclude-dependencies = ["opencv-python", "opencv-contrib-python", "agp-client"]
+
+[tool.uv.pip]
+torch-backend = "cpu"

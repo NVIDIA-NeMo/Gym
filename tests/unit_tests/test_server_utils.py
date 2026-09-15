@@ -67,6 +67,49 @@ def _return_exception_from_child_process(error: ClientResponseError) -> ClientRe
 
 
 class TestServerUtils:
+    def test_global_aiohttp_client_exit_uses_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.new_event_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+
+        try:
+            nemo_gym.server_utils.global_aiohttp_client_exit()
+        finally:
+            owner_loop.close()
+
+        assert client.closed
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+
+    async def test_global_aiohttp_client_exit_from_owner_loop_is_non_blocking(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.get_running_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+
+        nemo_gym.server_utils.global_aiohttp_client_exit()
+
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        await asyncio.sleep(0)
+        assert client.closed
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
             CIMultiDict(
@@ -171,6 +214,31 @@ class TestServerUtils:
         actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
 
+    def test_ServerClient_uses_loopback_for_wildcard_bind_hosts(self, monkeypatch: MonkeyPatch) -> None:
+        global_config_dict = DictConfig(
+            {
+                "head_server": {
+                    "host": "0.0.0.0",
+                    "port": 11000,
+                }
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        response = MagicMock(content=b'"head_server: {}"')
+        requests_get = MagicMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", requests_get)
+
+        client = ServerClient.load_from_global_config()
+
+        requests_get.assert_called_once_with("http://127.0.0.1:11000/global_config_dict_yaml")
+        assert client._build_server_base_url(DictConfig({"host": "0.0.0.0", "port": 11000})) == (
+            "http://127.0.0.1:11000"
+        )
+        assert client._build_server_base_url(DictConfig({"host": "::", "port": 11000})) == ("http://[::1]:11000")
     def test_ServerClient_load_from_global_config_fetches_when_config_was_not_injected(
         self, monkeypatch: MonkeyPatch
     ) -> None:
