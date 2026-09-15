@@ -41,6 +41,7 @@ from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 from nemo_gym.token_id_capture.terminal import TerminalAttribution, resolve_terminal
+from nemo_gym.token_id_capture.training_traces import project_training_traces
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ def _assemble(
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
     declared_response_id: str | None = None,
+    delivery: str = "main_chain",
 ) -> dict:
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
@@ -125,7 +127,20 @@ def _assemble(
         }
 
     try:
-        out = run_builder(entries, builder, terminal_call_id=attribution.model_call_id)
+        if delivery not in ("main_chain", "all_traces"):
+            raise ValueError(f"unknown delivery mode {delivery!r}")
+        if builder == "per_request" and delivery != "all_traces":
+            raise ValueError("per_request requires all_traces delivery")
+        if delivery == "all_traces":
+            if (explicit_terminal_call_id or declared_response_id) and not attribution.attributed:
+                raise ValueError("declared terminal could not be attributed to captured tokens")
+            if any(entry.rollout_id != rollout_id for entry in entries):
+                raise ValueError("capture contains entries from a different rollout")
+            if len({entry.model for entry in entries}) != 1:
+                raise ValueError("all_traces requires a single policy model per rollout")
+        out = run_builder(
+            entries, builder, terminal_call_id=attribution.model_call_id, all_traces=delivery == "all_traces"
+        )
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(
             "Could not build a trajectory for rollout %s from %d captured call(s): %s",
@@ -139,8 +154,13 @@ def _assemble(
     try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
-        assert_prefix_contiguity(response)
+        training_traces = None
+        if delivery == "all_traces":
+            training_traces = project_training_traces(rollout_id, out).model_dump()
+            response = None
+        else:
+            response = project_main_chain_response(rollout_id, out, model=model)
+            assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(
             "Could not build a trajectory for rollout %s from %d captured call(s): %s",
@@ -176,7 +196,11 @@ def _assemble(
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
-    if notes.terminal_chain == "delivered":
+    if delivery == "all_traces":
+        # project_training_traces validated every retained chain, including
+        # off-terminal roots and repeated-ancestor ownership.
+        mask = False
+    elif notes.terminal_chain == "delivered":
         # The verified chain is attributed and intact.
         # Off-path calls (auxiliary calls, sub-agent forks, abandoned retries)
         # are excluded from delivery instead of masking the rollout.
@@ -191,8 +215,9 @@ def _assemble(
         # Mask the rollout when the client-selected generation is unknown.
         mask = bool(unresolved) or bool(notes.unresolved_parent_calls) or notes.roots != 1 or notes.chains != 1
     # An empty delivery must never be trainable, whatever produced it.
-    mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
-    return {
+    if delivery != "all_traces":
+        mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
+    result = {
         "rollout_id": rollout_id,
         "builder": builder,
         "rebuilt_response": response,
@@ -201,6 +226,9 @@ def _assemble(
         "unresolved_retries": list(unresolved),
         "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
+    if training_traces is not None:
+        result["training_traces"] = training_traces
+    return result
 
 
 def trajectories_for_rollout(
@@ -208,6 +236,7 @@ def trajectories_for_rollout(
     token_capture_dirs: list[Path],
     *,
     builder: str = "prefix_merging",
+    delivery: str = "main_chain",
     model: str = "",
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
@@ -235,9 +264,11 @@ def trajectories_for_rollout(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                delivery=delivery,
             )
         if snapshot.incomplete:
             built["mask_sample"] = True
+            built.pop("training_traces", None)
             built.setdefault("metrics", {})["capture_incomplete"] = True
         built["_capture_snapshot"] = {
             "snapshot_id": snapshot.snapshot_id,
@@ -252,6 +283,7 @@ async def trajectories_from_source(
     source: TokenSource,
     *,
     builder: str = "prefix_merging",
+    delivery: str = "main_chain",
     model: str = "",
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
@@ -282,11 +314,13 @@ async def trajectories_from_source(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                delivery=delivery,
                 declared_response_id=declared_response_id,
             )
         )
     if snapshot.incomplete:
         built["mask_sample"] = True
+        built.pop("training_traces", None)
         built.setdefault("metrics", {})["capture_incomplete"] = True
     built["_capture_snapshot"] = {
         "snapshot_id": snapshot.snapshot_id,

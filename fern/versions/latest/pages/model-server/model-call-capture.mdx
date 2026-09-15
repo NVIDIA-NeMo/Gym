@@ -292,3 +292,96 @@ The model-server boundary observes model HTTP requests and responses. It can rec
 reasoning, and tool results present in those payloads, but it does not observe tool execution,
 environment events, context compaction, semantic turns, or subagent structure. Those require
 instrumentation at the agent, tool, environment, or rollout layer.
+
+## Deliver multiple training traces
+
+Training-token capture is separate from the evaluation evidence described above. A trainer that
+supports multiple sequences per logical rollout can opt into complete trace delivery:
+
+```yaml
+token_id_capture:
+  enabled: true
+  all_agents: true
+  dir: /absolute/shared/path/training-captures
+  rebuild_response: true
+  delivery: all_traces
+  builder: prefix_merging  # Or per_request.
+```
+
+NeMo RL passes this block under `env.nemo_gym`. The model server and finalizer must share the capture
+directory and preserve `/ng-rollout/<rollout_id>/training-token-capture` on every model call.
+`delivery: main_chain` with `builder: prefix_merging` remains the default and preserves the existing
+single-response behavior. `per_request` requires `delivery: all_traces`.
+
+- `prefix_merging` extends Gym's existing verified-parent builder. It delivers each retained chain,
+  including independent roots and branches. It does not infer a parent across an unresolved boundary.
+- `per_request` uses the same captured-call admission and retry selection, then emits each retained
+  call with its exact full prompt and sampled generation.
+
+In plural delivery, a complete captured prompt can remain an independent root when its resolved
+parent's sampled tokens are no longer a prefix of the canonical next prompt, for example after
+removing an empty thinking template. This fallback requires a valid cumulative token length and
+digest for the complete captured call. It preserves the exact conditioning tokens without joining
+across the rewrite. Delta records, missing or unresolved parents, and ambiguous retries still fail
+closed. The default `main_chain` behavior is unchanged.
+
+The plural mode leaves the scored `response` and scalar `reward` unchanged and adds a top-level
+`training_traces` envelope. Native inline token fields are also preserved. A trainer must explicitly
+consume the envelope; reading only `response.output` does not consume plural training data.
+
+```json
+{
+  "training_traces": {
+    "schema_version": 1,
+    "rollout_id": "0-0",
+    "builder": "per_request",
+    "traces": [{
+      "trace_id": "0-0:call-a",
+      "model_call_ids": ["call-a"],
+      "token_ids": [1, 2, 10, 11],
+      "generation_logprobs": [0.0, 0.0, -0.1, -0.2],
+      "loss_mask": [0, 0, 1, 1],
+      "sampled_spans": [{"model_call_id": "call-a", "start": 2, "end": 4}]
+    }]
+  }
+}
+```
+
+This is a synthetic schema example. All three arrays have the same length. Prompt and interstitial
+context positions carry loss mask zero and synthetic logprob zero. Each `sampled_spans` entry is a
+half-open range into the complete row and preserves the captured generated tokens and behavior
+logprobs. The first token is always conditioning context. A call's sampled span has exactly one
+loss-bearing owner across the envelope. A shared ancestor can appear as context in another branch,
+with mask zero. Deterministic call identities choose ownership; transport completion order does not.
+`model_call_ids` includes both owned calls and repeated ancestor context.
+
+Callers of `RunHelper.run_examples` finalize returned records explicitly. Gym's rollout-to-file
+collector already performs this step. Preserve the caller's `ROLLOUT_ID_KEY_NAME` field on the result:
+
+```python
+from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture
+from nemo_gym.token_id_capture.store import TokenCaptureStore
+
+source = TokenCaptureStore("/absolute/shared/path/training-captures")
+built = await finalize_rollout_token_capture(
+    result, source, delivery="all_traces", builder="per_request"
+)
+```
+
+The finalizer freezes its `TokenSource`; it never deletes captured evidence. Retire with
+`retire_rollout_token_capture` only after durable trainer acceptance or durable file handoff.
+An incomplete snapshot, conflicting duplicate, unresolved parent, ambiguous retained retry, invalid
+terminal, mixed model, or invalid token/logprob arrays masks the rollout and emits no usable envelope.
+Same-prompt independent invocations without retention evidence cannot be distinguished safely from
+retries; they remain unsupported rather than being silently counted as successful calls.
+
+This initial envelope supports text-only training without router replay. `routed_experts` is rejected.
+Framework-owned `external_staging` receipts still rebuild one selected chain, so configuring that path
+with `delivery: all_traces` raises an error before collection. A framework may use the generic
+`TokenSource` finalizer for plural delivery; the existing staged receipt API is unchanged.
+
+Trace reconstruction does not define rewards, advantages, or loss normalization. The trainer groups
+independently sampled logical rollouts by their input task, computes the chosen logical advantages,
+and then expands trace rows with their parent rollout identity. Repeated context must not become
+additional sampled tokens. Shared outcome rewards and token ownership alone do not solve process
+credit assignment or reward hacking; normalization choices require separate validation.
