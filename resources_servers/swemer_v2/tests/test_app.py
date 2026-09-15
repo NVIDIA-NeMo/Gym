@@ -128,7 +128,9 @@ class TestGrade:
         core behavior the swap to swe_bench_ext depends on.
         """
         statuses = {"tests/pkg/test_mod.py::TestFoo::test_x": "PASSED"}
-        report = grade(statuses, fail_to_pass=["tests.pkg.test_mod.TestFoo::test_x"], pass_to_pass=[], test_framework="pytest")
+        report = grade(
+            statuses, fail_to_pass=["tests.pkg.test_mod.TestFoo::test_x"], pass_to_pass=[], test_framework="pytest"
+        )
         assert report["resolved"] is True
 
     def test_exact_match_still_preferred_over_normalized(self) -> None:
