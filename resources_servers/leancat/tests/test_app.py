@@ -154,85 +154,53 @@ class TestLeanCatApp:
     @pytest.mark.asyncio
     async def test_verify_successful_proof(self, server):
         self._stub_sandbox(server)
-        result = await server.verify(self._create_request(f"Here you go.\n```lean4\n{SOLVED}\n```"))
+        result = await server.verify(self._create_request(f"Here you go.\n```lean4\n{SOLVED}\n```", level="High"))
         assert result.reward == 1.0
         assert result.proof_status == STATUS_COMPLETED
         assert result.statement_preserved
         assert result.failure_reason is None
         assert result.predicted_proof == SOLVED
-
-    @pytest.mark.asyncio
-    async def test_verify_row_metadata_survives_onto_the_response(self, server):
-        # compute_subset_metrics groups on `level`, so it has to make it through verify.
-        self._stub_sandbox(server)
-        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```", level="High"))
+        # compute_subset_metrics groups on `level`, so the row fields have to survive verify.
         assert result.level == "High"
         assert result.problem_id == "0001"
 
     @pytest.mark.asyncio
-    async def test_verify_failed_proof(self, server):
-        self._stub_sandbox(server, stderr="/lean4/my_project/x.lean:7:2: error: unknown tactic")
+    @pytest.mark.parametrize(
+        "sandbox_output,expected_status",
+        [
+            ({"stderr": "/lean4/my_project/x.lean:7:2: error: unknown tactic"}, STATUS_COMPILE_ERROR),
+            # `lake env lean` exits 0 on a sorry-carrying build; the status alone would pass it.
+            ({"stdout": "warning: declaration uses 'sorry'"}, STATUS_COMPILE_ERROR),
+            # The NeMo-Skills sandbox says "failed" for any non-zero lake exit, which is the
+            # normal way a wrong proof looks and must not read as infrastructure trouble.
+            ({"process_status": "failed"}, STATUS_COMPILE_ERROR),
+            ({"process_status": "timeout"}, STATUS_TIMEOUT),
+            ({"process_status": "error", "stderr": "connection refused"}, STATUS_SANDBOX_ERROR),
+        ],
+        ids=["compile-error", "zero-exit-with-sorry", "non-zero-lake-exit", "timeout", "sandbox-down"],
+    )
+    async def test_verify_maps_sandbox_outcomes_to_statuses(self, server, sandbox_output, expected_status):
+        self._stub_sandbox(server, **sandbox_output)
         result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
         assert result.reward == 0.0
-        assert result.proof_status == STATUS_COMPILE_ERROR
-        assert result.compiler_output.stderr.endswith("unknown tactic")
+        assert result.proof_status == expected_status
 
     @pytest.mark.asyncio
-    async def test_verify_zero_exit_with_sorry_warning(self, server):
-        # `lake env lean` exits 0 on a sorry-carrying build; the status alone would pass it.
-        self._stub_sandbox(server, stdout="warning: declaration uses 'sorry'")
-        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_COMPILE_ERROR
-
-    @pytest.mark.asyncio
-    async def test_verify_timeout(self, server):
-        self._stub_sandbox(server, process_status="timeout")
-        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_TIMEOUT
-
-    @pytest.mark.asyncio
-    async def test_verify_lean_rejected_is_a_compile_error_not_a_sandbox_error(self, server):
-        # The NeMo-Skills sandbox says "failed" for any non-zero lake exit; that is the
-        # normal way a wrong proof looks, and must not be reported as infrastructure trouble.
-        self._stub_sandbox(server, process_status="failed")
-        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_COMPILE_ERROR
-
-    @pytest.mark.asyncio
-    async def test_verify_sandbox_failure(self, server):
-        self._stub_sandbox(server, process_status="error", stderr="connection refused")
-        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_SANDBOX_ERROR
-
-    @pytest.mark.asyncio
-    async def test_verify_empty_generation(self, server):
+    @pytest.mark.parametrize(
+        "text,expected_status",
+        [
+            ("", STATUS_EMPTY_GENERATION),
+            (f"```lean4\n{REFERENCE}\n```", STATUS_BANNED_TOKENS),
+            (f"```lean4\n{SOLVED.replace('α ≫ β = β ≫ α', 'True')}\n```", STATUS_STATEMENT_MODIFIED),
+        ],
+        ids=["empty", "still-has-sorry", "weakened-statement"],
+    )
+    async def test_verify_rejects_on_text_without_compiling(self, server, text, expected_status):
+        """A five-minute Mathlib compile must not be spent on a submission already lost."""
         mock = self._stub_sandbox(server)
-        result = await server.verify(self._create_request(""))
+        result = await server.verify(self._create_request(text))
         assert result.reward == 0.0
-        assert result.proof_status == STATUS_EMPTY_GENERATION
-        mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_verify_rejects_sorry_without_compiling(self, server):
-        mock = self._stub_sandbox(server)
-        result = await server.verify(self._create_request(f"```lean4\n{REFERENCE}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_BANNED_TOKENS
-        assert "sorry" in result.failure_reason
-        # A five-minute Mathlib compile must not be spent on a submission already lost.
-        mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_verify_rejects_weakened_statement_without_compiling(self, server):
-        mock = self._stub_sandbox(server)
-        cheat = SOLVED.replace("α ≫ β = β ≫ α", "True")
-        result = await server.verify(self._create_request(f"```lean4\n{cheat}\n```"))
-        assert result.reward == 0.0
-        assert result.proof_status == STATUS_STATEMENT_MODIFIED
+        assert result.proof_status == expected_status
         mock.assert_not_awaited()
 
     @pytest.mark.asyncio
