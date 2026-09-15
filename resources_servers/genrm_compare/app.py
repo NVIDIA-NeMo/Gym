@@ -95,7 +95,11 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_model_server: ModelServerRef  # Default: genrm_model (see config)
     genrm_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    # Release a cohort that never fills to prevent deadlock.
+    cohort_timeout_s: float = 1800.0
+
     # Cohort-based verify: number of rollouts per prompt before running comparison (Difference 1)
+
     # When > 1, verify() buffers by prompt and runs comparison when cohort is full; rewards are relative to cohort.
     # When <= 1, verify() returns default_score (no comparison).
     num_rollouts_per_prompt: int = 1
@@ -155,6 +159,15 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
 
+class GenRMCompareVerifyResponse(BaseVerifyResponse):
+    # None represents no failure.
+    # "cohort_timeout" represents a partial failure, where the cohort timed out but there were
+    #   sufficient responses for a valid comparison.
+    # "no_comparisons" represents a failure where no comparisons could be made.
+    # "aggregation_failed" represents a failure where the scoring raised an exception.
+    failure_reason: Optional[str] = None
+
+
 class GenRMCompareRequest(BaseModel):
     """Request payload for GenRM pairwise comparison."""
 
@@ -209,7 +222,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cfg = self.config
         principle = body.principle
         if cfg.num_rollouts_per_prompt <= 1:
-            return BaseVerifyResponse(
+            return GenRMCompareVerifyResponse(
                 responses_create_params=body.responses_create_params,
                 response=body.response,
                 reward=cfg.default_score,
@@ -221,7 +234,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[Tuple[float, Optional[str]]] = asyncio.get_running_loop().create_future()
 
         _cohort_buffers[prompt_key].append((body, future))
 
@@ -246,40 +259,77 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         # Only run for the final response
         if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
+            async with _cohort_lock:
+                full_buf = _cohort_buffers.pop(prompt_key, None)
+                full_jit = _cohort_jit_buffers.pop(prompt_key, None)
+            # A waiter's timeout may claim the cohort while this final arrival was in flight.
+            if full_buf is not None:
+                self._resolve_cohort(full_buf, *(full_jit or ([], [])))
 
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
+        try:
+            reward, failure_reason = await asyncio.wait_for(asyncio.shield(future), timeout=cfg.cohort_timeout_s)
+        except asyncio.TimeoutError:
+            # The cohort never filled: a peer sub-request died upstream of verify().
+            # The first timed-out waiter claims whatever arrived and scores it.
+            # Later waiters collect the resolved future.
+            async with _cohort_lock:
+                stale_buf = _cohort_buffers.pop(prompt_key, None)
+                stale_jit = _cohort_jit_buffers.pop(prompt_key, None)
+            if stale_buf:
+                logger.warning(
+                    "[GenRM] Cohort for prompt_key=%s timed out with %d/%d rollouts; scoring the partial cohort.",
+                    prompt_key,
+                    len(stale_buf),
+                    cfg.num_rollouts_per_prompt,
                 )
-            )
-
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
-            )
-
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
-
-        reward = await future
-        return BaseVerifyResponse(
+                self._resolve_cohort(stale_buf, *(stale_jit or ([], [])), cause="cohort_timeout")
+            reward, failure_reason = await future
+        return GenRMCompareVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
             reward=reward,
+            failure_reason=failure_reason,
         )
+
+    def _resolve_cohort(self, cohort_buf, existing_results, existing_metadata, cause: Optional[str] = None) -> None:
+        """Aggregate a (possibly partial) cohort's comparisons and resolve every waiter future."""
+        cfg = self.config
+        try:
+            response_objs = [
+                (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in cohort_buf
+            ]
+            if len(response_objs) >= 2 and existing_results:
+                # Sort to match the ordering of the original `_run_compare` logic
+                existing_results, existing_metadata = zip(
+                    *sorted(
+                        zip(existing_results, existing_metadata),
+                        key=lambda pair: (pair[1][2], pair[1][0], pair[1][1]),
+                    )
+                )
+                rewards, _, _, _ = aggregate_scores(
+                    comparison_results=existing_results,
+                    comparison_metadata=existing_metadata,
+                    response_objs=response_objs,
+                    aggregator_method=cfg.aggregator_method,
+                    default_score=cfg.default_score,
+                    reasoning_bonus=cfg.reasoning_bonus,
+                    answer_bonus=cfg.answer_bonus,
+                    top_percentile=cfg.top_percentile,
+                    group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                    group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                    group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+                )
+                for i, (_, f) in enumerate(cohort_buf):
+                    if not f.done():
+                        f.set_result((rewards[i], cause))
+                return
+            fallback_cause = cause or "no_comparisons"
+        except Exception:
+            logger.exception("[GenRM] Cohort scoring failed; scoring cohort with the default score.")
+            fallback_cause = cause or "aggregation_failed"
+        for _, f in cohort_buf:
+            if not f.done():
+                f.set_result((cfg.default_score, fallback_cause))
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
