@@ -127,7 +127,6 @@ export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
 # host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
 export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
-# export UCX_IB_ADDR_TYPE=eth
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
 
@@ -135,7 +134,7 @@ export UCX_RNDV_THRESH=0
 export NCCL_NVLS_ENABLE=1
 
 # OCI-HSG has these parameters enabled by default:
-export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1
+export UCX_NET_DEVICES=all
 export NCCL_CUMEM_ENABLE=1
 export NCCL_MNNVL_ENABLE=1
 
