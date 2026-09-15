@@ -234,6 +234,10 @@ class OmniscienceServer(SimpleResourcesServer):
                 metrics[f"{agg}/judge_omni_index"] = correct - incorrect
                 metrics[f"{agg}/judge_omni_hallucination"] = 100 * incorrect / non_correct if non_correct > 0 else 0
 
+        hallucination = highest_k_metrics(metrics, "pass@1[avg-of-{k}]", score_names=["judge_omni_hallucination"])
+        if hallucination:
+            metrics["non_hallucination"] = 100 - next(iter(hallucination.values()))
+
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict) -> dict:
@@ -242,6 +246,8 @@ class OmniscienceServer(SimpleResourcesServer):
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
+        if "non_hallucination" in agent_metrics:
+            key["non_hallucination"] = agent_metrics["non_hallucination"]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         return key

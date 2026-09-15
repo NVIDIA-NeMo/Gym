@@ -43,7 +43,7 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
     pass, and writes `compare_report.md` and/or `compare_report.json`. The rollouts JSONL itself is
-    never opened -- it is the run's identity and the handle the sibling path is derived from. When
+    never opened -- it is the run's identity and the handle from which the sibling path is derived. When
     a legacy aggregate lacks repeat statistics, they are reconstructed from its embedded rollout
     summaries and saved in a sibling aggregate cache for later comparisons.
 
