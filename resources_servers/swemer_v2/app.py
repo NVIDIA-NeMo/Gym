@@ -20,11 +20,10 @@ here -- ``data/swemer_v2_training.jsonl`` is distributed offline (see the README
 
 Every task carries its own prebuilt image with ``/workspace/repo`` checked out at the task's
 base commit. Verification: apply the candidate patch and the dataset's held-out ``test_patch``,
-run the row's own ``test_command`` (adjusted to force machine-parseable output where the
-framework allows it -- see ``verification.inject_output_flags``), and grade FAIL_TO_PASS /
-PASS_TO_PASS from the parsed output. ``test_framework`` selects the parser; unsupported
-frameworks are rejected at prepare time rather than silently mis-graded (see
-``verification.SUPPORTED_FRAMEWORKS``).
+run the row's own ``test_command`` (adjusted to force machine-parseable output via
+``responses_api_agents.swe_agents.swe_bench_ext``), and grade FAIL_TO_PASS / PASS_TO_PASS from
+the parsed output. ``test_framework`` selects the parser; unsupported frameworks are rejected at
+prepare time rather than silently mis-graded (see ``verification.SUPPORTED_FRAMEWORKS``).
 
 Set ``is_verifying_golden_patch: true`` to grade the dataset's own patch instead of an agent's,
 the dataset-health check: a row whose golden patch does not resolve is a broken row.
