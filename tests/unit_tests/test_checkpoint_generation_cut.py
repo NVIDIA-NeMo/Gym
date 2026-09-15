@@ -54,6 +54,7 @@ class _FakeCutBackend:
                     disposition=self.disposition,
                     **(
                         {
+                            "cut_kind": "active_prefix",
                             "frozen_buffer_id": f"buffer/{prefix.ticket_id}",
                             "staging_keys": (f"prefix/{prefix.ticket_id}",),
                             "prefix_token_count": 3,
@@ -469,6 +470,7 @@ def test_receipt_rejects_logical_identity_different_from_inventory() -> None:
                 model_call_id="wrong-call",
                 admitted_at=1.0,
                 disposition="durable_prefix",
+                cut_kind="active_prefix",
                 frozen_buffer_id="buffer-1",
                 staging_keys=("staging-1",),
                 prefix_token_count=3,

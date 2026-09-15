@@ -155,6 +155,7 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
                 GenerationCutPrefixAck(
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
+                    cut_kind="active_prefix",
                     frozen_buffer_id="buffer-1",
                     staging_keys=("prefix-1",),
                     prefix_token_count=5,
@@ -260,6 +261,7 @@ async def test_generation_cut_contacts_owning_workers_concurrently(
                 GenerationCutPrefixAck(
                     **prefix.model_dump(mode="json"),
                     disposition="durable_prefix",
+                    cut_kind="active_prefix",
                     frozen_buffer_id="buffer-1",
                     staging_keys=(f"prefix-{prefix.ticket_id}",),
                     prefix_token_count=5,
@@ -456,6 +458,7 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
             GenerationCutPrefixAck(
                 **inventory.active_prefixes[0].model_dump(mode="json"),
                 disposition="durable_prefix",
+                cut_kind="active_prefix",
                 frozen_buffer_id="active/checkpoint-1",
                 staging_keys=(
                     "__generation_cut__/checkpoint-0/rollout-1/old-call",
@@ -504,6 +507,20 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
             receipt,
             excluded_replacements=frozenset({("rollout-1", 1)}),
         )
+        assert model._generation_cut_for_context() is None
+        terminal_receipt = receipt.model_copy(
+            update={
+                "prefixes": (
+                    receipt.prefixes[0].model_copy(
+                        update={
+                            "cut_kind": "terminal_completion",
+                            "frozen_buffer_id": "terminal/checkpoint-1",
+                        }
+                    ),
+                )
+            }
+        )
+        await model.restore_generation_cut(terminal_receipt)
         assert model._generation_cut_for_context() is None
     finally:
         reset_token_sink(token)
