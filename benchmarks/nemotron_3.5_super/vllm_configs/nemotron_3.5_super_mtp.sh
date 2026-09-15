@@ -21,6 +21,7 @@ VLLM_COMMON_ARGS=(
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
+    --no-async-scheduling
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
@@ -34,7 +35,7 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 16
 )
 VLLM_PREFILL_ARGS=(
-    --speculative-config '{"method":"mtp","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,1024,0]]}'
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
     --max-cudagraph-capture-size 1200
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
