@@ -107,6 +107,24 @@ Compose adapter, manifest, and image/config files.
 
 ## Validation and baseline
 
+### EFS log update, 2026-09-15
+
+The current profile mounts per-episode EFS logs on supporting OpenSandbox
+endpoints; see [shared log ownership and lifecycle](../../resources_servers/terminal_bench_4/README.md#shared-efs-logs).
+A subsequent five-task mini-SWE smoke passed for `risk-scorer-replay`,
+`rs-archive-clone`, `ks-solver-cpp`, `intrastat-meldung`, and `fp8-rmsnorm-gemm`.
+The two non-root CPU tasks now reach official verification. A direct canary
+confirmed their image UIDs, NFS mounts, isolated role logs, and shared artifact
+snapshots; the unchanged `ks-solver-cpp` solution still earns 1.0.
+
+The current GPU endpoint rejects EFS host paths, so GPU tasks retain their
+original filesystem/transfer lifecycle with an explicit fallback diagnostic.
+Enabling EFS on that endpoint remains deployment work. OpenCode reaches official
+verification for `rs-archive-clone`, but `risk-scorer-replay` encounters a separate
+harness setup limitation: its image lacks curl and the non-root user cannot
+install system packages. The full native baseline below predates the EFS update;
+this follow-up is representative smoke coverage, not a new 66-task baseline.
+
 The frozen source is `flafrance/terminal-bench-4` at `8b41d2fdf`, plus the existing
 uncommitted SYS_PTRACE provider/config/test changes. It is preserved in the
 separate `Gym-tb4-reference` checkout. The baseline health records are captured in

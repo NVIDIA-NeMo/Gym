@@ -102,7 +102,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     def _persist(self, session):
         resources = []
-        for env in (session.environment, session.verifier_environment):
+        for env in (session.environment, session.verifier_environment, session.shared_logs):
             if env is not None:
                 resources.append(
                     {

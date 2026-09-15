@@ -15,6 +15,8 @@ async def collect(environment, directory, diagnostics):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     task = environment.task.config
+    shared_logs = getattr(environment, "shared_logs", None)
+    collected_artifacts = task.collected_artifacts
     entries, claims = [], []
 
     async def hooks(main):
@@ -35,7 +37,7 @@ async def collect(environment, directory, diagnostics):
             diagnostics.append(record)
 
     async def artifacts(main):
-        for artifact in task.collected_artifacts:
+        for artifact in collected_artifacts:
             if (artifact.service in (None, "main")) != main:
                 continue
             target = directory / artifact.host_path
@@ -59,21 +61,32 @@ async def collect(environment, directory, diagnostics):
                     kind = await environment.exec(
                         f"test -d {shlex.quote(artifact.source)}",
                         service=artifact.service,
-                        user="root",
                     )
+                    if kind.return_code:
+                        kind = await environment.exec(
+                            f"test -d {shlex.quote(artifact.source)}",
+                            service=artifact.service,
+                            user="root",
+                        )
                     record["type"] = "directory" if kind.return_code == 0 else "file"
                 except Exception:
                     pass
                 try:
                     sandbox = environment.sandbox(artifact.service)
                     if record["type"] == "directory":
-                        await download_dir(
+                        shared_archive = (
+                            shared_logs.collection_archive(artifact, collected_artifacts) if shared_logs else None
+                        )
+                        digest = await download_dir(
                             sandbox,
                             artifact.source,
                             target,
                             exclude=artifact.exclude,
                             exec_command=partial(environment.exec, service=artifact.service),
+                            shared_archive=shared_archive,
                         )
+                        if shared_archive:
+                            shared_logs.retain_archive(digest, target)
                     else:
                         record["exclude"] = []
                         await download_file(sandbox, artifact.source, target)
