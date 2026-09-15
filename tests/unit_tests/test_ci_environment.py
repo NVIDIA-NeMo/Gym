@@ -914,14 +914,30 @@ def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
     assert "setup_uv_sync_args=(--offline)" in setup_dev
     assert "setup_uv_sync_args=()" in setup_dev
 
-    # lint.sh: pre-commit always comes from the lockfile (dev extra). The CI
-    # image installs it into the project venv at build time and local/online
-    # setups get it from `uv sync --extra dev`, so lint.sh performs no ad-hoc
-    # pip/uv install of its own.
+    # lint.sh: reuse a pre-commit already on PATH (the offline/container dev
+    # environment); otherwise provision the pinned pre-commit from uv.lock into
+    # an isolated venv. It does not use uv or setup_dev.sh.
     assert "command -v pre-commit" in lint
-    assert "pip install" not in lint
+    assert "uv.lock" in lint
     assert "uv pip install" not in lint
-    assert "uv sync --extra dev" in lint
+    assert "uv sync" not in lint
+    assert "setup_dev.sh" not in lint
+
+
+def test_lint_workflow_runs_lint_sh_directly() -> None:
+    # The lint job calls lint.sh directly. lint.sh runs gym_ci_sanitize_environment
+    # before hooks and provisions pre-commit itself (PATH-first, then a pinned
+    # venv), so it does NOT source setup_dev.sh (which would install uv on the
+    # bare runner) and does NOT use uv.
+    steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
+        "lint-check"
+    ]["steps"]
+    run_cmds = [step.get("run", "") for step in steps]
+    joined = "\n".join(run_cmds)
+
+    assert "scripts/ci/lint.sh" in joined, "lint job must call lint.sh"
+    assert "scripts/ci/setup_dev.sh" not in joined, "lint job must not source setup_dev.sh (uv install)"
+    assert "uv " not in joined, "lint job must not invoke uv"
 
 
 def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
@@ -954,18 +970,3 @@ def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
     assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile
     assert "uv pip install" not in dockerfile
 
-
-def test_lint_workflow_provisions_pre_commit_before_lint() -> None:
-    # lint.sh resolves pre-commit from PATH (the lockfile dev extra). setup_dev.sh
-    # sources the dev venv's activate, which only affects the current shell, so the
-    # lint job must run setup_dev.sh and lint.sh in the SAME step (setup first).
-    steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
-        "lint-check"
-    ]["steps"]
-    run_cmds = [step.get("run", "") for step in steps]
-
-    (lint_cmd,) = (cmd for cmd in run_cmds if "scripts/ci/lint.sh" in cmd)
-    assert "scripts/ci/setup_dev.sh" in lint_cmd, "lint.sh must share a step with setup_dev.sh"
-    assert lint_cmd.index("scripts/ci/setup_dev.sh") < lint_cmd.index(
-        "scripts/ci/lint.sh"
-    ), "setup_dev.sh must run before lint.sh"
