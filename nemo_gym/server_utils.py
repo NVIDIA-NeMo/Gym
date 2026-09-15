@@ -96,6 +96,15 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         default=3,
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
     )
+    global_aiohttp_client_total_timeout_seconds: Optional[float] = Field(
+        default=None,
+        description=(
+            "aiohttp ClientTimeout.total for every request the global client makes (model servers, "
+            "resources servers, agents). None (default) keeps the previous behaviour: no timeout, so a "
+            "request whose response is never written stalls its rollout forever. Set it above the "
+            "longest legitimate rollout (e.g. 5400 for 131k-token generations)."
+        ),
+    )
 
 
 def get_global_aiohttp_client(
@@ -155,7 +164,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(total=cfg.global_aiohttp_client_total_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 

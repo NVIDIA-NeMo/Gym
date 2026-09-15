@@ -371,14 +371,20 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         verify_request_body = body.model_dump()
         verify_request_body["response"] = _final_assistant_response(model_response).model_dump()
         verify_request = ImageToolsAgentVerifyRequest.model_validate(verify_request_body)
-        verify_response = await self.server_client.post(
-            server_name=resource_name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=resource_cookies,
-        )
-        await raise_for_status(verify_response)
-        verify_response_json = await get_response_json(verify_response)
+        if self.config.skip_verification:
+            verify_response_json = verify_request.model_dump() | {
+                "reward": float(self.config.skip_verification_reward),
+                "verification_skipped": True,
+            }
+        else:
+            verify_response = await self.server_client.post(
+                server_name=resource_name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=resource_cookies,
+            )
+            await raise_for_status(verify_response)
+            verify_response_json = await get_response_json(verify_response)
 
         base_reward = float(verify_response_json.get("reward", 0.0))
         aux_reward = float(rollout_info["image_tools_aux_reward"])
