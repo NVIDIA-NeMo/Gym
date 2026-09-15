@@ -21,7 +21,12 @@ visualwebarena_environment:
       allowed_benchmarks: [visualwebarena]
       artifact_dir: cache/visualwebarena-browser/artifacts
       task_image_root: ${visualwebarena_source_root}
-      terminate_on_action_error: false
+      # Stop on action failure and evaluate the live site, as in the reference.
+      terminate_on_action_error: true
+      max_tool_calls: null
+      # The maintained population includes task images larger than 25 MiB.
+      # Both the agent reader and resource/evaluator reader must admit them.
+      max_task_image_bytes: 33554432
 
 visualwebarena_benchmark_agent:
   _inherit_from: web_agent
@@ -34,9 +39,14 @@ visualwebarena_benchmark_agent:
       max_steps: 100
       max_parse_retries: 2
       # Use model-server parser output without JSON or tool-alias repair.
+      nano_omni_max_tool_calls: null
       nano_omni_max_computer_actions: 20
-      nano_omni_parse_retry_feedback: true
-      nano_omni_parse_retry_temperature: 0.2
+      nano_omni_retry_invalid_tool_calls: false
+      # Missing calls retain bounded retries without correction text or a
+      # sampling override. Invalid calls instead end interaction and evaluate.
+      nano_omni_parse_retry_feedback: false
+      nano_omni_parse_retry_temperature: null
+      nano_omni_parse_retry_delay_secs: 1.0
       model_turn_max_retries: 19
       model_retry_delay_secs: 5.0
       max_image_history: 3
@@ -45,6 +55,7 @@ visualwebarena_benchmark_agent:
       model_request_timeout_secs: 1200
       run_timeout_secs: 14400
       task_image_root: ${visualwebarena_source_root}
+      max_task_image_bytes: 33554432
       datasets:
         - name: visualwebarena
           type: benchmark

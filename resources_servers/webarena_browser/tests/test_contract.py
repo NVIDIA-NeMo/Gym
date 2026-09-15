@@ -299,9 +299,22 @@ def test_component_declares_isolated_runtime_dependencies() -> None:
     assert "nemo-gym" in dependencies
     assert "nemo-gym[dev]" not in dependencies
     assert "playwright==1.55.0" in dependencies
-    assert "numpy>=1.26.4,<2" in dependencies
+    assert "numpy>=2.1,<3" in dependencies
     assert "scikit-image" in dependencies
     assert project["tool"]["uv"]["sources"]["nemo-gym"] == {
         "path": "../..",
         "editable": True,
     }
+
+
+def test_fuzzy_image_evaluator_with_supported_numpy() -> None:
+    pytest.importorskip("numpy")
+    pytest.importorskip("skimage")
+    from PIL import Image
+
+    from resources_servers.webarena_browser.reference_evaluation.visualwebarena_evaluation import _image_ssim
+
+    black = Image.new("RGB", (16, 16), "black")
+    white = Image.new("RGB", (32, 32), "white")
+    assert _image_ssim(black, black.copy()) == pytest.approx(1.0)
+    assert _image_ssim(black, white) < 0.01

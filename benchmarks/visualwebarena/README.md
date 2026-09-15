@@ -18,7 +18,7 @@ gym eval prepare --benchmark visualwebarena
 The prepare command downloads the public
 [`jayl940712/webarena_benchmarks`](https://github.com/jayl940712/webarena_benchmarks)
 archive at commit `6a2977939b157b0ab9de7799bb089c721f1ac115`. It verifies the
-source JSONL SHA-256, exactly 908 rows, and all 346 local reference images
+source JSONL SHA-256, exactly 908 rows, and all 341 distinct local task images
 before producing the model-neutral
 `benchmarks/visualwebarena/data/visualwebarena.jsonl`. Source identity is
 recorded in `source_lock.json`.
@@ -41,6 +41,9 @@ gym eval prepare --benchmark visualwebarena
 
 Mount that root read-only at the same absolute path on every distributed
 worker. The JSONL retains relative image paths below this root.
+When using `--source` with a separately stored JSONL, also pass `--source-root`
+if the images are not below the JSONL's parent directory. The generated
+`env.yaml` uses that same image root for both the agent and resource server.
 
 ## Run
 
@@ -62,6 +65,11 @@ Stop the foreground `gym env start` process with Ctrl-C after evaluation.
 Each headed Chromium process owns one display and therefore permits one active
 session. Scale out by launching isolated resource-server and agent processes;
 do not share a display or mutable site deployment between concurrent shards.
+Run non-state-changing tasks before state-changing tasks, including tasks
+that read across multiple sites. Reset the owned site deployment before a new
+evaluation; serialization alone does not undo changes from an earlier task or
+run. Phase classification and independent site replicas belong to deployment
+orchestration, not to task-prompt rewriting.
 
 ## Runtime and evaluator boundary
 
@@ -76,3 +84,11 @@ selects the Nano Omni policy adapter; another compatible policy can replace
 that adapter while retaining the same task population and environment. Model
 and runtime results are comparable only when the source lock, site snapshot,
 viewport, action profile, evaluator, and judge configuration also match.
+
+The Nano Omni composition uses 100 steps, three recent browser screenshots,
+and no additional request-level output-token cap. Context exhaustion and
+terminal action errors end interaction but still invoke the evaluator on the
+live state before closing the browser. Model tool arguments are not repaired.
+Both task-image readers allow 32 MiB, including the maintained task image
+that exceeds the previous 25 MiB default; input images are not resized to
+work around that limit.

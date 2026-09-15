@@ -13,6 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.visualwebarena import prepare as visualwebarena_prepare
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.web.task_images import resolve_local_task_image_path
 
 
 def _write_source(root: Path, count: int) -> tuple[Path, str]:
@@ -67,6 +68,45 @@ def test_prepare_rejects_missing_reference_images(tmp_path, monkeypatch) -> None
         visualwebarena_prepare.prepare(source, tmp_path / "prepared.jsonl", tmp_path)
 
 
+def test_prepare_honors_explicit_image_root_for_an_external_jsonl(tmp_path, monkeypatch) -> None:
+    image_root = tmp_path / "images"
+    source, digest = _write_source(image_root, 908)
+    external_source = tmp_path / "source.jsonl"
+    source.replace(external_source)
+    monkeypatch.delenv("VISUALWEBARENA_SOURCE_ROOT", raising=False)
+    monkeypatch.setattr(visualwebarena_prepare, "SOURCE_SHA256", digest)
+
+    assert (
+        visualwebarena_prepare.prepare(external_source, tmp_path / "prepared.jsonl", image_root)
+        == tmp_path / "prepared.jsonl"
+    )
+
+
+def test_cli_env_uses_the_same_image_root_as_explicit_source(tmp_path, monkeypatch) -> None:
+    source, digest = _write_source(tmp_path / "source", 908)
+    env_path = tmp_path / "env.yaml"
+    monkeypatch.delenv("VISUALWEBARENA_SOURCE_ROOT", raising=False)
+    monkeypatch.setattr(visualwebarena_prepare, "SOURCE_SHA256", digest)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prepare.py",
+            "--source",
+            str(source),
+            "--output",
+            str(tmp_path / "prepared.jsonl"),
+            "--rollout-output",
+            str(tmp_path / "rollouts.jsonl"),
+            "--env-file",
+            str(env_path),
+        ],
+    )
+
+    visualwebarena_prepare.main()
+
+    assert OmegaConf.load(env_path).visualwebarena_source_root == str(source.parent)
+
+
 def test_nano_omni_profile_composes_without_output_repair(tmp_path) -> None:
     source_root = str(tmp_path / "source")
     resolved = GlobalConfigDictParser().parse(
@@ -93,12 +133,36 @@ def test_nano_omni_profile_composes_without_output_repair(tmp_path) -> None:
     assert "nano_omni_action_recovery" not in agent
     assert "nano_omni_tool_alias_recovery" not in agent
     assert agent.max_parse_retries == 2
+    assert agent.nano_omni_max_tool_calls is None
+    assert agent.nano_omni_retry_invalid_tool_calls is False
+    assert agent.nano_omni_parse_retry_feedback is False
+    assert agent.nano_omni_parse_retry_temperature is None
+    assert agent.nano_omni_parse_retry_delay_secs == 1.0
+    assert agent.max_steps == 100
+    assert agent.max_image_history == 3
+    assert agent.max_task_image_bytes == 32 * 1024 * 1024
     assert agent.datasets[0].jsonl_fpath == "benchmarks/visualwebarena/data/visualwebarena.jsonl"
     assert agent.task_image_root == source_root
     assert resolved.visualwebarena_environment.resources_servers.webarena_browser.task_image_root == source_root
+    resource = resolved.visualwebarena_environment.resources_servers.webarena_browser
+    assert resource.terminate_on_action_error is True
+    assert resource.max_tool_calls is None
+    assert resource.max_task_image_bytes == agent.max_task_image_bytes
     model = resolved.policy_model.responses_api_models.vllm_model
     assert model.base_url == "http://127.0.0.1:8000/v1"
     assert model.chat_template_kwargs == {"truncate_history_thinking": False}
+
+    # Task 499 exposed the independent agent/resource byte limits. Exercise
+    # both resolved limits with a sparse file larger than the old 25 MiB cap.
+    image = tmp_path / "large.png"
+    with image.open("wb") as handle:
+        handle.truncate(26 * 1024 * 1024)
+    for limit in (agent.max_task_image_bytes, resource.max_task_image_bytes):
+        path, mime = resolve_local_task_image_path(str(image), image_root=tmp_path, max_bytes=limit)
+        assert path == image
+        assert mime == "image/png"
+    with pytest.raises(ValueError, match="byte limit"):
+        resolve_local_task_image_path(str(image), image_root=tmp_path, max_bytes=25 * 1024 * 1024)
 
 
 def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
@@ -113,6 +177,10 @@ def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
     assert "benchmarks/visualwebarena/configs/nano_omni.yaml" in content
     assert "agent_name: visualwebarena_benchmark_agent" in content
     assert "visualwebarena_source_root:" in content
+    sampling = OmegaConf.load(env_path).responses_create_params
+    assert sampling.max_output_tokens is None
+    assert sampling.temperature == 0.1
+    assert sampling.top_p == 0.95
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
     with pytest.raises(ValueError, match="one DISPLAY"):
