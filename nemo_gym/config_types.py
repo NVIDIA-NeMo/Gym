@@ -440,6 +440,19 @@ class HuggingFaceDatasetSource(BaseModel):
 DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
 
 
+def _reject_dataset_agent_pin(data: Any) -> Any:
+    """A dataset entry names no agent. Rows route to the agent bound to the declaring resources server
+    (or to the declaring agent); a config where several agents share one resources server picks the
+    harness with `fan_out`, `+agent_map={<rs>: <agent>}`, or by declaring the dataset on the agent."""
+    if isinstance(data, dict) and "agent" in data:
+        raise ValueError(
+            "dataset entries do not take an `agent:` key. Rows are dispatched to the agent that references the "
+            "declaring resources server; when several do, use `fan_out`, pass `+agent_map={<rs>: <agent>}`, or "
+            "declare the dataset on the agent."
+        )
+    return data
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
@@ -465,6 +478,8 @@ class DatasetConfig(BaseModel):
             Literal["GNU General Public License v3.0"],
         ]
     ] = None
+
+    _reject_agent_pin = model_validator(mode="before")(_reject_dataset_agent_pin)
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
@@ -537,16 +552,8 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
-    agent: Optional[str] = Field(
-        default=None,
-        description=(
-            "Agent instance that runs this benchmark (a top-level key of the merged config). "
-            "Only needed when the config is ambiguous: the dataset is declared on a resources "
-            "server that several agents reference. The pin must name one of those agents — rows "
-            "are dispatched along the agent -> resources server edge, so any other value is a "
-            "config error. Unambiguous configs resolve without it."
-        ),
-    )
+
+    _reject_agent_pin = model_validator(mode="before")(_reject_dataset_agent_pin)
 
 
 ########################################
