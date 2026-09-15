@@ -63,9 +63,13 @@ def test_agent_turn_keeps_exact_request_and_response() -> None:
         participant="user",
         request={"input": [{"role": "user", "content": "hello"}]},
         response=_response(),
+        state_after={"preference": "vegetarian"},
+        termination_reason="user_goal_satisfied",
     )
     assert turn.participant == "user"
     assert turn.request.input[0].content == "hello"
+    assert turn.state_after == {"preference": "vegetarian"}
+    assert turn.termination_reason == "user_goal_satisfied"
 
 
 def test_collector_materializes_native_request_and_projects_success() -> None:

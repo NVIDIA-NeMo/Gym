@@ -81,6 +81,8 @@ class AgentTurn(BaseModel):
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
     observations: AgentObservationBundle | None = None
+    state_after: JsonValue = None
+    termination_reason: str | None = None
 
 
 class EpisodeResponse(BaseModel):

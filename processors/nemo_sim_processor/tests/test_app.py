@@ -41,6 +41,45 @@ def _model_response(response_id: str, text: str) -> dict:
     }
 
 
+def _trajectory_response(response_id: str, text: str) -> dict:
+    response = _model_response(response_id, text)
+    response["_ng_trajectory"] = {
+        "schema_version": "1.0",
+        "task_id": "0",
+        "rollout_id": "0-0",
+        "invocations": [
+            {
+                "kind": "agent_invocation",
+                "invocation_id": "root",
+                "status": "completed",
+                "model_calls": [],
+                "conversation": [],
+            }
+        ],
+        "turns": [],
+        "model_calls": [],
+        "tool_calls": [
+            {
+                "kind": "tool_call",
+                "invocation_id": "root",
+                "tool_call_id": "call-1",
+                "tool_name": "record_user_context",
+                "status": "completed",
+                "output": '{"preference":"vegetarian"}',
+            }
+        ],
+        "gaps": [],
+    }
+    return response
+
+
+def _http_response(payload: dict, cookies: dict | None = None) -> MagicMock:
+    response = MagicMock(status=200, ok=True, cookies=cookies or {})
+    response.content.read = AsyncMock(return_value=b"")
+    response.read = AsyncMock(return_value=json.dumps(payload))
+    return response
+
+
 def _processor() -> NeMoSimProcessor:
     config = NeMoSimProcessorConfig(
         host="127.0.0.1",
@@ -103,6 +142,53 @@ async def test_returns_ordered_agent_turns_and_focal_response(monkeypatch: pytes
     turns = result.verification.verifier_data["agent_turns"]
     assert [(turn["sequence"], turn["participant"]) for turn in turns] == [(0, "user"), (1, "assistant")]
     assert turns[1]["request"]["input"][0]["content"] == "assistant_model"
+
+
+@pytest.mark.asyncio
+async def test_participant_agent_owns_tools_and_reports_observations() -> None:
+    processor = _processor()
+    request = _request()
+    request.task_data["model_responses_create_params"] = {
+        "user_model": {
+            "input": [],
+            "instructions": "Use the context tool before replying.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "record_user_context",
+                    "description": "Record private user context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"preference": {"type": "string"}},
+                        "required": ["preference"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            ],
+        }
+    }
+    bridge = _ConversationBridge(
+        processor,
+        request,
+        NeMoSimTaskData.model_validate(request.task_data),
+        asyncio.get_running_loop(),
+        {},
+    )
+    processor.server_client.post = AsyncMock(
+        return_value=_http_response(_trajectory_response("response-1", "Done."), {"agent-cookie": "user"})
+    )
+
+    completion = await bridge._invoke(
+        "user_model", [{"role": "user", "content": "Remember my preference."}], max_tokens=None
+    )
+
+    assert completion.message.tool_calls is None
+    turn = bridge.agent_turns[0]
+    assert turn.request.instructions == "Use the context tool before replying."
+    assert turn.request.tools[0]["name"] == "record_user_context"
+    assert [record.kind for record in turn.observations.records] == ["agent_invocation", "tool_call"]
+    assert turn.response.output_text == "Done."
 
 
 @pytest.mark.asyncio

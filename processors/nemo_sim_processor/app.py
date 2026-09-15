@@ -18,7 +18,6 @@ from nemo_gym.config_types import AgentServerRef, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.processors import (
@@ -30,6 +29,7 @@ from nemo_gym.processors import (
     EpisodeResponse,
     EpisodeVerification,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from processors.nemo_sim_processor.contracts import (
     EPISODE_INTERACTION_PROTOCOL,
@@ -37,6 +37,9 @@ from processors.nemo_sim_processor.contracts import (
     NeMoSimScenario,
     NeMoSimTaskData,
 )
+
+
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
 class NeMoSimProcessorConfig(BaseProcessorConfig):
@@ -138,13 +141,7 @@ class _ConversationBridge:
     ) -> SimpleNamespace:
         params = self.task.model_responses_create_params.get(alias, self.episode.responses_create_params)
         values = params.model_dump(mode="json", exclude_none=True)
-        values.update(
-            {
-                "input": [_to_responses_input(message) for message in messages],
-                "instructions": None,
-                "tools": [],
-            }
-        )
+        values["input"] = [_to_responses_input(message) for message in messages]
         if max_tokens is not None:
             values["max_output_tokens"] = max_tokens
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(values)
@@ -157,7 +154,9 @@ class _ConversationBridge:
             cookies=self.cookies_by_alias[alias],
         )
         await raise_for_status(response)
-        gym_response = NeMoGymResponse.model_validate(await get_response_json(response))
+        response_data = await get_response_json(response)
+        trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
+        gym_response = NeMoGymResponse.model_validate(response_data)
         self.cookies_by_alias[alias].update(response.cookies)
         self.responses_by_alias[alias].append(gym_response)
         if alias in {"user_model", "assistant_model"}:
@@ -167,24 +166,17 @@ class _ConversationBridge:
                     participant="user" if alias == "user_model" else "assistant",
                     request=request_params,
                     response=gym_response,
+                    observations=_agent_observations(target.name, trajectory_data),
                 )
             )
 
-        tool_calls = [
-            {
-                "id": item.call_id,
-                "type": "function",
-                "function": {"name": item.name, "arguments": item.arguments},
-            }
-            for item in gym_response.output
-            if isinstance(item, NeMoGymResponseFunctionToolCall)
-        ]
         usage = gym_response.usage
         return SimpleNamespace(
             message=SimpleNamespace(
                 content=_response_text(gym_response),
                 reasoning_content=None,
-                tool_calls=tool_calls or None,
+                # The Agent Server already executes its complete tool loop.
+                tool_calls=None,
             ),
             usage=(
                 SimpleNamespace(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
@@ -192,6 +184,20 @@ class _ConversationBridge:
                 else None
             ),
         )
+
+
+def _agent_observations(source: str, trajectory_data: Any) -> AgentObservationBundle | None:
+    if trajectory_data is None:
+        return None
+    trajectory = TrajectoryRecord.model_validate(trajectory_data)
+    tool_observations = [
+        ToolCallObservation.model_validate(record.model_dump(exclude={"output"})) for record in trajectory.tool_calls
+    ]
+    return AgentObservationBundle(
+        source=source,
+        records=[*trajectory.invocations, *tool_observations],
+        gaps=trajectory.gaps,
+    )
 
 
 def _to_responses_input(message: Any) -> dict[str, Any]:
@@ -253,7 +259,7 @@ class NeMoSimProcessor(BaseProcessor):
                 response=assistant_responses[-1] if assistant_responses else None,
                 failure=EpisodeFailure(
                     kind="agent" if isinstance(error, TimeoutError) else "internal",
-                    message=str(error)[:2000],
+                    message=f"NeMo-Sim episode failed ({type(error).__name__})",
                     retryable=isinstance(error, TimeoutError),
                 ),
             )
