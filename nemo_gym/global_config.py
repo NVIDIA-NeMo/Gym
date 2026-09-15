@@ -117,6 +117,8 @@ SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
 ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
+EPISODE_PROCESSOR_NAME_KEY_NAME = "episode_processor_name"
+EPISODE_PROCESSOR_MAP_KEY_NAME = "episode_processor_map"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -154,9 +156,12 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
+    EPISODE_PROCESSOR_NAME_KEY_NAME,
+    EPISODE_PROCESSOR_MAP_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+EPISODE_PROCESSOR_TYPE_KEY_NAME = "episode_processors"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -1752,7 +1757,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "episode_processors"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')

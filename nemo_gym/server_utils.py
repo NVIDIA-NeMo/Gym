@@ -735,6 +735,7 @@ _TELEMETRY_SERVER_TYPE_BY_BASE = {
     "SimpleResourcesServer": "resources_servers",
     "SimpleResponsesAPIAgent": "responses_api_agents",
     "SimpleResponsesAPIModel": "responses_api_models",
+    "BaseEpisodeProcessor": "episode_processors",
 }
 
 

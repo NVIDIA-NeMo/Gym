@@ -126,7 +126,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class EpisodeProcessorRef(BaseModel):
+    type: Literal["episode_processors"]
+    name: str
+
+
+ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef, EpisodeProcessorRef]
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -625,6 +630,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["episode_processors"],
         ]
     ]
 
@@ -653,10 +659,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class EpisodeProcessorServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["episode_processors"]] = "episode_processors"
+
+    model_config = ConfigDict(extra="allow")
+
+    episode_processors: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    EpisodeProcessorServerTypeConfig,
 ]
 
 
@@ -704,10 +719,15 @@ class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, B
     pass
 
 
+class EpisodeProcessorServerInstanceConfig(EpisodeProcessorServerTypeConfig, BaseServerInstanceConfig):
+    pass
+
+
 ServerInstanceConfig = Union[
     ResponsesAPIModelServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
+    EpisodeProcessorServerInstanceConfig,
 ]
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
@@ -739,7 +759,12 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "episode_processors",
+    ]
     has_server_type = any(key in server_type_config_dict for key in server_type_keys)
 
     if not has_server_type:
