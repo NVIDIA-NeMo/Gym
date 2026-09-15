@@ -23,8 +23,10 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
@@ -322,11 +324,111 @@ def test_record_model_response_emits_trajectory_turns() -> None:
     assert [turn.turn_no for turn in snapshot.turns] == [1, 2]
     assert all(turn.invocation_id == "root" for turn in snapshot.turns)
     assert all(turn.task_id == "task-0" and turn.rollout_id == "0-0" for turn in snapshot.turns)
-    assert [turn.step_count for turn in snapshot.turns] == [1, 2]
+    # step_count is cumulative tool activity, not a duplicate turn counter.
+    assert [turn.step_count for turn in snapshot.turns] == [0, 0]
     assert [len(turn.model_calls) for turn in snapshot.turns] == [1, 1]
     # Turn answers carry the raw output items so structural checks see message text.
     first_answer = snapshot.turns[0].answer
     assert isinstance(first_answer, list) and first_answer[0]["type"] == "message"
+
+
+def test_canonical_turn_preserves_question_reasoning_tool_step_resolution_and_json_round_trip() -> None:
+    from nemo_gym.rollout_collection import NG_TRAJECTORY_KEY, _build_trajectory_record
+
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="task-0",
+        rollout_id="0-0",
+    )
+    root = hooks.before_agent_call(None, "solve", (), {}, "root-call", None)
+    first_question = [{"role": "user", "content": "Inspect the repository."}]
+    first = NeMoGymResponse(
+        id="resp-reasoning",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[
+            NeMoGymResponseReasoningItem(
+                id="reasoning-1",
+                summary=[],
+                content=[{"type": "reasoning_text", "text": "I should inspect before editing."}],
+            ),
+            NeMoGymResponseFunctionToolCall(
+                id="function-1",
+                call_id="call-1",
+                name="python_cell",
+                arguments=json.dumps({"code": "print('inspect')"}),
+                status="completed",
+            ),
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+    hooks.record_model_response(first, question=first_question, started_at=10.0)
+
+    execution = hooks.before_code_execution(
+        agent=None,
+        code="print('inspect')",
+        execution_id="exec-1",
+        generation_id="gen-1",
+        tool_call_id="call-1",
+    )
+    hooks.after_code_execution(
+        agent=None,
+        code="print('inspect')",
+        result=None,
+        exception=None,
+        context=execution,
+        execution_id="exec-1",
+        tool_call_id="call-1",
+    )
+    second_question = [
+        *first_question,
+        {"type": "function_call", "call_id": "call-1", "name": "python_cell", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1", "output": "inspect"},
+    ]
+    hooks.record_model_response(response("resp-final", "Done."), question=second_question, started_at=20.0)
+    hooks.after_agent_call(None, "solve", "done", None, root)
+
+    turns = hooks.snapshot().turns
+    assert turns[0].timestamp == 10.0
+    assert turns[0].question == first_question
+    assert turns[0].reasoning_content[0]["type"] == "reasoning"
+    assert turns[0].answer[0]["type"] == "function_call"
+    assert turns[0].step_count == 0
+    assert turns[0].resolved is None
+    assert turns[1].question == second_question
+    assert turns[1].reasoning_content is None
+    assert turns[1].step_count == 1
+    assert turns[1].resolved is True
+    assert [ref.response_id for ref in turns[0].model_calls] == ["resp-reasoning"]
+    assert [ref.response_id for ref in turns[1].model_calls] == ["resp-final"]
+
+    # Persist the producer trajectory as rollout JSON, reload it, and run the same
+    # canonical collector projection used by real eval output.
+    persisted = json.loads(
+        json.dumps({NG_TRAJECTORY_KEY: nooa_producer_trajectory(hooks.snapshot()).model_dump(mode="json")})
+    )
+    canonical = _build_trajectory_record(
+        {"instance_id": "task-0", "_ng_task_index": 0, "_ng_rollout_index": 0}, persisted
+    )
+    assert canonical.turns == turns
+    assert "turns_unavailable" not in {gap.code for gap in canonical.gaps}
+
+
+def test_failed_invocation_marks_only_its_terminal_turn_unresolved() -> None:
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="task-0",
+        rollout_id="0-0",
+    )
+    root = hooks.before_agent_call(None, "solve", (), {}, "root-call", None)
+    hooks.record_model_response(response("resp-1", "working"))
+    hooks.record_model_response(response("resp-2", "still working"))
+    hooks.after_agent_call(None, "solve", None, ValueError("boom"), root)
+
+    assert [turn.resolved for turn in hooks.snapshot().turns] == [None, False]
 
 
 def test_producer_trajectory_carries_turns_and_identity() -> None:
@@ -351,7 +453,7 @@ def test_producer_trajectory_carries_turns_and_identity() -> None:
 
 
 def test_turns_flow_through_collector_projection_without_turn_gap() -> None:
-    from nemo_gym.rollout_collection import _build_trajectory_record, NG_TRAJECTORY_KEY
+    from nemo_gym.rollout_collection import NG_TRAJECTORY_KEY, _build_trajectory_record
 
     hooks = GymTraceHooks(
         ModelServerRef(type="responses_api_models", name="policy_model"),

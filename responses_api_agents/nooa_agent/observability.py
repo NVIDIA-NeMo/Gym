@@ -79,6 +79,7 @@ class GymTraceHooks:
         self._snapshot = NOOATraceSnapshot(task_id=task_id, rollout_id=rollout_id)
         self._invocations: dict[str, AgentInvocation] = {}
         self._turn_counts: dict[str, int] = {}
+        self._step_counts: dict[str, int] = {}
         self._turns: list[TrajectoryTurn] = []
         self._tool_calls: list[ToolCallObservation] = []
 
@@ -101,13 +102,15 @@ class GymTraceHooks:
         self,
         response: NeMoGymResponse,
         *,
+        question: Any = None,
+        started_at: float | None = None,
         model_ref: ModelServerRef | None = None,
     ) -> None:
-        """Record one model response as a turn.
+        """Record one model response as a canonical turn.
 
-        ``model_ref`` overrides the hooks' default server reference so alias
-        clients (per-method model strings) attribute their calls to the Gym
-        model server that actually served them.
+        ``question`` is the exact Responses input sent to the model. ``model_ref``
+        overrides the hooks' default server reference so alias clients attribute
+        their calls to the Gym model server that actually served them.
         """
         invocation_id = self.invocation_id
         self._snapshot.output.extend(response.output)
@@ -115,10 +118,16 @@ class GymTraceHooks:
         model_calls = [ModelCallRef(model_ref=ref, response_id=response.id)] if response.id else []
         if model_calls:
             self._snapshot.model_calls.setdefault(invocation_id, []).extend(model_calls)
-        # One agent turn per model generation: the collector only accepts turns from a
-        # producer-emitted ``ng_trajectory``, so without this the agent-turn health checks
-        # stay unobserved. ``answer`` keeps the raw output items (messages + function
-        # calls) so structural checks see both message text and tool calls.
+
+        # Match the canonical semantics used by simple_agent: reasoning is first-class
+        # turn evidence, while answer preserves every non-reasoning output item (messages
+        # and function calls). The raw response remains available on the model-call record.
+        reasoning = [
+            item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"
+        ] or None
+        answer = [
+            item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type != "reasoning"
+        ]
         turn_no = self._turn_counts.get(invocation_id, 0) + 1
         self._turn_counts[invocation_id] = turn_no
         self._turns.append(
@@ -127,14 +136,17 @@ class GymTraceHooks:
                 task_id=self._snapshot.task_id,
                 rollout_id=self._snapshot.rollout_id,
                 turn_no=turn_no,
-                timestamp=time(),
-                answer=[item.model_dump(mode="json", exclude_none=True) for item in response.output],
-                step_count=turn_no,
+                timestamp=started_at if started_at is not None else time(),
+                question=question,
+                answer=answer,
+                reasoning_content=reasoning,
+                step_count=self._step_counts.get(invocation_id, 0),
                 model_calls=model_calls,
             )
         )
 
     def record_tool_execution(self, execution: Any) -> None:
+        self._step_counts[execution.invocation_id] = self._step_counts.get(execution.invocation_id, 0) + 1
         self._snapshot.output.extend(
             [
                 NeMoGymResponseFunctionToolCall(
@@ -196,6 +208,12 @@ class GymTraceHooks:
             error_type=type(exception).__name__ if exception is not None else None,
             model_calls=list(self._snapshot.model_calls.get(context.invocation_id, [])),
         )
+        # Resolution is an invocation outcome, not a model-response status: tool-call
+        # responses are also "completed". Mark only the invocation's terminal turn.
+        for turn in reversed(self._turns):
+            if turn.invocation_id == context.invocation_id:
+                turn.resolved = exception is None
+                break
 
     def before_generation(
         self,
@@ -252,6 +270,7 @@ class GymTraceHooks:
     ) -> None:
         if not isinstance(context, _CodeExecContext):
             return
+        self._step_counts[context.invocation_id] = self._step_counts.get(context.invocation_id, 0) + 1
         self._tool_calls.append(
             ToolCallObservation(
                 invocation_id=context.invocation_id,
@@ -473,8 +492,6 @@ def project_nooa_result(
     ]
     seen_tool_keys = {(record.invocation_id, record.tool_call_id) for record in tool_records}
     tool_records.extend(
-        record
-        for record in trace.tool_calls
-        if (record.invocation_id, record.tool_call_id) not in seen_tool_keys
+        record for record in trace.tool_calls if (record.invocation_id, record.tool_call_id) not in seen_tool_keys
     )
     return response, AgentObservationBundle(source="nooa", records=[*invocations, *tool_records], gaps=gaps)

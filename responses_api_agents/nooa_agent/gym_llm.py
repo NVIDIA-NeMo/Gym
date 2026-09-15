@@ -70,7 +70,6 @@ def _journal_callbacks() -> list[Any]:
     """
     try:
         import litellm
-
         from nooa.tracing._litellm_journal import MessageJournalCallback
     except Exception:  # pragma: no cover - litellm optional in unit tests
         return []
@@ -421,15 +420,18 @@ class GymResponsesLLM(UnifiedLLM):
                 response = NeMoGymResponse.model_validate(raw)
             except BaseException:
                 for callback in callbacks:
-                    callback.log_failure_event(
-                        {"litellm_call_id": litellm_call_id}, None, started, time.time()
-                    )
+                    callback.log_failure_event({"litellm_call_id": litellm_call_id}, None, started, time.time())
                 raise
             completed = time.time()
             self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
             self._response_collector.append(response)
             if self._trace_hooks is not None:
-                self._trace_hooks.record_model_response(response, model_ref=self._model_ref_override)
+                self._trace_hooks.record_model_response(
+                    response,
+                    question=body.model_dump(mode="json", exclude_none=True)["input"],
+                    started_at=started,
+                    model_ref=self._model_ref_override,
+                )
             if llm_span is not None:
                 llm_span.set_attribute("llm.model_name", response.model or self.model)
             for callback in callbacks:

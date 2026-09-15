@@ -18,15 +18,15 @@ and remaining work.
 |---|---|---:|---|---|
 | C1 | Model-call identity, status, error, and termination metadata | Met | `TrajectoryModelCall`, `TrajectoryResponseMetadata`; model capture projection in `nemo_gym/rollout_collection.py`; NOOA termination gaps in `responses_api_agents/nooa_agent/app.py` | Keep failure-path regression coverage. |
 | C2 | Prompt, completion, reasoning, total, and cached token counts when available | Met | `TrajectoryTokenStats`; `extract_token_stats()` / `build_model_call_record()`; canonical capture projection | Assert every available field through persisted JSONL. |
-| C3 | Canonical `TrajectoryTurn` records preserve answer, reasoning, and tool-call activity | Partial | `TrajectoryTurn`; `GymTraceHooks.record_model_response()` preserves raw response output in `answer` | Populate the dedicated `reasoning_content` field and add a persisted reasoning + tool-call round-trip test. |
+| C3 | Canonical `TrajectoryTurn` records preserve answer, reasoning, and tool-call activity | Met | `GymTraceHooks.record_model_response()` separates non-reasoning `answer` items from dedicated `reasoning_content`; persisted collector round-trip test | Preserve the round-trip regression. |
 | C4 | Model-visible input and output history is reconstructable from persisted rollout JSONL | Met | `AgentInvocation.conversation`; captured model request/response payloads; canonical `ng_trajectory` | Add one acceptance fixture proving reconstruction after JSON round-trip. |
 | C5 | Tool output, status, start/completion timestamps, and duration | Met | `TrajectoryToolCall`; `_GymToolDispatcher.invoke()`; NOOA code-execution hooks; collector output merge | Add failure/cancellation round-trip coverage. |
 | C6 | Independent timing for parallel tool calls | Partial | Per-call IDs and timing fields exist | Prove independent records under concurrent requests; define serialized stateful-resource versus truly parallel stateless/sandbox semantics. |
 | C7 | Resource-server-backed and custom or sandbox-backed benchmarks | Partial | Resource-server capability E2E; seeded sandbox attachment in `runner.py`; real external rollouts | Add a committed seeded-Docker E2E test on the final stack. |
-| C8 | Turn identity, timestamp, question, resolution, and step metadata | Partial | Identity, timestamp, and step placeholder are emitted | Populate question and resolution; use producer step metadata or emit a documented gap instead of implying it. |
+| C8 | Turn identity, timestamp, question, resolution, and step metadata | Met | Exact Responses input, call-start timestamp, terminal invocation resolution, and cumulative tool-step count are emitted and round-trip tested | Preserve nested/failure-path coverage. |
 | C9 | Captured model requests and responses retain their payloads | Met | `TrajectoryModelCall.request` / `.response`; capture projection | Keep payload round-trip assertions. |
 | C10 | Model calls have exact ownership references on an `AgentInvocation` | Met | `ModelCallRef`; `join_model_call_observations()` exact join and ambiguity/conflict gaps | Retain exact-join tests. |
-| C11 | Model calls have exact ownership references on a `TrajectoryTurn` | Partial | Turns carry exact `(model_ref, response_id)` refs and collector binding supports them | Add turn-level canonicalization, ambiguity, unmatched, duplicate, and ownership-conflict tests. |
+| C11 | Model calls have exact ownership references on a `TrajectoryTurn` | Met | Exact `(model_ref, response_id)` or `model_call_id` binding; H6 detects unmatched, ambiguous, duplicate-turn, and invocation/turn ownership conflicts | Preserve exact ownership tests. |
 
 ## Health checks
 
@@ -79,8 +79,8 @@ The audit that created this document ran:
 
 ## PR completion checklist
 
-- [ ] C3/C8 canonical turn fields implemented and persisted round-trip test added.
-- [ ] C11 turn ownership ambiguity/conflict tests added.
+- [x] C3/C8 canonical turn fields implemented and persisted round-trip test added.
+- [x] C11 turn ownership ambiguity/conflict tests added.
 - [ ] C6 concurrent timing behavior and semantics tested.
 - [ ] C7 resource-server and seeded-sandbox E2E routes tested.
 - [ ] H13 edge cases tested.

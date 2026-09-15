@@ -781,6 +781,62 @@ def test_partial_binding_checks_matched_calls_without_claiming_complete_accounti
     assert not any(finding.check == "model_call_missing_token_counts" for finding in digest.findings)
 
 
+def test_duplicate_turn_claims_are_conflicting_call_ownership(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    duplicate_turn = deepcopy(record["ng_trajectory"]["turns"][0])
+    duplicate_turn["turn_no"] = 2
+    duplicate_turn["timestamp"] = 2.0
+    record["ng_trajectory"]["turns"].append(duplicate_turn)
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    [finding] = [
+        item
+        for item in digest.findings
+        if item.check == "trajectory_capture_mismatch" and item.detail.get("kind") == "conflicting_call_ownership"
+    ]
+    assert finding.locator == {"call_id": "c1"}
+    assert finding.detail == {"kind": "conflicting_call_ownership", "turn_claims": 2}
+    assert "rollout_token_count_mismatch" in digest.unobserved
+    assert not digest.policy_calls_observed
+
+
+def test_turn_and_invocation_owner_disagreement_is_flagged(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "invocation_id": "root",
+            "status": "completed",
+            "model_calls": [{"model_call_id": "c1"}],
+            "conversation": [],
+        },
+        {
+            "invocation_id": "child",
+            "parent_invocation_id": "root",
+            "status": "completed",
+            "model_calls": [],
+            "conversation": [],
+        },
+    ]
+    record["ng_trajectory"]["turns"][0]["invocation_id"] = "child"
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    [finding] = [
+        item
+        for item in digest.findings
+        if item.check == "trajectory_capture_mismatch" and item.detail.get("kind") == "conflicting_call_ownership"
+    ]
+    assert finding.locator == {"call_id": "c1"}
+    assert finding.detail == {
+        "kind": "conflicting_call_ownership",
+        "invocation_ids": ["root"],
+        "turn_invocation_ids": ["child"],
+    }
+
+
 def test_call_failures_and_token_mismatches_have_separate_check_ids(tmp_path: Path) -> None:
     rollout_path = _write_fixture(
         tmp_path,

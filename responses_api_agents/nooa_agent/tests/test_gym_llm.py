@@ -90,6 +90,7 @@ def make_llm(
     budget: RolloutCallBudget | None = None,
     prior_outputs: list[dict[str, Any]] | None = None,
     model_server_name: str = "policy_model",
+    trace_hooks: Any = None,
 ) -> tuple[GymResponsesLLM, MagicMock, list[NeMoGymResponse]]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -105,6 +106,7 @@ def make_llm(
         observation_gaps=observation_gaps,
         budget=budget,
         prior_outputs=prior_outputs,
+        trace_hooks=trace_hooks,
     )
     return llm, server_client, collected
 
@@ -141,6 +143,30 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert result.content == "Cold"
     assert collected[0].output[0].prompt_token_ids == [1, 2]
     assert collected[0].output[0].routed_experts == [[[0, 1]]]
+
+
+@pytest.mark.asyncio
+async def test_turn_capture_receives_exact_model_input_and_call_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    trace_hooks = MagicMock()
+    llm, client, _ = make_llm(model_response(output), trace_hooks=trace_hooks)
+    clock = MagicMock(side_effect=[10.0, 11.0])
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.time.time", clock)
+
+    await llm.acall([{"role": "system", "content": "Be concise."}, {"role": "user", "content": "Weather?"}])
+
+    request_body = client.post.await_args.kwargs["json"]
+    trace_hooks.record_model_response.assert_called_once()
+    args, kwargs = trace_hooks.record_model_response.call_args
+    assert args[0].id == "resp-1"
+    assert kwargs["question"] == request_body.model_dump(mode="json", exclude_none=True)["input"]
+    assert kwargs["started_at"] == 10.0
 
 
 @pytest.mark.asyncio

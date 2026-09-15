@@ -143,6 +143,7 @@ class _CallBindings:
     matched_calls: tuple[dict[str, Any], ...]
     missing_references: tuple[str, ...]
     duplicated_references: tuple[tuple[str, int], ...]
+    multiply_claimed_references: tuple[tuple[str, int], ...]
 
     @property
     def observed(self) -> bool:
@@ -150,7 +151,12 @@ class _CallBindings:
 
     @property
     def complete(self) -> bool:
-        return self.observed and not self.missing_references and not self.duplicated_references
+        return (
+            self.observed
+            and not self.missing_references
+            and not self.duplicated_references
+            and not self.multiply_claimed_references
+        )
 
 
 @dataclass(frozen=True, slots=True)

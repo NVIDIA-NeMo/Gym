@@ -314,6 +314,40 @@ def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[tuple[
     )
 
 
+def _ownership_conflicts(trajectory: dict[str, Any]) -> list[tuple[str, set[str], set[str]]]:
+    """Find model calls whose invocation and turn owners disagree.
+
+    Only compare references present in both evidence sets. A producer may legitimately
+    supply only C10 or only C11; absence is handled by capability gating rather than
+    guessed ownership.
+    """
+    invocation_owners: dict[str, set[str]] = defaultdict(set)
+    for invocation in trajectory.get("invocations") or []:
+        invocation_id = invocation.get("invocation_id")
+        if not invocation_id:
+            continue
+        for raw_reference in invocation.get("model_calls") or []:
+            reference = _call_ref_key(raw_reference)
+            if reference is not None:
+                invocation_owners[reference].add(str(invocation_id))
+
+    turn_owners: dict[str, set[str]] = defaultdict(set)
+    for turn in trajectory.get("turns") or []:
+        invocation_id = turn.get("invocation_id")
+        if not invocation_id:
+            continue
+        for raw_reference in turn.get("model_calls") or []:
+            reference = _call_ref_key(raw_reference)
+            if reference is not None:
+                turn_owners[reference].add(str(invocation_id))
+
+    return [
+        (reference, invocation_owners[reference], turn_owners[reference])
+        for reference in invocation_owners.keys() & turn_owners.keys()
+        if invocation_owners[reference] != turn_owners[reference]
+    ]
+
+
 def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
     reference_items = _canonical_model_call_references(trajectory)
     references = tuple(reference for reference, _ in reference_items)
@@ -330,6 +364,10 @@ def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) 
     matched_calls: list[dict[str, Any]] = []
     missing_references: list[str] = []
     duplicated_references: list[tuple[str, int]] = []
+    reference_counts: dict[str, int] = defaultdict(int)
+    for reference in references:
+        reference_counts[reference] += 1
+    multiply_claimed_references = [(reference, count) for reference, count in reference_counts.items() if count > 1]
     unique_references = dict(reference_items)
     for reference, raw_reference in unique_references.items():
         model_call_id = raw_reference.get("model_call_id")
@@ -357,6 +395,7 @@ def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) 
         matched_calls=tuple(matched_calls),
         missing_references=tuple(missing_references),
         duplicated_references=tuple(duplicated_references),
+        multiply_claimed_references=tuple(multiply_claimed_references),
     )
 
 
@@ -495,6 +534,34 @@ def _trajectory_capture_mismatch(
                 detail={"kind": "duplicated_captured_call", "count": count},
             )
         )
+    for reference, count in bindings.multiply_claimed_references:
+        locator = reference.split(":")[-1]
+        seen.add(("conflicting_call_ownership", locator))
+        findings.append(
+            Finding(
+                check="trajectory_capture_mismatch",
+                subject=subject,
+                locator={"call_id": locator},
+                detail={"kind": "conflicting_call_ownership", "turn_claims": count},
+            )
+        )
+    for reference, invocation_ids, turn_invocation_ids in _ownership_conflicts(trajectory):
+        locator = reference.split(":")[-1]
+        if ("conflicting_call_ownership", locator) in seen:
+            continue
+        seen.add(("conflicting_call_ownership", locator))
+        findings.append(
+            Finding(
+                check="trajectory_capture_mismatch",
+                subject=subject,
+                locator={"call_id": locator},
+                detail={
+                    "kind": "conflicting_call_ownership",
+                    "invocation_ids": sorted(invocation_ids),
+                    "turn_invocation_ids": sorted(turn_invocation_ids),
+                },
+            )
+        )
     for gap in _trajectory_reference_contradictions(trajectory):
         kind = _REFERENCE_CONTRADICTION_GAPS[gap["code"]]
         detail = gap.get("detail") or "unknown"
@@ -588,17 +655,17 @@ _ROLLOUT_CHECKS: dict[
     "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),
-    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: (
-        _model_call_missing_token_counts(bindings, subject)
+    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: _model_call_missing_token_counts(
+        bindings, subject
     ),
-    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
-        _trajectory_capture_mismatch(trajectory, bindings, subject)
+    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: _trajectory_capture_mismatch(
+        trajectory, bindings, subject
     ),
     "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
-    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
-        _rollout_token_count_mismatch(record, bindings, subject)
+    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: _rollout_token_count_mismatch(
+        record, bindings, subject
     ),
-    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: (
-        _model_call_runaway_generation(bindings, subject)
+    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
+        bindings, subject
     ),
 }
