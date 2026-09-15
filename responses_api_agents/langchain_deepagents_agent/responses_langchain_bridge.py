@@ -70,9 +70,17 @@ def _output_text(content_items: list) -> str:
 
 
 def to_langchain(input_items: list) -> list:
-    """Gym Responses API input items -> LangChain messages. Runs once per responses() call, on the
-    first request that comes in. This is different from to_gym_input()/to_langchain_ai_message(),
-    which run once per internal model call inside GymResponsesChatModel._agenerate()."""
+    """Gym Responses API input items -> LangChain messages: one input item -> one LangChain message,
+    over a whole (possibly replayed) prior conversation. Runs once per responses() call, seeding
+    self.agent.ainvoke({"messages": ...}).
+
+    Not the same job as to_langchain_ai_message() below, despite the similar name. That function merges
+    every output item from a *single* model turn (one message + N function_calls + reasoning) into the
+    fields of one AIMessage, because LangChain's BaseChatModel contract allows exactly one AIMessage per
+    generation — there's no "list of sibling output items" concept on that side for a single turn, and it
+    runs once per internal model call inside GymResponsesChatModel._agenerate(). to_langchain() (this
+    function) has no such constraint: it's converting a whole conversation, not one turn, so each item
+    becomes its own message and the list can be any length."""
     # "developer" is an OpenAI Responses API role with no LangChain equivalent; map it to SystemMessage.
     roles = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage, "developer": SystemMessage}
     messages: list = []
@@ -137,6 +145,12 @@ def to_gym_input(messages: list) -> list[dict]:
                 }
             )
         elif isinstance(message, AIMessage):
+            # Round-trips reasoning items stashed by to_langchain_ai_message() so they aren't silently
+            # dropped on the next internal turn. This resends reasoning content on every subsequent
+            # internal model call (the full growing input list is resent each turn), which grows token
+            # usage — comment out this line to stop round-tripping and only pay for reasoning once, on
+            # the turn it was produced.
+            items.extend(message.additional_kwargs.get("reasoning_items", []))
             if message.content:
                 items.append({"type": "message", "role": "assistant", "content": _text(message.content)})
             for call in message.tool_calls:
@@ -159,6 +173,11 @@ def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
     """Gym Responses API output -> a single LangChain AIMessage, for one internal deepagents model call."""
     text_parts: list[str] = []
     tool_calls: list[dict] = []
+    # Stashed separately from text_parts (not shown as visible assistant text) so to_gym_input() can
+    # round-trip each one back as its own `reasoning` item on the next internal turn instead of silently
+    # dropping it. Kept as the original item dict (full fidelity: id, summary, encrypted_content, ...) so
+    # to_gym_input() can pass it straight through unchanged.
+    reasoning_items: list[dict] = []
     for item in gym_response.output:
         item_type = getattr(item, "type", None)
         if item_type == "message":
@@ -173,11 +192,25 @@ def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
                 # ToolMessage, same graceful-degradation outcome as simple_agent's explicit guard.
                 args = {}
             tool_calls.append(tool_call(name=item.name, args=args, id=item.call_id))
+        elif item_type == "reasoning":
+            reasoning_items.append(item.model_dump(mode="json"))
+        else:
+            # Anything else (mcp_call, web_search_call, code_interpreter_call, computer_call, ...) has no
+            # client-side execution path in deepagents and, for hosted/server-executed items, represents a
+            # tool result the model already produced — dropping it silently would leave the agent's next
+            # turn with no memory of something that already happened. Fail loudly instead of guessing a
+            # textual fallback for a type with no observed repro yet.
+            raise NotImplementedError(
+                f"to_langchain_ai_message() does not support Gym Responses output item type {item_type!r} "
+                f"(response id={gym_response.id!r}). Only 'message', 'function_call', and 'reasoning' are "
+                "handled today."
+            )
     return AIMessage(
         content="".join(text_parts),
         tool_calls=tool_calls,
         id=gym_response.id,
         response_metadata={"id": gym_response.id},
+        additional_kwargs={"reasoning_items": reasoning_items} if reasoning_items else {},
     )
 
 
@@ -225,12 +258,17 @@ class GymResponsesChatModel(BaseChatModel):
                 "RunnableConfig['configurable'] — it must be invoked via DeepAgentsAgent.responses(), "
                 "which sets these once per request."
             ) from e
+        # Optional (unlike the three above): most callers never set body.reasoning, so this is absent from
+        # older/simpler configurable dicts (e.g. hand-built test fixtures) rather than required wiring.
+        model_reasoning = configurable.get("model_reasoning")
 
         request_body: dict[str, Any] = {"input": to_gym_input(messages)}
         if "tools" in kwargs:
             request_body["tools"] = kwargs["tools"]
         if "tool_choice" in kwargs:
             request_body["tool_choice"] = kwargs["tool_choice"]
+        if model_reasoning is not None:
+            request_body["reasoning"] = model_reasoning
         resp = await self.agent.server_client.post(
             server_name=self.agent.config.model_server.name,
             url_path=model_url_path,

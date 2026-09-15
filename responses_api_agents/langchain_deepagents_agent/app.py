@@ -48,8 +48,7 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
     """No tool-specific fields — those belong on a concrete subclass's config (see reasoning_search_agent.py).
 
     `max_steps` (inherited from SimpleAgentConfig) is unused: deepagents runs its own internal tool loop
-    and answers in one call, the same as remote_agent's `max_steps: 1` in
-    examples/langchain_deepagent/configs/config_reasoning_gym.yaml.
+    and answers in one call
     """
 
 
@@ -103,6 +102,14 @@ class DeepAgentsAgent(SimpleAgent):
                 "model_url_path": self.url_path_for_request("/v1/responses", request),
                 "model_cookies": {"cookies": None},
                 "model_usage": model_usage,
+                # Forwarded verbatim to every internal model call (see GymResponsesChatModel._agenerate()),
+                # so a caller requesting e.g. {"summary": "auto"} gets reasoning summaries back on every
+                # turn — unlike SimpleAgent, which forwards this for free via body.model_copy(), this agent
+                # rebuilds each internal request from scratch and has to thread it through explicitly.
+                # `body.reasoning` is already a plain dict at runtime (its field type, Reasoning, is a
+                # TypedDict, not a BaseModel — verified via NeMoGymResponseCreateParamsNonStreaming; no
+                # .model_dump() needed, and calling one would raise AttributeError on a plain dict).
+                "model_reasoning": body.reasoning,
             }
         }
         final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)

@@ -19,6 +19,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
@@ -120,3 +121,36 @@ async def test_responses_forwards_capture_mode_path_into_model_url_path():
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert "training-token-capture" in run_config["configurable"]["model_url_path"]
+
+
+@pytest.mark.asyncio
+async def test_responses_forwards_body_reasoning_as_plain_dict():
+    """`body.reasoning` must reach `configurable` as a plain dict, not a Pydantic object: its field type
+    (Reasoning) is a TypedDict, not a BaseModel, so a real request's `body.reasoning` is already a plain
+    dict at runtime — calling .model_dump() on it would raise AttributeError. Uses a real
+    NeMoGymResponseCreateParamsNonStreaming (not a MagicMock body) so this is checked against the actual
+    runtime type instead of a mock that would hide the bug."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {"rollout_id": "abc123"}
+    request.url.path = "/ng-rollout/abc123/v1/responses"
+
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "reasoning": {"summary": "auto"},
+        }
+    )
+
+    await agent.responses(request, Response(), body)
+
+    run_config = agent.agent.ainvoke.call_args.kwargs["config"]
+    model_reasoning = run_config["configurable"]["model_reasoning"]
+    assert model_reasoning == {"summary": "auto"}
+    assert isinstance(model_reasoning, dict)

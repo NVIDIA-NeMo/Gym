@@ -29,8 +29,11 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseMcpCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
 )
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
@@ -195,6 +198,52 @@ def test_to_langchain_ai_message_extracts_text_and_tool_calls():
     assert message.tool_calls == [{"name": "search", "args": {"q": "x"}, "id": "call_1", "type": "tool_call"}]
 
 
+def test_to_langchain_ai_message_preserves_reasoning_for_round_trip():
+    gym_response = NeMoGymResponse(
+        id="resp_1",
+        created_at=0,
+        model="policy_model",
+        object="response",
+        output=[
+            NeMoGymResponseReasoningItem(id="rs_1", summary=[NeMoGymSummary(text="thinking...", type="summary_text")]),
+            NeMoGymResponseOutputMessage(
+                id="msg_1", content=[NeMoGymResponseOutputText(text="hello", annotations=[])]
+            ),
+        ],
+        parallel_tool_calls=False,
+        tools=[],
+        tool_choice="auto",
+    )
+    message = to_langchain_ai_message(gym_response)
+
+    # Not folded into the visible assistant text — stashed separately so it round-trips as its own item.
+    assert message.content == "hello"
+    (reasoning_item,) = message.additional_kwargs["reasoning_items"]
+    assert reasoning_item["id"] == "rs_1"
+    assert reasoning_item["type"] == "reasoning"
+    assert reasoning_item["summary"] == [{"text": "thinking...", "type": "summary_text"}]
+
+    # Round-trips back as its own `reasoning` item on the next internal turn instead of being dropped.
+    items = to_gym_input([message])
+    assert items[0] == reasoning_item
+    assert items[1] == {"type": "message", "role": "assistant", "content": "hello"}
+
+
+def test_to_langchain_ai_message_raises_on_unsupported_output_type():
+    gym_response = NeMoGymResponse(
+        id="resp_1",
+        created_at=0,
+        model="policy_model",
+        object="response",
+        output=[NeMoGymResponseMcpCall(name="roll_dice", arguments="{}")],
+        parallel_tool_calls=False,
+        tools=[],
+        tool_choice="auto",
+    )
+    with pytest.raises(NotImplementedError, match="mcp_call"):
+        to_langchain_ai_message(gym_response)
+
+
 def test_bind_tools_unnests_chat_completions_shape_into_responses_shape():
     from langchain_core.tools import tool
 
@@ -222,7 +271,11 @@ async def test_agenerate_reads_model_url_path_and_cookies_from_ambient_config():
     post = AsyncMock(return_value=_fake_model_response())
     model = _make_model(post)
     config: RunnableConfig = {
-        "configurable": {"model_url_path": "/v1/responses", "model_cookies": {"cookies": {"sid": "seed"}}}
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": {"cookies": {"sid": "seed"}},
+            "model_usage": {"usage": None},
+        }
     }
 
     with _ambient_config(config):
@@ -230,6 +283,49 @@ async def test_agenerate_reads_model_url_path_and_cookies_from_ambient_config():
 
     assert post.call_args.kwargs["url_path"] == "/v1/responses"
     assert post.call_args.kwargs["cookies"] == {"sid": "seed"}
+
+
+@pytest.mark.asyncio
+async def test_agenerate_forwards_model_reasoning_into_request_body():
+    post = AsyncMock(return_value=_fake_model_response())
+    model = _make_model(post)
+    config: RunnableConfig = {
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": {"cookies": None},
+            "model_usage": {"usage": None},
+            "model_reasoning": {"summary": "auto"},
+        }
+    }
+
+    with _ambient_config(config):
+        await model._agenerate([HumanMessage(content="hi")])
+
+    request_json = post.call_args.kwargs["json"]
+    assert request_json["reasoning"] == {"summary": "auto"}
+    # server_client.post()'s real path serializes via orjson.dumps(), which has no default handler for a
+    # bare Pydantic object — this would raise TypeError if DeepAgentsAgent.responses() stashed a live
+    # `Reasoning` instance in `configurable` instead of a plain dict. The mocked `post` above bypasses
+    # that layer, so this assertion is what actually catches the regression.
+    orjson.dumps(request_json)
+
+
+@pytest.mark.asyncio
+async def test_agenerate_omits_reasoning_key_when_not_configured():
+    post = AsyncMock(return_value=_fake_model_response())
+    model = _make_model(post)
+    config: RunnableConfig = {
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": {"cookies": None},
+            "model_usage": {"usage": None},
+        }
+    }
+
+    with _ambient_config(config):
+        await model._agenerate([HumanMessage(content="hi")])
+
+    assert "reasoning" not in post.call_args.kwargs["json"]
 
 
 @pytest.mark.asyncio
@@ -246,7 +342,13 @@ async def test_agenerate_chains_model_cookies_across_sequential_calls_without_mu
     )
     model = _make_model(post)
     cookie_holder = {"cookies": None}
-    config: RunnableConfig = {"configurable": {"model_url_path": "/v1/responses", "model_cookies": cookie_holder}}
+    config: RunnableConfig = {
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": cookie_holder,
+            "model_usage": {"usage": None},
+        }
+    }
 
     with _ambient_config(config):
         # First call: nothing chained yet (matches DeepAgentsAgent.responses() seeding `cookies: None` —
@@ -277,7 +379,11 @@ async def test_agenerate_propagates_into_a_nested_runnable_call():
 
     nested = RunnableLambda(inner)
     config: RunnableConfig = {
-        "configurable": {"model_url_path": "/nested/v1/responses", "model_cookies": {"cookies": None}}
+        "configurable": {
+            "model_url_path": "/nested/v1/responses",
+            "model_cookies": {"cookies": None},
+            "model_usage": {"usage": None},
+        }
     }
 
     await nested.ainvoke({}, config=config)
@@ -317,7 +423,13 @@ async def test_task_tool_propagates_ambient_config_to_subagent_model_call():
             }
         ],
     )
-    config: RunnableConfig = {"configurable": {"model_url_path": "/v1/responses", "model_cookies": {"cookies": None}}}
+    config: RunnableConfig = {
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": {"cookies": None},
+            "model_usage": {"usage": None},
+        }
+    }
 
     await agent.ainvoke({"messages": [HumanMessage(content="look something up")]}, config=config)
 
@@ -341,6 +453,7 @@ async def test_agenerate_isolated_across_concurrent_top_level_configs():
             "configurable": {
                 "model_url_path": f"/rollout-{rollout_suffix}/v1/responses",
                 "model_cookies": {"cookies": {"a": rollout_suffix}},
+                "model_usage": {"usage": None},
             }
         }
         with _ambient_config(config):
