@@ -47,6 +47,13 @@ The included example independently configures User tools
 The resulting ordered `agent_turns` retain both participants, tool calls and
 results, post-turn state, observations, and the final termination reason.
 
+The Assistant, simulated User, and NeMo-Sim support calls use three explicit
+model-server references: `assistant_policy_model`, `user_policy_model`, and
+`simulation_support_model`. By default, all three inherit the standard
+`policy_base_url`, `policy_api_key`, and `policy_model_name` settings. Override
+their corresponding `assistant_policy_*`, `user_policy_*`, or
+`simulation_support_*` settings to run them on different models or endpoints.
+
 After preparation:
 
 ```bash
@@ -57,6 +64,29 @@ gym eval run \
   ++observability_enabled=true \
   ++model_call_capture_dir=/absolute/path/to/model-calls
 ```
+
+To run the same benchmark against NVIDIA Inference Hub through Gym's
+`vllm_model` proxy, set `inference_hub_api_key` in the repository-root
+`env.yaml`, then use the included recipe:
+
+```bash
+.venv/bin/gym eval run \
+  --config benchmarks/nemo_sim/inference_hub.yaml \
+  --agent nemo_sim_processor \
+  --output results/nemo_sim-inference-hub.jsonl \
+  --limit 1 \
+  --concurrency 1 \
+  ++debug_mode=false \
+  ++observability_enabled=true \
+  ++model_call_capture_dir="$PWD/results/nemo-sim-model-calls"
+```
+
+The recipe explicitly configures all three model roles. They initially select
+`nvidia/qwen/eccn-qwen3.6-35b-a3b` at
+`https://inference-api.nvidia.com/v1`, but each can be changed independently.
+For example, pass `++user_policy_model_name=<model>` to change only the
+simulated User. An API key being present does not by itself prove model
+entitlement; a successful rollout confirms access to each selected model.
 
 For evaluation and existing RL consumers, top-level `response` remains the
 final Assistant response. For participant-specific SFT or custom collation,

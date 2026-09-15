@@ -118,6 +118,13 @@ User and Assistant tools are configured independently in
 instances execute their own tool loops against this Resources Server while the
 Processor forwards one shared Resources session cookie.
 
+The agents also have independent model-server references:
+`user_policy_model` and `assistant_policy_model`. Judge, summary, and
+API-response calls use a third `simulation_support_model` reference. All three
+inherit the standard `policy_*` settings by default, while their role-specific
+`user_policy_*`, `assistant_policy_*`, and `simulation_support_*` settings can
+select different endpoints or models.
+
 The runnable example demonstrates three idempotent endpoints:
 
 - `record_user_context`: the User stores context without repeating it in a

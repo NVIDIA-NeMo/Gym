@@ -1,0 +1,16 @@
+# NeMo-Sim recipe using the OpenAI-compatible NVIDIA Inference Hub through
+# Gym's vllm_model proxy. The API key remains in the repository-root env.yaml.
+config_paths:
+  - benchmarks/nemo_sim/config.yaml
+
+assistant_policy_base_url: https://inference-api.nvidia.com/v1
+assistant_policy_api_key: ${inference_hub_api_key}
+assistant_policy_model_name: nvidia/qwen/eccn-qwen3.6-35b-a3b
+
+user_policy_base_url: https://inference-api.nvidia.com/v1
+user_policy_api_key: ${inference_hub_api_key}
+user_policy_model_name: nvidia/qwen/eccn-qwen3.6-35b-a3b
+
+simulation_support_base_url: https://inference-api.nvidia.com/v1
+simulation_support_api_key: ${inference_hub_api_key}
+simulation_support_model_name: nvidia/qwen/eccn-qwen3.6-35b-a3b
