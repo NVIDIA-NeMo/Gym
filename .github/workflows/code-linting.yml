@@ -32,8 +32,8 @@ jobs:
           submodules: 'recursive'
 
       - name: Check lint
-        # Call lint.sh directly: it runs gym_ci_sanitize_environment before hooks and
-        # resolves pre-commit from the lockfile-provided dev environment already on
-        # PATH. We do NOT source setup_dev.sh (its uv fallback would download a remote
-        # installer) and we do NOT pip-install pre-commit (must come from the lockfile).
-        run: ./scripts/ci/lint.sh
+        # setup_dev.sh activates the dev venv (pre-commit) in the current shell, so it
+        # must run in the SAME step as lint.sh for the PATH change to be visible.
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          ./scripts/ci/lint.sh
