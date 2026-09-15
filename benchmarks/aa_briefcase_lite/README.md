@@ -114,7 +114,6 @@ limit or a demonstrated reliability fix.
 
 For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
 starting Gym. This controls the client timeout, not upstream service deadlines.
-The judge adapters also apply this deadline to queued work and upstream retries.
 Binary requests permit two transport retries with SDK backoff. Pairwise requests
 use the shared sender's five-attempt backoff loop, with timeout retries enabled
 for Briefcase. Both paths separately allow two retries for invalid answers;

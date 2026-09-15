@@ -7,7 +7,6 @@ aa_briefcase_lite_judge_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
-      request_timeout_seconds: ${oc.env:GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS,300}
       openai_model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
 
 aa_briefcase_lite_gpt_judge_model:
@@ -16,7 +15,6 @@ aa_briefcase_lite_gpt_judge_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
-      request_timeout_seconds: ${oc.env:GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS,300}
       openai_model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
 
 aa_briefcase_lite_claude_judge_model:
@@ -25,7 +23,6 @@ aa_briefcase_lite_claude_judge_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
-      request_timeout_seconds: ${oc.env:GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS,300}
       openai_model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
 
 aa_briefcase_lite_resources_server:
