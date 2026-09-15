@@ -793,3 +793,5 @@ lines-after-imports = 2
 quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+# no-op: touched to test the Python suggest-reviewers workflow (pyproject.toml -> enforced-only, wildcard suggestion)
