@@ -344,7 +344,8 @@ gym eval submit --config examples/slurm_leancat_goedel_prover.yaml
 ```
 
 `benchmarks/leancat/` is registered, so `gym list benchmarks` shows it and `--benchmark leancat` works.
-`num_repeats: 32` matches Table 3's specialized-prover budget; drop it to 4 for the generalist protocol of Table 1.
+`num_repeats: 4` is the generalist budget of Table 1, and one of upstream's `recommended_k_values`. For Table 3's
+specialized provers, raise it to 32 with `--num-repeats`.
 
 The submit config cannot start the sandbox — `services:` accepts only `type: vllm` and `type: ray`, so the sandbox
 must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
