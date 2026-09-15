@@ -32,13 +32,17 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
     CaptureStore,
     ModelCallCaptureConfig,
+    SimpleResponsesAPIModel,
     install_model_call_capture,
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
+    RolloutContextPeekMiddleware,
+    current_rollout_id,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
@@ -247,3 +251,92 @@ def test_explicit_rollout_alias_stays_request_scoped() -> None:
     )
     assert maybe_rollout_id_from_run_body(body) == "rollout-explicit"
     assert "_ng_rollout_id" not in body.model_dump(by_alias=True)
+
+
+@pytest.mark.asyncio
+async def test_rollout_context_peek_middleware_exposes_id_without_stripping_path() -> None:
+    """The peek middleware must publish the id but leave routing untouched.
+
+    Unlike ``RolloutContextMiddleware`` (used by resources/agent servers), a model
+    server's own ``_CaptureMiddleware`` still needs to see the intact
+    ``/ng-rollout/<id>`` prefix downstream of this middleware.
+    """
+    observed: dict[str, object] = {}
+
+    async def inner_app(scope, receive, send) -> None:
+        observed["path"] = scope["path"]
+        observed["raw_path"] = scope["raw_path"]
+        observed["rollout_id_inside"] = current_rollout_id()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = RolloutContextPeekMiddleware(inner_app)
+    scope = {
+        "type": "http",
+        "path": "/ng-rollout/rollout-42/v1/chat/completions",
+        "raw_path": b"/ng-rollout/rollout-42/v1/chat/completions",
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(scope, receive, send)
+
+    assert observed["path"] == "/ng-rollout/rollout-42/v1/chat/completions"
+    assert observed["raw_path"] == b"/ng-rollout/rollout-42/v1/chat/completions"
+    assert observed["rollout_id_inside"] == "rollout-42"
+    assert current_rollout_id() is None  # does not leak past the request
+
+
+class _EchoRolloutIdConfig(BaseResponsesAPIModelConfig):
+    pass
+
+
+class _EchoRolloutIdModel(SimpleResponsesAPIModel):
+    config: _EchoRolloutIdConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        @app.get("/observed-rollout-id")
+        async def observed_rollout_id() -> dict:
+            return {"rollout_id": current_rollout_id()}
+
+        return app
+
+    async def chat_completions(self, body: dict = Body()) -> dict:
+        raise NotImplementedError
+
+    async def responses(self, body: dict = Body()) -> dict:
+        raise NotImplementedError
+
+
+def test_model_server_exposes_current_rollout_id_to_its_own_handler() -> None:
+    """Regression test for the gap this change fixes.
+
+    Before this change, ``current_rollout_id()`` was populated for resources and
+    agent servers but always ``None`` inside a model server's own handler, even
+    though every correlated call already carries the id in its URL prefix.
+    """
+    server_client = ServerClient(
+        head_server_config=BaseServerConfig(host="head.test", port=80),
+        global_config_dict=OmegaConf.create({}),
+    )
+    model = _EchoRolloutIdModel(
+        config=_EchoRolloutIdConfig(host="policy.test", port=80, entrypoint="app.py", name="policy"),
+        server_client=server_client,
+    )
+    client = TestClient(model.setup_webserver())
+
+    correlated = client.get("/ng-rollout/rollout-7/observed-rollout-id")
+    assert correlated.status_code == 200
+    assert correlated.json() == {"rollout_id": "rollout-7"}
+
+    uncorrelated = client.get("/observed-rollout-id")
+    assert uncorrelated.status_code == 200
+    assert uncorrelated.json() == {"rollout_id": None}
