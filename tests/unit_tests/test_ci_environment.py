@@ -895,3 +895,26 @@ def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
 
     assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
     assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_cicd_main_runs_on_merge_queue() -> None:
+    # The CICD workflow is required and must run for merge-queue commits, or
+    # queued changes lose their integration check.
+    on_block = CICD_MAIN_WORKFLOW.read_text().split("\non:", 1)[1].split("\nconcurrency:", 1)[0]
+
+    assert "  merge_group:" in on_block
+    assert "    types: [checks_requested]" in on_block
+
+
+def test_dockerfile_installs_pre_commit_on_path_for_offline_lint() -> None:
+    # lint.sh's offline branch reuses a baked pre-commit only if the final image
+    # provides one on PATH. The persistent project environment is synced with
+    # only vllm+telemetry (no dev), so the Dockerfile must install pre-commit
+    # into it explicitly or the offline branch never triggers and lint.sh falls
+    # back to a network-dependent pip install.
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv" in dockerfile
+    assert "uv pip install --offline pre-commit" in dockerfile
+    # The on-PATH environment is the persistent project venv.
+    assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile

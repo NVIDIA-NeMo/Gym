@@ -212,6 +212,12 @@ ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
 RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
         uv sync --locked --extra vllm --extra telemetry --extra dev && \
+    # Install pre-commit into the persistent project environment (already on \
+    # PATH at /opt/nemo_gym_venv/bin) so scripts/ci/lint.sh can run offline in \
+    # this container. Resolve from the just-seeded runtime cache so the pinned \
+    # version matches the lockfile (dev extra). \
+    UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv \
+        uv pip install --offline pre-commit && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
