@@ -212,6 +212,7 @@ class AdmissionLimiter:
         self._generation_cut_backend = generation_cut_backend
         self._checkpoint_id: Optional[str] = None
         self._checkpoint_tickets: dict[str, AdmissionTicket] = {}
+        self._checkpoint_ready_ticket_ids: set[str] = set()
         self._generation_cut_receipt: GenerationCutReceipt | None = None
         self._cut_lock = asyncio.Lock()
         self._admission_tombstones: set[tuple[str, int]] = set()
@@ -310,6 +311,7 @@ class AdmissionLimiter:
         if self.state == AdmissionState.ACCEPTING:
             self._checkpoint_id = checkpoint_id
             self._checkpoint_tickets = dict(self._inflight)
+            self._checkpoint_ready_ticket_ids.clear()
             self._generation_cut_receipt = None
             if self._generation_cut_backend is not None:
                 self._egress_open.clear()
@@ -323,6 +325,7 @@ class AdmissionLimiter:
         self.state = AdmissionState.ACCEPTING
         self._checkpoint_id = None
         self._checkpoint_tickets.clear()
+        self._checkpoint_ready_ticket_ids.clear()
         self._generation_cut_receipt = None
         self._checkpoint_exclusions.clear()
         self._egress_open.set()
@@ -359,13 +362,12 @@ class AdmissionLimiter:
             return len(self._inflight)
         return sum(not self._ticket_checkpoint_ready(ticket) for ticket in self._checkpoint_tickets.values())
 
-    @staticmethod
-    def _ticket_checkpoint_ready(ticket: AdmissionTicket) -> bool:
+    def _ticket_checkpoint_ready(self, ticket: AdmissionTicket) -> bool:
         if ticket.checkpoint_abort_pending:
             return not ticket.response_active
         if ticket.response_started:
             return ticket.response_egress_completed and not ticket.response_active
-        return ticket.prepare_safe
+        return ticket.prepare_safe or ticket.ticket_id in self._checkpoint_ready_ticket_ids
 
     def generation_cut_worker_proof(
         self,
@@ -434,7 +436,7 @@ class AdmissionLimiter:
                 admitted_at=ticket.started_ts,
             )
             for ticket in self._checkpoint_tickets.values()
-            if ticket.generation_started and not ticket.prepare_safe and not ticket.response_started
+            if ticket.generation_started and not self._ticket_checkpoint_ready(ticket) and not ticket.response_started
         ]
         return GenerationCutInventory.build(
             checkpoint_id=checkpoint_id,
@@ -473,11 +475,9 @@ class AdmissionLimiter:
                 ticket = self._checkpoint_tickets.get(result.ticket_id)
                 if ticket is None or result.ticket_id not in by_id:
                     raise ValueError(f"generation-cut ack named unknown ticket {result.ticket_id!r}")
-                if result.disposition == "durable_prefix":
-                    ticket.mark_durable_prefix_cut()
-                else:
-                    ticket.mark_durable_failure()
+                self._checkpoint_ready_ticket_ids.add(ticket.ticket_id)
             self._generation_cut_receipt = receipt
+            self._after_inflight_change()
             return self.is_prepare_safe()
 
     def abort_inflight(self, rollout_id: str, attempt_index: int) -> list[str]:
