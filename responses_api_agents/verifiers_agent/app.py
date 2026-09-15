@@ -19,7 +19,9 @@ import logging
 import traceback
 from collections.abc import Mapping
 from http.cookiejar import CookieJar
+from time import time
 from typing import Any, Optional
+from uuid import uuid4
 
 import verifiers as vf
 from fastapi import Body, Request, Response
@@ -37,13 +39,27 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
 )
 
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_OUTPUT_ITEM_ID = "msg_empty"
 
 
 def _as_dict(msg: Any) -> dict:
@@ -120,6 +136,30 @@ def _build_message_item(raw: Any, body: str, tokens: dict | None) -> dict:
     ).model_dump()
 
 
+def _assistant_turn_groups(output: list[dict]) -> list[list[dict]]:
+    """Cut the flat output back into one group per assistant turn.
+
+    `_build_assistant_items` emits an optional message followed by that turn's
+    function calls, and a tool result always separates two assistant turns, so
+    a group runs until the next tool result or the next message. The synthetic
+    `msg_empty` placeholder is not an agent turn and is skipped -- counting it
+    would report a hollow turn on every rollout served by an endpoint that
+    returns no token ids.
+    """
+    groups: list[list[dict]] = []
+    current: Optional[list[dict]] = None
+    for item in output:
+        item_type = item.get("type")
+        if item_type not in ("message", "function_call") or item.get("id") == _EMPTY_OUTPUT_ITEM_ID:
+            current = None
+            continue
+        if current is None or item_type == "message":
+            current = []
+            groups.append(current)
+        current.append(item)
+    return groups
+
+
 def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dict]:
     tool_calls = msg.get("tool_calls") or []
     body = _text(msg.get("content"))
@@ -138,7 +178,57 @@ def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dic
     return items
 
 
+def _as_response_usage(usage: Any) -> Optional[NeMoGymResponseUsage]:
+    """Map a chat-completions `usage` onto the Responses shape the rollout record uses."""
+    if usage is None:
+        return None
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    return NeMoGymResponseUsage(
+        input_tokens=usage.prompt_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(
+            cached_tokens=getattr(prompt_details, "cached_tokens", None) or 0
+        ),
+        output_tokens=usage.completion_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(
+            reasoning_tokens=getattr(completion_details, "reasoning_tokens", None) or 0
+        ),
+        total_tokens=usage.total_tokens,
+    )
+
+
+class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
+    """Records the id of every model response verifiers receives.
+
+    `simple_agent` builds its `ModelCallRef`s from `model_response.id` because it
+    issues the calls itself. Here `verifiers` owns the call loop and hands back
+    only a rollout summary, so the agent never sees a response. The client is the
+    one seam it does own: every call passes through `get_native_response`, so
+    recording ids here yields the same references without verifiers having to
+    expose anything.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.recorded_response_ids: list[str] = []
+        self.recorded_usage: Optional[NeMoGymResponseUsage] = None
+
+    async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
+        response = await super().get_native_response(*args, **kwargs)
+        response_id = getattr(response, "id", None)
+        if isinstance(response_id, str) and response_id:
+            self.recorded_response_ids.append(response_id)
+        self.recorded_usage = accumulate_response_usage(
+            self.recorded_usage, _as_response_usage(getattr(response, "usage", None))
+        )
+        return response
+
+
 class VerifiersNeMoGymResponse(NeMoGymResponse):
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     env_id: str
     group_id: str
     output: list[dict[str, Any]]
@@ -153,6 +243,12 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     response: VerifiersNeMoGymResponse
     reward: float
+    # Read by rollout_collection from the rollout RESULT, so they have to be
+    # fields here -- inside `metrics` the harness never sees them.
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class _NoStoreCookieJar(CookieJar):
@@ -231,7 +327,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             return None
         return path_params.get("rollout_id") or None
 
-    def _get_client(self, body: Any = None, request: Optional[Request] = None) -> NeMoRLChatCompletionsClient:
+    def _get_client(
+        self,
+        body: Any = None,
+        request: Optional[Request] = None,
+        invocation_id: Optional[str] = None,
+    ) -> NeMoRLChatCompletionsClient:
         """Return a rollout-prefixed client over one shared policy transport.
 
         The vllm_model server picks a vLLM engine per session
@@ -289,7 +390,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             return shared_client
 
         model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-        return NeMoRLChatCompletionsClient(shared_client.client.copy(base_url=model_server_url))
+        headers = {"x-session-id": invocation_id} if invocation_id else {}
+        return _ResponseIdRecordingClient(
+            shared_client.client.copy(base_url=model_server_url, default_headers=headers)
+        )
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
@@ -319,7 +423,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             )
             output.append(
                 NeMoGymResponseOutputMessageForTraining(
-                    id="msg_empty",
+                    id=_EMPTY_OUTPUT_ITEM_ID,
                     content=[NeMoGymResponseOutputText(text="", annotations=[])],
                     prompt_token_ids=[0],
                     generation_token_ids=[0],
@@ -340,6 +444,65 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 if _as_dict(m).get("role") == "assistant":
                     tokens_per_turn.append(step_tokens)
         return tokens_per_turn
+
+    def _build_trajectory(
+        self,
+        *,
+        invocation_id: str,
+        task_id: str,
+        rollout_id: str,
+        output: list[dict],
+        response_ids: list[str],
+        conversation: list,
+        status: str,
+    ) -> TrajectoryRecord:
+        """Project the verifiers rollout into turns the health checks can read.
+
+        One turn per recorded model response, in call order: that is the only
+        ordering verifiers guarantees back to us. Each turn claims exactly the
+        call it came from, which is what `_canonical_model_call_references`
+        needs -- an invocation-level list is not enough, since the BOUND_CALLS
+        checks read `turns[*].model_calls`.
+        """
+        gaps: list[ObservationGap] = []
+        model_calls = [ModelCallRef(model_ref=self.config.model_server, response_id=rid) for rid in response_ids]
+        if not model_calls:
+            gaps.append(ObservationGap(code="model_call_reference_unavailable", invocation_id=invocation_id))
+
+        groups = _assistant_turn_groups(output)
+        turns: list[TrajectoryTurn] = []
+        now = time()
+        for index, ref in enumerate(model_calls, start=1):
+            # A call with no items behind it is a genuinely empty turn; leaving
+            # `answer` empty is what lets `agent_turn_hollow` say so.
+            items = groups[index - 1] if index <= len(groups) else []
+            turns.append(
+                TrajectoryTurn(
+                    invocation_id=invocation_id,
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    turn_no=index,
+                    timestamp=now,
+                    answer=items,
+                    step_count=sum(1 for item in items if item.get("type") == "function_call"),
+                    model_calls=[ref],
+                )
+            )
+
+        return TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            invocations=[
+                AgentInvocation(
+                    invocation_id=invocation_id,
+                    status=status,
+                    model_calls=model_calls,
+                    conversation=conversation,
+                )
+            ],
+            turns=turns,
+            gaps=gaps,
+        )
 
     async def responses(
         self,
@@ -368,7 +531,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_client(body, request)
+            rollout_id = self._rollout_id_for(body, request)
+            invocation_id = f"verifiers_{uuid4().hex}" if rollout_id else None
+            trajectory = None
+            observations = None
+            client = self._get_client(body, request, invocation_id)
 
             # prefer NeMo RL generation config set in responses_create_params
             # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
@@ -391,12 +558,28 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
             output = self._convert_trajectory_to_output(rollout_output)
 
+            if invocation_id is not None:
+                response_ids = getattr(client, "recorded_response_ids", [])
+                trajectory = self._build_trajectory(
+                    invocation_id=invocation_id,
+                    task_id=str(task_idx),
+                    rollout_id=rollout_id,
+                    output=output,
+                    response_ids=response_ids,
+                    conversation=list(body.responses_create_params.input or []),
+                    status="completed" if response_ids else "incomplete",
+                )
+                observations = AgentObservationBundle(source="verifiers", records=list(trajectory.invocations))
+
             return VerifiersNeMoGymResponse(
+                ng_trajectory=trajectory,
+                ng_agent_observations=observations,
                 id=f"verifiers-{vf_env_id}-{task_idx}",
                 created_at=0,
                 model=self.config.model_name,
                 object="response",
                 output=output,
+                usage=getattr(client, "recorded_usage", None),
                 env_id=vf_env_id,
                 group_id=str(task_idx),
                 reward=reward,
@@ -416,6 +599,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         resp = await self.responses(request, response, body)
 
         return VerifiersAgentVerifyResponse(
+            ng_trajectory=resp.ng_trajectory,
+            ng_agent_observations=resp.ng_agent_observations,
             responses_create_params=body.responses_create_params,
             response=resp,
             reward=resp.reward,
