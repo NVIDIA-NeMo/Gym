@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.episode import AgentSeedSessionRequest, DirectSandboxConnection, EpisodeId, SandboxAccess, TaskId
+from nemo_gym.episode_sessions import AgentSession
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -32,6 +34,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
+    HermesAgentSessionState,
     ModelServerRef,
     ResourcesServerRef,
     _split_input_to_user_and_history,
@@ -78,6 +81,58 @@ class TestSanity:
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
+
+    async def test_sandbox_access_selects_runtime_provider(self, monkeypatch) -> None:
+        hermes = HermesAgent(
+            config=_config(enabled_toolsets=["terminal"]),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        provider_config = {"opensandbox": {"connection": {}}}
+        resolve = MagicMock(return_value=provider_config)
+        bind = AsyncMock()
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.bind_sandbox", bind)
+
+        await hermes.initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(task_source="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(
+                        provider_config_ref="runtime",
+                        descriptor={"sandbox_id": "sandbox"},
+                    ),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        resolve.assert_called_once_with("runtime", {"runtime": {}})
+        bind.assert_awaited_once_with(
+            "session",
+            descriptor={"sandbox_id": "sandbox"},
+            provider_config=provider_config,
+            workdir="/app",
+        )
+
+    async def test_sandbox_access_requires_terminal_only_mode(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(task_source="test", task_id="task"),
+            sandbox_access=SandboxAccess(
+                connection=DirectSandboxConnection(
+                    provider_config_ref="runtime",
+                    descriptor={"sandbox_id": "sandbox"},
+                ),
+                workdir="/app",
+            ),
+        )
+
+        with pytest.raises(ValueError, match=r"enabled_toolsets: \[terminal\]"):
+            await hermes.initialize_agent_session_state("session", body)
 
 
 class _FakeAgent:
@@ -185,6 +240,42 @@ class TestSigtermHandler:
 
         assert hermes.active_agents == set()
         assert hermes.interrupted_agents == set()
+
+    def test_session_activation_rejects_hermes_error_result(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        hermes = HermesAgent(config=_config(), server_client=server_client)
+        hermes._agent_sessions["session"] = AgentSession(
+            request=AgentSeedSessionRequest(
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(task_source="test", task_id="task"),
+            ),
+            state=HermesAgentSessionState(),
+        )
+        monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
+
+        class _ErrorResultAIAgent:
+            def __init__(self, **kwargs) -> None:
+                self._build_api_kwargs = lambda _messages: {}
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {"error": "model request failed", "messages": []}
+
+        monkeypatch.setattr("run_agent.AIAgent", _ErrorResultAIAgent)
+
+        with pytest.raises(RuntimeError, match="model request failed"):
+            asyncio.run(
+                hermes._create_response(
+                    NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+                    rollout_id="rollout",
+                    agent_session_id="session",
+                )
+            )
 
 
 class TestSplitInputToUserAndHistory:
