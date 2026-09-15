@@ -28,7 +28,15 @@ from nemo_gym.server_utils import ServerClient
 class TestBaseResponsesAPIAgent:
     def test_BaseResponsesAPIAgent(self) -> None:
         config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="")
-        BaseResponsesAPIAgent(config=config)
+
+        class TestBaseResponsesAPIAgent(BaseResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+        agent = TestBaseResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        paths = {route.path for route in agent.setup_webserver().routes}
+        assert "/v1/responses" in paths
+        assert "/run" not in paths
 
     def test_SimpleResponsesAPIAgent(self) -> None:
         config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="")
