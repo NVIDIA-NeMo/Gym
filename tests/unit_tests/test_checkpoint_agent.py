@@ -40,6 +40,7 @@ from nemo_gym._checkpoint import (
     AgentStaleAttemptError,
     CheckpointArtifactReference,
     CheckpointPhase,
+    ContinuationRegistry,
     ControlCapabilities,
     ControlFence,
     DuplicateExecutionError,
@@ -891,3 +892,49 @@ async def test_restore_rejects_continuation_dependency_mismatch(tmp_path) -> Non
     await participant.resume()
     await park
     await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_shared_continuation_registry_assigns_restore_to_one_worker() -> None:
+    registry: ContinuationRegistry[tuple[str, int], AgentBoundaryRecord] = ContinuationRegistry()
+    restorer = AgentCheckpointParticipant(continuation_registry=registry, owner_id="restore-worker")
+    record = _boundary(attempt_index=0, boundary_index=3)
+    restorer.install_restored([record])
+
+    first = AgentCheckpointParticipant(continuation_registry=registry, owner_id="worker-1")
+    second = AgentCheckpointParticipant(continuation_registry=registry, owner_id="worker-2")
+    execution = await first.begin("rollout-a", 1, task=None)
+    assert first.continuation(execution) == record
+
+    with pytest.raises(DuplicateExecutionError, match="already has an active /run"):
+        await second.begin("rollout-a", 1, task=None)
+
+    assert registry.release_owner("worker-1") == 1
+    replacement = await second.begin("rollout-a", 1, task=None)
+    assert second.continuation(replacement) == record
+
+
+@pytest.mark.asyncio
+async def test_shared_continuation_registry_retries_lost_completion_until_acknowledged() -> None:
+    registry: ContinuationRegistry[tuple[str, int], AgentBoundaryRecord] = ContinuationRegistry()
+    restorer = AgentCheckpointParticipant(continuation_registry=registry, owner_id="restore-worker")
+    record = _boundary(attempt_index=0, boundary_index=3)
+    restorer.install_restored([record])
+
+    first = AgentCheckpointParticipant(continuation_registry=registry, owner_id="worker-1")
+    execution = await first.begin("rollout-a", 1, task=None)
+    await first.finish(execution, outcome="completed", result={"id": "result-1"})
+
+    second = AgentCheckpointParticipant(continuation_registry=registry, owner_id="worker-2")
+    with pytest.raises(DuplicateExecutionError, match="already has an active /run"):
+        await second.begin("rollout-a", 1, task=None)
+
+    assert registry.release_owner("worker-1") == 1
+    replacement = await second.begin("rollout-a", 1, task=None)
+    assert second.continuation(replacement) == record
+    await second.finish(replacement, outcome="completed", result={"id": "result-2"})
+    await second.acknowledge_completed([_completion_receipt(second, "rollout-a", 1)])
+
+    third = AgentCheckpointParticipant(continuation_registry=registry, owner_id="worker-3")
+    with pytest.raises(AgentStaleAttemptError, match="was retired"):
+        await third.begin("rollout-a", 1, task=None)

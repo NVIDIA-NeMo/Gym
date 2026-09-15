@@ -38,6 +38,11 @@ from nemo_gym._checkpoint.artifacts import (
     write_jsonl_artifact,
 )
 from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPhase, ControlError, ControlFence
+from nemo_gym._checkpoint.coordinator import (
+    ContinuationAlreadyOwnedError,
+    ContinuationRegistry,
+    ContinuationRetiredError,
+)
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
 
@@ -286,11 +291,18 @@ class AgentCheckpointParticipant:
     that count is nonzero.
     """
 
-    def __init__(self, instance_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        instance_name: Optional[str] = None,
+        *,
+        continuation_registry: Optional[ContinuationRegistry[tuple[str, int], AgentBoundaryRecord]] = None,
+        owner_id: Optional[str] = None,
+    ) -> None:
         self.instance_name = _validate_instance_name(instance_name)
         self._executions: dict[tuple[str, int], AgentExecution] = {}
         self._generations: dict[tuple[str, int], int] = {}
-        self._restored: dict[tuple[str, int], AgentBoundaryRecord] = {}
+        self._continuation_registry = continuation_registry or ContinuationRegistry()
+        self._continuation_owner_id = owner_id or f"{os.getpid()}:{id(self):x}"
         # These exact process-lifetime fences make delayed retries deterministic.
         # They cannot be bounded safely until the wire protocol supplies a
         # coordinated epoch/high-watermark after which old identities cannot recur.
@@ -311,7 +323,7 @@ class AgentCheckpointParticipant:
             raise AgentStaleAttemptError(
                 f"rollout {rollout_id!r} attempt {attempt_index} completed result was acknowledged"
             )
-        if key in self._tombstones:
+        if key in self._tombstones or self._continuation_registry.is_retired(key):
             raise AgentStaleAttemptError(f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore")
         existing = self._executions.get(key)
         if existing is not None:
@@ -322,12 +334,25 @@ class AgentCheckpointParticipant:
             raise AgentAdmissionClosedError("agent admission is closed for checkpoint preparation")
         generation = self._generations.get(key, 0) + 1
         self._generations[key] = generation
+        try:
+            continuation = self._continuation_registry.claim_or_register(
+                key,
+                owner_id=self._continuation_owner_id,
+            )
+        except ContinuationRetiredError as error:
+            raise AgentStaleAttemptError(
+                f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore"
+            ) from error
+        except ContinuationAlreadyOwnedError as error:
+            raise DuplicateExecutionError(
+                f"rollout {rollout_id!r} attempt {attempt_index} already has an active /run"
+            ) from error
         execution = AgentExecution(
             rollout_id,
             attempt_index,
             generation,
             task,
-            self._restored.pop(key, None),
+            continuation,
         )
         self._executions[key] = execution
         await self._notify()
@@ -400,6 +425,10 @@ class AgentCheckpointParticipant:
                 execution.result_identity, execution.result_digest = _result_receipt(result)
                 execution.continuation = None
                 execution.outer_task = None
+                self._continuation_registry.mark_completed(
+                    (execution.rollout_id, execution.attempt_index),
+                    owner_id=self._continuation_owner_id,
+                )
             else:
                 execution.state = AgentExecutionState.RETIRED
                 key = (execution.rollout_id, execution.attempt_index)
@@ -520,7 +549,6 @@ class AgentCheckpointParticipant:
                 "completed_unacknowledged": True,
             }
         self._remember_tombstone(key)
-        self._restored.pop(key, None)
         execution = self._executions.pop(key, None)
         if execution is None:
             await self._notify()
@@ -544,7 +572,12 @@ class AgentCheckpointParticipant:
         key = (rollout_id, attempt_index)
         if key in self._executions:
             raise DuplicateExecutionError(f"rollout {rollout_id!r} attempt {attempt_index} is already active")
-        discarded = self._restored.pop(key, None) is not None
+        try:
+            discarded = self._continuation_registry.discard_available(key)
+        except ContinuationAlreadyOwnedError as error:
+            raise DuplicateExecutionError(
+                f"rollout {rollout_id!r} attempt {attempt_index} is already active"
+            ) from error
         await self._notify()
         return {"discarded": discarded}
 
@@ -602,6 +635,7 @@ class AgentCheckpointParticipant:
                 receipt.result_identity,
                 receipt.result_digest,
             )
+            self._remember_tombstone(key)
             self._generations.pop(key, None)
         await self._notify()
         return receipts
@@ -677,13 +711,17 @@ class AgentCheckpointParticipant:
         ]
 
     def install_restored(self, records: list[AgentBoundaryRecord]) -> None:
+        self._continuation_registry.install(
+            {(record.rollout_id, record.attempt_index + 1): record for record in records},
+            retired={(record.rollout_id, record.attempt_index) for record in records},
+        )
         for record in records:
             self._remember_tombstone((record.rollout_id, record.attempt_index))
-            self._restored[(record.rollout_id, record.attempt_index + 1)] = record
         self._accepting = False
 
     def _remember_tombstone(self, key: tuple[str, int]) -> None:
         self._tombstones.add(key)
+        self._continuation_registry.retire(key)
         self._generations.pop(key, None)
 
     def _owns(self, execution: AgentExecution) -> bool:

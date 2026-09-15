@@ -151,6 +151,23 @@ async def test_workers_register_and_report(sock_dir) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_disconnect_releases_its_continuation_claims(sock_dir) -> None:
+    pool = await _start_pool(sock_dir, expected=2, connect=2)
+    try:
+        key = ("rollout-a", 1)
+        continuation = {"boundary_index": 3}
+        pool.coordinator.continuation_registry.install({key: continuation})
+        assert pool.coordinator.continuation_registry.claim_or_register(key, owner_id="w1") == continuation
+
+        await pool.workers[1][1].stop()
+        await pool.coordinator.wait_until(lambda status: status["workers"]["live"] == 1, timeout_s=2.0)
+
+        assert pool.coordinator.continuation_registry.claim_or_register(key, owner_id="w0") == continuation
+    finally:
+        await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
 async def test_duplicate_live_worker_id_rejects_newcomer_without_displacing_original(sock_dir) -> None:
     pool = await _start_pool(sock_dir, expected=2, connect=1)
     newcomer_limiter = AdmissionLimiter()

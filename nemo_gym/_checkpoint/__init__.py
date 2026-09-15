@@ -104,6 +104,9 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.coordinator import (
     AdmissionCoordinator,
+    ContinuationAlreadyOwnedError,
+    ContinuationRegistry,
+    ContinuationRetiredError,
     MissingWorkersError,
     WorkerAdmissionAgent,
     WorkerRegistrationError,
@@ -205,6 +208,9 @@ __all__ = [
     "AdmissionLimiter",
     "AdmissionMiddleware",
     "AdmissionCoordinator",
+    "ContinuationAlreadyOwnedError",
+    "ContinuationRegistry",
+    "ContinuationRetiredError",
     "AdmissionParkedError",
     "AdmissionState",
     "AdmissionTicket",

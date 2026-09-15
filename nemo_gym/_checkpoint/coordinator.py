@@ -41,8 +41,9 @@ are one service on one host; nothing here crosses machines.
 
 import asyncio
 import json
+import threading
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Generic, Hashable, Iterable, Optional, TypeVar
 
 from fastapi import FastAPI, Header, Query
 
@@ -65,6 +66,159 @@ from nemo_gym._checkpoint.model_control_contracts import (
     ModelAdmissionResumeRequest,
 )
 from nemo_gym.token_id_capture.control_routes import require_control_auth
+
+
+_ContinuationKey = TypeVar("_ContinuationKey", bound=Hashable)
+_ContinuationValue = TypeVar("_ContinuationValue")
+
+
+class ContinuationAlreadyOwnedError(RuntimeError):
+    """A second worker attempted to own an execution that is already live."""
+
+
+class ContinuationRetiredError(RuntimeError):
+    """A delayed request attempted to revive a retired execution identity."""
+
+
+class _ContinuationEntry(Generic[_ContinuationValue]):
+    """Coordinator-local ownership state for one execution identity."""
+
+    def __init__(self, value: Optional[_ContinuationValue], owner_id: Optional[str]) -> None:
+        self.value = value
+        self.owner_id = owner_id
+        self.completed = False
+
+
+class ContinuationRegistry(Generic[_ContinuationKey, _ContinuationValue]):
+    """Atomically assign restored continuations to one worker.
+
+    The coordinator owns one registry per server instance. Values are small
+    checkpoint records or references; token and conversation payloads remain
+    in their existing durable stores. A worker claims every execution before
+    running it, which also prevents two workers from executing the same fresh
+    request concurrently.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[_ContinuationKey, _ContinuationEntry[_ContinuationValue]] = {}
+        self._retired: set[_ContinuationKey] = set()
+        self._lock = threading.RLock()
+
+    def install(
+        self,
+        entries: dict[_ContinuationKey, _ContinuationValue],
+        *,
+        retired: Iterable[_ContinuationKey] = (),
+    ) -> None:
+        """Install restored values as unclaimed and fence their source attempts."""
+        retired_keys = set(retired)
+        with self._lock:
+            for key, value in entries.items():
+                if key in self._retired or key in retired_keys:
+                    raise ContinuationRetiredError(f"continuation identity {key!r} is already retired")
+                existing = self._entries.get(key)
+                if existing is None or (
+                    existing.owner_id is None and not existing.completed and existing.value == value
+                ):
+                    continue
+                raise ContinuationAlreadyOwnedError(
+                    f"continuation identity {key!r} conflicts with existing coordinator state"
+                )
+            self._retired.update(retired_keys)
+            for key, value in entries.items():
+                self._entries.setdefault(key, _ContinuationEntry(value, None))
+
+    def claim_or_register(self, key: _ContinuationKey, *, owner_id: str) -> Optional[_ContinuationValue]:
+        """Claim a restored continuation or register a fresh execution."""
+        if not owner_id:
+            raise ValueError("continuation owner_id must be non-empty")
+        with self._lock:
+            if key in self._retired:
+                raise ContinuationRetiredError(f"continuation identity {key!r} is retired")
+            entry = self._entries.get(key)
+            if entry is None:
+                self._entries[key] = _ContinuationEntry(None, owner_id)
+                return None
+            if entry.owner_id is None:
+                entry.owner_id = owner_id
+                return entry.value
+            if entry.owner_id == owner_id and not entry.completed:
+                return entry.value
+            raise ContinuationAlreadyOwnedError(f"continuation identity {key!r} is already owned by another worker")
+
+    def mark_completed(self, key: _ContinuationKey, *, owner_id: str) -> None:
+        """Retain ownership until the completed result is durably acknowledged."""
+        with self._lock:
+            entry = self._require_owner(key, owner_id)
+            entry.completed = True
+
+    def retire(self, key: _ContinuationKey, *, owner_id: Optional[str] = None) -> None:
+        """Permanently fence an execution after failure or acknowledgement."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and owner_id is not None and entry.owner_id != owner_id:
+                raise ContinuationAlreadyOwnedError(f"continuation identity {key!r} is owned by another worker")
+            self._entries.pop(key, None)
+            self._retired.add(key)
+
+    def discard_available(self, key: _ContinuationKey) -> bool:
+        """Discard an unclaimed restored continuation so the attempt restarts."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return False
+            if entry.owner_id is not None:
+                raise ContinuationAlreadyOwnedError(f"continuation identity {key!r} is already owned by a worker")
+            del self._entries[key]
+            return True
+
+    def release_owner(self, owner_id: str) -> int:
+        """Make a failed worker's claims available for another worker.
+
+        Fresh executions have no continuation to replay and are removed.
+        Restored executions retain their saved continuation and become
+        claimable again. Completed results are also retried because their
+        process-local response disappeared with the failed worker.
+        """
+        released = 0
+        with self._lock:
+            for key, entry in list(self._entries.items()):
+                if entry.owner_id != owner_id:
+                    continue
+                released += 1
+                if entry.value is None:
+                    del self._entries[key]
+                else:
+                    entry.owner_id = None
+                    entry.completed = False
+        return released
+
+    def is_retired(self, key: _ContinuationKey) -> bool:
+        with self._lock:
+            return key in self._retired
+
+    def status(self) -> dict[str, int]:
+        """Return bounded cardinality diagnostics without exposing payloads."""
+        with self._lock:
+            available = sum(entry.owner_id is None for entry in self._entries.values())
+            completed = sum(entry.completed for entry in self._entries.values())
+            return {
+                "entries": len(self._entries),
+                "available": available,
+                "claimed": len(self._entries) - available,
+                "completed": completed,
+                "retired": len(self._retired),
+            }
+
+    def _require_owner(
+        self,
+        key: _ContinuationKey,
+        owner_id: str,
+    ) -> _ContinuationEntry[_ContinuationValue]:
+        entry = self._entries.get(key)
+        if entry is None or entry.owner_id != owner_id:
+            raise ContinuationAlreadyOwnedError(f"continuation identity {key!r} is not owned by worker {owner_id!r}")
+        return entry
 
 
 class MissingWorkersError(ControlError):
@@ -116,9 +270,16 @@ class AdmissionCoordinator:
     drained" apart from "the missing worker never reported".
     """
 
-    def __init__(self, socket_path: Path, expected_workers: int) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        expected_workers: int,
+        *,
+        continuation_registry: Optional[ContinuationRegistry[Any, Any]] = None,
+    ) -> None:
         self.socket_path = Path(socket_path)
         self.expected_workers = expected_workers
+        self.continuation_registry = continuation_registry or ContinuationRegistry()
         self._workers: dict[str, WorkerRecord] = {}
         self._state = AdmissionState.ACCEPTING
         self._checkpoint_id: Optional[str] = None
@@ -214,6 +375,7 @@ class AdmissionCoordinator:
         finally:
             if record is not None:
                 record.connected = False
+                self.continuation_registry.release_owner(record.worker_id)
                 await self._notify()
             writer.close()
 
