@@ -15,7 +15,7 @@
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
@@ -27,6 +27,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.episode import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+)
+from nemo_gym.episode_sessions import AGENT_SESSION_ACTIVE_KEY, AgentCloseSessionResult, AgentSession
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -39,6 +46,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
@@ -66,6 +74,15 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    supports_agent_sessions: ClassVar[bool] = False
+    _agent_sessions: dict[str, AgentSession]
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        if self.supports_agent_sessions:
+            if self.config.num_workers not in (None, 1):
+                raise ValueError("Agent sessions require num_workers=1")
+            self._agent_sessions = {}
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -98,8 +115,93 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        if self.supports_agent_sessions:
+            app.post("/v1/agent_sessions")(self.seed_agent_session)
+            app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        """Create agent-owned state for one episode."""
+        agent_session_id = request.session[SESSION_ID_KEY]
+        if agent_session_id in self._agent_sessions:
+            raise ValueError(f"Agent session already exists: {agent_session_id}")
+        state = await self.initialize_agent_session_state(agent_session_id, body)
+        self._agent_sessions[agent_session_id] = AgentSession(request=body, state=state)
+        request.session[AGENT_SESSION_ACTIVE_KEY] = True
+        return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Close agent-owned state and return its final artifacts."""
+        agent_session_id = request.session[SESSION_ID_KEY]
+        if body.agent_session_id != agent_session_id:
+            raise ValueError("agent_session_id does not match the session cookie")
+        session = self.require_agent_session(body.agent_session_id)
+        result = await self.close_agent_session_state(body.agent_session_id, session)
+        del self._agent_sessions[body.agent_session_id]
+        request.session.pop(AGENT_SESSION_ACTIVE_KEY, None)
+        return AgentCloseSessionResponse(
+            agent_session_id=body.agent_session_id,
+            agent_observations=result.agent_observations,
+            resources_cookies=result.resources_cookies,
+        )
+
+    def require_agent_session(self, agent_session_id: str) -> AgentSession:
+        """Resolve worker-local state for an agent session."""
+        try:
+            return self._agent_sessions[agent_session_id]
+        except KeyError as error:
+            raise ValueError(f"Unknown agent_session_id: {agent_session_id}") from error
+
+    def begin_agent_activation(self, agent_session_id: str, rollout_id: str) -> AgentSession:
+        """Validate and mark the single activation allowed for a session."""
+        session = self.require_agent_session(agent_session_id)
+        if rollout_id != session.request.episode_id.capture_key:
+            raise ValueError("Agent-session episode_id does not match the rollout route")
+        if session.activation_started:
+            raise ValueError("Agent session has already been activated")
+        session.activation_started = True
+        return session
+
+    @staticmethod
+    def agent_session_id_from_request(request: Request | None) -> str | None:
+        """Read episode-session correlation without extending the Responses body."""
+        if request is None:
+            return None
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping):
+            return None
+        if session.get(AGENT_SESSION_ACTIVE_KEY) is not True:
+            return None
+        agent_session_id = session.get(SESSION_ID_KEY)
+        return agent_session_id if isinstance(agent_session_id, str) else None
+
+    async def initialize_agent_session_state(
+        self,
+        agent_session_id: str,
+        body: AgentSeedSessionRequest,
+    ) -> object:
+        """Initialize agent-specific state. Session-capable subclasses must override."""
+        raise NotImplementedError
+
+    async def close_agent_session_state(
+        self,
+        agent_session_id: str,
+        session: AgentSession,
+    ) -> AgentCloseSessionResult:
+        """Close agent-specific state. Session-capable subclasses must override."""
+        raise NotImplementedError
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
