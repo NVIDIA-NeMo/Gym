@@ -423,7 +423,9 @@ class TestBuildTaskTextBlock:
     def test_folds_delivery_notice_between_task_and_extracted_text(self) -> None:
         block = _build_task_text_block(
             prompt_blocks=[{"type": "input_text", "text": "Q?"}],
-            delivery_notice_blocks=[{"type": "input_text", "text": "<document_delivery>\ncomposites\n</document_delivery>"}],
+            delivery_notice_blocks=[
+                {"type": "input_text", "text": "<document_delivery>\ncomposites\n</document_delivery>"}
+            ],
             page_text_blocks=[{"type": "input_text", "text": "## Page 1\n\nbody"}],
         )
         text = block["text"]
