@@ -20,7 +20,7 @@ per column:
 ``sql_context`` itself is a per-table, per-column schema (data type, description, example
 values) followed by a "#### Foreign key" section -- see ``build_sql_context``.
 
-Requires ``bm25s`` and ``nltk`` (``uv sync --extra birdbench``).
+Requires ``bm25s`` and ``nltk`` (``uv pip install bm25s nltk``, see benchmarks/birdbench/README.md).
 """
 
 import json

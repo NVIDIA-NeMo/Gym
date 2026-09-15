@@ -18,7 +18,7 @@ question text, so the values shown are ones actually likely to be relevant. See
 Calls ``ensure_bird_sql()`` so the download cache is shared with the ``bird_sql`` resource
 server (avoids a duplicate ~1.4 GB download).
 
-Requires ``bm25s`` and ``nltk`` (``uv sync --extra birdbench``), unlike a plain schema dump.
+Requires ``bm25s`` and ``nltk`` (``uv pip install bm25s nltk``, see benchmarks/birdbench/README.md), unlike a plain schema dump.
 """
 
 import json

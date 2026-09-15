@@ -9,8 +9,11 @@ Execution-based text-to-SQL on BIRD dev, bound to the `bird_sql` resource server
 
 ## Preparation
 
+Dataset prep needs `bm25s` and `nltk` for per-question BM25 retrieval (see below);
+neither is a `pyproject.toml` dependency, so install them separately:
+
 ```bash
-uv sync --extra birdbench
+uv pip install bm25s nltk
 gym eval prepare --benchmark birdbench
 ```
 
