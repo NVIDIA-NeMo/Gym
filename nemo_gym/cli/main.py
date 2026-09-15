@@ -991,7 +991,10 @@ COMMANDS = {
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
-            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
+            _value_flag(
+                "output", "output_jsonl_fpath", "Output rollouts JSONL file (.jsonl or .jsonl.zst).", aliases=("-o",)
+            ),
+            _bool_flag("rollouts-file-compress", "rollouts_file_compress", "Compress rollout output with Zstandard."),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
@@ -1038,6 +1041,9 @@ COMMANDS = {
                 "output_jsonl_fpath",
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
+            ),
+            _bool_flag(
+                "rollouts-file-compress", "rollouts_file_compress", "Compress merged rollout output with Zstandard."
             ),
             _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
             _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
@@ -1088,6 +1094,11 @@ COMMANDS = {
             _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
+            _bool_flag(
+                "rollouts-file-compress",
+                "rollouts_file_compress",
+                "Compress reverified rollout output with Zstandard.",
+            ),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("limit", "limit", "Maximum number of examples to re-verify."),
             _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),

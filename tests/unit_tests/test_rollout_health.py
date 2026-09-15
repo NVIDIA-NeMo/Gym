@@ -354,7 +354,9 @@ def test_missing_canonical_trajectory_makes_trajectory_checks_unobserved(tmp_pat
     assert not digest.findings
 
 
+@pytest.mark.parametrize("compressed", [False, True])
 async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
+    compressed: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -394,7 +396,9 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             return futures
 
         async def _call_aggregate_metrics(self, results, rows, output_fpath):
-            metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            from nemo_gym.path_utils import aggregate_metrics_path_for
+
+            metrics_path = aggregate_metrics_path_for(output_fpath)
             metrics_path.write_bytes(orjson.dumps([{"key_metrics": {"reward": 1.0}}]))
             return metrics_path
 
@@ -404,7 +408,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
         run_dir.mkdir()
         input_path = run_dir / "input.jsonl"
         input_path.write_bytes(orjson.dumps(source, option=orjson.OPT_APPEND_NEWLINE))
-        output_path = run_dir / "rollouts.jsonl"
+        output_path = run_dir / ("rollouts.jsonl.zst" if compressed else "rollouts.jsonl")
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_path),
             output_jsonl_fpath=str(output_path),
@@ -1271,3 +1275,119 @@ def test_health_check_config_accepts_csv_and_rejects_unknown_ids(tmp_path: Path)
             upload_rollouts=False,
             health_check_ignored_checks=["not_a_check"],
         )
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_compressed_health_matches_plain_with_malformed_and_duplicate_rows(tmp_path, monkeypatch, workers):
+    from nemo_gym.jsonl_io import open_jsonl
+
+    rows = [_record(2, 0), _record(1, 0), _record(2, 0)]
+    raw = b"\n" + b"".join(orjson.dumps(row) + b"\n" for row in rows) + b"not-json\n[]\n"
+    plain = tmp_path / "rollouts.jsonl"
+    plain.write_bytes(raw)
+    expected = run_health_checks(plain, output_dir=tmp_path / "plain", workers=1)
+    compressed = tmp_path / "rollouts.jsonl.zst"
+    with open_jsonl(compressed, "wb") as handle:
+        for line in raw.splitlines(keepends=True):
+            handle.write(line)
+            handle.flush()  # Exercise independently completed frames, as collection writes them.
+
+    def forbidden_index(*args):
+        raise AssertionError("Compressed health checking must not index/decompress the entire input upfront")
+
+    monkeypatch.setattr(health, "_index_jsonl", forbidden_index)
+    actual = run_health_checks(compressed, output_dir=tmp_path / "compressed", workers=workers)
+    assert actual.summary == expected.summary
+    # Physical source locators correctly point at the compressed filename.
+    assert actual.verdicts_path.read_bytes().replace(str(compressed).encode(), str(plain).encode()) == (
+        expected.verdicts_path.read_bytes()
+    )
+    plain.unlink()
+    assert health.health_check_run_dir(tmp_path, workers=1).summary == expected.summary
+
+
+def test_stream_health_mixed_sources_preserves_physical_identity(tmp_path):
+    from nemo_gym.jsonl_io import open_jsonl
+
+    plain = tmp_path / "a.jsonl"
+    compressed = tmp_path / "b.jsonl.zst"
+    plain.write_bytes(b"\n[]\n")
+    with open_jsonl(compressed, "wb") as handle:
+        handle.write(b"\n\ninvalid\n")
+    result = run_health_checks([plain, compressed], workers=1)
+    assert [digest.task_index for digest in result.rollouts] == [
+        "__unreadable_record__:input-0:line-2",
+        "__unreadable_record__:input-1:line-3",
+    ]
+
+
+@pytest.mark.parametrize("byte_limit", [1, 256 * 1024])
+def test_stream_health_bounds_pending_payloads(tmp_path, monkeypatch, byte_limit):
+    from nemo_gym.jsonl_io import open_jsonl
+
+    compressed = tmp_path / "rollouts.jsonl.zst"
+    with open_jsonl(compressed, "wb") as handle:
+        for index in range(15):
+            handle.write(orjson.dumps(_record(index, 0)) + b"\n")
+    monkeypatch.setattr(health, "_STREAM_MAX_PENDING_BYTES", byte_limit)
+    outstanding = []
+
+    class DeferredResult:
+        def __init__(self, function, item):
+            self.function, self.item = function, item
+
+        def result(self):
+            outstanding.remove(self)
+            return self.function(self.item)
+
+    class BoundedPool:
+        def __init__(self, *, max_workers):
+            assert max_workers == 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, function, item):
+            future = DeferredResult(function, item)
+            outstanding.append(future)
+            assert len(outstanding) <= 4
+            assert len(outstanding) == 1 or sum(f.item.line.length for f in outstanding) <= byte_limit
+            return future
+
+    monkeypatch.setattr(health, "ProcessPoolExecutor", BoundedPool)
+    assert len(run_health_checks(compressed, workers=2).rollouts) == 15
+    assert not outstanding
+
+
+def test_compressed_health_retries_serially_after_pool_failure(tmp_path, monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+
+    from nemo_gym.jsonl_io import open_jsonl
+
+    compressed = tmp_path / "rollouts.jsonl.zst"
+    with open_jsonl(compressed, "wb") as handle:
+        handle.write(orjson.dumps(_record(1, 0)) + b"\n")
+    expected = run_health_checks(compressed, workers=1).summary
+
+    class BrokenPool:
+        def __init__(self, **kwargs):
+            raise BrokenProcessPool("test process failure")
+
+    monkeypatch.setattr(health, "ProcessPoolExecutor", BrokenPool)
+    with pytest.warns(RuntimeWarning, match="rereading rollout streams"):
+        assert run_health_checks(compressed, workers=2).summary == expected
+
+
+def test_compressed_health_rejects_truncated_stream_without_reports(tmp_path):
+    from nemo_gym.jsonl_io import open_jsonl
+
+    compressed = tmp_path / "rollouts.jsonl.zst"
+    with open_jsonl(compressed, "wb") as handle:
+        handle.write(orjson.dumps(_record(1, 0)) + b"\n")
+    compressed.write_bytes(compressed.read_bytes()[:-1])
+    with pytest.raises(EOFError):
+        run_health_checks(compressed, workers=1)
+    assert not (tmp_path / "quality_summary.json").exists()

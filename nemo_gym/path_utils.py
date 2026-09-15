@@ -15,7 +15,13 @@
 from pathlib import Path
 
 
+def uncompressed_path(path: Path) -> Path:
+    """Keep artifact stems stable for both .jsonl and .jsonl.zst inputs."""
+    return path.with_suffix("") if path.suffix == ".zst" else path
+
+
 def failures_path_for(output_fpath: Path) -> Path:
+    output_fpath = uncompressed_path(output_fpath)
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
@@ -25,4 +31,5 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     Mirrors how rollout collection and reverification name the file they write, so consumers
     (e.g. `gym eval compare`) derive the same path the writers produced.
     """
+    output_fpath = uncompressed_path(output_fpath)
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")

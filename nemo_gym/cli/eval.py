@@ -413,8 +413,10 @@ def e2e_rollout_collection():  # pragma: no cover
         data_processor_config_dict["should_download"] = True
         data_processor_config_dict["mode"] = "train_preparation"
 
+        from nemo_gym.path_utils import uncompressed_path
+
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
+        data_process_output_dir = uncompressed_path(output_fpath).with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
     server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
@@ -579,7 +581,9 @@ def reward_profile():  # pragma: no cover
     with open(config.materialized_inputs_jsonl_fpath) as f:
         rows = [loads_jsonl_line(line, config.materialized_inputs_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
-    with open(config.rollouts_jsonl_fpath) as f:
+    from nemo_gym.jsonl_io import open_jsonl
+
+    with open_jsonl(config.rollouts_jsonl_fpath) as f:
         results = [loads_jsonl_line(line, config.rollouts_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
     # Results may be out of order.
