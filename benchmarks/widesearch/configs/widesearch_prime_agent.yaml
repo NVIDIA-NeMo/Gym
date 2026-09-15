@@ -1,0 +1,85 @@
+widesearch:
+  resources_servers:
+    widesearch:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: WideSearch benchmark
+      value: Evaluate wide search coverage and accuracy
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+        top_p: 1.0
+widesearch_prime_agent_benchmark:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run WideSearch with PrimeAgent in a sandbox
+      value: Evaluate agentic web search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: widesearch
+      harness_module: responses_api_agents.prime_agent.app
+      harness_class: PrimeAgent
+      harness_config_class: PrimeAgentConfig
+      harness_kwargs:
+        model: ${policy_model_name}
+        thinking: null
+        timeout: 7200
+        system_prompt: You must search with Exa before answering. If no native Exa tool is available, use the shell to call the Exa search API with the EXA_API_KEY already in the environment. Never print the key. Return exactly the requested Markdown table.
+        context_window: 262144
+        max_output_tokens: 131072
+        prime_agent_version: 0.7.0
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: >-
+        python3 -m pip install -q
+        https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+        && prime_agent_dir=$(mktemp -d)
+        && curl -fsSL
+        https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/prime-agent-0.7.0.tgz
+        -o "$prime_agent_dir/prime-agent.tgz"
+        && curl -fsSL
+        https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/prime-agent-ai-0.7.0.tgz
+        -o "$prime_agent_dir/prime-agent-ai.tgz"
+        && curl -fsSL
+        https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/prime-agent-core-0.7.0.tgz
+        -o "$prime_agent_dir/prime-agent-core-original.tgz"
+        && curl -fsSL
+        https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/prime-agent-tui-0.7.0.tgz
+        -o "$prime_agent_dir/prime-agent-tui.tgz"
+        && mkdir "$prime_agent_dir/main" "$prime_agent_dir/core"
+        && tar -xzf "$prime_agent_dir/prime-agent.tgz" -C "$prime_agent_dir/main"
+        && tar -xzf "$prime_agent_dir/prime-agent-core-original.tgz" -C "$prime_agent_dir/core"
+        && cd "$prime_agent_dir/core/package"
+        && npm pkg set "dependencies.@earendil-works/pi-ai=0.7.0"
+        && npm pack --silent --pack-destination "$prime_agent_dir"
+        && cd "$prime_agent_dir/main/package"
+        && npm pkg set
+        "dependencies.@earendil-works/pi-ai=file:$prime_agent_dir/prime-agent-ai.tgz"
+        "dependencies.@earendil-works/pi-agent-core=file:$prime_agent_dir/prime-agent-core-0.7.0.tgz"
+        "dependencies.@earendil-works/pi-tui=file:$prime_agent_dir/prime-agent-tui.tgz"
+        && npm pack --silent --pack-destination "$prime_agent_dir"
+        && npm install -g "$prime_agent_dir/prime-agent-0.7.0.tgz"
+        && prime-agent --version
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 9000
+        resources:
+          memory_mib: 8192
+      sandbox_model_base_url: null
+      exa_api_key: null
+      token_id_capture: false
+      datasets:
+        - name: widesearch
+          type: benchmark
+          jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
+          prepare_script: benchmarks/widesearch/prepare.py
+          license: MIT

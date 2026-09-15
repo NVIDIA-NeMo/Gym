@@ -1,0 +1,54 @@
+deepsearchqa:
+  resources_servers:
+    deepsearchqa:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Grade DeepSearchQA single-answer and set-answer responses
+      value: Evaluate multi-step web research answers
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+        top_p: 1.0
+deepsearchqa_codex_benchmark:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run DeepSearchQA with CodexAgent in a sandbox
+      value: Evaluate agentic web search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: deepsearchqa
+      harness_module: responses_api_agents.codex_agent.app
+      harness_class: CodexAgent
+      harness_config_class: CodexAgentConfig
+      harness_kwargs:
+        model: ${policy_model_name}
+        timeout: 7200
+        sandbox_mode: danger-full-access
+        system_prompt: You must call an Exa MCP search tool before answering. Research the request on the web and return a complete final answer.
+        reasoning_effort: null
+        codex_version: 0.144.4
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 9000
+        resources:
+          memory_mib: 8192
+      sandbox_model_base_url: null
+      exa_api_key: null
+      token_id_capture: false
+      datasets:
+        - name: deepsearchqa
+          type: benchmark
+          jsonl_fpath: benchmarks/deepsearchqa/data/deepsearchqa_benchmark.jsonl
+          prepare_script: benchmarks/deepsearchqa/prepare.py

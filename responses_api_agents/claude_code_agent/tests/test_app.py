@@ -110,6 +110,23 @@ class TestSanity:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
 
+    async def test_response_preserves_run_metadata(self) -> None:
+        agent = _make_agent()
+        metadata = {
+            "status": "incomplete",
+            "error_type": "error_max_turns",
+            "num_turns": 200,
+            "duration_ms": 1234.0,
+            "subtype": "error_max_turns",
+            "is_error": True,
+        }
+        agent._run_claude_code = AsyncMock(return_value=([], "model", metadata))
+        request = MagicMock(path_params={})
+
+        response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+        assert json.loads(response.metadata["agent_run"]) == metadata
+
 
 class TestBuildCommand:
     def test_default_passes_bare(self) -> None:
