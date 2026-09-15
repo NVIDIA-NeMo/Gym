@@ -39,6 +39,30 @@ class FakeSandbox:
         self.stopped += 1
 
 
+def test_opensandbox_pool_skips_local_docker_vm_resolution() -> None:
+    assert (
+        osworld_sandbox._resolve_pool_vm_path(
+            {"opensandbox": {"connection": {}}},
+            None,
+        )
+        == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
+    )
+
+
+def test_explicit_vm_path_is_preserved_for_opensandbox() -> None:
+    assert (
+        osworld_sandbox._resolve_pool_vm_path(
+            {"opensandbox": {"connection": {}}},
+            "caller-supplied-path",
+        )
+        == "caller-supplied-path"
+    )
+
+
+def test_docker_sandbox_does_not_receive_pool_sentinel() -> None:
+    assert osworld_sandbox._resolve_pool_vm_path({"docker": {}}, None) is None
+
+
 def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "smoke-run")
     vm_path = tmp_path / "Ubuntu.qcow2"
@@ -47,6 +71,7 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         {"docker": {}},
         {
             "image": "docker://osworld@sha256:abc",
+            "metadata": {osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"},
             "ports": None,
             "resources": {"cpu": 4, "memory_mib": 16384},
             "provider_options": {"run_args": ["--security-opt", "label=disable"]},
@@ -73,6 +98,11 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         spec.provider_options["run_args"],
         "--label",
         "nemo-gym.run-id=smoke-run",
+    )
+    assert osworld_sandbox._has_option(
+        spec.provider_options["run_args"],
+        "--label",
+        f"{osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY}=execution-test-001",
     )
 
 
@@ -117,6 +147,56 @@ def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
 
 
+def test_build_spec_skips_local_vm_and_kvm_checks_on_remote_docker_host(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "ssh://remote-docker")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    spec = provider._build_spec(
+        "/srv/osworld-assets/Ubuntu.qcow2",
+        headless=True,
+        os_type="Ubuntu",
+    )
+
+    assert "/srv/osworld-assets/Ubuntu.qcow2:/System.qcow2:ro" in spec.provider_options["volumes"]
+    assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+
+
+def test_build_spec_honors_explicit_remote_daemon_behind_unix_proxy(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "unix:///run/osworld-docker.sock")
+    monkeypatch.setenv("OSWORLD_DOCKER_REMOTE", "true")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    spec = provider._build_spec(
+        "/srv/osworld-assets/Ubuntu.qcow2",
+        headless=True,
+        os_type="Ubuntu",
+    )
+
+    assert "/srv/osworld-assets/Ubuntu.qcow2:/System.qcow2:ro" in spec.provider_options["volumes"]
+    assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+
+
+def test_build_spec_rejects_invalid_remote_daemon_override(monkeypatch) -> None:
+    monkeypatch.setenv("OSWORLD_DOCKER_REMOTE", "remote")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    with pytest.raises(ValueError, match="OSWORLD_DOCKER_REMOTE"):
+        provider._build_spec(
+            "/srv/osworld-assets/Ubuntu.qcow2",
+            headless=True,
+            os_type="Ubuntu",
+        )
+
+
 def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "opensandbox-run")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
@@ -131,6 +211,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
         {
             "ttl_s": 1800,
             "image": "busybox:1.36",
+            "metadata": {osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"},
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
@@ -156,6 +237,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
     }
     assert spec.metadata["osworld-provider"] == "gym-opensandbox-sandbox"
     assert spec.metadata["run-id"] == "opensandbox-run"
+    assert spec.metadata[osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY] == ("execution-test-001")
     assert spec.entrypoint is None
     assert spec.env == {}
     assert spec.resources.cpu is None

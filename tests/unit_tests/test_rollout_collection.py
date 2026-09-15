@@ -38,6 +38,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    EXECUTION_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -68,6 +69,7 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
+    _trajectory_identity,
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
@@ -164,6 +166,19 @@ class TestLoadsJsonlLine:
     def test_parses_valid_line(self) -> None:
         assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
 
+    def test_execution_id_does_not_replace_semantic_trajectory_identity(self) -> None:
+        row = {
+            EXECUTION_ID_KEY_NAME: "execution-physical-1",
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "trajectory_identity": {
+                "task_id": "task-logical",
+                "rollout_id": "rollout-logical",
+            },
+        }
+
+        assert _trajectory_identity(row) == ("task-logical", "rollout-logical")
+
     def test_malformed_line_raises_config_error_with_location(self) -> None:
         with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
             loads_jsonl_line("{not json", "f.jsonl", 3)
@@ -225,11 +240,16 @@ class TestRolloutCollection:
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
             "env_specific_metadata": "do not include",
-            "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
+            "responses_create_params": {
+                "input": "large prompt",
+                "tools": ["large schema"],
+                "metadata": {"nemo_rl_rollout_purpose": "evaluation"},
+            },
         }
 
         assert _rollout_request_debug_summary(row) == {
             "agent_name": "my_agent",
+            "metadata_rollout_purpose": "evaluation",
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
         }
@@ -746,7 +766,7 @@ class TestRolloutCollection:
 
         assert NG_PERF_KEY not in result
 
-    async def test_run_examples_logs_failed_run(
+    async def test_run_examples_always_logs_payload_free_failed_run_summary(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -773,9 +793,13 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert EXECUTION_ID_KEY_NAME not in row
+        posted_row = mock_server_client.post.await_args.kwargs["json"]
+        assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
+        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is False
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
@@ -786,7 +810,84 @@ class TestRolloutCollection:
         assert "do not log this either" not in captured.out
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
-        assert "[rollout_collection] /run failed" in captured.out
+
+    async def test_run_examples_allocates_fresh_execution_without_mutating_source(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": "solve"},
+        }
+        source_snapshot = json.loads(json.dumps(source_row))
+        response = MagicMock(status=200)
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+
+        async def successful_status(_response):
+            return None
+
+        async def successful_json(_response):
+            return {"reward": 1.0}
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", successful_json)
+        helper = RolloutCollectionHelper()
+
+        first_row, first_result = await next(helper.run_examples([source_row]))
+        second_row, second_result = await next(helper.run_examples([source_row]))
+
+        assert EXECUTION_ID_KEY_NAME not in source_row
+        assert source_row == source_snapshot
+        assert first_row is not source_row
+        assert second_row is not source_row
+        assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
+        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[EXECUTION_ID_KEY_NAME]
+        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[EXECUTION_ID_KEY_NAME]
+        assert all(call.kwargs["retry_transport_errors"] is False for call in mock_server_client.post.await_args_list)
+        assert mock_server_client.post.await_count == 2
+
+    async def test_run_examples_rejects_server_execution_id_conflict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": "solve"},
+        }
+        response = MagicMock(status=200)
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+
+        async def successful_status(_response):
+            return None
+
+        async def conflicting_json(_response):
+            return {EXECUTION_ID_KEY_NAME: "execution-from-wrong-dispatch"}
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", conflicting_json)
+
+        with pytest.raises(ValueError, match="wrong physical execution"):
+            await next(RolloutCollectionHelper().run_examples([source_row]))
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -805,7 +906,12 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
         )
 
-        assert returned_row is row
+        # run_examples dispatches a deep copy stamped with a fresh execution id,
+        # so the returned row is that copy rather than the caller's object.
+        assert returned_row is not row
+        assert EXECUTION_ID_KEY_NAME not in row
+        assert {key: returned_row[key] for key in row} == row
+        assert returned_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
@@ -1202,7 +1308,7 @@ class TestRolloutCollection:
         assert [row["reward"] for row in merged] == [1.0]
 
     async def test_run_examples_never_leaks_rollout_latency_into_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Direct callers (e.g. NeMo-RL) get exactly the raw /run result, with no Gym-private fields."""
+        """Direct callers get execution identity without internal rollout-latency metadata."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
@@ -1218,8 +1324,12 @@ class TestRolloutCollection:
 
         returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
 
-        assert returned_row is row
-        assert result == {"response": {}}
+        assert returned_row is not row
+        assert EXECUTION_ID_KEY_NAME not in row
+        assert result == {
+            "response": {},
+            EXECUTION_ID_KEY_NAME: returned_row[EXECUTION_ID_KEY_NAME],
+        }
         assert "_ng_rollout_latency_ms" not in result
 
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
@@ -1241,8 +1351,12 @@ class TestRolloutCollection:
 
         completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
 
-        assert completed.row is row
-        assert completed.result == {"response": {}}
+        assert completed.row is not row
+        assert EXECUTION_ID_KEY_NAME not in row
+        assert completed.result == {
+            "response": {},
+            EXECUTION_ID_KEY_NAME: completed.row[EXECUTION_ID_KEY_NAME],
+        }
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
 
@@ -2513,7 +2627,7 @@ class TestRolloutCollection:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
-            for i in range(3)
+            for i in range(4)
         ]
         input_jsonl_fpath.write_text("\n".join(samples) + "\n")
         output_jsonl_fpath = tmp_path / "output.jsonl"
@@ -2521,7 +2635,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
-            limit=3,
+            limit=4,
             num_repeats=1,
         )
 
@@ -2545,6 +2659,8 @@ class TestRolloutCollection:
                         result[NG_FAILURE_CLASS_KEY] = "verify_failed"
                     elif example["x"] == 2:
                         result[NG_NO_PERSIST_KEY] = True
+                    elif example["x"] == 3:
+                        result["mask_sample"] = True
                     future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
                     futures.append(future)
                 return futures
@@ -2558,7 +2674,12 @@ class TestRolloutCollection:
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
-        assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
+        assert [result["case"] for result in actual_returned_results] == [
+            "case-0",
+            "case-1",
+            "case-2",
+            "case-3",
+        ]
         assert [result["case"] for result in captured["results"]] == ["case-0"]
         assert [row["x"] for row in captured["rows"]] == [0]
 
@@ -2569,8 +2690,9 @@ class TestRolloutCollection:
         failures_fpath = _failures_path_for(output_jsonl_fpath)
         with failures_fpath.open() as f:
             actual_failure_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_failure_results] == ["case-1"]
+        assert [result["case"] for result in actual_failure_results] == ["case-1", "case-3"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
+        assert actual_failure_results[1][NG_FAILURE_CLASS_KEY] == "masked_sample"
 
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
         self, tmp_path: Path, empty_global_config: MagicMock

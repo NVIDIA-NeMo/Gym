@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from nemo_gym.global_config import EXECUTION_ID_SANDBOX_METADATA_KEY
 from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 
@@ -32,6 +33,17 @@ OSWORLD_IMAGE_ENTRYPOINT = ("/usr/bin/tini", "-s", "/run/entry.sh")
 OSWORLD_QCOW2_MOUNT = "/System.qcow2"
 OSWORLD_WORKLOAD_LABEL = "nemo-gym.workload=osworld"
 OSWORLD_RUN_ID_LABEL = "nemo-gym.run-id"
+OSWORLD_EXECUTION_ID_LABEL = EXECUTION_ID_SANDBOX_METADATA_KEY
+OPENSANDBOX_POOL_VM_PATH = "opensandbox-pool-managed"
+
+
+def _resolve_pool_vm_path(sandbox_provider: Mapping[str, Any], path_to_vm: Any) -> Any:
+    """Avoid local qcow2 resolution when an OpenSandbox pool owns the guest image."""
+
+    provider_name = str(next(iter(sandbox_provider), "")).lower().strip()
+    if provider_name == "opensandbox" and not path_to_vm:
+        return OPENSANDBOX_POOL_VM_PATH
+    return path_to_vm
 
 
 def _string_list(value: Any, *, field: str) -> list[str]:
@@ -76,6 +88,23 @@ def _parse_plain_http_endpoint(resolved: SandboxEndpoint, port: int) -> tuple[st
 def _http_origin(host: str, port: int) -> str:
     formatted_host = f"[{host}]" if ":" in host else host
     return f"http://{formatted_host}:{port}"
+
+
+def _uses_remote_docker_daemon() -> bool:
+    """Return whether Docker bind mounts and devices resolve on another host."""
+
+    explicit = os.environ.get("OSWORLD_DOCKER_REMOTE", "").strip().lower()
+    if explicit:
+        if explicit in {"1", "true", "yes"}:
+            return True
+        if explicit in {"0", "false", "no"}:
+            return False
+        raise ValueError("OSWORLD_DOCKER_REMOTE must be one of 1/true/yes or 0/false/no")
+
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    if not docker_host:
+        return False
+    return urlsplit(docker_host).scheme.lower() not in {"", "unix", "npipe"}
 
 
 class GymSandboxDesktopProvider:
@@ -170,7 +199,8 @@ class GymSandboxDesktopProvider:
             return SandboxSpec(**pool_fields)
 
         vm_path = os.path.realpath(os.path.abspath(os.path.expanduser(path_to_vm)))
-        if not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK):
+        remote_docker = _uses_remote_docker_daemon()
+        if not remote_docker and (not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK)):
             raise FileNotFoundError(f"OSWorld base qcow2 is not readable: {vm_path}")
 
         if not values.get("image"):
@@ -198,6 +228,14 @@ class GymSandboxDesktopProvider:
         run_id_label = f"{OSWORLD_RUN_ID_LABEL}={run_id}"
         if run_id and not _has_option(run_args, "--label", run_id_label):
             run_args.extend(["--label", run_id_label])
+        execution_id = str(metadata.get(EXECUTION_ID_SANDBOX_METADATA_KEY) or "").strip()
+        execution_id_label = f"{OSWORLD_EXECUTION_ID_LABEL}={execution_id}"
+        if execution_id and not _has_option(
+            run_args,
+            "--label",
+            execution_id_label,
+        ):
+            run_args.extend(["--label", execution_id_label])
         if not _has_option(run_args, "--cap-add", "NET_ADMIN"):
             run_args.extend(["--cap-add", "NET_ADMIN"])
         if self._require_kvm and not _has_option(run_args, "--device", "/dev/kvm"):
