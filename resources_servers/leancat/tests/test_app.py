@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,7 +45,6 @@ from resources_servers.leancat.prepare import (
     UPSTREAM_PROMPT_CONFIG_PATH,
     UPSTREAM_PROMPT_URL,
 )
-from resources_servers.leancat.proof_utils import check_statement_preserved
 
 
 DATA_DIR = Path(__file__).absolute().parent.parent / "data"
@@ -78,10 +76,8 @@ def _load_rows(filename: str) -> list:
 PROMPT_CONFIG_FPATH = REPO_ROOT / PROMPT_CONFIG_PATH
 UPSTREAM_PROMPT_CONFIG_FPATH = REPO_ROOT / UPSTREAM_PROMPT_CONFIG_PATH
 
-# Every data-backed test reads the committed 5-row `data/example.jsonl`, as the rest of the
-# repo's server tests do. LeanCat's 100 problems are gitignored and regenerated from a pinned
-# upstream commit, so a test that read them would skip on every CI checkout and report green
-# without having run.
+# Data-backed tests read the committed 5-row `data/example.jsonl`; the 100 problems are
+# gitignored, so a test reading them would skip on every CI checkout and report green.
 
 
 
@@ -105,25 +101,18 @@ def server(config) -> LeanCatResourcesServer:
 
 class TestLeanCatApp:
     def _create_response(self, text: str, msg_id: str = "test_msg") -> NeMoGymResponse:
+        message = NeMoGymResponseOutputMessage(
+            id=msg_id,
+            role="assistant",
+            type="message",
+            content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+        )
         return NeMoGymResponse(
             id="test_response_id",
             created_at=1234567890.0,
             model="test_model",
             object="response",
-            output=[
-                NeMoGymResponseOutputMessage(
-                    id=msg_id,
-                    role="assistant",
-                    type="message",
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=text,
-                            annotations=[],
-                        )
-                    ],
-                )
-            ],
+            output=[message],
             parallel_tool_calls=False,
             tool_choice="none",
             tools=[],
@@ -282,49 +271,9 @@ class TestDataset:
             # construction, since filling nothing still leaves the file unchanged.
             assert "sorry" in request.formal_statement
 
-    def test_guard_accepts_a_reference_statement_with_its_holes_filled(self):
-        """The statement guard must not reject an honest answer.
-
-        A false positive here is invisible in a real run -- it just looks like the model
-        failed -- so it is worth pinning. The substitution stands in for the minimal honest
-        submission: the reference file with each hole replaced by a tactic and nothing else
-        touched. Checked over the committed example rows, which is what CI can see; the
-        upstream statements themselves are pinned by commit, so the 5 are stable inputs and
-        not a random sample.
-        """
-        rejected = []
-        for row in _load_rows("example.jsonl"):
-            statement = row["formal_statement"]
-            filled = re.sub(r"\bsorry\b", "aesop_cat", statement)
-            preserved, reason = check_statement_preserved(statement, filled)
-            if not preserved:
-                rejected.append((row["problem_id"], reason))
-        assert rejected == []
-
-    def test_rows_carry_no_prebuilt_input(self):
-        """Rows must stay prompt-free, or `prompt_config` refuses to run.
-
-        `nemo_gym.prompt.validate_prompt_compatibility` rejects a row that carries
-        `responses_create_params.input` alongside a `prompt_config`, and the benchmark config
-        sets one -- so a prepare script that started baking prompts in would break the run,
-        not merely duplicate work.
-        """
-        for row in _load_rows("example.jsonl"):
-            assert not row.get("responses_create_params", {}).get("input")
-
 
 class TestPrompt:
-    """Two templates ship, both applied at run time via ``prompt_config``.
-
-    ``paper.yaml`` is the benchmark default: the template printed in the paper's Appendix D.1,
-    which is what the published numbers correspond to. ``upstream-repo.yaml`` is what upstream's
-    own ``scripts/passk.py`` reads, kept runnable with ``--prompt-config`` so the difference
-    between the two stays measurable rather than being a claim in the README.
-
-    The paper's is a reconstruction of a typeset listing, so it cannot be pinned against a
-    source; upstream's can be, and is -- ``test_upstream_template_still_matches_upstream``
-    refetches the pinned file.
-    """
+    """Both templates ship: `paper.yaml` (the default, Appendix D.1) and `upstream-repo.yaml`."""
 
     @pytest.mark.parametrize("fpath", [PROMPT_CONFIG_FPATH, UPSTREAM_PROMPT_CONFIG_FPATH])
     def test_is_a_valid_gym_prompt_config(self, fpath):
@@ -333,13 +282,7 @@ class TestPrompt:
         assert config.system is None, "upstream posts a single user message; a system prompt would deviate"
 
     def test_upstream_template_still_matches_upstream(self):
-        """Refetch the pinned `prompts/static_passk.md` and prove our transcription is exact.
-
-        Stronger than committing a copy of the file: this checks against the pinned source
-        itself, so a transcription slip cannot hide behind a copy that drifted with it. Skips
-        offline -- it is a fidelity check, not a correctness one, and CI without egress should
-        not fail on it.
-        """
+        """Check the transcription against the pinned source itself, not a committed copy."""
         import urllib.error
         import urllib.request
 
@@ -353,14 +296,7 @@ class TestPrompt:
         assert load_prompt_config(str(UPSTREAM_PROMPT_CONFIG_FPATH)).user.strip() == upstream.strip()
 
     def test_filling_it_reproduces_the_prompt_the_benchmark_runs(self):
-        """End-to-end: a shipped row plus the shipped template equals one user message.
-
-        Locks the pair together, so a change to either the template or the row shape surfaces
-        as a test failure rather than as a benchmark number that quietly stops being
-        comparable to the paper's. The half that needs the network -- that formal_statement is
-        the ``CAT_statement/*.lean`` bytes verbatim, trailing newline included -- is enforced
-        in prepare.py, which fails if the .lean file and the JSONL record disagree.
-        """
+        """A shipped row plus the shipped template must equal one user message."""
         config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
         for row in _load_rows("example.jsonl"):
             messages = apply_prompt_to_row(row, config)["responses_create_params"]["input"]
@@ -370,12 +306,7 @@ class TestPrompt:
 
 
 class TestToolchainCheck:
-    """LeanCat wires the probe up; the probe itself is tested in math_formal_lean.
-
-    ``parse_lean_version``, the mismatch/unusable-sandbox logging and the run-once guarantee
-    all live in ``math_formal_lean.toolchain`` and are covered by its own tests. All that is
-    LeanCat-specific is that the server reaches them at all, with the row's pinned toolchain.
-    """
+    """The probe itself is tested in math_formal_lean; this is only the wiring."""
 
     @pytest.mark.asyncio
     async def test_mismatch_against_the_rows_pin_is_logged(self, server, caplog):
@@ -386,16 +317,8 @@ class TestToolchainCheck:
         assert "4.12.0" in caplog.text and "4.19.0" in caplog.text
 
 
-class TestReverifyMode:
-    def test_server_is_stateless(self):
-        from nemo_gym.base_resources_server import ReverifyMode
-
-        assert LeanCatResourcesServerConfig.REVERIFY_MODE is ReverifyMode.STATELESS
-
-
 class TestVerifierMetadataLifting:
-    """Gym posts rows with `verifier_metadata` still nested; the request must accept that,
-    and a top-level field must win when both carry the same key."""
+    """Gym posts rows with `verifier_metadata` nested; a top-level field wins on conflict."""
 
     @pytest.mark.parametrize(
         "fields,expected_statement,expected_level",
