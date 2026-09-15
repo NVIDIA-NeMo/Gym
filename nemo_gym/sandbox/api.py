@@ -29,6 +29,7 @@ from nemo_gym.sandbox.providers import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxNotRunningError,
     SandboxProvider,
     SandboxPtyError,
     SandboxPtySession,
@@ -449,9 +450,12 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        require_running: bool = False,
     ) -> SandboxExecResult:
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
-            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            return await self._exec_uninstrumented(
+                command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, require_running=require_running
+            )
 
         # The command itself is deliberately not recorded. In a code-execution environment
         # it is model output or task content, which must not land in a trace backend
@@ -463,7 +467,9 @@ class AsyncSandbox:
             "gym.sandbox.exec",
             **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
         ) as span:
-            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            result = await self._exec_uninstrumented(
+                command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, require_running=require_running
+            )
             if span is not None:
                 safe_set_span_attributes(
                     span,
@@ -482,7 +488,10 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        require_running: bool = False,
     ) -> SandboxExecResult:
+        if require_running:
+            await self._require_running("exec")
         return await self._provider.exec(
             self._require_handle(),
             command,
@@ -492,11 +501,30 @@ class AsyncSandbox:
             user=user,
         )
 
-    async def upload(self, local_path: Path | str, remote_path: str) -> None:
+    async def upload(self, local_path: Path | str, remote_path: str, *, require_running: bool = False) -> None:
+        if require_running:
+            await self._require_running("upload")
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
-    async def download(self, remote_path: str, local_path: Path | str) -> None:
+    async def download(self, remote_path: str, local_path: Path | str, *, require_running: bool = False) -> None:
+        if require_running:
+            await self._require_running("download")
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+
+    async def _require_running(self, operation: str) -> None:
+        """Refuse ``operation`` when the provider reports the sandbox dead.
+
+        Some backends keep routing a dead sandbox's requests to whichever
+        sandbox reused its network address (OpenSandbox, RL-1469), so the
+        operation would run against a stranger's filesystem. Only a definite
+        terminal status refuses: UNKNOWN means the provider has no status
+        signal, and refusing on it would disable such providers entirely.
+        """
+        status = await self.status()
+        if status in (SandboxStatus.STOPPED, SandboxStatus.ERROR):
+            raise SandboxNotRunningError(
+                f"Sandbox {self._require_handle().sandbox_id!r} is {status.value}; refusing {operation}"
+            )
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -704,6 +732,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        require_running: bool = False,
     ) -> SandboxExecResult:
         return self._runner.run(
             "exec",
@@ -713,14 +742,19 @@ class Sandbox:
                 env=env,
                 timeout_s=timeout_s,
                 user=user,
+                require_running=require_running,
             ),
         )
 
-    def upload(self, local_path: Path | str, remote_path: str) -> None:
-        self._runner.run("upload", lambda: self._async_sandbox.upload(local_path, remote_path))
+    def upload(self, local_path: Path | str, remote_path: str, *, require_running: bool = False) -> None:
+        self._runner.run(
+            "upload", lambda: self._async_sandbox.upload(local_path, remote_path, require_running=require_running)
+        )
 
-    def download(self, remote_path: str, local_path: Path | str) -> None:
-        self._runner.run("download", lambda: self._async_sandbox.download(remote_path, local_path))
+    def download(self, remote_path: str, local_path: Path | str, *, require_running: bool = False) -> None:
+        self._runner.run(
+            "download", lambda: self._async_sandbox.download(remote_path, local_path, require_running=require_running)
+        )
 
     def status(self) -> SandboxStatus:
         if self._closed:

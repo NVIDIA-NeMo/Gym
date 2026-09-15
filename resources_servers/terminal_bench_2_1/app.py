@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxNotRunningError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -224,17 +224,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         target_dirpath: str,
         patches: Dict[str, List[Tuple[str, str]]],
         task_name: Optional[str] = None,
+        require_running: bool = False,
     ) -> None:
+        """Upload a folder; with ``require_running`` the first command checks the sandbox is alive."""
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
+        check_status = require_running
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
                 continue
 
             target_fpath = f"{target_dirpath}/{file}"
-            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
+            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}", require_running=check_status)
+            check_status = False
             assert mkdir_result.return_code == 0, mkdir_result
 
             with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
@@ -269,13 +273,25 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
+        failure_reason: Optional[str] = None
         try:
-            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
+            # The grading commands refuse to run against a sandbox the control
+            # plane reports dead: the server may otherwise route them to another
+            # sandbox that reused the dead one's pod IP (RL-1469).
+            await self._upload_folder(
+                eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name, require_running=True
+            )
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,
+                require_running=True,
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        except SandboxNotRunningError as e:
+            failure_reason = f"sandbox_not_running: {e}"
+            print(f"Skipping TerminalBench 2.1 tests for {body.task_name}: {failure_reason}", file=stderr)
+            eval_result = None
+            test_output = failure_reason
         except:
             print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
             eval_result = None
@@ -290,7 +306,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if eval_result is not None:
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name, require_running=True)
                     temp_file.seek(0)
                     reward = float(temp_file.read())
 
@@ -311,6 +327,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            failure_reason=failure_reason,
         )
 
 

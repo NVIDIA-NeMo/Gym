@@ -193,6 +193,15 @@ class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
+class SandboxNotRunningError(RuntimeError):
+    """Raised by ``require_running`` operations when the sandbox is stopped or failed.
+
+    Requests to a dead sandbox must not be sent: some backends keep routing
+    them to whichever sandbox reused the dead one's address (RL-1469), so the
+    operation would run against a stranger's filesystem.
+    """
+
+
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
