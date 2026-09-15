@@ -41,6 +41,7 @@ from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPha
 from nemo_gym._checkpoint.coordinator import (
     ContinuationAlreadyOwnedError,
     ContinuationRegistry,
+    ContinuationRegistryClient,
     ContinuationRetiredError,
 )
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
@@ -295,7 +296,9 @@ class AgentCheckpointParticipant:
         self,
         instance_name: Optional[str] = None,
         *,
-        continuation_registry: Optional[ContinuationRegistry[tuple[str, int], AgentBoundaryRecord]] = None,
+        continuation_registry: Optional[
+            ContinuationRegistry[tuple[str, int], AgentBoundaryRecord] | ContinuationRegistryClient
+        ] = None,
         owner_id: Optional[str] = None,
     ) -> None:
         self.instance_name = _validate_instance_name(instance_name)
@@ -323,7 +326,7 @@ class AgentCheckpointParticipant:
             raise AgentStaleAttemptError(
                 f"rollout {rollout_id!r} attempt {attempt_index} completed result was acknowledged"
             )
-        if key in self._tombstones or self._continuation_registry.is_retired(key):
+        if key in self._tombstones:
             raise AgentStaleAttemptError(f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore")
         existing = self._executions.get(key)
         if existing is not None:
@@ -335,10 +338,7 @@ class AgentCheckpointParticipant:
         generation = self._generations.get(key, 0) + 1
         self._generations[key] = generation
         try:
-            continuation = self._continuation_registry.claim_or_register(
-                key,
-                owner_id=self._continuation_owner_id,
-            )
+            continuation = await self._claim_continuation(key)
         except ContinuationRetiredError as error:
             raise AgentStaleAttemptError(
                 f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore"
@@ -425,14 +425,11 @@ class AgentCheckpointParticipant:
                 execution.result_identity, execution.result_digest = _result_receipt(result)
                 execution.continuation = None
                 execution.outer_task = None
-                self._continuation_registry.mark_completed(
-                    (execution.rollout_id, execution.attempt_index),
-                    owner_id=self._continuation_owner_id,
-                )
+                await self._mark_continuation_completed((execution.rollout_id, execution.attempt_index))
             else:
                 execution.state = AgentExecutionState.RETIRED
                 key = (execution.rollout_id, execution.attempt_index)
-                self._remember_tombstone(key)
+                await self._remember_tombstone(key, require_owner=True)
                 execution.resume_event.set()
                 if execution.parked_task is not None and execution.parked_task is not asyncio.current_task():
                     execution.parked_task.cancel()
@@ -528,7 +525,7 @@ class AgentCheckpointParticipant:
                 if execution.outer_task is None:
                     execution.state = AgentExecutionState.RETIRED
                     key = (execution.rollout_id, execution.attempt_index)
-                    self._remember_tombstone(key)
+                    await self._remember_tombstone(key, require_owner=True)
                     execution.resume_event.set()
                     if execution.parked_task is not None:
                         execution.parked_task.cancel()
@@ -548,7 +545,7 @@ class AgentCheckpointParticipant:
                 "tombstoned": False,
                 "completed_unacknowledged": True,
             }
-        self._remember_tombstone(key)
+        await self._remember_tombstone(key, require_owner=execution is not None)
         execution = self._executions.pop(key, None)
         if execution is None:
             await self._notify()
@@ -573,7 +570,7 @@ class AgentCheckpointParticipant:
         if key in self._executions:
             raise DuplicateExecutionError(f"rollout {rollout_id!r} attempt {attempt_index} is already active")
         try:
-            discarded = self._continuation_registry.discard_available(key)
+            discarded = await self._discard_continuation(key)
         except ContinuationAlreadyOwnedError as error:
             raise DuplicateExecutionError(
                 f"rollout {rollout_id!r} attempt {attempt_index} is already active"
@@ -624,6 +621,8 @@ class AgentCheckpointParticipant:
                     f"acknowledgement receipt mismatch for rollout {key[0]!r} attempt {key[1]}"
                 )
 
+        newly_acknowledged = [key for key in keys if key not in self._acknowledged]
+        await self._retire_completed_continuations(newly_acknowledged)
         for key, receipt in zip(keys, receipts):
             if key in self._acknowledged:
                 continue
@@ -635,8 +634,7 @@ class AgentCheckpointParticipant:
                 receipt.result_identity,
                 receipt.result_digest,
             )
-            self._remember_tombstone(key)
-            self._generations.pop(key, None)
+            self._remember_local_tombstone(key)
         await self._notify()
         return receipts
 
@@ -711,18 +709,75 @@ class AgentCheckpointParticipant:
         ]
 
     def install_restored(self, records: list[AgentBoundaryRecord]) -> None:
+        """Install records into an in-process registry for single-worker use."""
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            raise RuntimeError("coordinator-backed participants require install_restored_async")
         self._continuation_registry.install(
             {(record.rollout_id, record.attempt_index + 1): record for record in records},
             retired={(record.rollout_id, record.attempt_index) for record in records},
         )
         for record in records:
-            self._remember_tombstone((record.rollout_id, record.attempt_index))
+            self._remember_local_tombstone((record.rollout_id, record.attempt_index))
         self._accepting = False
 
-    def _remember_tombstone(self, key: tuple[str, int]) -> None:
+    async def install_restored_async(self, records: list[AgentBoundaryRecord]) -> None:
+        """Install records through either the local or coordinator registry."""
+        entries = {(record.rollout_id, record.attempt_index + 1): record for record in records}
+        retired = {(record.rollout_id, record.attempt_index) for record in records}
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            await self._continuation_registry.install(
+                {key: record.model_dump(mode="json") for key, record in entries.items()},
+                retired=retired,
+            )
+        else:
+            self._continuation_registry.install(entries, retired=retired)
+        for key in retired:
+            self._remember_local_tombstone(key)
+        self._accepting = False
+
+    async def _remember_tombstone(self, key: tuple[str, int], *, require_owner: bool) -> None:
+        self._remember_local_tombstone(key)
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            await self._continuation_registry.retire(key, require_owner=require_owner)
+        else:
+            self._continuation_registry.retire(
+                key,
+                owner_id=self._continuation_owner_id if require_owner else None,
+            )
+
+    def _remember_local_tombstone(self, key: tuple[str, int]) -> None:
         self._tombstones.add(key)
-        self._continuation_registry.retire(key)
         self._generations.pop(key, None)
+
+    async def _claim_continuation(self, key: tuple[str, int]) -> Optional[AgentBoundaryRecord]:
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            value = await self._continuation_registry.claim_or_register(key)
+            if value is None:
+                return None
+            try:
+                return AgentBoundaryRecord.model_validate(value)
+            except ValueError as error:
+                raise AgentCheckpointError("coordinator returned an invalid agent continuation") from error
+        return self._continuation_registry.claim_or_register(key, owner_id=self._continuation_owner_id)
+
+    async def _mark_continuation_completed(self, key: tuple[str, int]) -> None:
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            await self._continuation_registry.mark_completed(key)
+        else:
+            self._continuation_registry.mark_completed(key, owner_id=self._continuation_owner_id)
+
+    async def _discard_continuation(self, key: tuple[str, int]) -> bool:
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            return await self._continuation_registry.discard_available(key)
+        return self._continuation_registry.discard_available(key)
+
+    async def _retire_completed_continuations(self, keys: list[tuple[str, int]]) -> None:
+        if not keys:
+            return
+        if isinstance(self._continuation_registry, ContinuationRegistryClient):
+            await self._continuation_registry.retire_many(keys)
+        else:
+            self._continuation_registry.retire_many(keys, owner_id=self._continuation_owner_id)
 
     def _owns(self, execution: AgentExecution) -> bool:
         return self._executions.get((execution.rollout_id, execution.attempt_index)) is execution

@@ -46,7 +46,13 @@ from nemo_gym._checkpoint import (
     AdmissionLimiter,
     AdmissionParkedError,
     AdmissionState,
+    AgentBoundaryRecord,
+    AgentCheckpointParticipant,
+    AgentStaleAttemptError,
+    ContinuationAlreadyOwnedError,
+    ContinuationRetiredError,
     ControlCapabilities,
+    DuplicateExecutionError,
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
@@ -163,6 +169,65 @@ async def test_worker_disconnect_releases_its_continuation_claims(sock_dir) -> N
         await pool.coordinator.wait_until(lambda status: status["workers"]["live"] == 1, timeout_s=2.0)
 
         assert pool.coordinator.continuation_registry.claim_or_register(key, owner_id="w0") == continuation
+    finally:
+        await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_workers_share_continuation_registry_over_coordinator_socket(sock_dir) -> None:
+    pool = await _start_pool(sock_dir, expected=2, connect=2)
+    first = pool.workers[0][1].continuation_registry_client()
+    second = pool.workers[1][1].continuation_registry_client()
+    try:
+        key = ("rollout-a", 1)
+        retired_key = ("rollout-a", 0)
+        continuation = {"boundary_index": 3}
+        await first.install({key: continuation}, retired={retired_key})
+
+        assert await second.claim_or_register(key) == continuation
+        with pytest.raises(ContinuationAlreadyOwnedError, match="another worker"):
+            await first.claim_or_register(key)
+        with pytest.raises(ContinuationRetiredError, match="retired"):
+            await first.claim_or_register(retired_key)
+
+        await pool.workers[1][1].stop()
+        await pool.coordinator.wait_until(lambda status: status["workers"]["live"] == 1, timeout_s=2.0)
+        assert await first.claim_or_register(key) == continuation
+    finally:
+        await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_agent_participants_claim_restored_continuation_across_worker_socket(sock_dir) -> None:
+    pool = await _start_pool(sock_dir, expected=2, connect=2)
+    first = AgentCheckpointParticipant(
+        continuation_registry=pool.workers[0][1].continuation_registry_client(),
+        owner_id="ignored-local-owner-0",
+    )
+    second = AgentCheckpointParticipant(
+        continuation_registry=pool.workers[1][1].continuation_registry_client(),
+        owner_id="ignored-local-owner-1",
+    )
+    record = AgentBoundaryRecord(
+        rollout_id="rollout-a",
+        attempt_index=0,
+        boundary_index=3,
+        output_items=[],
+    )
+    try:
+        await first.install_restored_async([record])
+        await first.resume()
+        execution = await second.begin("rollout-a", 1, task=None)
+        assert second.continuation(execution) == record
+
+        with pytest.raises(DuplicateExecutionError, match="already has an active /run"):
+            await first.begin("rollout-a", 1, task=None)
+
+        await second.finish(execution, outcome="completed", result={"id": "result-a"})
+        receipt = second.completion_receipt("rollout-a", 1)
+        await second.acknowledge_completed([receipt])
+        with pytest.raises(AgentStaleAttemptError, match="was retired"):
+            await first.begin("rollout-a", 1, task=None)
     finally:
         await _stop_pool(pool)
 

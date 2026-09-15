@@ -161,6 +161,16 @@ class ContinuationRegistry(Generic[_ContinuationKey, _ContinuationValue]):
             self._entries.pop(key, None)
             self._retired.add(key)
 
+    def retire_many(self, keys: Iterable[_ContinuationKey], *, owner_id: str) -> None:
+        """Atomically fence a batch of acknowledged completed executions."""
+        unique_keys = tuple(dict.fromkeys(keys))
+        with self._lock:
+            for key in unique_keys:
+                self._require_owner(key, owner_id)
+            for key in unique_keys:
+                self._entries.pop(key)
+                self._retired.add(key)
+
     def discard_available(self, key: _ContinuationKey) -> bool:
         """Discard an unclaimed restored continuation so the attempt restarts."""
         with self._lock:
@@ -247,6 +257,7 @@ class WorkerRecord:
         "cut_proof",
         "proof_error",
         "writer",
+        "write_lock",
         "connected",
     )
 
@@ -259,6 +270,7 @@ class WorkerRecord:
         self.cut_proof: GenerationCutWorkerProof | None = None
         self.proof_error: str | None = None
         self.writer = writer
+        self.write_lock = asyncio.Lock()
         self.connected = True
 
 
@@ -342,7 +354,7 @@ class AdmissionCoordinator:
                     self._workers[record.worker_id] = record
                     # A late-joining worker immediately receives the current
                     # state so it can never serve traffic against a stale one.
-                    await _write_message(writer, self._state_message())
+                    await self._write_to_worker(record, self._state_message())
                     await self._notify()
                 elif record is None:
                     continue
@@ -370,6 +382,8 @@ class AdmissionCoordinator:
                     if self._state != AdmissionState.ACCEPTING:
                         self._accept_cut_proof(record, message, message_seq)
                     await self._notify()
+                elif kind == "continuation_request":
+                    await self._handle_continuation_request(record, message)
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
         finally:
@@ -378,6 +392,86 @@ class AdmissionCoordinator:
                 self.continuation_registry.release_owner(record.worker_id)
                 await self._notify()
             writer.close()
+
+    async def _handle_continuation_request(self, record: WorkerRecord, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id", ""))
+        operation = str(message.get("operation", ""))
+        try:
+            if not request_id:
+                raise ValueError("continuation request_id must be non-empty")
+            key = _continuation_key(message.get("key")) if "key" in message else None
+            if operation == "claim_or_register":
+                if key is None:
+                    raise ValueError("continuation claim_or_register request is missing its key")
+                result = self.continuation_registry.claim_or_register(key, owner_id=record.worker_id)
+            elif operation == "mark_completed":
+                if key is None:
+                    raise ValueError("continuation mark_completed request is missing its key")
+                self.continuation_registry.mark_completed(key, owner_id=record.worker_id)
+                result = None
+            elif operation == "retire":
+                if key is None:
+                    raise ValueError("continuation retire request is missing its key")
+                require_owner = message.get("require_owner", False)
+                if not isinstance(require_owner, bool):
+                    raise ValueError("continuation retire require_owner must be a boolean")
+                self.continuation_registry.retire(key, owner_id=record.worker_id if require_owner else None)
+                result = None
+            elif operation == "retire_many":
+                raw_keys = message.get("keys")
+                if not isinstance(raw_keys, list):
+                    raise ValueError("continuation retire_many payload must contain a key list")
+                keys = tuple(_continuation_key(item) for item in raw_keys)
+                if len(set(keys)) != len(keys):
+                    raise ValueError("continuation retire_many keys must be unique")
+                self.continuation_registry.retire_many(keys, owner_id=record.worker_id)
+                result = None
+            elif operation == "discard_available":
+                if key is None:
+                    raise ValueError("continuation discard_available request is missing its key")
+                result = self.continuation_registry.discard_available(key)
+            elif operation == "install":
+                raw_entries = message.get("entries")
+                raw_retired = message.get("retired", ())
+                if not isinstance(raw_entries, list) or not isinstance(raw_retired, list):
+                    raise ValueError("continuation install payload must contain entry and retired lists")
+                entries = {
+                    _continuation_key(item.get("key")): item.get("value")
+                    for item in raw_entries
+                    if isinstance(item, dict)
+                }
+                if len(entries) != len(raw_entries):
+                    raise ValueError("continuation install entries must contain unique keys")
+                self.continuation_registry.install(
+                    entries,
+                    retired=(_continuation_key(item) for item in raw_retired),
+                )
+                result = None
+            else:
+                raise ValueError(f"unknown continuation registry operation {operation!r}")
+        except (ContinuationAlreadyOwnedError, ContinuationRetiredError, ValueError) as error:
+            await self._write_to_worker(
+                record,
+                {
+                    "type": "continuation_error",
+                    "request_id": request_id,
+                    "error_type": type(error).__name__,
+                    "detail": str(error),
+                },
+            )
+        else:
+            await self._write_to_worker(
+                record,
+                {
+                    "type": "continuation_result",
+                    "request_id": request_id,
+                    "result": result,
+                },
+            )
+
+    async def _write_to_worker(self, record: WorkerRecord, message: dict[str, Any]) -> None:
+        async with record.write_lock:
+            await _write_message(record.writer, message)
 
     def _accept_cut_proof(self, record: WorkerRecord, message: dict[str, Any], message_seq: int) -> bool:
         try:
@@ -419,7 +513,7 @@ class AdmissionCoordinator:
         for record in self._workers.values():
             if record.connected:
                 try:
-                    await _write_message(record.writer, message)
+                    await self._write_to_worker(record, message)
                 except ConnectionResetError:
                     record.connected = False
 
@@ -557,6 +651,9 @@ class WorkerAdmissionAgent:
         self.cut_timeout_s = cut_timeout_s
         self._writer: Optional[asyncio.StreamWriter] = None
         self._listener: Optional[asyncio.Task] = None
+        self._write_lock = asyncio.Lock()
+        self._continuation_requests: dict[str, asyncio.Future[Any]] = {}
+        self._next_continuation_request_id = 0
         self._coordinator_sequence = 0
         self._checkpoint_id: str | None = None
 
@@ -564,7 +661,7 @@ class WorkerAdmissionAgent:
         reader, writer = await asyncio.open_unix_connection(path=str(self.socket_path))
         self._writer = writer
         self.limiter.add_listener(self._on_limiter_change)
-        await _write_message(writer, {"type": "register", "worker_id": self.worker_id, "pid": self.pid})
+        await self._write({"type": "register", "worker_id": self.worker_id, "pid": self.pid})
         line = await reader.readline()
         if not line:
             self.limiter.remove_listener(self._on_limiter_change)
@@ -594,10 +691,17 @@ class WorkerAdmissionAgent:
         if self._writer is not None:
             self._writer.close()
             self._writer = None
+        for future in self._continuation_requests.values():
+            if not future.done():
+                future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
+        self._continuation_requests.clear()
 
     async def _listen(self, reader: asyncio.StreamReader) -> None:
         async for message in _read_messages(reader):
-            await self._apply_state_message(message)
+            if message.get("type") in {"continuation_result", "continuation_error"}:
+                self._complete_continuation_request(message)
+            else:
+                await self._apply_state_message(message)
 
     async def _apply_state_message(self, message: dict[str, Any]) -> None:
         if message.get("type") != "state":
@@ -619,8 +723,7 @@ class WorkerAdmissionAgent:
                 timeout_s=self.cut_timeout_s,
             )
         assert self._writer is not None
-        await _write_message(
-            self._writer,
+        await self._write(
             {
                 "type": "ack",
                 "seq": message["seq"],
@@ -644,7 +747,7 @@ class WorkerAdmissionAgent:
         }
         # Fire-and-forget: counter reports are monotone-refreshed, so a lost
         # one is corrected by the next change or the next ack.
-        asyncio.get_running_loop().create_task(_write_message(writer, payload))
+        asyncio.get_running_loop().create_task(self._write(payload))
 
     def _generation_cut_proof_payload(self) -> dict[str, Any]:
         if self._checkpoint_id is None or self._coordinator_sequence <= 0:
@@ -655,6 +758,95 @@ class WorkerAdmissionAgent:
             worker_id=self.worker_id,
         )
         return {"generation_cut_proof": proof.model_dump(mode="json")}
+
+    def continuation_registry_client(self) -> "ContinuationRegistryClient":
+        """Return the async continuation client bound to this worker identity."""
+        return ContinuationRegistryClient(self)
+
+    async def _continuation_request(self, operation: str, **payload: Any) -> Any:
+        if self._writer is None or self._writer.is_closing():
+            raise ConnectionError("checkpoint coordinator connection is not active")
+        self._next_continuation_request_id += 1
+        request_id = f"{self.worker_id}:{self._next_continuation_request_id}"
+        future = asyncio.get_running_loop().create_future()
+        self._continuation_requests[request_id] = future
+        try:
+            await self._write(
+                {
+                    "type": "continuation_request",
+                    "request_id": request_id,
+                    "operation": operation,
+                    **payload,
+                }
+            )
+            return await asyncio.wait_for(future, timeout=self.cut_timeout_s)
+        finally:
+            self._continuation_requests.pop(request_id, None)
+
+    def _complete_continuation_request(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id", ""))
+        future = self._continuation_requests.get(request_id)
+        if future is None or future.done():
+            return
+        if message.get("type") == "continuation_error":
+            error_type = message.get("error_type")
+            detail = str(message.get("detail", "continuation registry request failed"))
+            if error_type == ContinuationAlreadyOwnedError.__name__:
+                future.set_exception(ContinuationAlreadyOwnedError(detail))
+            elif error_type == ContinuationRetiredError.__name__:
+                future.set_exception(ContinuationRetiredError(detail))
+            else:
+                future.set_exception(ValueError(detail))
+        else:
+            future.set_result(message.get("result"))
+
+    async def _write(self, message: dict[str, Any]) -> None:
+        writer = self._writer
+        if writer is None:
+            raise ConnectionError("checkpoint coordinator connection is not active")
+        async with self._write_lock:
+            await _write_message(writer, message)
+
+
+class ContinuationRegistryClient:
+    """Async process-local facade for the coordinator-owned registry."""
+
+    def __init__(self, worker: WorkerAdmissionAgent) -> None:
+        self._worker = worker
+
+    async def claim_or_register(self, key: tuple[str, int]) -> Any:
+        return await self._worker._continuation_request("claim_or_register", key=list(key))
+
+    async def mark_completed(self, key: tuple[str, int]) -> None:
+        await self._worker._continuation_request("mark_completed", key=list(key))
+
+    async def retire(self, key: tuple[str, int], *, require_owner: bool = False) -> None:
+        await self._worker._continuation_request(
+            "retire",
+            key=list(key),
+            require_owner=require_owner,
+        )
+
+    async def retire_many(self, keys: Iterable[tuple[str, int]]) -> None:
+        await self._worker._continuation_request(
+            "retire_many",
+            keys=[list(key) for key in keys],
+        )
+
+    async def discard_available(self, key: tuple[str, int]) -> bool:
+        return bool(await self._worker._continuation_request("discard_available", key=list(key)))
+
+    async def install(
+        self,
+        entries: dict[tuple[str, int], Any],
+        *,
+        retired: Iterable[tuple[str, int]] = (),
+    ) -> None:
+        await self._worker._continuation_request(
+            "install",
+            entries=[{"key": list(key), "value": value} for key, value in entries.items()],
+            retired=[list(key) for key in retired],
+        )
 
 
 def build_coordinator_control_app(
@@ -832,6 +1024,19 @@ def build_coordinator_control_app(
 async def _write_message(writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
     writer.write(json.dumps(message).encode() + b"\n")
     await writer.drain()
+
+
+def _continuation_key(value: Any) -> tuple[str, int]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], int)
+    ):
+        raise ValueError("continuation key must be [rollout_id, attempt_index]")
+    if not value[0] or value[1] < 0:
+        raise ValueError("continuation key contains an invalid rollout or attempt identity")
+    return value[0], value[1]
 
 
 async def _read_messages(reader: asyncio.StreamReader):
