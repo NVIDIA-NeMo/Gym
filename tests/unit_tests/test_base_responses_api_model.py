@@ -1718,11 +1718,16 @@ def _cross_process_writer(root: str, base: int) -> None:
         store.record("0-0", {"dialect": "chat", "request": {"i": i}, "response": {}})
 
 
-def test_capture_store_cross_process_append_no_loss(tmp_path):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_capture_store_cross_process_append_no_loss(tmp_path, compressed):
     # The threads-only test above exercises the in-process lock; this exercises fcntl.flock across
     # *processes* -- the num_workers>1 case the in-process lock cannot coordinate.
     import multiprocessing as mp
 
+    if compressed:
+        store = CaptureStore(tmp_path)
+        store.path_for("0-0").touch()
+        store.compress("0-0")
     ctx = mp.get_context("fork")
     procs = [ctx.Process(target=_cross_process_writer, args=(str(tmp_path), b * 100)) for b in range(4)]
     for p in procs:
@@ -1806,3 +1811,130 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+# --- Optional compressed capture lifecycle ---
+def test_capture_compression_preserves_payload_and_late_call(tmp_path):
+    from nemo_gym.jsonl_io import open_jsonl
+
+    store = CaptureStore(tmp_path)
+    first = {"model_call_id": "a", "request": {"unknown": [None, "😀"]}}
+    second = {"model_call_id": "b", "response_raw": {"text": "late"}}
+    store.record("0-0", first)
+    original = store.path_for("0-0").read_bytes()
+    store.compress("0-0")
+    assert not store.path_for("0-0").exists()
+    with open_jsonl(store.compressed_path_for("0-0"), "rb") as reader:
+        assert reader.read() == original
+    # A separately constructed writer discovers the compressed encoding automatically.
+    CaptureStore(tmp_path).record("0-0", second)
+    assert store.read("0-0") == [first, second]
+    assert store.read_available("0-0") == ([(0, first), (1, second)], 0)
+    store.compress("0-0")  # already compressed: no duplicate frames or records
+    assert store.read("0-0") == [first, second]
+
+
+def test_compressed_capture_merge_and_clear(tmp_path):
+    from nemo_gym.base_responses_api_model import (
+        clear_model_call_captures_for_rollouts,
+        merge_model_call_capture_into_record,
+    )
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a", "dialect": "responses", "status_code": 200})
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(record, [tmp_path], compress=True)
+    assert record["ng_model_call_capture"]["metrics"]["num_calls"] == 1
+    assert store.compressed_path_for("0-0").exists()
+    second = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(second, [tmp_path])
+    assert second == record
+    store.mark_incomplete("0-0")
+    clear_model_call_captures_for_rollouts([second], [tmp_path])
+    assert store.read("0-0") == []
+    assert not store.is_incomplete("0-0")
+    assert not store.compressed_path_for("0-0").exists()
+
+
+def test_capture_compression_failure_keeps_model_evidence(tmp_path, monkeypatch):
+    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a", "dialect": "responses"})
+
+    def fail(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(CaptureStore, "compress", fail)
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(record, [tmp_path], compress=True)
+    assert record["ng_model_call_capture"]["metrics"]["num_calls"] == 1
+    assert store.path_for("0-0").exists()
+
+
+def test_compressed_capture_truncation_retains_prior_rows_and_blocks_append(tmp_path):
+    from nemo_gym.jsonl_io import zstd
+
+    store = CaptureStore(tmp_path)
+    first = {"model_call_id": "a"}
+    store.record("0-0", first)
+    store.compress("0-0")
+    path = store.compressed_path_for("0-0")
+    with path.open("ab") as output:
+        output.write(zstd.compress(b'{"model_call_id":"b"}\n')[:5])
+    assert store.read_available("0-0") == ([(0, first)], 1)
+    with pytest.raises(EOFError):
+        store.record("0-0", {"model_call_id": "c"})
+    assert store.is_incomplete("0-0")
+
+
+def test_capture_interrupted_publication_and_conflict(tmp_path):
+    from nemo_gym.jsonl_io import compress_jsonl
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    compress_jsonl(store.path_for("0-0"), remove_source=False)
+    assert store.read("0-0") == [{"model_call_id": "a"}]
+    store.record("0-0", {"model_call_id": "b"})
+    assert not store.path_for("0-0").exists()
+    assert len(store.read("0-0")) == 2
+    store.path_for("0-0").write_bytes(b'{"model_call_id":"conflict"}\n')
+    with pytest.raises(ValueError, match="Conflicting"):
+        store.read("0-0")
+    with pytest.raises(ValueError, match="Conflicting"):
+        store.record("0-0", {})
+
+
+def test_capture_compression_concurrent_with_late_writes(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"index": -1})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(store.record, "0-0", {"index": i}) for i in range(30)]
+        futures.extend(pool.submit(store.compress, "0-0") for _ in range(4))
+        for future in futures:
+            future.result()
+    assert sorted(row["index"] for row in store.read("0-0")) == list(range(-1, 30))
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_capture_reader_works_on_read_only_archive_without_lock(tmp_path, monkeypatch, compressed):
+    from pathlib import Path
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    if compressed:
+        store.compress("0-0")
+    (tmp_path / "0-0.capture.lock").unlink()  # old/imported artifacts have no lock
+    original_open = Path.open
+
+    def read_only_open(path, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in "wa+"):
+            raise PermissionError("read-only archive")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", read_only_open)
+    assert store.read("0-0") == [{"model_call_id": "a"}]
+    assert store.read_available("0-0") == ([(0, {"model_call_id": "a"})], 0)
+    assert not (tmp_path / "0-0.capture.lock").exists()
