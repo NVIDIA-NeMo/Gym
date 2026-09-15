@@ -65,9 +65,15 @@ class VLLMCaptureAdapter:
         return extract_generation_token_info(_single_choice(response_payload))
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
-        routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
-        if routed_experts is None:
-            return None
-        if not isinstance(routed_experts, (str, dict, list)):
+        message = _message(_single_choice(response_payload))
+        routed_experts = message.get(ROUTED_EXPERTS_FIELD)
+        extras = {}
+        if "cc_image_geometry" in response_payload:
+            extras["cc_image_geometry"] = response_payload["cc_image_geometry"]
+        if routed_experts is not None and not isinstance(routed_experts, (str, dict, list)):
             raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
-        return {ROUTED_EXPERTS_FIELD: routed_experts}
+        if routed_experts is not None:
+            extras[ROUTED_EXPERTS_FIELD] = routed_experts
+            if "predecessor_tail_route" in message:
+                extras["predecessor_tail_route"] = message["predecessor_tail_route"]
+        return extras or None

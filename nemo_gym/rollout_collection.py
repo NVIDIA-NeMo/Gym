@@ -1898,6 +1898,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1918,7 +1919,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    res = await server_client.post(
+                        server_name=row["agent_ref"]["name"], url_path="/run", json=row, _retry=retry_requests
+                    )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
@@ -1957,6 +1960,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1968,6 +1972,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
+
+        ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
+        It does not convert failures to successful result rows.
 
         Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are ever added to ``result``.
@@ -1984,6 +1991,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 route_failures_to_sidecar=route_failures_to_sidecar,
+                **({"retry_requests": False} if not retry_requests else {}),
             ),
         )
 

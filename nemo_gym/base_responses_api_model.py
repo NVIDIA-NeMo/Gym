@@ -44,7 +44,7 @@ import orjson
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
@@ -89,6 +89,7 @@ from nemo_gym.token_id_capture.control_routes import install_rollout_control_rou
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -103,6 +104,17 @@ def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
             status_code=422,
             detail="worker-owned token capture does not support streaming requests",
         )
+
+
+def _decode_capture_parent(value: str) -> str | None:
+    """Decode the explicit parent hint shared by generation and read-only probes."""
+    try:
+        parent = orjson.loads(value)
+    except orjson.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID") from error
+    if parent is not None and (not isinstance(parent, str) or not parent):
+        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID")
+    return parent
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -194,12 +206,20 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    _capture_lineage: LineageResolver | None = PrivateAttr(default=None)
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture after conversion to the response returned to the client."""
+        context = current_capture_context()
+        if context is not None and context.fail_on_capture_error and not context.committed:
+            raise HTTPException(status_code=502, detail="CC action finished without committed capture")
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        self._capture_lineage = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
@@ -255,7 +275,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return _orjson_dispatch_response(await self._invoke_responses(request, params))
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -300,7 +323,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            response = await self._invoke_chat_completions(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
@@ -314,6 +340,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> NeMoGymChatCompletion:
+        if CAPTURE_PARENT_HEADER in request.headers:
+            raise HTTPException(status_code=422, detail="explicit parent selection requires the Responses API")
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
@@ -354,7 +382,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
                 media_type="text/event-stream",
             )
-        return _orjson_dispatch_response(anthropic_response)
+        dispatched = _orjson_dispatch_response(anthropic_response)
+        await self._finalize_served_response(anthropic_response)
+        return dispatched
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
@@ -364,9 +394,23 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
+        context = current_capture_context()
+        parent_header = request.headers.get(CAPTURE_PARENT_HEADER)
+        if parent_header is not None:
+            if context is None or not context.external_staging:
+                raise HTTPException(status_code=409, detail="explicit parent selection requires external capture")
+            if request.url.path != "/v1/responses":
+                raise HTTPException(status_code=422, detail="explicit parent selection requires the Responses API")
+            parent_response_id = _decode_capture_parent(parent_header)
+            context.fail_on_capture_error = True
+        if context is not None:
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
+            if parent_header is None:
+                await resolve_parent(request_messages)
+            else:
+                await resolve_parent(request_messages, parent_response_id=parent_response_id)
+                if context.capture_admission is None:
+                    raise HTTPException(status_code=409, detail="explicit capture parent could not be admitted")
             await register_call_intent()
         else:
             request_messages = None
@@ -1515,7 +1559,7 @@ def install_model_call_capture(
     model_server_name: str | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
-) -> None:
+) -> LineageResolver | None:
     """Install model-call capture middleware.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
@@ -1604,6 +1648,7 @@ def install_model_call_capture(
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
+    return lineage_store
 
 
 # --- Run-level capture helpers (rollout-collection side) ---

@@ -228,6 +228,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -235,6 +236,8 @@ async def request(
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+
+    Set `_retry=False` when repeating an ambiguous request could repeat a state change.
     """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -246,10 +249,10 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, _retry=_retry, **kwargs
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, _retry=_retry, **kwargs
     )
 
 
@@ -258,6 +261,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -293,7 +297,7 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, _retry=_retry, **kwargs
         )
 
         if span is not None:
@@ -342,9 +346,13 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
+    if not _retry:
+        return await client.request(method=method, url=url, **kwargs)
+
     num_tries = 1
     retries = 0
     retry_start = time.monotonic()

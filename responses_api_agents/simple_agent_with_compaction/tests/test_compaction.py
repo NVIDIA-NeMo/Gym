@@ -4,42 +4,49 @@
 import subprocess
 import sys
 
-from responses_api_agents.simple_agent_with_compaction.compaction import (
+from nemo_gym.context_management.config import (
     ContextGuardConfig,
-    ContextMeasurements,
-    HistoryController,
     HistoryPolicyConfig,
-    IdentityHistoryPolicy,
     ImageRecencyConfig,
     ReasoningRecencyConfig,
-    RecencyHistoryPolicy,
     RecencyHistoryPolicyConfig,
-    SemanticHistory,
+)
+from nemo_gym.context_management.controller import (
+    HistoryController,
     TurnChunkedHistoryController,
     build_guard_outcome_records,
-    build_history_policy,
-    capture_observed_completion,
-    descriptor_is_append_compatible,
     evaluate_context_guards,
-    materialize_history_view,
+)
+from nemo_gym.context_management.history import (
+    ContextMeasurements,
+    SemanticHistory,
     normalize_semantic_items,
-    ordered_media_is_append_compatible,
-    register_history_policy,
     register_semantic_part_kind,
-    unregister_history_policy,
     unregister_semantic_part_kind,
+)
+from nemo_gym.context_management.materialization import (
+    descriptor_is_append_compatible,
+    materialize_history_view,
+    ordered_media_is_append_compatible,
+)
+from nemo_gym.context_management.policies import (
+    IdentityHistoryPolicy,
+    RecencyHistoryPolicy,
+    build_history_policy,
+    register_history_policy,
+    unregister_history_policy,
 )
 
 
 def test_context_compaction_modules_import_independently() -> None:
     for module_name in (
-        "responses_api_agents.simple_agent_with_compaction.compaction",
-        "responses_api_agents.simple_agent_with_compaction.compaction.config",
-        "responses_api_agents.simple_agent_with_compaction.compaction.controller",
-        "responses_api_agents.simple_agent_with_compaction.compaction.history",
-        "responses_api_agents.simple_agent_with_compaction.compaction.materialization",
-        "responses_api_agents.simple_agent_with_compaction.compaction.policies",
-        "responses_api_agents.simple_agent_with_compaction.compaction.session",
+        "nemo_gym.context_management",
+        "nemo_gym.context_management.config",
+        "nemo_gym.context_management.controller",
+        "nemo_gym.context_management.history",
+        "nemo_gym.context_management.materialization",
+        "nemo_gym.context_management.policies",
+        "nemo_gym.context_management.client",
     ):
         subprocess.run(
             [sys.executable, "-c", f"import {module_name}"],
@@ -665,90 +672,6 @@ def test_ordered_media_prefix_is_part_of_append_compatibility():
     assert ordered_media_is_append_compatible(("A",), ("A", "B"))
     assert not ordered_media_is_append_compatible(("A",), ("B", "A"))
     assert not ordered_media_is_append_compatible(None, ("A",))
-
-
-def test_capture_observed_completion_preserves_exact_evidence_and_media_order():
-    history = SemanticHistory("rollout-evidence")
-    history.append_items(
-        [_observation("initial", "A", "B")],
-        turn_id=0,
-        is_initial_context=True,
-    )
-    view = materialize_history_view(
-        history,
-        IdentityHistoryPolicy().plan(history, decision_turn=1),
-    )
-    observed = capture_observed_completion(
-        [
-            {
-                "role": "assistant",
-                "type": "message",
-                "content": "answer",
-                "prompt_token_ids": [1, 2],
-                "generation_token_ids": [3, 4],
-                "generation_log_probs": [-0.1, -0.2],
-            }
-        ],
-        rollout_id=history.rollout_id,
-        turn_id=1,
-        media_ids=view.media_ids,
-        policy_decision=view.decision,
-        prepared_request_id="prepared-request-1",
-        context_epoch=0,
-        segment_index=0,
-        segment_id="segment-0",
-        expected_append_compatible=False,
-        compaction_event_id=None,
-        generation_contract_id="generation-contract-1",
-    )
-
-    assert observed.prompt_token_ids == (1, 2)
-    assert observed.sampled_token_ids == (3, 4)
-    assert observed.sampled_logprobs == (-0.1, -0.2)
-    assert observed.media_ids == view.media_ids
-    assert observed.context_epoch == 0
-    assert observed.policy_output_spans[0].start == 0
-    assert observed.policy_output_spans[0].end == 2
-    assert [item.media_id for item in observed.media_occurrences] == list(view.media_ids)
-    assert observed.evidence_source == "generation_response"
-
-
-def test_capture_observed_completion_rejects_misaligned_logprobs():
-    history = SemanticHistory("rollout-bad-evidence")
-    history.append_items([_observation("initial", "A")], turn_id=0)
-    view = materialize_history_view(
-        history,
-        IdentityHistoryPolicy().plan(history, decision_turn=1),
-    )
-
-    try:
-        capture_observed_completion(
-            [
-                {
-                    "role": "assistant",
-                    "type": "message",
-                    "content": "answer",
-                    "prompt_token_ids": [1],
-                    "generation_token_ids": [2, 3],
-                    "generation_log_probs": [-0.1],
-                }
-            ],
-            rollout_id=history.rollout_id,
-            turn_id=1,
-            media_ids=view.media_ids,
-            policy_decision=view.decision,
-            prepared_request_id="prepared-request-1",
-            context_epoch=0,
-            segment_index=0,
-            segment_id="segment-0",
-            expected_append_compatible=False,
-            compaction_event_id=None,
-            generation_contract_id="generation-contract-1",
-        )
-    except ValueError as exc:
-        assert "length mismatch" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("misaligned generation evidence must fail closed")
 
 
 def test_guard_evaluation_records_admission_after_compaction():

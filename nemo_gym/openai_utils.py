@@ -1247,6 +1247,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    retry_requests: bool = Field(
+        default=True,
+        description="Retry connection failures and retryable HTTP statuses; false makes a single attempt.",
+    )
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
@@ -1262,10 +1267,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             },
             "_internal": self.internal,
             "_max_connection_retries": self.max_connection_retries,
+            "_retry": self.retry_requests,
         }
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
+        if not self.retry_requests:
+            return await request(**request_kwargs)
+
         max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:

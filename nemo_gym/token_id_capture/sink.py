@@ -35,7 +35,13 @@ from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution, LineageResolver, TokenSink
+from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageResolution,
+    LineageResolver,
+    ParentSelection,
+    TokenSink,
+)
 from nemo_gym.token_id_capture.records import (
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
@@ -58,6 +64,7 @@ if TYPE_CHECKING:
 # response under ``NG_COMMIT_COORDS_FIELD``.
 NG_CAPTURE_FIELD = "ng_capture"
 NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
+CAPTURE_PARENT_HEADER = "x-nemo-gym-capture-parent"
 
 
 @dataclass
@@ -94,6 +101,8 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
+    # Explicitly selected calls require successful capture before returning a response.
+    fail_on_capture_error: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -105,6 +114,8 @@ class CaptureContext:
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
     request_items: list[dict] | None = None
+    # Retain the worker acknowledgement privately until API conversion finishes.
+    external_commit_coords: dict[str, Any] | None = None
 
     @property
     def parent_call_id(self) -> str | None:
@@ -176,7 +187,11 @@ def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
 
-async def resolve_parent(request_messages: list | None) -> None:
+async def resolve_parent(
+    request_messages: list | None,
+    *,
+    parent_response_id: str | None | ParentSelection = ParentSelection.INFER,
+) -> None:
     """Resolve which recorded call this request continues.
 
     Use the request representation received from the harness.
@@ -185,6 +200,10 @@ async def resolve_parent(request_messages: list | None) -> None:
     Return without work for untagged traffic.
     Every attempted resolution records a root, resolved, or unresolved decision.
     An unresolved decision includes its reason.
+    Omit ``parent_response_id`` to infer the parent. Explicit ``None`` selects
+    an ordinary text root, including a retry after a definite root response.
+    A string selects that served response in this capture namespace, subject
+    to the existing continuation checks. Failed explicit selection never roots.
 
     For external staging, parent resolution determines whether the worker may capture the call:
 
@@ -201,7 +220,9 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     context.request_items = list(request_messages)
     try:
-        if not assistant_fingerprint(request_messages):
+        if parent_response_id is None or (
+            parent_response_id is ParentSelection.INFER and not assistant_fingerprint(request_messages)
+        ):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
         elif context.lineage_store is None:
             context.parent_resolution = LineageResolution(
@@ -218,8 +239,12 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "No lineage resolver is available: every continuation resolves UNRESOLVED "
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
-        else:
+        elif parent_response_id is ParentSelection.INFER:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
+        else:
+            context.parent_resolution = await context.lineage_store.resolve(
+                context.rollout_id, request_messages, parent_response_id=parent_response_id
+            )
         _count_resolution(context.parent_resolution.status.value)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
@@ -275,7 +300,7 @@ async def resolve_parent(request_messages: list | None) -> None:
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or not await ledger.has_rows(context.rollout_id):
+    if is_root or (parent_response_id is ParentSelection.INFER and not await ledger.has_rows(context.rollout_id)):
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,

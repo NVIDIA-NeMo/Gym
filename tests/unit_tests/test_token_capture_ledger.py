@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger
-from nemo_gym.token_id_capture.records import compute_digest
+from nemo_gym.token_id_capture.lineage import (
+    FileLineageStore,
+    InMemoryLineageStore,
+    _custody_columns,
+    stamp_continuation,
+)
+from nemo_gym.token_id_capture.protocols import CaptureLedger, ParentSelection
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest, stamp_lineage
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
     CaptureContext,
@@ -28,6 +33,7 @@ from nemo_gym.token_id_capture.staging.digest import (
     hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit, RolloutManifest
+from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
 USER_1 = {"role": "user", "content": "solve the task"}
@@ -208,7 +214,9 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
-async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
+async def _admit(
+    store, request_items, rollout_id="r1", model_call_id="c2", *, parent_response_id=ParentSelection.INFER
+):
     context = CaptureContext(
         rollout_id=rollout_id,
         model_call_id=model_call_id,
@@ -218,7 +226,7 @@ async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     )
     token = set_token_sink(context)
     try:
-        await resolve_parent(request_items)
+        await resolve_parent(request_items, parent_response_id=parent_response_id)
     finally:
         reset_token_sink(token)
     return context
@@ -316,6 +324,116 @@ async def test_ambiguous_siblings_are_unresolved(store):
 
 
 @pytest.mark.asyncio
+async def test_explicit_null_admits_same_prepared_root_retry(store):
+    request = [USER_1, ASSISTANT_SEEDED, USER_2]
+    first = await _admit(store, request, model_call_id="c1", parent_response_id=None)
+    assert first.capture_admission is not None and first.capture_admission.mode == "text"
+    await store.record(_commit(_call_record("c1"), request, [ASSISTANT_1]))
+
+    retry = await _admit(store, request, model_call_id="c1retry", parent_response_id=None)
+    assert retry.parent_resolution.status == ParentResolutionStatus.ROOT
+    assert retry.capture_admission is not None and retry.capture_admission.mode == "text"
+    assert retry.capture_admission.parent_call_id is None
+    assert retry.capture_admission.prev_len == 0
+    assert retry.capture_admission.staging_chain == []
+    assert (await store.manifest("r1"))["failures"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_call", ["c1", "c1retry"])
+async def test_explicit_response_selects_exact_same_text_sibling(store, selected_call):
+    await _record_call_1(store)
+    sibling_tokens = TOKENS_1 + [42]
+    sibling = _call_record(
+        "c1retry",
+        cumulative_hash=hash_token_ids(sibling_tokens),
+        chain_hash=compute_chain_hash(None, sibling_tokens),
+        delta_len=len(sibling_tokens),
+    )
+    await store.record(_commit(sibling, [USER_1], [ASSISTANT_1]))
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2], parent_response_id=f"chatcmpl-{selected_call}")
+    admission = context.capture_admission
+    selected = _call_record("c1") if selected_call == "c1" else sibling
+    assert admission is not None and admission.mode == "token_in"
+    assert admission.parent_call_id == selected_call
+    assert admission.prev_len == selected.cum_len
+    assert admission.parent_chain_hash == selected.chain_hash
+    assert admission.staging_chain == [selected.staging_key]
+    assert admission.required_prefix_token_ids == []
+    assert context.parent_tokens == []
+    assert (await store.manifest("r1"))["failures"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_items", [[USER_1], [USER_1, ASSISTANT_SEEDED, USER_2]])
+@pytest.mark.parametrize("parent_response_id", ["chatcmpl-missing", "chatcmpl-c1"])
+async def test_explicit_missing_or_foreign_parent_poisons_empty_namespace(store, request_items, parent_response_id):
+    await _record_call_1(store, rollout_id="foreign")
+    context = await _admit(store, request_items, parent_response_id=parent_response_id)
+    assert context.parent_resolution.status == ParentResolutionStatus.UNRESOLVED
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.records == []
+    assert [(row.model_call_id, row.reason) for row in manifest.failures] == [("c2", UNRESOLVED_PARENT_REASON)]
+    assert (await store.manifest("foreign"))["failures"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_items",
+    [
+        [{"role": "user", "content": "rewritten context"}, ASSISTANT_1, USER_2],
+        [USER_1, ASSISTANT_2, USER_2],
+        [USER_1],
+    ],
+)
+async def test_explicit_parent_requires_original_context_and_response(store, request_items):
+    await _record_call_1(store)
+    context = await _admit(store, request_items, parent_response_id="chatcmpl-c1")
+    assert context.capture_admission is None
+    assert context.parent_resolution.status == ParentResolutionStatus.UNRESOLVED
+    assert (await store.manifest("r1"))["failures"][0]["reason"] == UNRESOLVED_PARENT_REASON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_response", [ASSISTANT_1, ASSISTANT_2])
+async def test_duplicate_response_id_is_ambiguous_even_with_identical_tokens(store, sibling_response):
+    await _record_call_1(store)
+    sibling = _call_record("c1retry").model_copy(update={"response_id": "chatcmpl-c1"})
+    await store.record(_commit(sibling, [USER_1], [sibling_response]))
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2], parent_response_id="chatcmpl-c1")
+    assert context.capture_admission is None
+    assert context.parent_resolution.status == ParentResolutionStatus.UNRESOLVED
+    assert (await store.manifest("r1"))["failures"][0]["reason"] == UNRESOLVED_PARENT_REASON
+
+
+@pytest.mark.asyncio
+async def test_explicit_response_lookup_materializes_exact_local_tokens(store, tmp_path):
+    for call_id, token_id in [("c1", 3), ("c1retry", 4)]:
+        entry = TokenEntry(
+            rollout_id="r1",
+            model_call_id=call_id,
+            response_id=f"chatcmpl-{call_id}",
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[token_id],
+            generation_log_probs=[-0.1],
+            output_items=[ASSISTANT_1],
+        )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        stamp_continuation(entry, [USER_1])
+        if isinstance(store, FileLineageStore):
+            TokenCaptureStore(tmp_path).append(entry)
+        else:
+            await store.put(entry)
+    request = [USER_1, ASSISTANT_1, USER_2]
+    assert (await store.resolve("r1", request)).status == ParentResolutionStatus.UNRESOLVED
+    for call_id, token_id in [("c1", 3), ("c1retry", 4)]:
+        resolution = await store.resolve("r1", request, parent_response_id=f"chatcmpl-{call_id}")
+        assert resolution.match is not None and resolution.match.model_call_id == call_id
+        assert resolution.match.cumulative_token_ids == (1, 2, token_id)
+
+
+@pytest.mark.asyncio
 async def test_commit_ordering_parent_resolvable_only_after_record(store):
     # Before the ledger row exists, the follow-up cannot resolve a parent.
     assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
@@ -337,6 +455,8 @@ async def test_file_store_cross_handle_visibility(tmp_path):
     manifest = RolloutManifest.model_validate(await reader.manifest("r1"))
     assert len(manifest.records) == 1 and len(manifest.failures) == 1
     assert await reader.has_rows("r1")
+    context = await _admit(reader, [USER_1, ASSISTANT_1, USER_2], parent_response_id="chatcmpl-c1")
+    assert context.capture_admission is not None and context.capture_admission.parent_call_id == "c1"
 
 
 @pytest.mark.asyncio
