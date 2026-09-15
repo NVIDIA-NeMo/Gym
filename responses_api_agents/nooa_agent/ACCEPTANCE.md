@@ -40,7 +40,7 @@ and remaining work.
 | H9 | `model_call_zero_completion_tokens` | C2 and C10/C11 | Met | Preserve length-limited exemption behavior. |
 | H10 | `model_call_runaway_generation` | C1, C9, and C10/C11 | Met | Keep Responses status/incomplete-reason variants covered. |
 | H11 | `rollout_token_count_mismatch` | C2, C11, complete accounting, top-level totals | Met | Add one persisted acceptance-matrix fixture. |
-| H13 | `task_no_successful_model_calls` | C11 and complete accounting for every repeat | Partial | Add focused success, incomplete-repeat/unobserved, duplicate-repeat, multi-repeat, and ignore-path tests. |
+| H13 | `task_no_successful_model_calls` | C11 and complete accounting for every repeat | Met | Focused tests cover any-repeat success, incomplete accounting as unobserved, duplicate-repeat reduction, all-failed findings, and ignore behavior | Preserve task-reduction regressions. |
 
 ## Required implementation order
 
@@ -83,7 +83,7 @@ The audit that created this document ran:
 - [x] C11 turn ownership ambiguity/conflict tests added.
 - [x] C6 concurrent timing behavior and semantics tested.
 - [x] C7 resource-server and seeded-sandbox E2E routes tested.
-- [ ] H13 edge cases tested.
+- [x] H13 edge cases tested.
 - [ ] Acceptance-matrix fixture passes all applicable health checks.
 - [ ] Representative real rollout inspected on the final stack.
 - [ ] Scoped/full pre-commit passes.

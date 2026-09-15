@@ -896,6 +896,92 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
     assert ignored.summary["tasks"]["7"]["repeats"] == 1
 
 
+def test_task_no_successful_model_calls_is_suppressed_when_any_repeat_succeeds(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (_record(20, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call()]),
+            (
+                _record(20, 1, usage={"input_tokens": 3, "output_tokens": 2}),
+                [_call(status_code=500, error_category="upstream")],
+            ),
+        ],
+    )
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    assert "task_no_successful_model_calls" not in result.summary["tasks"]["20"]["flags"]
+    assert result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"] == {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0,
+    }
+
+
+def test_task_no_successful_model_calls_is_unobserved_when_any_repeat_has_incomplete_accounting(
+    tmp_path: Path,
+) -> None:
+    incomplete = _record(21, 1, usage={"input_tokens": 3, "output_tokens": 2})
+    incomplete["ng_trajectory"]["turns"][0]["model_calls"] = []
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                _record(21, 0, usage={"input_tokens": 3, "output_tokens": 2}),
+                [_call(status_code=500, error_category="upstream")],
+            ),
+            (incomplete, [_call(model_call_id="second")]),
+        ],
+    )
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    assert "task_no_successful_model_calls" not in result.summary["tasks"]["21"]["flags"]
+    assert result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"] == {
+        "evaluated": 0,
+        "unobserved": 1,
+        "ignored": 0,
+    }
+
+
+def test_task_no_successful_model_calls_deduplicates_logical_repeats(tmp_path: Path) -> None:
+    failed = _record(22, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    calls = [_call(status_code=500, error_category="upstream")]
+    rollout_path = _write_fixture(tmp_path, [(failed, calls), (deepcopy(failed), deepcopy(calls))])
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    assert result.summary["tasks"]["22"]["repeats"] == 1
+    assert "task_no_successful_model_calls" in result.summary["tasks"]["22"]["flags"]
+    assert result.summary["run"]["issues"]["task_no_successful_model_calls"] == 1
+
+
+def test_task_no_successful_model_calls_can_be_ignored(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                _record(23, 0, usage={"input_tokens": 3, "output_tokens": 2}),
+                [_call(status_code=500, error_category="upstream")],
+            )
+        ],
+    )
+
+    result = run_health_checks(
+        rollout_path,
+        workers=1,
+        ignored_checks=["task_no_successful_model_calls"],
+    )
+
+    assert "task_no_successful_model_calls" not in result.summary["tasks"]["23"]["flags"]
+    assert result.summary["run"]["issues"]["task_no_successful_model_calls"] == 0
+    assert result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"] == {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 1,
+    }
+
+
 def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_path: Path) -> None:
     rollout_path = _write_fixture(
         tmp_path,
