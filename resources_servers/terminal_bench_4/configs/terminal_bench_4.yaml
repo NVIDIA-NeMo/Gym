@@ -1,0 +1,9 @@
+config_paths:
+- benchmarks/terminal_bench_4/resources.yaml
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Official pinned TB4 setup, state, separate verification, and cleanup.
