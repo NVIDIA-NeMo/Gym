@@ -77,6 +77,32 @@ The audit that created this document ran:
 - Standalone rollout-health suite: **53 passed**.
 - Combined controller acceptance suite: **87 passed**.
 
+## Final-stack rollout evidence
+
+A one-row real GLM-5.3 run used the shipped `nooa_calculate_capability` agent and
+`nooa_capability` resources server on the completed stack:
+
+- reward `1.0`; expected and actual result `7`;
+- `1 healthy / 0 unhealthy / 0 unobserved` rollout verdicts;
+- one canonical invocation and turn with exact model-visible question and `resolved=true`;
+- one captured model call with full request/response and prompt `1885`, completion `52`, reasoning
+  `32`, total `1937`, and cached `32` tokens;
+- `ng_perf.token_observability_coverage = 1.0`;
+- config-driven native journal written under `/tmp/nooa-gym-acceptance-final/native-traces` with
+  experiment `nooa-gym-acceptance-final-20260915`.
+
+The sole trajectory gap is `non_trainable_terminal_output`: the typed return value is projected into
+the final assistant message. This is explicit and does not make any acceptance health check
+unobserved.
+
+## Verification environment note
+
+Scoped `pre-commit` was invoked, but initialization failed before any hook ran because this host's
+network policy blocks fetching `github.com/pre-commit/pre-commit-hooks`. The worktree was unchanged.
+The local equivalents were run over every file in the PR stack: Ruff check, Ruff format check,
+trailing whitespace, EOF, and Markdown filename policy. The config-changing local hooks do not apply
+to this stack's changed files. Full pre-commit remains an external-environment gate.
+
 ## PR completion checklist
 
 - [x] C3/C8 canonical turn fields implemented and persisted round-trip test added.
@@ -85,6 +111,7 @@ The audit that created this document ran:
 - [x] C7 resource-server and seeded-sandbox E2E routes tested.
 - [x] H13 edge cases tested.
 - [x] Acceptance-matrix fixture passes all applicable health checks.
-- [ ] Representative real rollout inspected on the final stack.
-- [ ] Scoped/full pre-commit passes.
+- [x] Representative real rollout inspected on the final stack.
+- [x] Scoped Ruff, formatting, whitespace, EOF, and Markdown-name checks pass.
+- [ ] Full pre-commit runner completes (bootstrap currently blocked by host network policy for `github.com`).
 - [ ] All PR commits carry DCO `Signed-off-by` trailers.
