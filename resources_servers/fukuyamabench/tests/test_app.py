@@ -454,7 +454,17 @@ class TestCorpusCompleteness:
         assert not output.exists(), "a rejected limit must not write a split"
 
     def test_cli_accepts_a_positive_limit(self, tmp_path, monkeypatch) -> None:
-        """The supported subset path still works, and bypasses the manifest check."""
+        """A positive limit writes that many rows and skips the manifest check.
+
+        The skip is asserted rather than assumed: the synthetic tier is exempt
+        from the manifest anyway, so without the fail-if-called stub this would
+        pass even if completeness were still being enforced.
+        """
+
+        def _must_not_check(*_args, **_kwargs):
+            raise AssertionError("check_corpus_complete() must not run for an explicit subset")
+
+        monkeypatch.setattr(prepare, "check_corpus_complete", _must_not_check)
         output = tmp_path / "out.jsonl"
         monkeypatch.setattr(
             sys,
