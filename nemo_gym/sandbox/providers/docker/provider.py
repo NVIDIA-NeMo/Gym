@@ -373,24 +373,22 @@ class DockerProvider:
         return handle
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
-        """Serialize a handle so another process can connect to the same container.
+        """Return a descriptor for reattaching to this container by id.
 
-        ``scope`` is unused by the Docker provider.
+        Docker recovers image and shell from the running container on connect,
+        and ``docker exec`` runs inside the container's own environment, so the
+        id alone is enough; ``AsyncSandbox.serialize()`` layers the declared
+        ports on top. ``scope`` is unused by the Docker provider.
         """
-        container = handle.raw
-        return {
-            "sandbox_id": handle.sandbox_id,
-            "image": container.image,
-            "shell": container.shell,
-            "env": dict(container.env),
-            "published_ports": list(container.published_ports),
-        }
+        return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        """Create a handle for an existing running container.
+        """Create a handle for an existing running container, rediscovering its
+        image and shell via the Docker CLI.
 
-        ``sandbox_id`` is required. If omitted, ``image`` and ``shell`` are
-        determined from the container.
+        ``sandbox_id`` is required. ``AsyncSandbox.serialize()`` adds a
+        top-level ``ports`` key from the original spec; read it back here so
+        ``endpoint()`` still works after reconnecting.
         """
         name = descriptor.get("sandbox_id")
         if not name:
@@ -402,7 +400,7 @@ class DockerProvider:
         )
         if code != 0:
             raise DockerCreateError(f"cannot connect to container {name!r}: {err.strip() or out.strip()}")
-        running, _, inspected_image = out.strip().partition("\t")
+        running, _, image = out.strip().partition("\t")
         if running != "true":
             raise DockerCreateError(f"cannot connect to container {name!r}: it is not running")
 
@@ -411,10 +409,9 @@ class DockerProvider:
             provider_name=self.name,
             raw=_DockerContainer(
                 name=str(name),
-                image=descriptor.get("image") or inspected_image,
-                shell=descriptor.get("shell") or await self._resolve_shell(str(name)),
-                env=dict(descriptor.get("env") or {}),
-                published_ports=tuple(descriptor.get("published_ports") or ()),
+                image=image,
+                shell=await self._resolve_shell(str(name)),
+                published_ports=tuple(descriptor.get("ports") or ()),
             ),
         )
 

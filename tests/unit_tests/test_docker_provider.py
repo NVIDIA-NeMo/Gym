@@ -822,19 +822,13 @@ async def test_run_real_timeout(fake_binary: str) -> None:
 # Reattaching to a container another process created
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_serialize_handle_carries_what_connect_needs(fake_binary: str) -> None:
+async def test_serialize_handle_returns_only_the_sandbox_id(fake_binary: str) -> None:
     provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
     handle = _make_handle(name="nemo-gym-a", image="img:1", shell="bash", env={"K": "v"}, published_ports=(8080,))
 
     descriptor = await provider.serialize_handle(handle)
 
-    assert descriptor == {
-        "sandbox_id": "nemo-gym-a",
-        "image": "img:1",
-        "shell": "bash",
-        "env": {"K": "v"},
-        "published_ports": [8080],
-    }
+    assert descriptor == {"sandbox_id": "nemo-gym-a"}
 
 
 @pytest.mark.asyncio
@@ -844,23 +838,26 @@ async def test_connect_rebuilds_a_handle_for_a_running_container(
     """A resources server creates the container; the agent server only gets the descriptor."""
     provider, rec = _make_provider(monkeypatch, lambda _argv: (0, "true\timg:1\n", ""))
 
-    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "image": "img:1", "shell": "sh"})
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a"})
 
     assert handle.sandbox_id == "nemo-gym-a"
     assert handle.provider_name == "docker"
     assert handle.raw.image == "img:1"
+    assert handle.raw.shell == "sh"
+    assert handle.raw.env == {}
     assert _contains_seq(rec.calls[0]["argv"], ["inspect"])
 
 
 @pytest.mark.asyncio
-async def test_connect_reads_the_image_back_when_the_descriptor_omits_it(
+async def test_connect_carries_the_ports_serialize_layered_on(
     monkeypatch: pytest.MonkeyPatch, fake_binary: str
 ) -> None:
-    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "true\tinspected:2\n", ""))
+    """``AsyncSandbox.serialize()`` adds a top-level ``ports`` key; connect() must read it back."""
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "true\timg:1\n", ""))
 
-    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "shell": "sh"})
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "ports": [8080]})
 
-    assert handle.raw.image == "inspected:2"
+    assert handle.raw.published_ports == (8080,)
 
 
 @pytest.mark.asyncio
