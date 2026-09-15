@@ -170,11 +170,11 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
                 id=item.call_id,
             )
             calls_by_id[item.call_id] = tool_call
-            meta = (
-                {_OUTPUT_ITEMS_META_KEY: [{"type": "function_call", "id": item.id, "call_id": item.call_id}]}
-                if item.id is not None
-                else None
-            )
+            meta = {
+                _OUTPUT_ITEMS_META_KEY: [
+                    {"type": "function_call", "id": item.id, "call_id": item.call_id, "namespace": item.namespace}
+                ]
+            }
             messages.append(ChatMessage.from_assistant(tool_calls=[tool_call], meta=meta))
         elif item_type == "function_call_output":
             origin = calls_by_id.get(item.call_id) or ToolCall(tool_name="", arguments={}, id=item.call_id)
@@ -200,11 +200,11 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
             )
         elif role == "assistant":
             text = _content_to_text(item.content)
-            meta = (
-                {_OUTPUT_ITEMS_META_KEY: [{"type": "message", "id": item.id, "text": text}]}
-                if getattr(item, "id", None) is not None
-                else None
-            )
+            meta = {
+                _OUTPUT_ITEMS_META_KEY: [
+                    {"type": "message", "id": getattr(item, "id", None), "text": text, "phase": item.phase}
+                ]
+            }
             messages.append(ChatMessage.from_assistant(text=text or None, meta=meta))
         elif role == "system" or role == "developer":
             messages.append(ChatMessage.from_system(_content_to_text(item.content), meta={"__ng_role__": role}))
@@ -224,12 +224,12 @@ def _tool_to_responses_param(tool: Any, tools_strict: bool) -> dict[str, Any]:
     }
 
 
-def _items_from_output_metadata(message: ChatMessage, index: int) -> Optional[list[Any]]:
+def _items_from_output_metadata(message: ChatMessage, index: int, *, output: bool) -> Optional[list[Any]]:
     """Recreate the model output items folded into one Haystack assistant message.
 
     Haystack's ``ChatMessage`` has one text and one reasoning field, while a Responses
     completion may contain several reasoning and assistant-message items. The private
-    metadata retains their minimal grouping solely so their model-provided IDs survive
+    metadata retains their grouping, IDs, message phases, and tool namespaces through
     both the next model request and the final reconstructed trajectory.
     """
     records = message.meta.get(_OUTPUT_ITEMS_META_KEY)
@@ -250,11 +250,17 @@ def _items_from_output_metadata(message: ChatMessage, index: int) -> Optional[li
                 )
             )
         elif record_type == "message":
+            if record["id"] is None and not output:
+                items.append(
+                    NeMoGymEasyInputMessage(role="assistant", content=record["text"], phase=record.get("phase"))
+                )
+                continue
             items.append(
                 NeMoGymResponseOutputMessage(
                     type="message",
-                    id=record["id"],
+                    id=record["id"] if record["id"] is not None else f"msg_{index}",
                     role="assistant",
+                    phase=record.get("phase"),
                     content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=record["text"])],
                 )
             )
@@ -268,6 +274,7 @@ def _items_from_output_metadata(message: ChatMessage, index: int) -> Optional[li
                     id=record["id"],
                     call_id=tool_call.id,
                     name=tool_call.tool_name,
+                    namespace=record.get("namespace"),
                     arguments=json.dumps(tool_call.arguments or {}),
                 )
             )
@@ -303,7 +310,7 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
 
         role = message.role
         if role == ChatRole.ASSISTANT:
-            retained_items = _items_from_output_metadata(message, index)
+            retained_items = _items_from_output_metadata(message, index, output=output)
             if retained_items is not None:
                 items.extend(retained_items)
             else:
@@ -379,7 +386,7 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
         if item_type == "message" and getattr(item, "role", None) == "assistant":
             text = "".join(_content_part_text(content, context="model response") for content in item.content)
             text_parts.append(text)
-            output_items.append({"type": "message", "id": item.id, "text": text})
+            output_items.append({"type": "message", "id": item.id, "text": text, "phase": item.phase})
         elif item_type == "function_call":
             try:
                 arguments = json.loads(item.arguments) if item.arguments else {}
@@ -388,7 +395,9 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
                 # invocation surfaces the error instead of us crashing here.
                 arguments = {"__raw_arguments__": item.arguments}
             tool_calls.append(ToolCall(tool_name=item.name, arguments=arguments, id=item.call_id))
-            output_items.append({"type": "function_call", "id": item.id, "call_id": item.call_id})
+            output_items.append(
+                {"type": "function_call", "id": item.id, "call_id": item.call_id, "namespace": item.namespace}
+            )
         elif item_type == "reasoning":
             summary = "".join(summary.text for summary in item.summary)
             reasoning_parts.append(summary)

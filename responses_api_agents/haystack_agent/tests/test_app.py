@@ -365,6 +365,49 @@ class TestChatGenerator:
         seeded_items = chat_messages_to_responses(seeded_messages)
         assert [item.id for item in seeded_items] == ["rs_1", "msg_1", "fc_1", "rs_2", "msg_2", "fc_2"]
 
+    @pytest.mark.parametrize("output", [False, True])
+    @pytest.mark.parametrize("seeded", [False, True])
+    @pytest.mark.parametrize("call_id", [None, "fc_1"])
+    def test_round_trips_message_phase_and_tool_namespace(self, output, seeded, call_id) -> None:
+        response = NeMoGymResponse.model_validate(
+            _envelope(
+                [
+                    {**_text_item("Checking."), "phase": "commentary"},
+                    {**_function_call_item(), "id": call_id, "namespace": "weather"},
+                    {**_text_item("Done."), "id": "msg_2", "phase": "final_answer"},
+                ]
+            )
+        )
+        messages = responses_input_to_messages(response.output) if seeded else response_to_chat_messages(response)
+        messages = [ChatMessage.from_dict(message.to_dict()) for message in messages]
+
+        reconstructed = chat_messages_to_responses(messages, output=output)
+
+        assert [item.type for item in reconstructed] == ["message", "function_call", "message"]
+        assert [reconstructed[0].phase, reconstructed[2].phase] == ["commentary", "final_answer"]
+        assert [reconstructed[0].content[0].text, reconstructed[2].content[0].text] == ["Checking.", "Done."]
+        assert reconstructed[1].namespace == "weather"
+        assert reconstructed[1].id == call_id
+        assert reconstructed[1].call_id == "call_1"
+        assert reconstructed[1].name == "get_weather"
+        assert json.loads(reconstructed[1].arguments) == {"city": "San Francisco"}
+
+    @pytest.mark.parametrize("output", [False, True])
+    @pytest.mark.parametrize("phase", [None, "commentary", "final_answer"])
+    def test_round_trips_easy_input_message_phase(self, output, phase) -> None:
+        messages = responses_input_to_messages([NeMoGymEasyInputMessage(role="assistant", content="Hi", phase=phase)])
+
+        reconstructed = chat_messages_to_responses(messages, output=output)
+
+        assert len(reconstructed) == 1
+        assert reconstructed[0].phase == phase
+        if output:
+            assert reconstructed[0].id == "msg_0"
+            assert reconstructed[0].content[0].text == "Hi"
+        else:
+            assert isinstance(reconstructed[0], NeMoGymEasyInputMessage)
+            assert reconstructed[0].content == "Hi"
+
     async def test_run_async_does_not_replace_resource_cookies(self, monkeypatch: MonkeyPatch) -> None:
         client = MagicMock()
         model_response = _make_response(_envelope([_text_item()], _USAGE))
