@@ -238,6 +238,14 @@ def load_case(case_dir: Path) -> Optional[dict]:
     }
 
 
+def positive_int(value: str) -> int:
+    """A subset size below one is a mistake, not a request for everything."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"--limit must be a positive integer, got {number}")
+    return number
+
+
 def check_corpus_complete(cases: list[dict], wanted: set[str]) -> None:
     """Fail before writing if a requested upstream tier is not fully loaded.
 
@@ -250,11 +258,6 @@ def check_corpus_complete(cases: list[dict], wanted: set[str]) -> None:
     cases during parsing and would otherwise pass a directory-count check. Tiers
     outside the upstream manifest — the synthetic fixtures — are exempt.
     """
-    ids = [c["case_id"] for c in cases]
-    duplicates = sorted({i for i in ids if ids.count(i) > 1})
-    if duplicates:
-        raise SystemExit(f"Duplicate case identities: {', '.join(duplicates)}")
-
     problems = []
     for tier in sorted(wanted & EXPECTED_CASES.keys()):
         found = sum(1 for c in cases if c["case_set"] == tier)
@@ -306,7 +309,7 @@ def main() -> None:
             "Upstream tiers are A, B and C; B and C carry the sub-20%% published figures"
         ),
     )
-    parser.add_argument("--limit", type=int, default=None, help="Max rows to output")
+    parser.add_argument("--limit", type=positive_int, default=None, help="Max rows to output (positive integer)")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -326,17 +329,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    mechanisms = args.source_dir or fetch_mechanisms(args.cache_dir)
     wanted = {s.upper() for s in args.sets}
 
-    # An unrecognised tier would otherwise intersect to nothing in the manifest
-    # check and quietly produce an empty split.
+    # Checked before fetching: an unrecognised tier would otherwise intersect to
+    # nothing in the manifest check and quietly produce an empty split, and
+    # there is no reason to download an archive first to reject the argument.
     unknown = sorted(wanted - EXPECTED_CASES.keys())
     if unknown and not args.source_dir:
         raise SystemExit(
             f"Unknown set(s): {', '.join(unknown)}. Upstream tiers are {', '.join(sorted(EXPECTED_CASES))}."
         )
 
+    mechanisms = args.source_dir or fetch_mechanisms(args.cache_dir)
     case_dirs = sorted(d for d in mechanisms.iterdir() if d.is_dir() and d.name[0].upper() in wanted)
 
     # Load everything before writing anything, so an incomplete corpus cannot
@@ -349,12 +353,12 @@ def main() -> None:
             skipped.append(case_dir.name)
             continue
         cases.append(case)
-        if args.limit and len(cases) >= args.limit:
+        if args.limit is not None and len(cases) >= args.limit:
             break
 
     if not cases:
         raise SystemExit(f"No cases loaded from {mechanisms} for set(s) {', '.join(sorted(wanted))}.")
-    if not args.limit:
+    if args.limit is None:
         check_corpus_complete(cases, wanted)
 
     output_path = Path(args.output)

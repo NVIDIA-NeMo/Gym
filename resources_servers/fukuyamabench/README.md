@@ -24,8 +24,9 @@ Advanced Organic Reaction Mechanism* (Kagaku-Dojin, 2005):
 
 `prepare_fukuyamabench.py` defaults to **sets B and C** (241 cases), which are
 the tiers carrying the sub-20% published figures. Set A is available via
-`--sets A` but is a materially easier task; scores should never be aggregated
-across tiers.
+`--sets A` but is a materially easier task. Tier scores should be read
+separately — the server reports per-tier headline metrics, and the pooled mean it
+removes from `key_metrics` is described under "Metrics are reported per tier".
 
 Upstream defines three tasks. This implements **pathway & product prediction**,
 the headline task (the paper's Table 2) and the only one upstream ships an
@@ -119,6 +120,12 @@ recovered species maps to its own form, and no previously-separate species are
 merged. Gold-as-prediction goes from 236/241 to **241/241** with all negative
 controls still at zero.
 
+Note this retry applies to predictions as well as gold, and there it can *remove*
+a match: a predicted species upstream silently discards as unparseable is
+retained here, so a prediction upstream scored as a subset of gold may no longer
+be one. That is the intended reading — the model did write that species — but it
+means this divergence is not purely additive.
+
 **A prediction containing an unparseable component fails.** Upstream drops
 components RDKit cannot read before comparing, so the correct product plus one
 malformed fragment scores an exact match — under `--strict` as well, which makes
@@ -146,10 +153,15 @@ it is simply not presented as a result. Read the per-tier keys.
 
 Upstream reports pass@k for k in {1, 3, 5, 8} over n=8 samples per case, using
 the unbiased estimator. This server scores a single rollout, so pass@k is an
-aggregation concern for the harness, not the verifier. Note also that upstream's
-inference script runs the *first* of its n draws at temperature 0.0 and the rest
-at 0.7 — pass@1 there is not a mean over n stochastic draws. The sampling
-parameters behind the published tables are not stated in the paper.
+aggregation concern for the harness, not the verifier.
+
+A caution on upstream's sampling: its inference script *computes and records* a
+per-draw temperature (0.0 for the first draw, 0.7 for the rest), but its OpenAI
+path never passes that value to `chat.completions.create` — only `model` and
+`messages` are sent. On that provider the recorded temperature is therefore not
+the effective request parameter and the endpoint defaults apply; other provider
+paths in the same script do pass it. The sampling parameters behind the
+published tables are not stated in the paper.
 
 ## Quickstart
 
