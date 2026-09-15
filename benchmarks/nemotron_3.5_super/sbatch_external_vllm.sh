@@ -131,7 +131,12 @@ export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 # export UCX_IB_ADDR_TYPE=eth
 # export UCX_RNDV_SCHEME=get_zcopy
 # export UCX_RNDV_THRESH=0
+
+# vLLM recipes recommended env vars
 export UCX_NET_DEVICES=all
+export NCCL_CUMEM_ENABLE=1
+export NCCL_MNNVL_ENABLE=1
+export NCCL_NVLS_ENABLE=1
 
 source "$VLLM_CONFIG"
 
