@@ -130,7 +130,7 @@ def prepare(
     configured_root = str(os.environ.get("VISUALWEBARENA_SOURCE_ROOT", "")).strip()
     if source_value:
         source_path = Path(source_value).expanduser().resolve()
-        image_root = Path(configured_root).expanduser().resolve() if configured_root else source_path.parent
+        image_root = Path(configured_root or source_root or source_path.parent).expanduser().resolve()
     else:
         image_root = Path(configured_root or source_root or DEFAULT_SOURCE_ROOT).expanduser().resolve()
         source_path = _download_pinned_source(image_root)
@@ -183,7 +183,7 @@ def write_env(
         "upload_rollouts: false",
         f"visualwebarena_source_root: {_yaml_string(Path(source_root).expanduser().resolve())}",
         "responses_create_params:",
-        "  max_output_tokens: 16384",
+        "  max_output_tokens: null",
         "  temperature: 0.1",
         "  top_p: 0.95",
         "policy_base_url: ${oc.env:POLICY_BASE_URL,http://127.0.0.1:8000/v1}",
@@ -213,7 +213,9 @@ def main() -> None:
     args = parser.parse_args()
 
     configured_root = str(os.environ.get("VISUALWEBARENA_SOURCE_ROOT", "")).strip()
-    source_root = Path(configured_root or args.source_root or DEFAULT_SOURCE_ROOT).expanduser().resolve()
+    source_value = args.source or os.environ.get("VISUALWEBARENA_SOURCE_JSONL", "").strip()
+    default_root = Path(source_value).expanduser().resolve().parent if source_value else DEFAULT_SOURCE_ROOT
+    source_root = Path(configured_root or args.source_root or default_root).expanduser().resolve()
     prepared = prepare(args.source, args.output, source_root)
     if not args.no_env:
         write_env(
