@@ -91,6 +91,8 @@ def _numeric(value: Any) -> Optional[float]:
 
 def is_comparable_metric(name: str) -> bool:
     """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
+    if name == "num_repeats":
+        return False
     if name.startswith(DISPERSION_PREFIXES):
         return False
     if ACROSS_REPEATS_MARKER in name:
@@ -146,6 +148,9 @@ def _welch_delta_confidence_interval(
     candidate_values = _repeat_metric_values(candidate, name)
     if len(baseline_values) < 2 or len(candidate_values) < 2:
         return None, None
+    if len(set(baseline_values)) == len(set(candidate_values)) == 1:
+        delta = candidate_values[0] - baseline_values[0]
+        return delta, delta
 
     test_result = stats.ttest_ind(candidate_values, baseline_values, equal_var=False)
     interval = test_result.confidence_interval(confidence_level=0.95)
@@ -414,7 +419,7 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
     if not baseline.has_repeat_cis and not any(run.has_repeat_cis for run in candidates):
         notes.append(
             "Neither run recorded per-run cross-repeat confidence intervals, so every baseline/candidate "
-            "CI cell is empty. They are written for `mean/*` metrics when a run has 2 or more repeats."
+            "CI cell is empty. They are written for repeat-aggregated metrics when a run has 2 or more repeats."
         )
     one_sided = [row.metric for row in rows if len(row.present_in) < 1 + len(candidates)]
     if one_sided:

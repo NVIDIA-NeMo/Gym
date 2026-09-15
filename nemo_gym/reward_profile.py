@@ -31,12 +31,14 @@ from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    ACROSS_REPEATS_MARKER,
     AGENT_REF_KEY_NAME,
     AVG_SAMPLE_STD_DEV_SUFFIX,
     CI_HIGH_95_ACROSS_REPEATS_PREFIX,
     CI_HIGH_95_PREFIX,
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
     CI_LOW_95_PREFIX,
+    HISTOGRAM_PREFIX,
     HISTOGRAM_STAT_NAME,
     MAX_ACROSS_REPEATS_PREFIX,
     MAX_PREFIX,
@@ -54,6 +56,7 @@ from nemo_gym.global_config import (
     P75_PREFIX,
     ROLLOUT_INDEX_KEY_NAME,
     SE_ACROSS_REPEATS_PREFIX,
+    SE_PREFIX,
     SEM_PREFIX,
     STAT_SEPARATOR,
     STD_ACROSS_REPEATS_PREFIX,
@@ -63,6 +66,76 @@ from nemo_gym.global_config import (
     STD_STAT_NAME,
     TASK_INDEX_KEY_NAME,
 )
+
+
+# Metrics with these names are already summaries or uncertainty estimates.
+# We do not compute second-order `*_across_repeats/*` statistics for
+# them.
+REPEAT_AGGREGATION_EXCLUDED_PREFIXES = (
+    MAX_PREFIX,
+    MIN_PREFIX,
+    MEDIAN_PREFIX,
+    STD_PREFIX,
+    SE_PREFIX,
+    SEM_PREFIX,
+    P25_PREFIX,
+    P75_PREFIX,
+    CI_LOW_95_PREFIX,
+    CI_HIGH_95_PREFIX,
+    HISTOGRAM_PREFIX,
+    "variance/",
+    "var/",
+    "mad/",
+    "iqr/",
+)
+REPEAT_AGGREGATION_EXCLUDED_SUFFIXES = (
+    "/max",
+    "/min",
+    "/median",
+    "/std",
+    "/se",
+    "/sem",
+    "/p5",
+    "/p25",
+    "/p50",
+    "/p75",
+    "/p90",
+    "/p95",
+    "/p99",
+    "/ci_low_95",
+    "/ci_high_95",
+    "/ci_lower",
+    "/ci_upper",
+    "/variance",
+    "/var",
+    "/mad",
+    "/iqr",
+    "_ci95_lower",
+    "_ci95_upper",
+    "std_dev_across_runs",
+    "std_err_across_runs",
+    "avg_sample_std_dev",
+)
+REPEAT_AGGREGATION_EXCLUDED_NAMES = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    "sample_count",
+    "missing_count",
+    "num_repeats",
+    "max_rollouts_per_task",
+    "token_usage_version",
+)
+
+
+def is_repeat_aggregatable_metric(name: object) -> bool:
+    """Whether a per-repeat field is a point estimate, rather than an existing statistic."""
+    return (
+        isinstance(name, str)
+        and name not in REPEAT_AGGREGATION_EXCLUDED_NAMES
+        and not name.startswith(REPEAT_AGGREGATION_EXCLUDED_PREFIXES)
+        and not name.endswith(REPEAT_AGGREGATION_EXCLUDED_SUFFIXES)
+        and ACROSS_REPEATS_MARKER not in name
+    )
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
@@ -297,6 +370,8 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 sem = std / n**0.5
+                # SEM and the t interval quantify uncertainty in `mean/<col>`. They are
+                # not uncertainty estimates for the median, extrema, or quantiles below.
                 entry.update(
                     {
                         f"{MEAN_PREFIX}{col}": mean,
@@ -329,18 +404,24 @@ class RewardProfiler:
 
         return repeat_metrics
 
-    def _aggregate_repeat_level_metrics(self, repeat_level_metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _aggregate_repeat_level_metrics(
+        self,
+        repeat_level_metrics: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         """Aggregate per-repeat estimates (e.g. mean/reward) across repeats, per agent.
 
         Treats each repeat's stat as one observation and reports the statistics across
-        repeats.
+        repeats. Existing summaries and uncertainty estimates are retained in the input
+        rows but excluded here to avoid calculating statistics over statistics.
         """
         if not repeat_level_metrics:
             return []
 
         df = DataFrame.from_records(repeat_level_metrics)
         df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
-        numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith(MEAN_PREFIX)]
+        numeric_cols = [
+            col for col in df.select_dtypes(include="number").columns if is_repeat_aggregatable_metric(col)
+        ]
 
         aggregated_metrics = []
         for agent_name, group in df.groupby("agent_name"):
