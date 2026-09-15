@@ -889,6 +889,18 @@ def test_resolve_env_value_with_newline_is_quoted():
     assert "KEY='line1\nline2'" in out
 
 
+def test_resolve_env_runtime_marker_emits_unquoted_shell_reference():
+    out = _resolve_env({"FOO": "runtime:NEL_INVOCATION_ID"})
+    assert "FOO=${NEL_INVOCATION_ID}" in out
+    assert "'" not in out
+
+
+def test_resolve_env_runtime_marker_alongside_literal():
+    out = _resolve_env({"LIT": "val", "RUN": "runtime:NEL_INVOCATION_ID"})
+    assert "LIT=val" in out
+    assert "RUN=${NEL_INVOCATION_ID}" in out
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script — env injection
 # ---------------------------------------------------------------------------
@@ -924,11 +936,11 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"SVC_KEY": "svc_val"},
+                    "env": {"SVC_KEY": "lit:svc_val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "drv_val"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "lit:drv_val"}},
             "job": {"output_path": "/remote/jobs"},
         }
     )
@@ -968,7 +980,7 @@ def test_build_sbatch_script_service_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"HF_TOKEN": "hf_test", "LIT": "val"},
+                    "env": {"HF_TOKEN": "lit:hf_test", "LIT": "lit:val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
@@ -991,7 +1003,7 @@ def test_build_sbatch_script_driver_env(bench_dir):
             "driver": {
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
-                "env": {"WANDB_API_KEY": "wb_secret"},  # pragma: allowlist secret
+                "env": {"WANDB_API_KEY": "lit:wb_secret"},  # pragma: allowlist secret
             },
             "job": {"output_path": "/remote/jobs"},
         }
