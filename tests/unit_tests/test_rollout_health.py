@@ -1196,6 +1196,101 @@ def test_input_validation_and_nonstandard_filename_errors(tmp_path: Path) -> Non
         run_health_checks(one, ignored_checks=["not_a_check"], workers=1)
 
 
+def test_persisted_trajectory_acceptance_matrix_is_complete_and_health_checkable(tmp_path: Path) -> None:
+    source = Path(__file__).parent / "fixtures" / "trajectory_acceptance_matrix.jsonl"
+    rows = [json.loads(line) for line in source.read_text().splitlines()]
+    assert len(rows) == 2
+
+    trajectories = [TrajectoryRecord.model_validate(row["ng_trajectory"]) for row in rows]
+    healthy, failed = trajectories
+
+    # C1-C4, C8-C11: identity/status/error/token/payload/history/turn/ownership evidence.
+    assert healthy.invocations[0].status == "completed"
+    assert failed.invocations[0].status == "failed"
+    assert failed.invocations[0].error_type == "GenerationError"
+    assert healthy.turns[0].question
+    assert healthy.turns[0].reasoning_content
+    assert healthy.turns[0].answer[0]["type"] == "function_call"
+    assert healthy.turns[-1].resolved is True
+    assert failed.turns[-1].resolved is False
+    assert healthy.turns[-1].step_count == 2
+    assert healthy.invocations[0].conversation
+    assert all(
+        call.request is not None and call.response is not None
+        for trajectory in trajectories
+        for call in trajectory.model_calls
+    )
+    assert all(
+        call.token_stats.prompt_tokens is not None for trajectory in trajectories for call in trajectory.model_calls
+    )
+    assert all(
+        call.token_stats.completion_tokens is not None
+        for trajectory in trajectories
+        for call in trajectory.model_calls
+    )
+    assert all(
+        call.token_stats.reasoning_tokens is not None for trajectory in trajectories for call in trajectory.model_calls
+    )
+    assert all(
+        call.token_stats.total_tokens is not None for trajectory in trajectories for call in trajectory.model_calls
+    )
+    assert all(
+        call.token_stats.cached_tokens is not None for trajectory in trajectories for call in trajectory.model_calls
+    )
+    invocation_refs = {ref.model_call_id for ref in healthy.invocations[0].model_calls}
+    turn_refs = {ref.model_call_id for turn in healthy.turns for ref in turn.model_calls}
+    captured_ids = {call.model_call_id for call in healthy.model_calls}
+    assert invocation_refs == turn_refs == captured_ids == {"c1", "c2"}
+
+    # C5-C6: complete, independently timed, overlapping sibling tool observations.
+    left, right = healthy.tool_calls
+    assert left.output == "left-result" and right.output == "right-result"
+    assert left.status == right.status == "completed"
+    assert left.started_at < right.completed_at and right.started_at < left.completed_at
+    assert left.tool_call_id != right.tool_call_id
+    assert left.duration_ms == 1000 and right.duration_ms == 800
+
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(source.read_bytes())
+    result = run_health_checks(rollout_path, workers=1)
+    by_rollout = {digest.rollout_index: digest for digest in result.rollouts}
+
+    assert by_rollout[0].verdict == "healthy"
+    assert by_rollout[0].findings == []
+    assert by_rollout[0].unobserved == []
+    assert by_rollout[1].verdict == "unhealthy"
+    assert {finding.check for finding in by_rollout[1].findings} == {
+        "model_call_failed",
+        "model_call_runaway_generation",
+    }
+    assert by_rollout[1].unobserved == []
+    assert result.summary["tasks"]["0"] == {
+        "repeats": 2,
+        "healthy": 1,
+        "unhealthy": 1,
+        "unobserved": 0,
+        "flags": [],
+    }
+
+    required_checks = {
+        "rollout_missing_agent_turns",
+        "agent_turn_hollow",
+        "trajectory_capture_mismatch",
+        "model_call_failed",
+        "model_call_missing_token_counts",
+        "model_call_zero_completion_tokens",
+        "model_call_runaway_generation",
+        "rollout_token_count_mismatch",
+    }
+    coverage = result.summary["run"]["artifacts"]["coverage"]
+    assert all(coverage[check] == {"evaluated": 2, "unobserved": 0, "ignored": 0} for check in required_checks)
+    assert coverage["task_no_successful_model_calls"] == {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0,
+    }
+
+
 def test_health_check_config_accepts_csv_and_rejects_unknown_ids(tmp_path: Path) -> None:
     config = RolloutCollectionConfig(
         input_jsonl_fpath=str(tmp_path / "input.jsonl"),

@@ -84,7 +84,7 @@ The audit that created this document ran:
 - [x] C6 concurrent timing behavior and semantics tested.
 - [x] C7 resource-server and seeded-sandbox E2E routes tested.
 - [x] H13 edge cases tested.
-- [ ] Acceptance-matrix fixture passes all applicable health checks.
+- [x] Acceptance-matrix fixture passes all applicable health checks.
 - [ ] Representative real rollout inspected on the final stack.
 - [ ] Scoped/full pre-commit passes.
 - [ ] All PR commits carry DCO `Signed-off-by` trailers.
