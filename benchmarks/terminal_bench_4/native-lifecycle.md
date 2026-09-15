@@ -139,6 +139,29 @@ both harnesses; a regression fixture reproduces the failed directory probe and
 checks restoration. The original failed attempts remain in the validation
 artifacts alongside the successful reruns.
 
+### Final live health, 2026-09-15
+
+Smokes used `gpt-5.4-mini-2026-03-17`, three agent steps, and a 900-second agent
+cap, following CPU → Compose → GPU. All 66 tasks were exercised with OpenCode;
+mini-SWE covered the five CPU representatives and every Compose/GPU task.
+
+| Harness | Category | Baseline healthy | Native healthy |
+| --- | --- | ---: | ---: |
+| OpenCode | CPU | 50/52 | 50/52 |
+| OpenCode | Compose | 9/11 | 9/11 |
+| OpenCode | GPU | 3/3 | 3/3 |
+| mini-SWE | CPU sample | 5/5 | 5/5 |
+| mini-SWE | Compose | 8/11 | 9/11 |
+| mini-SWE | GPU | 3/3 | 3/3 |
+
+No health regressions remain. `kv-live-surgery` is newly healthy with mini-SWE.
+The four existing unhealthy tasks reproduce their reference setup failures:
+`risk-scorer-replay` and `rs-archive-clone` cannot initialize log directories as
+their image users; `medical-claims-processing` and `payments-pipeline-fix` hit
+the deployment's shell-execution restriction during Compose host configuration.
+The final paginated ownership audit found zero remaining run-owned resources
+on both CPU and GPU pools, without manual reaping.
+
 Live category results and cleanup audit are recorded in `health-report.md` in
 that artifact directory. Capped smoke rewards are not benchmark scores. The
 standalone OpenCode smoke retains its public model endpoint mode and does not
