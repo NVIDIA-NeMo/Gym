@@ -43,7 +43,6 @@ from resources_servers.leancat.prepare import (
     PROMPT_CONFIG_PATH,
     REPO_ROOT,
     UPSTREAM_PROMPT_CONFIG_PATH,
-    UPSTREAM_PROMPT_URL,
 )
 
 
@@ -280,20 +279,6 @@ class TestPrompt:
         config = load_prompt_config(str(fpath))
         assert "{formal_statement}" in config.user
         assert config.system is None, "upstream posts a single user message; a system prompt would deviate"
-
-    def test_upstream_template_still_matches_upstream(self):
-        """Check the transcription against the pinned source itself, not a committed copy."""
-        import urllib.error
-        import urllib.request
-
-        try:
-            with urllib.request.urlopen(UPSTREAM_PROMPT_URL, timeout=30) as response:
-                upstream = response.read().decode("utf-8")
-        except (urllib.error.URLError, TimeoutError) as exc:
-            pytest.skip(f"no network to reach {UPSTREAM_PROMPT_URL}: {exc}")
-
-        # `.strip()` matches eval_common.load_prompt, which upstream applies to every template.
-        assert load_prompt_config(str(UPSTREAM_PROMPT_CONFIG_FPATH)).user.strip() == upstream.strip()
 
     def test_filling_it_reproduces_the_prompt_the_benchmark_runs(self):
         """A shipped row plus the shipped template must equal one user message."""

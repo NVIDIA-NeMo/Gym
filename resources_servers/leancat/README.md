@@ -247,9 +247,13 @@ the paper's, runs shorter (median 6,959 output tokens against 11,212), and reach
 count. Whatever that observation came from, it was not a full run, and it should not be cited.
 
 `upstream-repo.yaml` is a verbatim transcription of the pinned `prompts/static_passk.md` into Gym's prompt-config
-form. `tests/test_app.py::TestPrompt::test_upstream_template_still_matches_upstream` refetches the pinned file and
-compares, so the transcription is checked against the source itself rather than against a committed copy that could
-drift with it. That test skips when there is no network.
+form. It is **not** checked automatically: a test that refetched the pinned file would need network egress and would
+skip on every CI run, so it was dropped rather than kept as a check that never executes. To verify the
+transcription by hand, diff it against the source:
+
+```bash
+curl -s https://raw.githubusercontent.com/sciencraft/LeanCat/4e136a13e5/prompts/static_passk.md
+```
 
 ### The paper's prompt cannot be transcribed byte-exactly — read this before quoting a number from it
 
