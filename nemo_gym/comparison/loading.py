@@ -16,7 +16,8 @@
 
 All filesystem I/O for the compare feature lives here. The rollouts JSONL a user points at is
 never opened: it is the run's identity and the handle its `_aggregate_metrics.json` sibling is
-derived from.
+derived from. Aggregate files written before repeat-level statistics existed are enriched from
+their already-recorded per-rollout summaries and cached alongside the aggregate file.
 """
 
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
-    EXPECTED_NUM_ROLLOUTS_KEY_NAME,
+    ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -69,6 +70,11 @@ def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optiona
     return aggregate_metrics_path_for(_resolve_under_cwd_or_install(rollouts_jsonl_fpath))
 
 
+def _repeat_metrics_cache_path(metrics_fpath: Path) -> Path:
+    """Sibling cache for legacy aggregate files without per-repeat statistics."""
+    return metrics_fpath.with_stem(f"{metrics_fpath.stem}_repeat_metrics_cache")
+
+
 def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     try:
         raw = metrics_fpath.read_bytes()
@@ -102,6 +108,42 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     return entries
 
 
+def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Add repeat metrics to one legacy aggregate entry."""
+    from nemo_gym.reward_profile import compute_aggregate_metrics
+
+    computed = compute_aggregate_metrics(
+        [info for group in entry.get("group_level_metrics", []) for info in group.get(ROLLOUT_INFOS_KEY_NAME, [])]
+    )
+    return entry | {
+        "agent_metrics": computed.agent_metrics
+        | (entry.get("agent_metrics") or {})
+        | {"num_repeats": computed.agent_metrics.get("num_repeats")},
+        "repeat_level_metrics": computed.repeat_level_metrics,
+    }
+
+
+def _load_repeat_metrics_cache_if_needed(
+    entries: Dict[str, Dict[str, Any]], metrics_fpath: Path
+) -> Dict[str, Dict[str, Any]]:
+    """Use a sibling cache only when the aggregate predates repeat-level metrics."""
+    key = "repeat_level_metrics"
+    if all(key in entry for entry in entries.values()):
+        return entries
+    cache_fpath = _repeat_metrics_cache_path(metrics_fpath)
+    if cache_fpath.exists():
+        return _read_agent_entries(cache_fpath)
+    entries = {name: entry if key in entry else _compute_repeat_metrics(entry) for name, entry in entries.items()}
+    with cache_fpath.open("wb") as cache_file:
+        cache_file.write(
+            orjson.dumps(
+                list(entries.values()),
+                option=orjson.OPT_INDENT_2,
+            )
+        )
+    return entries
+
+
 def load_agg_metrics_file(
     rollouts_jsonl_fpath: str,
     role: RunRole,
@@ -118,13 +160,14 @@ def load_agg_metrics_file(
             "or point at the metrics file directly with "
             "'baseline_aggregate_metrics_fpath' or 'candidate_aggregate_metrics_fpaths'."
         )
-
+    entries_by_agent = _read_agent_entries(metrics_path)
+    entries_by_agent = _load_repeat_metrics_cache_if_needed(entries_by_agent, metrics_path)
     return RunFile(
         role=role,
         index=index,
         rollouts_jsonl_fpath=_resolve_under_cwd_or_install(rollouts_jsonl_fpath),
         aggregate_metrics_fpath=metrics_path,
-        entries_by_agent=_read_agent_entries(metrics_path),
+        entries_by_agent=entries_by_agent,
     )
 
 
@@ -212,28 +255,6 @@ def resolve_agent_selections(
     )
 
 
-def _derive_num_repeats(
-    group_level_metrics: List[Dict[str, Any]],
-    repeat_level_metrics: List[Dict[str, Any]],
-) -> Optional[int]:
-    """How many repeats the run collected: the most any single task has.
-
-    `expected_num_rollouts` is per task, and a partially recovered run leaves some tasks short of
-    the rest, so the max is the run's repeat count. `repeat_level_metrics` has exactly one entry
-    per repeat but is absent from single-repeat runs and from files written before it existed.
-    """
-    expected = [
-        group[EXPECTED_NUM_ROLLOUTS_KEY_NAME]
-        for group in group_level_metrics
-        if isinstance(group.get(EXPECTED_NUM_ROLLOUTS_KEY_NAME), int)
-    ]
-    if expected:
-        return max(expected)
-    if repeat_level_metrics:
-        return len(repeat_level_metrics)
-    return None
-
-
 def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
     """Narrow a parsed run file to one agent."""
     entry = run_file.entries_by_agent[agent_name]
@@ -249,6 +270,6 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         group_level_metrics=group_level_metrics,
         repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
-        num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
+        num_repeats=agent_metrics.get("num_repeats"),
         has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
     )

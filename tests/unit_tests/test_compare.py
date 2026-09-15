@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 import orjson
 import pytest
 
+from nemo_gym.comparison import loading as comparison_loading
 from nemo_gym.comparison.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
 from nemo_gym.comparison.loading import (
     build_loaded_run,
@@ -195,45 +196,121 @@ class TestLoadRunFile:
             load_agg_metrics_file(str(rollouts), role="baseline")
 
 
-class TestNumRepeatsDerivation:
-    def test_prefers_expected_num_rollouts(self, tmp_path):
-        run = _load(tmp_path, "base", [_entry(groups=[_group(0, [1.0, 0.0, 1.0])])])
-        assert run.num_repeats == 3
+class TestLegacyRepeatMetricsCache:
+    @staticmethod
+    def _legacy_entry() -> Dict[str, Any]:
+        entry = _entry(
+            agent_metrics={"mean/reward": 2 / 3},
+            key_metrics={"mean/reward": 2 / 3},
+            groups=[
+                _group(0, [1.0, 0.0]),
+                _group(1, [1.0], extra={"expected_num_rollouts": 2, "missing_num_rollouts": 1}),
+            ],
+        )
+        del entry["repeat_level_metrics"]
+        return entry
 
-    def test_falls_back_to_repeat_level_metrics(self, tmp_path):
-        groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
-        repeat_level_metrics = [{"_ng_rollout_index": i, "mean/reward": i / 4} for i in range(4)]
-        entry = _entry(groups=groups, repeat_level_metrics=repeat_level_metrics)
-        run = _load(tmp_path, "base", [entry])
-        assert run.num_repeats == 4
-        assert run.repeat_level_metrics == repeat_level_metrics
+    def test_missing_repeat_metrics_are_calculated_and_cached_as_an_aggregate_file(self, tmp_path):
+        rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
+        run_file = load_agg_metrics_file(str(rollouts), role="baseline")
+        run = build_loaded_run(run_file, AGENT)
+
+        assert [repeat["mean/reward"] for repeat in run.repeat_level_metrics] == [1.0, 0.0]
+        assert run.agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert run.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert run.agent_metrics["num_repeats"] == 2
+        assert run.num_repeats == 2
+        assert run.has_repeat_cis
+
+        cache = orjson.loads(
+            comparison_loading._repeat_metrics_cache_path(run_file.aggregate_metrics_fpath).read_bytes()
+        )
+        assert isinstance(cache, list)
+        assert cache[0]["agent_metrics"]["num_repeats"] == 2
+        assert cache[0]["repeat_level_metrics"] == run.repeat_level_metrics
+
+    def test_present_repeat_metrics_ignore_even_an_invalid_cache(self, tmp_path):
+        entry = self._legacy_entry()
+        entry["repeat_level_metrics"] = []
+        rollouts = _write_run(tmp_path, "modern", [entry])
+        comparison_loading._repeat_metrics_cache_path(aggregate_metrics_path_for(rollouts)).write_text("{invalid")
+
+        run = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+
+        assert run.repeat_level_metrics == []
+
+    def test_plain_cache_is_reused_without_recomputing(self, tmp_path, monkeypatch):
+        rollouts = _write_run(tmp_path, "cached", [self._legacy_entry()])
+        first = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+
+        def fail_if_called(_entry):
+            raise AssertionError("cache should avoid repeat aggregation")
+
+        monkeypatch.setattr(comparison_loading, "_compute_repeat_metrics", fail_if_called)
+        second = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+
+        assert second.repeat_level_metrics == first.repeat_level_metrics
+        assert second.agent_metrics == first.agent_metrics
+
+    def test_legacy_files_flow_through_comparison_to_a_welch_interval(self, tmp_path):
+        baseline_entry = _entry(
+            agent_metrics={"mean/reward": 0.3},
+            key_metrics={"mean/reward": 0.3},
+            groups=[_group(0, [0.0, 0.4]), _group(1, [0.2, 0.6])],
+        )
+        candidate_entry = _entry(
+            agent_metrics={"mean/reward": 0.6},
+            key_metrics={"mean/reward": 0.6},
+            groups=[_group(0, [0.3, 0.7]), _group(1, [0.5, 0.9])],
+        )
+        del baseline_entry["repeat_level_metrics"]
+        del candidate_entry["repeat_level_metrics"]
+        baseline = _write_run(tmp_path / "legacy-e2e", "baseline", [baseline_entry])
+        candidate = _write_run(tmp_path / "legacy-e2e", "candidate", [candidate_entry])
+
+        result = build_comparison_result(
+            ComparisonConfig(
+                baseline_rollouts_jsonl_fpath=str(baseline),
+                candidate_rollouts_jsonl_fpaths=[str(candidate)],
+            ),
+            "gym eval compare ...",
+        )
+
+        row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
+        assert row.candidates[0].delta == pytest.approx(0.3)
+        assert row.candidates[0].delta_ci_low is not None
+        assert row.candidates[0].delta_ci_high is not None
+
+    def test_cache_follows_an_explicit_aggregate_override(self, tmp_path):
+        rollout_identity = tmp_path / "identity" / "rollouts.jsonl"
+        override = tmp_path / "elsewhere" / "legacy_metrics.json"
+        override.parent.mkdir()
+        override.write_bytes(orjson.dumps([self._legacy_entry()]))
+
+        load_agg_metrics_file(
+            str(rollout_identity),
+            role="baseline",
+            aggregate_metrics_fpath_override=str(override),
+        )
+
+        assert comparison_loading._repeat_metrics_cache_path(override).exists()
+        assert not comparison_loading._repeat_metrics_cache_path(aggregate_metrics_path_for(rollout_identity)).exists()
+
+
+class TestNumRepeats:
+    @pytest.mark.parametrize("reported", [7, 7.0])
+    def test_reads_num_repeats_from_agent_metrics(self, tmp_path, reported):
+        entry = _entry(
+            agent_metrics={"mean/reward": 0.5, "num_repeats": reported},
+            groups=[_group(0, [1.0, 0.0, 1.0])],
+        )
+        assert _load(tmp_path, f"reported-{reported}", [entry]).num_repeats == 7
 
     def test_missing_repeat_level_metrics_loads_as_an_empty_list(self, tmp_path):
         entry = _entry()
         del entry["repeat_level_metrics"]
         run = _load(tmp_path, "base", [entry])
         assert run.repeat_level_metrics == []
-
-    def test_repeat_level_fallback_works_per_agent_in_a_multi_agent_file(self, tmp_path):
-        """Aggregation nests each agent's repeat_level_metrics under its own entry, stripped of
-        `agent_ref`, so the fallback is per-agent regardless of how many agents the file holds."""
-        groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
-        entries = [
-            _entry(agent="a", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(2)]),
-            _entry(agent="b", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(7)]),
-        ]
-        assert _load(tmp_path, "multi", entries, agent="a").num_repeats == 2
-        assert _load(tmp_path, "multi", entries, agent="b").num_repeats == 7
-
-    def test_a_partially_recovered_run_reports_its_full_repeat_count(self, tmp_path):
-        """Some tasks come up short when a run is partially recovered; the run still had 3 repeats.
-
-        Taking the mode instead would report 1 here, and would depend on task ordering when the
-        per-task counts tie.
-        """
-        groups = [_group(0, [1.0, 0.0, 1.0]), _group(1, [1.0]), _group(2, [0.0, 1.0])]
-        run = _load(tmp_path, "base", [_entry(groups=groups)])
-        assert run.num_repeats == 3
 
     def test_unknown_when_nothing_records_it(self, tmp_path):
         run = _load(tmp_path, "base", [_entry(groups=[{"_ng_task_index": 0, "mean/reward": 1.0}])])
@@ -322,6 +399,7 @@ class TestMetricRows:
             ("ci_low_95/reward", False),
             ("mean_across_repeats/mean/reward", False),
             ("ci_high_95_across_repeats/mean/reward", False),
+            ("num_repeats", False),
             ("pass@1[avg-of-3]/accuracy/std_err_across_runs", False),
             ("pass@1[avg-of-3]/accuracy/avg_sample_std_dev", False),
         ],
@@ -372,8 +450,9 @@ class TestMetricRows:
         assert row.candidates[0].delta_pct == pytest.approx(-25.0)
         assert row.candidates[0].delta_ci_low == pytest.approx(-0.8084869844593309)
         assert row.candidates[0].delta_ci_high == pytest.approx(0.40848698445933074)
-        # The candidate recorded no interval of its own.
+        # The repeat-level key is present, so loading does not supplement this file.
         assert row.candidates[0].ci_low is None
+        assert row.candidates[0].ci_high is None
 
     def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
         baseline_values = [0.0, 0.1, 0.2]
@@ -404,6 +483,37 @@ class TestMetricRows:
         assert row.candidates[0].delta == pytest.approx(0.6)
         assert row.candidates[0].delta_ci_low == pytest.approx(-0.20089819746637771)
         assert row.candidates[0].delta_ci_high == pytest.approx(1.4008981974663777)
+
+    def test_benchmark_defined_repeat_metric_gets_a_delta_interval(self, tmp_path):
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"subtask_accuracy": 0.5, "mean_across_repeats/subtask_accuracy": 0.5},
+                    key_metrics={"subtask_accuracy": 0.5},
+                    repeat_level_metrics=[{"subtask_accuracy": 0.4}, {"subtask_accuracy": 0.6}],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"subtask_accuracy": 0.7, "mean_across_repeats/subtask_accuracy": 0.7},
+                    key_metrics={"subtask_accuracy": 0.7},
+                    repeat_level_metrics=[{"subtask_accuracy": 0.6}, {"subtask_accuracy": 0.8}],
+                )
+            ],
+            role="candidate",
+        )
+
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.metric == "subtask_accuracy"
+        assert row.candidates[0].delta == pytest.approx(0.2)
+        assert row.candidates[0].delta_ci_low is not None
+        assert row.candidates[0].delta_ci_high is not None
 
     def test_mean_delta_uses_across_repeat_point_estimates(self, tmp_path):
         baseline = _load(
@@ -447,7 +557,7 @@ class TestMetricRows:
         assert row.candidates[0].delta_pct == pytest.approx(100.0)
         assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.5)
 
-    def test_delta_ci_requires_across_repeat_values_on_both_sides(self, tmp_path):
+    def test_present_repeat_values_do_not_fill_missing_across_repeat_values(self, tmp_path):
         baseline = _load(
             tmp_path,
             "base",
@@ -751,8 +861,27 @@ class TestCompareRuns:
             compare_runs(baseline, [candidate])
 
     def test_notes_flag_repeat_mismatch_and_absent_intervals(self, tmp_path):
-        baseline = _load(tmp_path, "base", [_entry(groups=[_group(0, [1.0, 1.0, 1.0])])])
-        candidate = _load(tmp_path, "cand", [_entry(groups=[_group(0, [1.0, 0.0])])], role="candidate")
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5, "num_repeats": 3},
+                    groups=[_group(0, [1.0, 1.0, 1.0], with_rollout_infos=False)],
+                )
+            ],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5, "num_repeats": 2},
+                    groups=[_group(0, [1.0, 0.0], with_rollout_infos=False)],
+                )
+            ],
+            role="candidate",
+        )
         comparison = compare_runs(baseline, [candidate])
         assert comparison.baseline_repeat_count == 3 and comparison.candidate_repeat_counts == [2]
         assert any("Repeat counts differ" in note for note in comparison.notes)
