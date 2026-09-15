@@ -1,0 +1,3 @@
+# Training JSONL embeds patch/test content from an internal dataset -- not ours to redistribute
+# via this repo. Distributed offline; there is no prepare script for it here.
+*.jsonl
