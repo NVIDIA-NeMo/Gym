@@ -1,0 +1,6 @@
+# MathArena's APEX prompt (eth-sri/matharena
+# `configs/competitions/apex/apex_2025.yaml`).
+user: |-
+  Put your final answer within \boxed{{}}.
+
+  {question}

@@ -184,10 +184,18 @@ ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 
-# Copy full source as root while the package build introspects the preserved
-# Git checkout. Exclude pyproject.toml and uv.lock since they are already
-# present from the hermetic stage. Runtime ownership is applied after install.
-COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+# Copy full source while the package build introspects the preserved Git
+# checkout. Exclude pyproject.toml and uv.lock since they are already present
+# from the hermetic stage.
+#
+# --chown matches the hermetic-stage copies above and makes the source readable
+# by the runtime UID regardless of the build context's file modes. Without it
+# the image only works when the context happens to be world-readable: a builder
+# with a restrictive umask (NeMo CI uses 0007) yields mode 0660 root-owned
+# files, and the later chown pass only covers directories, so `gym --help`
+# fails with PermissionError on nemo_gym/__init__.py once USER is switched.
+COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
+    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm and telemetry extras. The
 # worktree was created for the runtime UID in the base stage, so restore build ownership

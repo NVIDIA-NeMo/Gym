@@ -15,6 +15,10 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
         ttl_s: 18000
         ready_timeout_s: 1200
         derive_cpu_env: true
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
         resources:
           cpu: 4
           memory_mib: 16384

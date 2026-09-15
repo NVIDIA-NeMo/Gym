@@ -322,6 +322,12 @@ on the PR so the underlying validator contract can be corrected.
 and `main` triggers. Its scheduled/manual path adds the configured container
 build and GPU E2E coverage.
 
+The current GPU coverage is the **GPU E2E - Qwen vLLM rollout** job
+(`tests/e2e/gpu_e2e_test.sh`, `Qwen/Qwen2.5-0.5B-Instruct`), which builds the
+Gym container and runs a live vLLM rollout end to end. To exercise this path
+for an inference or container change, manually dispatch `cicd-main.yml`
+instead of waiting for the next four-hour schedule.
+
 **Workflow:** `full-test-suite.yml` — runs every four hours and by manual
 dispatch, with no change detection:
 

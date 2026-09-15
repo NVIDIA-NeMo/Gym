@@ -46,7 +46,7 @@ correctly; if you copy or override it, keep them.
 | `connection.transport_backend` | `aiohttp` | httpx's connection pool degrades badly at high concurrency; the aiohttp bridge (`httpx-aiohttp`, in the `sandbox` extra) does not. If the bridge is missing the provider falls back to httpx with a warning — treat that warning as a setup error. |
 | `connection.max_connections` | `null` | The pool is shared, so this also caps in-flight sandbox operations per process. The httpx default of 100 silently serializes a 1,000-sandbox run. |
 | `connection.keepalive_expiry_s` | below the server's idle timeout (shipped: `3.0`) | A pooled socket reused after the server closed it hangs the SDK. If a load balancer reaps idle connections anyway, set `disable_connection_pooling: true` and pay a handshake per request. |
-| `connection.protocol` | `http` unless you need TLS | TLS load-balancer listeners often have a fixed, short idle timeout that resets multi-minute streams. If you must use `https`, `background_exec: true` (below) is what keeps long commands alive. |
+| `connection.protocol` | `http` unless you need TLS | TLS load-balancer listeners often have a fixed, short idle timeout that resets multi-minute streams. If you must use `https`, `background_exec: true` (below) is what keeps long commands alive. A scheme in `connection.domain` (`OPENSANDBOX_DOMAIN=https://...`) sets the protocol and overrides this field. |
 
 ## Requests are not limits
 

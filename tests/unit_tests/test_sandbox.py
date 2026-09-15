@@ -894,7 +894,7 @@ async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypa
 
     assert [call["command"] for call in calls] == ["true", "true", "true"]
     assert all(call["timeout_s"] == 30 for call in calls)
-    assert all(call["user"] == "root" for call in calls)
+    assert all(call["user"] is None for call in calls)
 
 
 @requires_tenacity

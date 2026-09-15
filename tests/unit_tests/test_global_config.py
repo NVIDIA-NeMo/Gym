@@ -2695,6 +2695,36 @@ class TestComposeUnboundAgent:
 
         assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
 
+    def test_config_resolution_restores_held_agent_override_after_inheritance(self, monkeypatch: MonkeyPatch) -> None:
+        instance = "terminal_bench_2_1_terminus_2_sandboxed_agent"
+        agent_type = "terminus_2_sandboxed_agent"
+        config = DictConfig(
+            {
+                agent_type: {
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "app.py",
+                            "sandbox_timeout": 10800,
+                        }
+                    }
+                },
+                instance: {
+                    "_inherit_from": agent_type,
+                    "responses_api_agents": {agent_type: {}},
+                },
+            }
+        )
+        cli = self._cli_dict(
+            {
+                instance: {"responses_api_agents": {agent_type: {"sandbox_timeout": 21600}}},
+            }
+        )
+
+        resolved = self._parse_with_cli(config, cli, monkeypatch)
+
+        assert agent_type not in resolved
+        assert resolved[instance]["responses_api_agents"][agent_type]["sandbox_timeout"] == 21600
+
     def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
         # The override must carry only the fields the user set, leaving the environment's bindings intact.
         config = self._config(

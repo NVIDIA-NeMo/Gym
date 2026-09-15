@@ -36,6 +36,7 @@ from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
+    ClientDisconnectCancellationMiddleware,
     ConnectionError,
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
@@ -322,6 +323,29 @@ class TestServerUtils:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         head_server.setup_webserver()
 
+    def test_HeadServer_health_reports_readiness_without_changing_liveness(self) -> None:
+        from fastapi.testclient import TestClient
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+
+        with TestClient(head_server.setup_webserver()) as client:
+            for path in ("/", "/livez"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 503
+                assert response.json() == {"status": "starting"}
+
+            head_server.mark_ready()
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
     async def test_HeadServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock()
@@ -541,6 +565,19 @@ class TestServerUtils:
 
         TestSimpleServer.run_webserver()
 
+    def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        BaseServer.setup_liveness(MagicMock(), app)
+
+        with TestClient(app) as client:
+            for path in ("/", "/health", "/healthz", "/livez", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
     def test_setup_session_middleware_idempotent(self) -> None:
         from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
@@ -660,6 +697,69 @@ class TestServerUtils:
 
         assert handler_cancelled.is_set()
         assert sent_messages == []
+
+    async def test_cancellation_middleware_ignores_disconnect_after_response_completion(self) -> None:
+        response_sent = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            assert await receive() == {"type": "http.request", "body": b"", "more_body": False}
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+            try:
+                await finish_cleanup.wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+            cleanup_completed.set()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            await response_sent.wait()
+            return {"type": "http.disconnect"}
+
+        sent_messages = []
+
+        async def send(message):
+            sent_messages.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_sent.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/work",
+            "raw_path": b"/work",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        app_task = asyncio.create_task(middleware(scope, receive, send))
+        await asyncio.wait_for(response_sent.wait(), timeout=1)
+        await asyncio.sleep(0)
+        finish_cleanup.set()
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert cleanup_completed.is_set()
+        assert not handler_cancelled.is_set()
+        assert middleware.num_cancelled == 0
+        assert sent_messages == [
+            {"type": "http.response.start", "status": 200, "headers": []},
+            {"type": "http.response.body", "body": b"ok", "more_body": False},
+        ]
 
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
