@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import Body, Request
 from pydantic import Field
 
-from nemo_gym.config_types import AgentServerRef, ModelServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -27,15 +27,20 @@ from nemo_gym.processors import (
     EpisodeFailure,
     EpisodeRequest,
     EpisodeResponse,
-    EpisodeVerification,
+    EpisodeSeedRequest,
+    ResourcesSessionCloseRequest,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from processors.nemo_sim_processor.contracts import (
-    EPISODE_INTERACTION_PROTOCOL,
     NEMO_SIM_MODEL_ALIASES,
+    NeMoSimProtocolConfig,
     NeMoSimScenario,
+    NeMoSimSeedResponse,
+    NeMoSimSimulationResult,
     NeMoSimTaskData,
+    NeMoSimVerification,
+    NeMoSimVerifyRequest,
 )
 
 
@@ -49,8 +54,10 @@ class NeMoSimProcessorConfig(BaseProcessorConfig):
     judge_model: ModelServerRef
     summary_model: ModelServerRef
     api_response_model: ModelServerRef
+    resources_server: ResourcesServerRef
     max_turns: int = Field(5, ge=1)
     agent_call_timeout_s: float = Field(300.0, gt=0)
+    protocol_config: NeMoSimProtocolConfig = Field(default_factory=NeMoSimProtocolConfig)
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
         return {
@@ -239,7 +246,7 @@ class NeMoSimProcessor(BaseProcessor):
         from conversation_plugin.generator import ConversationSimulatorGenerator
 
         set_debug_log_path(None)
-        config_values = dict(bridge.task.simulation_config)
+        config_values = self.config.protocol_config.model_dump(mode="python", exclude_none=True)
         config_values.update(
             {"name": "conversation_messages", "locale": scenario.locale, "max_turns": self.config.max_turns}
         )
@@ -253,12 +260,64 @@ class NeMoSimProcessor(BaseProcessor):
 
     async def run(self, request: Request, body: EpisodeRequest = Body()) -> EpisodeResponse:
         task = NeMoSimTaskData.model_validate(body.task_data)
-        bridge = _ConversationBridge(self, body, task, asyncio.get_running_loop(), request.cookies)
+        seed_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=EpisodeSeedRequest(
+                episode_id=body.episode_id,
+                task=body.task,
+                task_data=body.task_data,
+            ).model_dump(mode="json"),
+            cookies=request.cookies,
+        )
+        await raise_for_status(seed_response)
+        seed = NeMoSimSeedResponse.model_validate(await get_response_json(seed_response))
+        environment_cookies = dict(seed_response.cookies)
+        bridge = _ConversationBridge(self, body, task, asyncio.get_running_loop(), environment_cookies)
+        episode_response: EpisodeResponse
         try:
-            result = await asyncio.to_thread(self._run_nemo_sim, bridge, task.scenario)
+            raw_result = await asyncio.to_thread(self._run_nemo_sim, bridge, seed.scenario)
+            result = NeMoSimSimulationResult.model_validate(raw_result)
+            assistant_responses = bridge.responses_by_alias["assistant_model"]
+            if not assistant_responses:
+                episode_response = EpisodeResponse(
+                    episode_id=body.episode_id,
+                    task=body.task,
+                    agent_turns=bridge.agent_turns,
+                    failure=EpisodeFailure(
+                        kind="agent",
+                        message="NeMo-Sim completed without an Assistant response",
+                        retryable=False,
+                    ),
+                )
+            else:
+                focal_response = assistant_responses[-1]
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=NeMoSimVerifyRequest(
+                        episode_id=body.episode_id,
+                        responses_create_params=body.responses_create_params,
+                        response=focal_response,
+                        scenario=seed.scenario,
+                        nemo_sim_context=seed.nemo_sim_context,
+                        nemo_sim_result=result,
+                        agent_turns=bridge.agent_turns,
+                    ).model_dump(mode="json"),
+                    cookies=environment_cookies,
+                )
+                await raise_for_status(verify_response)
+                verification = NeMoSimVerification.model_validate(await get_response_json(verify_response))
+                episode_response = EpisodeResponse(
+                    episode_id=body.episode_id,
+                    task=body.task,
+                    agent_turns=bridge.agent_turns,
+                    output_turn_sequence=_last_turn_sequence(bridge.agent_turns, "assistant"),
+                    verification=verification,
+                )
         except Exception as error:
             assistant_responses = bridge.responses_by_alias["assistant_model"]
-            return EpisodeResponse(
+            episode_response = EpisodeResponse(
                 episode_id=body.episode_id,
                 task=body.task,
                 agent_turns=bridge.agent_turns,
@@ -272,33 +331,29 @@ class NeMoSimProcessor(BaseProcessor):
                 ),
             )
 
-        assistant_responses = bridge.responses_by_alias["assistant_model"]
-        if not assistant_responses:
+        try:
+            close_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close_session",
+                json=ResourcesSessionCloseRequest(resources_session_id=seed.resources_session_id).model_dump(
+                    mode="json"
+                ),
+                cookies=environment_cookies,
+            )
+            await raise_for_status(close_response)
+        except Exception as error:
             return EpisodeResponse(
                 episode_id=body.episode_id,
                 task=body.task,
-                agent_turns=bridge.agent_turns,
+                agent_turns=episode_response.agent_turns,
+                output_turn_sequence=episode_response.output_turn_sequence,
                 failure=EpisodeFailure(
-                    kind="agent",
-                    message="NeMo-Sim completed without an Assistant response",
-                    retryable=False,
+                    kind="internal",
+                    message=f"Failed to close NeMo-Sim resources ({type(error).__name__})",
+                    retryable=True,
                 ),
             )
-
-        verifier_data = {
-            "episode_interaction_protocol": EPISODE_INTERACTION_PROTOCOL,
-            "nemo_sim_result": result,
-        }
-        return EpisodeResponse(
-            episode_id=body.episode_id,
-            task=body.task,
-            agent_turns=bridge.agent_turns,
-            output_turn_sequence=_last_turn_sequence(bridge.agent_turns, "assistant"),
-            verification=EpisodeVerification(
-                reward=float(bool(result.get("conversation_status"))),
-                verifier_data=verifier_data,
-            ),
-        )
+        return episode_response
 
 
 if __name__ == "__main__":

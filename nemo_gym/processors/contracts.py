@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from math import isfinite
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt, model_validator
@@ -54,6 +55,40 @@ class EpisodeRequest(BaseModel):
     deadline: datetime | None = None
 
 
+class EpisodeSeedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    task: TaskIdentity
+    task_data: dict[str, JsonValue]
+
+
+class EpisodeSeedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+
+
+class EpisodeVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    response: NeMoGymResponse
+
+
+class ResourcesSessionCloseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+
+
+class ResourcesSessionCloseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+
+
 class EpisodeFailure(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -69,6 +104,12 @@ class EpisodeVerification(BaseModel):
     reward_components: dict[str, float] = Field(default_factory=dict)
     mask_sample: bool = False
     verifier_data: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_reward_components(self) -> Self:
+        if any(not isfinite(value) for value in self.reward_components.values()):
+            raise ValueError("reward components must be finite")
+        return self
 
 
 class AgentTurn(BaseModel):

@@ -167,3 +167,16 @@ def test_projection_rejects_verifier_field_collisions() -> None:
     )
     with pytest.raises(ValueError, match="collides"):
         _project_episode_response(request, native.model_dump(mode="json"))
+
+
+def test_projection_preserves_retryable_failure() -> None:
+    request = _request()
+    native = EpisodeResponse(
+        episode_id=request.episode_id,
+        task=request.task,
+        failure=EpisodeFailure(kind="unavailable", message="try later", retryable=True),
+    )
+    projected = _project_episode_response(request, native.model_dump(mode="json"))
+    assert projected["_ng_failure_class"] == "agent_request_failed"
+    assert projected["_ng_failure_terminal"] is False
+    assert projected["episode_failure"]["kind"] == "unavailable"

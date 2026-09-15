@@ -10,7 +10,12 @@ from nemo_gym.processors.contracts import (
     EpisodeId,
     EpisodeRequest,
     EpisodeResponse,
+    EpisodeSeedRequest,
+    EpisodeSeedResponse,
     EpisodeVerification,
+    EpisodeVerifyRequest,
+    ResourcesSessionCloseRequest,
+    ResourcesSessionCloseResponse,
     TaskIdentity,
 )
 
@@ -23,6 +28,11 @@ __all__ = [
     "EpisodeId",
     "EpisodeRequest",
     "EpisodeResponse",
+    "EpisodeSeedRequest",
+    "EpisodeSeedResponse",
+    "EpisodeVerifyRequest",
     "EpisodeVerification",
+    "ResourcesSessionCloseRequest",
+    "ResourcesSessionCloseResponse",
     "TaskIdentity",
 ]
