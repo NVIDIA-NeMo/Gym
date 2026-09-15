@@ -15,8 +15,8 @@
 """Reading `*_aggregate_metrics.json` for `gym eval compare`, and picking which agent to compare.
 
 All filesystem I/O for the compare feature lives here. The rollouts JSONL a user points at is
-never opened: it is the run's identity and the handle its `_aggregate_metrics.json` sibling is
-derived from. Aggregate files written before repeat-level statistics existed are enriched from
+never opened: it is the run's identity and the handle from which its `_aggregate_metrics.json`
+sibling is derived. Aggregate files written before repeat-level statistics existed are enriched from
 their already-recorded per-rollout summaries and cached alongside the aggregate file.
 """
 
@@ -72,7 +72,7 @@ def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optiona
 
 
 def _repeat_metrics_cache_path(metrics_fpath: Path) -> Path:
-    """Cache for legacy aggregate files without per-repeat statistics."""
+    """Return the cache path for a legacy aggregate without per-repeat statistics."""
     return metrics_fpath.with_stem(f"{metrics_fpath.stem}_repeat_metrics_cache")
 
 
@@ -127,7 +127,7 @@ def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
 def _load_repeat_metrics_cache_if_needed(
     entries: Dict[str, Dict[str, Any]], metrics_fpath: Path
 ) -> Dict[str, Dict[str, Any]]:
-    """Use a cache only when the aggregate is legacy and predates repeat-level metrics."""
+    """Use the cache only when the aggregate predates repeat-level metrics."""
     key = "repeat_level_metrics"
     if all(key in entry for entry in entries.values()):
         return entries
