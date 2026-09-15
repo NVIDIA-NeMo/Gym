@@ -1,0 +1,18 @@
+# Apptainer sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider:
+# sandbox`; the child key `apptainer` selects the provider class. Provider
+# defaults use a private host staging directory mounted at `/sandbox` and run
+# each sandbox as a persistent Apptainer instance.
+#
+# Requires the `apptainer` CLI on PATH. See ../README.md for image formats,
+# fakeroot, cgroup, bind, and writable-tmpfs options.
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer
+  apptainer:
+    create:
+      # Apptainer otherwise bind-mounts the host's /tmp and home into every
+      # instance. Containment gives each sandbox private writable scratch
+      # directories and prevents state from leaking between concurrent tasks.
+      extra_start_args: ["--containall"]

@@ -419,6 +419,14 @@ def test_apply_spec_overrides_maps_resources_and_ttl():
     assert _apply_spec_overrides(cfg, SandboxSpec(image="img")) is cfg
 
 
+def test_apply_spec_overrides_uses_implicit_storage_for_requests_up_to_20_gib():
+    cfg = engine.EcsFargateConfig(region="us-east-1")
+
+    for requested in (1, 10, 20):
+        out = _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"disk_gib": requested}))
+        assert out.ephemeral_storage_gib is None
+
+
 def test_apply_spec_overrides_rejects_gpu():
     from nemo_gym.sandbox.providers import SandboxCreateError
 

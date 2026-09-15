@@ -92,6 +92,7 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
         "base_url": os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url,
         "api_key": os.environ.get("LAB_JUDGE_API_KEY") or args.judge_api_key,
         "temperature": _optional_float(os.environ.get("LAB_JUDGE_TEMPERATURE")),
+        "reasoning_effort": os.environ.get("LAB_JUDGE_REASONING_EFFORT") or None,
         "timeout_seconds": float(
             os.environ.get("LAB_JUDGE_REQUEST_TIMEOUT_SECONDS") or os.environ.get("LAB_JUDGE_TIMEOUT_SECONDS", "90")
         ),
@@ -128,6 +129,7 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
         "task": config.get("task") or metrics.get("task") or task_config.get("title", ""),
         "judge_model": judge_model,
         "judge_model_base_url": judge.base_url,
+        "judge_reasoning_effort": judge.reasoning_effort,
         "judge_parallelism": judge_parallelism,
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }

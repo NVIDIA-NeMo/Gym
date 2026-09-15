@@ -2,20 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_paths:
-  - resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml
+  - responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_native.yaml
 
 legal_agent_bench_benchmark_resources_server:
   _inherit_from: legal_agent_bench
 
-legal_agent_bench_benchmark_harbor_agent:
-  _inherit_from: legal_agent_bench_harbor_agent
+legal_agent_bench_benchmark_native_agent:
+  _inherit_from: legal_agent_bench_native_agent
   responses_api_agents:
-    harbor_agent:
-      harbor_datasets:
-        legal_agent_bench:
-          local_dataset_path: ${legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.harbor_tasks_dir}
-      harbor_agent_kwargs:
-        skills_dir: ${legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.harness_skills_dir}
+    legal_agent_bench_agent:
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench_benchmark_resources_server
+      runtime_tasks_dir: ${legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      skills_dir: ${legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.harness_skills_dir}
       datasets:
         - name: legal_agent_bench
           type: benchmark

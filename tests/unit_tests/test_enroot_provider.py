@@ -332,7 +332,14 @@ async def test_create_builds_argv_and_runs_probe(
     assert _contains_seq(start_argv, ["-e", "NVIDIA_VISIBLE_DEVICES=0"])
     expected_init = f"{enroot_provider.DEFAULT_INIT_COMMAND}  # {handle.sandbox_id}"
     assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", expected_init]
-    assert _contains_seq(start_argv, ["--rc", "/dev/null"])
+    rc_index = start_argv.index("--rc")
+    bypass_rc_path = Path(start_argv[rc_index + 1])
+    assert bypass_rc_path.parent == staging
+    assert bypass_rc_path.name == ".nemo-gym-bypass-entrypoint-rc"
+    assert bypass_rc_path.is_file()
+    assert bypass_rc_path.read_text() == enroot_provider.ENTRYPOINT_BYPASS_RC
+    assert 'exec "$@"' in bypass_rc_path.read_text()
+    assert bypass_rc_path.stat().st_mode & 0o777 == 0o400
 
 
 # The generated container name is random; the create test above needs the `list`
@@ -840,7 +847,7 @@ async def test_close_staging_removal_failure_is_logged(
     def boom(path: Any, ignore_errors: bool = False) -> None:
         raise OSError("locked")
 
-    monkeypatch.setattr(enroot_provider.shutil, "rmtree", boom)
+    monkeypatch.setattr(enroot_provider, "_remove_writable_tree", boom)
     with caplog.at_level("WARNING"):
         await provider.close(_make_handle(staging))
     assert "failed to remove staging dir" in caplog.text
