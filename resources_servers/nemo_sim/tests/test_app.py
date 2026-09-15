@@ -184,6 +184,39 @@ def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
     assert second_seed["scenario"]["probe_type"] == "general_educational"
 
 
+def test_participant_tools_share_task_state_and_keep_sessions_isolated(tmp_path: Path) -> None:
+    _write_personas(tmp_path)
+    app = _app(tmp_path)
+    with TestClient(app) as first, TestClient(app) as second:
+        first_seed = first.post("/seed_session", json=_seed_body(seed=1)).json()
+        second.post("/seed_session", json=_seed_body(seed=2))
+
+        recorded = first.post(
+            "/record_user_context",
+            json={"key": "dietary_preference", "value": "vegetarian"},
+        )
+        observed = first.post("/read_user_context", json={})
+        isolated = second.post("/episode_status", json={})
+        finished = first.post("/finish_episode", json={"reason": "user_goal_satisfied"})
+        verified = first.post("/verify", json=_verify_body(first_seed))
+
+    assert recorded.json()["state"]["user_context"] == {"dietary_preference": "vegetarian"}
+    assert observed.json()["state"] == {
+        "user_context": {"dietary_preference": "vegetarian"},
+        "assistant_context_reads": 1,
+    }
+    assert isolated.json()["state"]["user_context"] == {}
+    assert finished.json()["terminated"] is True
+    assert finished.json()["termination_reason"] == "user_goal_satisfied"
+    assert verified.json()["reward"] == 1
+    assert verified.json()["reward_components"] == {
+        "participants_completed": 1,
+        "shared_state_exercised": 1,
+        "terminated": 1,
+    }
+    assert verified.json()["verifier_data"]["termination_reason"] == "user_goal_satisfied"
+
+
 def test_startup_prepares_panel_then_reuses_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_personas(tmp_path)
     monkeypatch.setattr(
@@ -268,5 +301,7 @@ def test_close_session_releases_seeded_state(tmp_path: Path) -> None:
         )
         with pytest.raises(RuntimeError, match="No active NeMo-Sim scenario"):
             client.post("/verify", json=_verify_body(seed))
+        with pytest.raises(RuntimeError, match="No active NeMo-Sim scenario"):
+            client.post("/episode_status", json={})
 
     assert closed.status_code == 200

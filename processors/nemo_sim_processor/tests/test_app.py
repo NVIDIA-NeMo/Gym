@@ -157,6 +157,15 @@ async def test_returns_ordered_agent_turns_and_focal_response(monkeypatch: pytes
                     "scenario_completed": True,
                 }
             )
+        if kwargs["url_path"] == "/episode_status":
+            return _http_response(
+                {
+                    "state": {"user_context": {"dietary_preference": "vegetarian"}},
+                    "terminated": False,
+                    "termination_reason": None,
+                },
+                {"session": "resource"},
+            )
         if kwargs["url_path"] == "/close_session":
             return _http_response({"resources_session_id": "resource-session"})
         model_calls += 1
@@ -178,8 +187,12 @@ async def test_returns_ordered_agent_turns_and_focal_response(monkeypatch: pytes
     assert result.agent_turns[result.output_turn_sequence].response.output_text == "output-3"
     assert [(turn.sequence, turn.agent_id) for turn in result.agent_turns] == [(0, "user"), (1, "assistant")]
     assert result.agent_turns[1].request.input[0].content == "assistant_model"
+    assert result.agent_turns[1].state_after["user_context"]["dietary_preference"] == "vegetarian"
+    assert result.agent_turns[1].termination_reason == "nemo_sim_completed"
     assert [post["url_path"] for post in posts if post["server_name"] == "nemo-sim"] == [
         "/seed_session",
+        "/episode_status",
+        "/episode_status",
         "/verify",
         "/close_session",
     ]
@@ -210,6 +223,8 @@ async def test_real_conversation_loop_uses_seed_verify_close_lifecycle() -> None
                     "scenario_completed": True,
                 }
             )
+        if path == "/episode_status":
+            return _http_response({"state": {}, "terminated": False, "termination_reason": None})
         if path == "/close_session":
             lifecycle.append("close")
             return _http_response({"resources_session_id": "resource-session"})
@@ -262,11 +277,26 @@ async def test_participant_agent_owns_tools_and_reports_observations() -> None:
         request,
         NeMoSimTaskData.model_validate(request.task_data),
         asyncio.get_running_loop(),
-        {},
+        {"resource-cookie": "shared"},
     )
-    processor.server_client.post = AsyncMock(
-        return_value=_http_response(_trajectory_response("response-1", "Done."), {"agent-cookie": "user"})
-    )
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/episode_status":
+            assert kwargs["cookies"] == {"resource-cookie": "shared"}
+            return _http_response(
+                {
+                    "state": {"user_context": {"preference": "vegetarian"}},
+                    "terminated": True,
+                    "termination_reason": "user_goal_satisfied",
+                },
+                {"resource-cookie": "shared"},
+            )
+        return _http_response(
+            _trajectory_response("response-1", "Done."),
+            {"resource-cookie": "shared", "agent-cookie": "user"},
+        )
+
+    processor.server_client.post = post
 
     completion = await bridge._invoke(
         "user_model", [{"role": "user", "content": "Remember my preference."}], max_tokens=None
@@ -278,6 +308,10 @@ async def test_participant_agent_owns_tools_and_reports_observations() -> None:
     assert turn.request.tools[0]["name"] == "record_user_context"
     assert [record.kind for record in turn.observations.records] == ["agent_invocation", "tool_call"]
     assert turn.response.output_text == "Done."
+    assert turn.state_after == {"user_context": {"preference": "vegetarian"}}
+    assert turn.termination_reason == "user_goal_satisfied"
+    assert bridge.environment_cookies == {"resource-cookie": "shared"}
+    assert bridge.cookies_by_alias["user_model"] == {"agent-cookie": "user"}
 
 
 @pytest.mark.asyncio

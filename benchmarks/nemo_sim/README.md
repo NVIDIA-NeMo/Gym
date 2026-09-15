@@ -41,11 +41,26 @@ Dataset rows contain only per-task sampling inputs and optional model-call
 parameter overrides. Resolved scenarios are output-only and cannot be supplied
 by a dataset row.
 
+The included example independently configures User tools
+(`record_user_context`, `finish_episode`) and the Assistant tool
+(`read_user_context`). Their calls share one task-scoped Resources session.
+The resulting ordered `agent_turns` retain both participants, tool calls and
+results, post-turn state, observations, and the final termination reason.
+
 After preparation:
 
 ```bash
 gym eval run \
   --benchmark nemo_sim \
   --agent nemo_sim_processor \
-  --output results/nemo_sim.jsonl
+  --output results/nemo_sim.jsonl \
+  ++observability_enabled=true \
+  ++model_call_capture_dir=/absolute/path/to/model-calls
 ```
+
+For evaluation and existing RL consumers, top-level `response` remains the
+final Assistant response. For participant-specific SFT or custom collation,
+filter `agent_turns` by `participant == "assistant"` or
+`participant == "user"` and use each selected turn's exact `request` and
+`response`. Selecting both produces separate participant-labelled examples;
+User outputs are never folded into the Assistant response.

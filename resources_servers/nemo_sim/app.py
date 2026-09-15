@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
+from nemo_gym import WORKING_DIR
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.processors import (
     EpisodeId,
@@ -28,6 +29,7 @@ from nemo_gym.processors import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from processors.nemo_sim_processor.contracts import (
+    NeMoSimEpisodeStatus,
     NeMoSimSamplingRequest,
     NeMoSimScenario,
     NeMoSimSeedResponse,
@@ -118,9 +120,25 @@ class CachedPersonaSource(BaseModel):
     rows: int
 
 
+class NeMoSimEpisodeState(BaseModel):
+    user_context: dict[str, str] = Field(default_factory=dict)
+    assistant_context_reads: int = Field(0, ge=0)
+    termination_reason: str | None = None
+
+
 class SeededNeMoSimEpisode(BaseModel):
     episode_id: EpisodeId
     seed: NeMoSimSeedResponse
+    state: NeMoSimEpisodeState = Field(default_factory=NeMoSimEpisodeState)
+
+
+class RecordUserContextRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=1_000)
+
+
+class FinishEpisodeRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 def _stable_fraction(*parts: Any) -> float:
@@ -190,11 +208,18 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        app.post("/record_user_context")(self.record_user_context)
+        app.post("/read_user_context")(self.read_user_context)
+        app.post("/finish_episode")(self.finish_episode)
+        app.post("/episode_status")(self.episode_status)
         app.post("/close_session")(self.close_session)
         return app
 
     def _version_dir(self) -> Path:
-        return self.config.personas_cache_dir.expanduser() / self.config.personas_dataset_version
+        cache_dir = self.config.personas_cache_dir.expanduser()
+        if not cache_dir.is_absolute():
+            cache_dir = WORKING_DIR / cache_dir
+        return cache_dir / self.config.personas_dataset_version
 
     def _source_path(self, locale: str) -> Path:
         return self._version_dir() / "source" / f"{locale}.parquet"
@@ -400,6 +425,17 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
             raise RuntimeError("No active NeMo-Sim scenario. Call /seed_session first.")
         return self.session_id_to_seed[session_id]
 
+    @staticmethod
+    def _status(seeded: SeededNeMoSimEpisode) -> NeMoSimEpisodeStatus:
+        return NeMoSimEpisodeStatus(
+            state={
+                "user_context": seeded.state.user_context,
+                "assistant_context_reads": seeded.state.assistant_context_reads,
+            },
+            terminated=seeded.state.termination_reason is not None,
+            termination_reason=seeded.state.termination_reason,
+        )
+
     async def seed_session(
         self,
         request: Request,
@@ -410,6 +446,32 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
         result = await asyncio.to_thread(self._resolve_seed, task.nemo_sim_sampling, session_id)
         self.session_id_to_seed[session_id] = SeededNeMoSimEpisode(episode_id=body.episode_id, seed=result)
         return result
+
+    async def record_user_context(
+        self,
+        request: Request,
+        body: RecordUserContextRequest,
+    ) -> NeMoSimEpisodeStatus:
+        seeded = self._seeded_episode(request)
+        seeded.state.user_context[body.key] = body.value
+        return self._status(seeded)
+
+    async def read_user_context(self, request: Request) -> NeMoSimEpisodeStatus:
+        seeded = self._seeded_episode(request)
+        seeded.state.assistant_context_reads += 1
+        return self._status(seeded)
+
+    async def finish_episode(
+        self,
+        request: Request,
+        body: FinishEpisodeRequest,
+    ) -> NeMoSimEpisodeStatus:
+        seeded = self._seeded_episode(request)
+        seeded.state.termination_reason = body.reason
+        return self._status(seeded)
+
+    async def episode_status(self, request: Request) -> NeMoSimEpisodeStatus:
+        return self._status(self._seeded_episode(request))
 
     async def verify(
         self,
@@ -426,17 +488,32 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
                 status_code=409,
                 detail="Verified NeMo-Sim resolved episode does not match the seeded session",
             )
-        scenario_completed = {"user", "assistant"} <= _conversation_roles(body.nemo_sim_result)
+        participants_completed = {"user", "assistant"} <= _conversation_roles(body.nemo_sim_result)
+        status = self._status(seeded)
+        shared_state_exercised = bool(seeded.state.user_context) and seeded.state.assistant_context_reads > 0
+        tool_scenario_started = (
+            bool(seeded.state.user_context) or seeded.state.assistant_context_reads > 0 or status.terminated
+        )
+        scenario_completed = participants_completed and (
+            not tool_scenario_started or (shared_state_exercised and status.terminated)
+        )
         return NeMoSimVerification(
             reward=float(scenario_completed),
+            reward_components={
+                "participants_completed": float(participants_completed),
+                "shared_state_exercised": float(shared_state_exercised),
+                "terminated": float(status.terminated),
+            },
             scenario_completed=scenario_completed,
             verifier_data={
                 "agent_turns": [turn.model_dump(mode="json") for turn in body.agent_turns],
+                "environment_state": status.state,
                 "episode_interaction_protocol": body.episode_interaction_protocol,
                 "scenario": body.scenario.model_dump(mode="json"),
                 "nemo_sim_context": body.nemo_sim_context.model_dump(mode="json"),
                 "nemo_sim_result": body.nemo_sim_result.model_dump(mode="json"),
                 "scenario_completed": scenario_completed,
+                "termination_reason": status.termination_reason,
             },
         )
 

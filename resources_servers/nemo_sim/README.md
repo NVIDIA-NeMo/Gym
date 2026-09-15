@@ -105,7 +105,30 @@ engine. Its native `EpisodeResponse` contains the final Assistant response and
 exactly one of `verification` or `failure`. Ordered User and Assistant
 `AgentTurn` records live in `verification.verifier_data`. Judge, summary, and
 API-response calls remain internal observability rather than a second episode
-trajectory.
+trajectory. Each turn contains its participant, exact Responses API request and
+response, optional `AgentObservationBundle`, the environment `state_after` that
+activation, and an optional final `termination_reason`. Function calls and
+their model-visible results remain ordered inside `response.output`.
+
+## Participant tools and shared state
+
+User and Assistant tools are configured independently in
+`model_responses_create_params.user_model.tools` and
+`model_responses_create_params.assistant_model.tools`. Both SimpleAgent
+instances execute their own tool loops against this Resources Server while the
+Processor forwards one shared Resources session cookie.
+
+The runnable example demonstrates three idempotent endpoints:
+
+- `record_user_context`: the User stores context without repeating it in a
+  message.
+- `read_user_context`: the Assistant reads that task-scoped context on a later
+  activation.
+- `finish_episode`: the User records the environment termination reason.
+
+`/episode_status` lets the Processor snapshot state after every participant
+activation. `/close_session` removes both the resolved scenario and mutable
+state. Different Resources session cookies never share state.
 
 ## Static and dynamic configuration
 
@@ -138,9 +161,10 @@ This first implementation supports:
 - `general_open_ended`
 - `general_educational`
 
-These probes resolve a theme and user goal but do not require dynamic tools.
-Tool-calling, safety, sovereign-AI, finance, health, and trajectory-evaluator
-semantics require probe-specific resources-server adapters.
+These probes resolve a theme and user goal. The included general-open-ended
+example adds Gym Agent-owned tools around that conversation. NeMo-Sim's own
+tool-calling, safety, sovereign-AI, finance, health, and trajectory-evaluator
+probe semantics still require probe-specific Resources Server adapters.
 
 The current reward is an integration signal: `1.0` when both assistant and
 simulated-user trajectories contain at least one turn, otherwise `0.0`. It is
@@ -157,5 +181,29 @@ gym eval prepare --benchmark nemo_sim
 .venv/bin/gym eval run \
   --benchmark nemo_sim \
   --agent nemo_sim_processor \
-  --output results/nemo_sim.jsonl
+  --output results/nemo_sim.jsonl \
+  ++observability_enabled=true \
+  ++model_call_capture_dir=/absolute/path/to/model-calls
 ```
+
+## Evaluation and training attribution
+
+The projected rollout keeps the final Assistant response at top-level
+`response` for existing evaluation and training consumers. It also preserves
+both participants under `agent_turns`; select either policy without relabeling
+the other participant's outputs:
+
+```python
+selected = [
+    {"responses_create_params": turn["request"], "response": turn["response"]}
+    for turn in rollout["agent_turns"]
+    if turn["participant"] in requested_participants
+]
+```
+
+Use `{"assistant"}`, `{"user"}`, or both for
+`requested_participants`. Support-model calls are absent from `agent_turns`,
+so judge, summary, and API-response outputs cannot be mistaken for participant
+training tokens. Token-ID-based RL consumers should continue using the
+top-level focal Assistant response; participant filtering provides the
+explicit per-turn contract for downstream SFT or custom collation.

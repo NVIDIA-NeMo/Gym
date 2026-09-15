@@ -34,6 +34,7 @@ from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObser
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from processors.nemo_sim_processor.contracts import (
     NEMO_SIM_MODEL_ALIASES,
+    NeMoSimEpisodeStatus,
     NeMoSimProtocolConfig,
     NeMoSimScenario,
     NeMoSimSeedResponse,
@@ -110,7 +111,8 @@ class _ConversationBridge:
         self.episode = episode
         self.task = task
         self.event_loop = event_loop
-        self.cookies_by_alias = {alias: dict(cookies) for alias in NEMO_SIM_MODEL_ALIASES}
+        self.environment_cookies = dict(cookies)
+        self.cookies_by_alias = {alias: {} for alias in NEMO_SIM_MODEL_ALIASES}
         self.agent_turns: list[AgentTurn] = []
         self.responses_by_alias: dict[str, list[NeMoGymResponse]] = {alias: [] for alias in NEMO_SIM_MODEL_ALIASES}
 
@@ -159,15 +161,20 @@ class _ConversationBridge:
             server_name=target.name,
             url_path=self.processor.url_path_for_run("/v1/responses", self.episode),
             json=request_params.model_dump(mode="json", exclude_none=True),
-            cookies=self.cookies_by_alias[alias],
+            cookies=self.environment_cookies | self.cookies_by_alias[alias],
         )
         await raise_for_status(response)
         response_data = await get_response_json(response)
         trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
         gym_response = NeMoGymResponse.model_validate(response_data)
-        self.cookies_by_alias[alias].update(response.cookies)
+        for name, value in response.cookies.items():
+            if name in self.environment_cookies:
+                self.environment_cookies[name] = value
+            else:
+                self.cookies_by_alias[alias][name] = value
         self.responses_by_alias[alias].append(gym_response)
         if alias in _AGENT_ID_BY_ALIAS:
+            status = await self._episode_status()
             self.agent_turns.append(
                 AgentTurn(
                     sequence=len(self.agent_turns),
@@ -175,6 +182,8 @@ class _ConversationBridge:
                     request=request_params,
                     response=gym_response,
                     observations=_agent_observations(target.name, trajectory_data),
+                    state_after=status.state,
+                    termination_reason=status.termination_reason if status.terminated else None,
                 )
             )
 
@@ -192,6 +201,17 @@ class _ConversationBridge:
                 else None
             ),
         )
+
+    async def _episode_status(self) -> NeMoSimEpisodeStatus:
+        response = await self.processor.server_client.post(
+            server_name=self.processor.config.resources_server.name,
+            url_path="/episode_status",
+            json={},
+            cookies=self.environment_cookies,
+        )
+        await raise_for_status(response)
+        self.environment_cookies.update(response.cookies)
+        return NeMoSimEpisodeStatus.model_validate(await get_response_json(response))
 
 
 def _agent_observations(source: str, trajectory_data: Any) -> AgentObservationBundle | None:
@@ -231,6 +251,25 @@ def _response_text(response: NeMoGymResponse) -> str:
             if text:
                 chunks.append(text)
     return "\n".join(chunks)
+
+
+def _finalize_termination(agent_turns: list[AgentTurn], result: NeMoSimSimulationResult) -> None:
+    if not agent_turns:
+        return
+    environment_reason = next(
+        (turn.termination_reason for turn in reversed(agent_turns) if turn.termination_reason),
+        None,
+    )
+    metadata = result.conversation_metadata or {}
+    reason = environment_reason
+    if reason is None and metadata.get("early_stop"):
+        reason = "nemo_sim_early_stop"
+    if reason is None:
+        reason = "nemo_sim_completed" if result.conversation_status else "nemo_sim_incomplete"
+    for index, turn in enumerate(agent_turns):
+        agent_turns[index] = turn.model_copy(
+            update={"termination_reason": reason if index == len(agent_turns) - 1 else None}
+        )
 
 
 def _last_turn_sequence(agent_turns: list[AgentTurn], agent_id: str) -> int | None:
@@ -278,6 +317,7 @@ class NeMoSimProcessor(BaseProcessor):
         try:
             raw_result = await asyncio.to_thread(self._run_nemo_sim, bridge, seed.scenario)
             result = NeMoSimSimulationResult.model_validate(raw_result)
+            _finalize_termination(bridge.agent_turns, result)
             assistant_responses = bridge.responses_by_alias["assistant_model"]
             if not assistant_responses:
                 episode_response = EpisodeResponse(
@@ -304,7 +344,7 @@ class NeMoSimProcessor(BaseProcessor):
                         nemo_sim_result=result,
                         agent_turns=bridge.agent_turns,
                     ).model_dump(mode="json"),
-                    cookies=environment_cookies,
+                    cookies=bridge.environment_cookies,
                 )
                 await raise_for_status(verify_response)
                 verification = NeMoSimVerification.model_validate(await get_response_json(verify_response))
@@ -338,7 +378,7 @@ class NeMoSimProcessor(BaseProcessor):
                 json=ResourcesSessionCloseRequest(resources_session_id=seed.resources_session_id).model_dump(
                     mode="json"
                 ),
-                cookies=environment_cookies,
+                cookies=bridge.environment_cookies,
             )
             await raise_for_status(close_response)
         except Exception as error:

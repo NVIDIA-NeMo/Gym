@@ -110,6 +110,14 @@ class NeMoSimSimulationResult(BaseModel):
         return json.loads(value) if isinstance(value, str) else value
 
 
+class NeMoSimEpisodeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: dict[str, Any] = Field(default_factory=dict)
+    terminated: bool = False
+    termination_reason: str | None = None
+
+
 class NeMoSimVerifyRequest(EpisodeVerifyRequest):
     model_config = ConfigDict(extra="forbid")
 
