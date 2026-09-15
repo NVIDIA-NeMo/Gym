@@ -27,15 +27,19 @@ gym_ci_setup_dev() {
     fi
 
     cd "${setup_repo_root}"
-    if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv >/dev/null 2>&1; then
-        # Offline container environment: the image already provides uv and a
-        # pre-populated uv cache, so install nothing and resolve from the cache only.
-        # Verify the baked uv is the pinned version before trusting it.
-        test "$(uv --version | awk '{print $2}')" = "0.11.29"
-        setup_uv_sync_args=(--offline)
+    if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.11.29" ]]; then
+        # uv is already present at the pinned version (the baked CI image, or a
+        # runner/image that ships it): do not download or install anything.
+        # In the container (NEMO_GYM_CONTAINER=1) resolve from the pre-populated
+        # cache offline; elsewhere resolve from the package index.
+        if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]]; then
+            setup_uv_sync_args=(--offline)
+        else
+            setup_uv_sync_args=()
+        fi
     else
-        # Online environment (e.g. GitHub Actions): download the pinned uv and let it
-        # resolve from the package index as before.
+        # Online environment (e.g. GitHub Actions) without the pinned uv: download
+        # it and let it resolve from the package index as before.
         setup_uv_installer="$(
             curl -LsSf --retry 5 --retry-all-errors --retry-max-time 300 \
                 --connect-timeout 30 --max-time 120 "${setup_uv_install_url}"

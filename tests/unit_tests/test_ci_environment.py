@@ -866,18 +866,19 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
 
 def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
-    # setup_dev.sh installs uv itself (a bootstrap tool, not a project
-    # dependency), then syncs the dev extra; in the CI container
-    # (NEMO_GYM_CONTAINER=1) it reuses the baked uv and syncs offline.
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
     setup_dev = SETUP_DEV.read_text()
     lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
 
-    assert 'if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv' in setup_dev
-    # The offline branch must verify the baked uv is the pinned version.
-    assert "test "$(uv --version | awk '{print $2}')" = "0.11.29"" in setup_dev
+    # Reuse a present pinned uv; verify the version before trusting it.
+    assert "command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.11.29" ]]" in setup_dev
+    # Only the no-uv fallback downloads the installer.
+    assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
     assert "setup_uv_sync_args=(--offline)" in setup_dev
     assert "setup_uv_sync_args=()" in setup_dev
-    assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
 
     # lint.sh: pre-commit always comes from the lockfile (dev extra). The CI
     # image installs it into the project venv at build time and local/online
