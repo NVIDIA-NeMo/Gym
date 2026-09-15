@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.global_config import (
     ROLLOUT_ID_KEY_NAME,
@@ -55,10 +55,15 @@ class CheckInput(str, Enum):
     AGENT_TURNS = "agent_turns"
     # Canonical model calls joined in memory to explicit TrajectoryTurn references.
     BOUND_CALLS = "bound_calls"
+    # Canonical model calls joined to explicit AgentInvocation or TrajectoryTurn references.
+    OWNED_MODEL_CALLS = "owned_model_calls"
     # Runner-derived rollout verdicts grouped by task for task-level reduction.
     REPEAT_VERDICTS = "repeat_verdicts"
     # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
     REPEAT_DIGESTS = "repeat_digests"
+
+
+CALL_BINDING_INPUTS = frozenset({CheckInput.BOUND_CALLS, CheckInput.OWNED_MODEL_CALLS})
 
 
 class CheckSpec(BaseModel):
@@ -70,6 +75,13 @@ class CheckSpec(BaseModel):
     evaluation_scope: CheckScope
     subject: CheckSubject
     reads: frozenset[CheckInput]
+
+    @field_validator("reads")
+    @classmethod
+    def _require_one_call_binding_view(cls, reads: frozenset[CheckInput]) -> frozenset[CheckInput]:
+        if len(reads & CALL_BINDING_INPUTS) > 1:
+            raise ValueError("a health check cannot read both turn-bound and invocation-owned call bindings")
+        return reads
 
 
 class Finding(BaseModel):

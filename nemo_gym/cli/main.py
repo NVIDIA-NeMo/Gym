@@ -543,18 +543,75 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
     return ([f"+config_paths=[{','.join(paths)}]"] if paths else []) + rest
 
 
+# Root-level keys prefixed with `_` are scratch namespaces: not part of SubmitConfig's schema, only
+# present so other parts of the config can interpolate into them (e.g. `${_image_tags.vllm}`). They must
+# be fully defined in the config file itself — `+`/`++` overrides are rejected here so a typo'd scratch
+# field (e.g. `+_image_tags.vllmm=...`) fails loudly instead of silently creating an unused field that
+# nothing interpolates against. Overriding an *existing* scratch leaf with a bare `key=value` still works,
+# and Hydra itself already rejects bare overrides of nonexistent keys, so typos there are caught for free.
+def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
+    for token in overrides:
+        prefix = "++" if token.startswith("++") else "+" if token.startswith("+") else ""
+        if not prefix:
+            continue
+        key = token[len(prefix) :].split("=", 1)[0]
+        root = key.split(".", 1)[0]
+        if root.startswith("_"):
+            raise ValueError(
+                f"Refusing override {token!r}: scratch namespace {root!r} must be fully defined in the "
+                "config file. Only pre-existing fields may be overridden — use a bare 'key=value' override "
+                "instead of '+'/'++' so a typo is rejected rather than silently adding an unused field."
+            )
+
+
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from pathlib import Path
+
+    import rich
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
+    from rich.markup import escape
 
     from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
-    merged = OmegaConf.merge(
-        OmegaConf.load(args.config),
-        OmegaConf.from_dotlist([t.lstrip("+") for t in overrides]) if overrides else OmegaConf.create(),
-    )
-    config = SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
-    submit(config, dry_run=args.dry_run)
+    _reject_scratch_namespace_additions(overrides)
+    config_path = Path(args.config).resolve()
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
+        composed = compose(config_name=config_path.stem, overrides=overrides)
+    # Resolve interpolations (e.g. `${_scratch.value}`) before dropping scratch namespaces (root keys
+    # prefixed with `_`) — any other unrecognized root key is a real typo and must reach SubmitConfig's
+    # strict validation so it fails loudly instead of being silently dropped.
+    resolved = OmegaConf.to_container(composed, resolve=True)
+    scratch_keys = {key for key in resolved if key.startswith("_")}
+    config = SubmitConfig.model_validate({key: value for key, value in resolved.items() if key not in scratch_keys})
+
+    record = submit(config, dry_run=args.dry_run)
+    if record is None:
+        return
+
+    if args.json:
+        # The record alone, so the output parses.
+        print(record.model_dump_json(indent=2))
+    else:
+        rich.print(f"Run directory: [bold]{record.run_dir}[/bold]")
+        for benchmark in record.benchmarks:
+            if benchmark.job_id is None:
+                # sbatch's message is not ours to format: `escape` disables markup
+                # for it, so an error carrying square brackets is printed as
+                # written instead of being swallowed or raising MarkupError.
+                rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
+            else:
+                rich.print(
+                    f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"
+                )
+
+    if record.failed:
+        names = ", ".join(b.benchmark for b in record.failed)
+        print(f"Error: {len(record.failed)} benchmark(s) failed to submit: {names}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1080,6 +1137,11 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", action="store_true", help="Emit the submission record as JSON."
                 ),
             ),
         ),

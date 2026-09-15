@@ -14,6 +14,7 @@ apex_shortlist_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: apex_shortlist_math_with_judge_resources_server
       datasets:
