@@ -113,6 +113,19 @@ requires both model-output evidence and an official grade. Inspect trajectories,
 verifier output, and resource cleanup before promoting coverage. Capped runs are
 not benchmark scores; missing submissions can exit grading before deeper tests.
 
+The complete observed mini-SWE CPU results are recorded separately in
+[health-native-miniswe-cpu.json](health-native-miniswe-cpu.json). To repeat all
+52 CPU tasks against those native results:
+
+```sh
+PYTHONPATH=. python benchmarks/terminal_bench_4/smoke.py \
+  --harness miniswe --category cpu --env-file /path/to/private.env \
+  --baseline-health benchmarks/terminal_bench_4/health-native-miniswe-cpu.json \
+  --output results/tb4-smoke/miniswe-cpu
+```
+
+The original `health-baseline.json` remains the frozen reference baseline.
+
 See [native lifecycle notes](native-lifecycle.md) for the current implementation and
 validation record. The [earlier migration notes](migration.md) describe the historical
 Harbor-backed reference.

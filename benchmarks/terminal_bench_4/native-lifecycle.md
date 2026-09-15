@@ -114,6 +114,12 @@ separate `Gym-tb4-reference` checkout. The baseline health records are captured 
 and 3/3 GPU healthy; mini-SWE has 5/5 sampled CPU, 8/11 Compose, and 3/3 GPU healthy.
 The later OpenCode SYS_PTRACE follow-up is included in that baseline.
 
+The subsequent full-CPU mini-SWE sweep uses those five measured mini-SWE tasks
+and the OpenCode CPU results as expectations for the 47 previously unmeasured
+mini-SWE tasks. These cross-harness expectations are recorded separately in
+`cpu-miniswe-expectations.json`; the frozen reference baseline is preserved.
+Fresh mini-SWE reference runs reproduce both known CPU setup failures.
+
 Pass `--baseline-health benchmarks/terminal_bench_4/health-baseline.json` to the
 smoke runner. It records baseline status and regressions, and advances CPU →
 Compose → GPU only when no newly unhealthy task appears. Without a baseline,
@@ -139,22 +145,44 @@ both harnesses; a regression fixture reproduces the failed directory probe and
 checks restoration. The original failed attempts remain in the validation
 artifacts alongside the successful reruns.
 
+The expanded mini-SWE CPU sweep also exposed model context overflows on
+`react-lead-form` and `shadow-relay`: their commands produced approximately
+2.5 MB and 7.9 MB of output. Replaying the same requests through the frozen
+reference model adapter produced identical HTTP 400 `context_length_exceeded`
+errors. Both affected native environments still completed official verification,
+and both tasks recovered on retry with the same profile. No runtime, prompt, observation-format,
+model-routing, or budget changes were made for this coverage expansion. Large
+command dumps can still overflow this mini-SWE profile; the original attempts,
+request replay evidence, and successful reruns remain in the validation artifacts.
+
 ### Final live health, 2026-09-15
 
 Smokes used `gpt-5.4-mini-2026-03-17`, three agent steps, and a 900-second agent
-cap, following CPU → Compose → GPU. All 66 tasks were exercised with OpenCode;
-mini-SWE covered the five CPU representatives and every Compose/GPU task.
+cap. The initial rollout followed CPU → Compose → GPU; the subsequent mini-SWE
+sweep expanded CPU coverage from five representatives to all 52 CPU tasks. Both
+harnesses have now exercised all 66 tasks. The full mini-SWE CPU sweep was 47/52
+healthy on its first attempt and 49/52 after the recorded retries.
 
 | Harness | Category | Baseline healthy | Native healthy |
 | --- | --- | ---: | ---: |
 | OpenCode | CPU | 50/52 | 50/52 |
 | OpenCode | Compose | 9/11 | 9/11 |
 | OpenCode | GPU | 3/3 | 3/3 |
-| mini-SWE | CPU sample | 5/5 | 5/5 |
+| mini-SWE | CPU | 5/5 sampled | 49/52 |
 | mini-SWE | Compose | 8/11 | 9/11 |
 | mini-SWE | GPU | 3/3 | 3/3 |
 
-No health regressions remain. `kv-live-surgery` is newly healthy with mini-SWE.
+All previously measured healthy results remain healthy. `kv-live-surgery` is
+newly healthy with mini-SWE. The newly covered `retro-console-soc` remains below
+the cross-harness CPU expectation: the full sweep and unchanged-profile retry
+submitted Verilog stubs with `frame_done` permanently low. The official tests
+allow two 600-second simulations inside a 1,200-second overall verifier budget,
+so these submissions time out without an official reward. Replaying the first
+submission on the frozen reference, with identical collected Verilog bytes,
+reproduces the timeout. This remains an unhealthy mini-SWE result; the evidence
+does not identify a native lifecycle defect. The task, tests, and deadlines are
+preserved. See `cpu-miniswe-retro-parity.json` in the validation artifacts.
+
 The four existing unhealthy tasks reproduce their reference setup failures:
 `risk-scorer-replay` and `rs-archive-clone` cannot initialize log directories as
 their image users; `medical-claims-processing` and `payments-pipeline-fix` hit
@@ -163,7 +191,11 @@ The final paginated ownership audit found zero remaining run-owned resources
 on both CPU and GPU pools, without manual reaping.
 
 Live category results and cleanup audit are recorded in `health-report.md` in
-that artifact directory. Capped smoke rewards are not benchmark scores. The
+that artifact directory. The complete native mini-SWE CPU measurements are
+committed separately in [health-native-miniswe-cpu.json](health-native-miniswe-cpu.json);
+pass that file to `--baseline-health` for future mini-SWE CPU comparisons.
+`native-health.json` in the artifact directory contains both harnesses across all
+66 tasks. Capped smoke rewards are not benchmark scores. The
 standalone OpenCode smoke retains its public model endpoint mode and does not
 certify remote Gym model routing. The official MCP task remains subject to its
 existing deployment blocker; mocked routing or a different MCP task is not a
