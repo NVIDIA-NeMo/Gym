@@ -223,8 +223,7 @@ def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
     sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
     assert any("--extra telemetry" in line for line in sync_lines), (
         "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
-        "telemetry tests run and the coverage gate is not starved: "
-        + repr(sync_lines)
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
     )
 
 
