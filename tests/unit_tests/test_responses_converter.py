@@ -457,6 +457,79 @@ def test_responses_to_chat_completion_preserves_assistant_refusal(converter: Res
     assert params.messages[0]["refusal"] == "I cannot answer."
 
 
+def test_responses_to_chat_completion_preserves_empty_assistant_refusal(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_refusal",
+                    role="assistant",
+                    status="completed",
+                    content=[NeMoGymResponseOutputRefusal(refusal="")],
+                ),
+            ]
+        )
+    )
+
+    assert params.messages[0]["content"] is None
+    assert params.messages[0]["refusal"] == ""
+
+
+def test_responses_to_chat_completion_rejects_text_after_refusal(converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="text after a refusal"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymResponseOutputMessage(
+                        id="msg_refusal",
+                        role="assistant",
+                        status="completed",
+                        content=[
+                            NeMoGymResponseOutputRefusal(refusal="I cannot answer."),
+                            NeMoGymResponseOutputText(text="Additional text.", annotations=[]),
+                        ],
+                    ),
+                ]
+            )
+        )
+
+
+def test_responses_to_chat_completion_rejects_part_with_text_and_refusal(converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="cannot contain both text and refusal"):
+        converter._format_message(
+            {
+                "role": "assistant",
+                "content": [{"type": "refusal", "text": "answer", "refusal": "I cannot answer."}],
+            },
+            ResponsesConverterState(return_token_id_information=False),
+        )
+
+
+def test_responses_to_chat_completion_rejects_multiple_refusals(converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="multiple refusal parts"):
+        converter._format_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "First refusal."},
+                    {"type": "refusal", "refusal": "Second refusal."},
+                ],
+            },
+            ResponsesConverterState(return_token_id_information=False),
+        )
+
+
+def test_responses_to_chat_completion_rejects_text_message_after_refusal(converter: ResponsesConverter):
+    state = ResponsesConverterState(return_token_id_information=False)
+    converter._format_message(
+        {"role": "assistant", "content": [{"type": "refusal", "refusal": "I cannot answer."}]},
+        state,
+    )
+
+    with pytest.raises(NotImplementedError, match="text after a refusal"):
+        converter._format_message({"role": "assistant", "content": "Additional text."}, state)
+
+
 def test_responses_to_chat_completion_function_call_and_output(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
@@ -1164,6 +1237,14 @@ def test_postprocess_refusal_preserves_provider_signal(converter: ResponsesConve
     assert output[0].content == [NeMoGymResponseOutputRefusal(refusal="Policy refusal.")]
 
 
+def test_postprocess_empty_refusal_preserves_provider_signal(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict({"role": "assistant", "content": None, "refusal": ""})
+
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert output[0].content == [NeMoGymResponseOutputRefusal(refusal="")]
+
+
 def test_postprocess_preserves_text_alongside_provider_refusal(converter: ResponsesConverter):
     output = converter.postprocess_assistant_message_dict(
         {"role": "assistant", "content": "Partial answer.", "refusal": "Policy refusal."}
@@ -1354,6 +1435,7 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finis
     )
 
     assert expected_response == actual_response
+    assert "native_finish_reason" not in actual_response.model_dump(mode="json")
 
 
 @pytest.mark.parametrize(
@@ -1437,6 +1519,9 @@ def test_chat_completion_to_response_preserves_native_finish_reason(converter: R
     )
 
     assert response.native_finish_reason == "refusal"
+    assert response.model_dump(mode="json")["native_finish_reason"] == "refusal"
+    assert "native_finish_reason" in NeMoGymChoice.model_json_schema()["properties"]
+    assert "native_finish_reason" in NeMoGymResponse.model_json_schema()["properties"]
 
 
 # ===========================================================================
