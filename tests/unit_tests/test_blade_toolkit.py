@@ -28,7 +28,6 @@ CLAUDE_SKILLS = (
     "nemo-gym-pivot-datasets",
     "nemo-gym-pr-checks-and-labels",
     "nemo-gym-reward-profiling",
-    "simplicity-first",
 )
 CODEX_COMPATIBILITY_LINKS = (
     "nemo-gym-blade-analysis",
@@ -36,7 +35,6 @@ CODEX_COMPATIBILITY_LINKS = (
     "nemo-gym-pivot-datasets",
     "nemo-gym-pr-checks-and-labels",
     "nemo-gym-reward-profiling",
-    "simplicity-first",
 )
 TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
 

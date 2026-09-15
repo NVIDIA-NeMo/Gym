@@ -154,6 +154,10 @@ gym env resolve --config ...
 - Line length: 119
 - Python 3.13.14+, async-first
 - Ruff for linting and formatting (double quotes, isort)
+- Prefer the smallest clear implementation that satisfies current requirements. Do not add abstractions, options,
+  dependencies, or layers for hypothetical future needs.
+- Simplicity means obvious code, not merely fewer lines. Preserve required behavior, compatibility, performance, and
+  observability; extract helpers when they genuinely improve clarity or reuse.
 - Add parameter and return annotations to new or changed public functions and methods, and explicit types to public
   dataclass and Pydantic fields. Avoid `Any` at public boundaries when a concrete model, protocol, `TypedDict`, or
   `object` plus narrowing expresses the contract. Match surrounding annotation style and do not perform unrelated
