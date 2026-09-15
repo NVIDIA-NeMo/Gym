@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the genrm_compare server.
 
-Rows carry no verify-consumed task data at all: verify() is a cohort-buffered pairwise GenRM
-comparison driven entirely by ``responses_create_params.input`` (framework key), the rollout
-``response``, and server config. Every verify-specific wire field (``principle``,
-``task_index``/``rollout_index`` via the ``_ng_*`` aliases, ``prompt_id``) is injected by the
-agent/harness at verify time, never read from dataset rows, so those stay declared on
-``GenRMCompareVerifyRequest`` in app.py only. The single task-owned column in committed data is
-``dataset``, a provenance label that survives transit purely via the wire model's
-``extra="allow"``.
+Task-owned data contains the optional provenance label ``dataset``. Multi-member
+verification also requires caller-owned ``_ng_group_id`` and ``_ng_rollout_index``
+coordinates. The group ID must distinguish runs and prompt occurrences; rollout
+indices are local group slots 0..N-1. A shared ``_ng_group_attempt`` distinguishes
+replacement groups and defaults to zero. Prompt/task labels alone cannot isolate
+independent runs. See the GenRM cohort guide for the wire contract and migration.
 """
 
 from typing import Optional

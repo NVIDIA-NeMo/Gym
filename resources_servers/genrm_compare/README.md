@@ -235,18 +235,14 @@ Compare multiple candidate responses.
 
 ### POST `/verify`
 
-Cohort-based verification endpoint used during rollout collection.
+Cohort verification requires caller-owned group and member identities and a finite deadline.
+Comparisons start after every member arrives; rewards are published only for a complete group. Missing
+members or failed judging end the group with HTTP 503 and no reward. A disconnect detaches its waiter;
+the same answer can reattach or receive its cached reward after completion.
+The caller coordinates complete replacement attempts; collector scheduling and resume are unchanged.
 
-- When `num_rollouts_per_prompt <= 1`, returns `default_score`
-- When `num_rollouts_per_prompt > 1`, buffers rollouts by task/prompt identity plus principle, waits for a full cohort, then assigns relative rewards to that cohort
-
-## Error Handling
-
-The server handles failures gracefully:
-
-- **Parse failures**: Retries up to `genrm_parse_retries` times with sleep between attempts
-- **Connection errors**: Falls back to default scores
-- **Single response**: Returns default score (no comparison possible)
+See [GenRM Comparison Groups](../../fern/versions/latest/pages/evaluation/genrm-cohorts.mdx) for
+coordinates, the supported collector example, cancellation behavior, and bounded retention limits.
 
 ## Development
 

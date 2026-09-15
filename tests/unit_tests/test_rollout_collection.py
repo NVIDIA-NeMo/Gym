@@ -38,6 +38,8 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -908,7 +910,15 @@ class TestRolloutCollection:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
             "\n".join(
-                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                json.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        "agent_ref": {"name": "my_agent"},
+                        GROUP_ID_KEY_NAME: f"group-{i}",
+                        GROUP_ATTEMPT_KEY_NAME: 2,
+                        "x": i,
+                    }
+                )
                 for i in range(2)
             )
             + "\n"
@@ -940,6 +950,8 @@ class TestRolloutCollection:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r[TASK_INDEX_KEY_NAME] for r in persisted] == [1]
         assert [r["reward"] for r in persisted] == [1.0]
+        assert persisted[0][GROUP_ID_KEY_NAME] == "group-1"
+        assert persisted[0][GROUP_ATTEMPT_KEY_NAME] == 2
 
         failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
         assert len(failures) == 1
@@ -947,6 +959,8 @@ class TestRolloutCollection:
         assert failures[0][TASK_INDEX_KEY_NAME] == 0
         assert failures[0][ROLLOUT_INDEX_KEY_NAME] == 0
         assert failures[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        assert failures[0][GROUP_ID_KEY_NAME] == "group-0"
+        assert failures[0][GROUP_ATTEMPT_KEY_NAME] == 2
         assert "reward" not in failures[0]
 
         # The failed rollout reaches neither the aggregator's input nor its denominator.
