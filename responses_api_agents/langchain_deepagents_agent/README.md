@@ -110,6 +110,10 @@ reasoning_gym, mcqa, instruction_following, ...) can be used as-is by pointing `
 - `model_server`: the Gym model server driving the deepagents graph (composed via `--model-type`)
 - `tavily_api_key`: Tavily API key for the `TavilySearch` tool
 - `max_search_results`: max results returned per `TavilySearch` call
+- `max_input_tokens`: the configured model's real context window, in tokens. Required — drives deepagents'
+  `SummarizationMiddleware` trigger/keep thresholds via `model.profile`; without it, deepagents falls back to
+  a hardcoded, model-agnostic default (170k tokens, keep last 6 messages) that has no relationship to
+  whatever model this agent actually talks to
 - `max_steps` (inherited, unused): deepagents runs its own internal tool loop and answers in one call
 
 ## Known limitation: no trajectory/observability capture (yet)

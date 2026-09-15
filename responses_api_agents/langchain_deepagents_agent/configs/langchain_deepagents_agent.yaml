@@ -10,3 +10,7 @@ langchain_deepagents_agent:
         name: policy_model
       tavily_api_key: ${tavily_api_key}
       max_search_results: 5
+      # nvidia/nemotron-3-ultra-550b-a55b's actual enforced limit (OpenRouter's `top_provider.context_length`,
+      # not the larger nominal `context_length: 262144` — top_provider is what the routed provider actually
+      # enforces). Update this if policy_model_name changes to point at a different model.
+      max_input_tokens: 202800

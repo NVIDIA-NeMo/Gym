@@ -32,3 +32,7 @@ reasoning_gym_langchain_deepagents_agent_model_server:
       # reasoning_gym's verifier extracts the answer from <answer></answer> tags in the final message;
       # without this, correct reasoning still scores 0.
       system_prompt: "Answer the user, then restate your final answer wrapped in <answer></answer> tags."
+      # nvidia/nemotron-3-ultra-550b-a55b's actual enforced limit (OpenRouter's `top_provider.context_length`,
+      # not the larger nominal `context_length: 262144` — top_provider is what the routed provider actually
+      # enforces). Update this if policy_model_name changes to point at a different model.
+      max_input_tokens: 202800

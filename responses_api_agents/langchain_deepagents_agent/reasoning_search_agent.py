@@ -33,12 +33,18 @@ class ReasoningSearchDeepAgentConfig(DeepAgentsAgentConfig):
     tavily_api_key: str
     max_search_results: int = 5
     system_prompt: Optional[str] = None
+    # Required, no default: without it, deepagents' SummarizationMiddleware falls back to a hardcoded,
+    # model-agnostic threshold (170k tokens, keep last 6 messages) unrelated to the real model.
+    max_input_tokens: int
 
 
 class ReasoningSearchDeepAgent(DeepAgentsAgent):
     config: ReasoningSearchDeepAgentConfig
 
     def build_agent(self, model: BaseChatModel):
+        # BaseChatModel.profile is a plain, already-inherited field (langchain_core) — deepagents reads
+        # model.profile["max_input_tokens"] when computing its summarization trigger/keep thresholds.
+        model.profile = {"max_input_tokens": self.config.max_input_tokens}
         return create_deep_agent(
             model=model,
             tools=[

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -26,12 +27,14 @@ from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent impo
     ReasoningSearchDeepAgent,
     ReasoningSearchDeepAgentConfig,
 )
+from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import GymResponsesChatModel
 
 
 def _config(**kwargs) -> ReasoningSearchDeepAgentConfig:
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name="reasoning_gym"))
     kwargs.setdefault("model_server", ModelServerRef(type="responses_api_models", name="policy_model"))
     kwargs.setdefault("tavily_api_key", "test-tavily-key")
+    kwargs.setdefault("max_input_tokens", 202800)
     return ReasoningSearchDeepAgentConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **kwargs)
 
 
@@ -50,6 +53,34 @@ def test_base_class_build_agent_is_abstract():
 def test_concrete_agent_builds_successfully():
     agent = _make_agent()
     assert agent.agent is not None
+
+
+def test_build_agent_sets_model_profile_from_max_input_tokens():
+    """deepagents' SummarizationMiddleware reads model.profile["max_input_tokens"] to compute its
+    trigger/keep thresholds; without it, it falls back to a hardcoded 170k-token/6-message default
+    unrelated to whatever model is actually configured. Calls build_agent() directly with a fresh model
+    (rather than inspecting the compiled create_deep_agent() graph) since the graph doesn't expose the
+    model object it wraps."""
+    agent = _make_agent(max_input_tokens=202800)
+    model = GymResponsesChatModel(agent=agent)
+
+    agent.build_agent(model)
+
+    assert model.profile == {"max_input_tokens": 202800}
+
+
+def test_reasoning_search_deep_agent_config_requires_max_input_tokens():
+    with pytest.raises(ValidationError, match="max_input_tokens"):
+        ReasoningSearchDeepAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server=ResourcesServerRef(type="resources_servers", name="reasoning_gym"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            tavily_api_key="test-tavily-key",
+            # max_input_tokens deliberately omitted
+        )
 
 
 # --- cookie propagation ------------------------------------------------------------------------------
