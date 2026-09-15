@@ -44,9 +44,16 @@ class Observation:
     url: str
     title: str
     elements: list[Element] = field(default_factory=list)
+    # Visible body text, collapsed and capped. The element list alone covers only
+    # what the policy can act on, so a page whose answer sits in prose -- a code,
+    # a price, a confirmation number -- was unreadable without escaping into
+    # JavaScript. Kept separate from `elements` so the ids stay stable.
+    text: str = ""
     # True when the backend stopped collecting at its element budget, so the
     # policy knows the element list is incomplete rather than exhaustive.
     truncated: bool = False
+    # True when `text` was cut at its budget, for the same reason.
+    text_truncated: bool = False
 
     def render(self, max_elements: int = 50) -> str:
         lines = [f"URL: {self.url}", f"TITLE: {self.title}", "ELEMENTS:"]
@@ -54,6 +61,11 @@ class Observation:
             lines.append(f"  [{el.id}] {el.role}: {el.name}")
         if self.truncated or len(self.elements) > max_elements:
             lines.append(f"  ... (truncated at {max_elements} elements)")
+        if self.text:
+            lines.append("TEXT:")
+            lines.append(f"  {self.text}")
+            if self.text_truncated:
+                lines.append("  ... (truncated)")
         return "\n".join(lines)
 
 

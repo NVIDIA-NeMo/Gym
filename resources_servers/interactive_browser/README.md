@@ -125,8 +125,10 @@ third-party service. Tasks are the bundled offline `site/` (deterministic, ToS-s
 
 Requirements for the policy endpoint — it must satisfy **both**:
 
-1. **Speak the Responses API** (`POST /v1/responses`). Chat-completions-only
-   gateways do not work; recent vLLM serves `/v1/responses` natively.
+1. **Speak the Responses API** (`POST /v1/responses`). Gym's own model servers
+   already do — `vllm_model` exposes `/v1/responses` and forwards to vLLM's
+   chat-completions endpoint for you, so nothing extra is needed there. The
+   requirement applies when you point the agent straight at a gateway instead.
 2. **Parse tool calls into structured `function_call` items.** If the server
    returns tool-call markup as plain text, the agent sees zero tool calls, the
    browser is never driven, and every rollout "succeeds" with **reward 0.0** —
@@ -155,6 +157,32 @@ gym env start --config resources_servers/interactive_browser/providers/lexmount/
 Remote browsers cannot open this repo's offline `site/` pages (local `file://`
 URIs), so remote runs use live-web tasks — `data/example_remote.jsonl`, which
 that config points at.
+
+## Scope and maturity
+
+This is a working environment meant to be extended, not a finished benchmark.
+What that means concretely:
+
+**Dataset.** `data/example.jsonl` is a small set of tasks over the bundled
+offline `site/`, and `data/example_remote.jsonl` a handful of live-web ones.
+They exist to exercise the loop end to end and keep CI deterministic. Point
+`generate_data.py` at your own task source for anything beyond that.
+
+**Verifier.** Outcome-only, checked once in `verify()`: final URL, URL substring,
+DOM substring, or an exact answer match. That is enough for tasks with a single
+unambiguous end state, and not enough for tasks where the path matters — a
+policy that reaches the right URL by a shortcut scores the same as one that
+completed the flow. Tasks whose correctness depends on what happened along the
+way need a verifier of their own.
+
+**Harness.** The observation is a numbered list of interactive elements plus
+capped body text. No screenshots, no accessibility tree, no per-step reward.
+A vision policy or a task needing layout will want more than this exposes; the
+`BrowserBackend` contract is where to add it.
+
+**Backends.** Local Chromium is the CI path. The hosted provider under
+`providers/lexmount/` is one example of a remote backend and is optional — the
+environment runs without its SDK installed.
 
 ## Files (Gym `new-environment` spec)
 - [x] `app.py` — resources server (seed_session + tools + verify)

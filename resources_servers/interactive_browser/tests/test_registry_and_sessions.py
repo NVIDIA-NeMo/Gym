@@ -12,6 +12,11 @@ The session tests use a fake provider: leaking a remote browser is the failure
 mode that matters most here, and it must be provable without a cloud account.
 """
 
+import asyncio
+import time
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 from browser import (
     BrowserSessionError,
@@ -141,3 +146,60 @@ async def test_session_without_a_cdp_url_is_reported_and_released():
     with pytest.raises(BrowserSessionError, match="cdp_url"):
         await backend.open("about:blank")
     assert len(provider.released) == 1
+
+
+class TestACreateThatLandsAfterTheRolloutGaveUp:
+    """A session created past its rollout's deadline must not keep a quota slot.
+
+    The SDK call runs in a thread and cannot be cancelled, so a create that is
+    still polling when we stop waiting may well succeed afterwards. Nothing else
+    knows that session exists -- the rollout that asked for it has already failed
+    -- so the provider has to release it itself.
+    """
+
+    def _provider(self, create: Any, monkeypatch: Any) -> Any:
+        from providers.lexmount import provider as provider_module
+
+        # The SDK bound is the real one; shrink only our grace period so the
+        # abandoned-create path runs in test time rather than in service time.
+        monkeypatch.setattr(provider_module, "_CREATE_SLACK_S", 0.05)
+        provider = provider_module.LexmountSessionProvider(create_timeout_s=0.0)
+        client = SimpleNamespace(sessions=SimpleNamespace(create=create, delete=lambda session_id: None))
+        provider._client = client
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_a_late_session_is_released(self, monkeypatch: Any) -> None:
+        released: list[str] = []
+
+        def slow_create(**kwargs: Any) -> Any:
+            time.sleep(0.2)
+            return SimpleNamespace(connect_url="ws://late", session_id="late-1", close=lambda: None)
+
+        provider = self._provider(slow_create, monkeypatch)
+        provider.release = lambda handle: released.append(handle.session_id)  # type: ignore[assignment]
+
+        with pytest.raises(BrowserSessionError, match="did not complete"):
+            await provider.acquire(BrowserSessionSpec())
+
+        # The thread is still running at this point; the callback fires when it finishes.
+        await asyncio.sleep(0.6)
+        assert released == ["late-1"]
+
+    @pytest.mark.asyncio
+    async def test_a_create_that_fails_on_its_own_releases_nothing(self, monkeypatch: Any) -> None:
+        """Nothing was allocated, so there is no quota slot to reclaim."""
+        released: list[str] = []
+
+        def failing_create(**kwargs: Any) -> Any:
+            time.sleep(0.2)
+            raise RuntimeError("provider refused")
+
+        provider = self._provider(failing_create, monkeypatch)
+        provider.release = lambda handle: released.append(handle.session_id)  # type: ignore[assignment]
+
+        with pytest.raises(BrowserSessionError, match="did not complete"):
+            await provider.acquire(BrowserSessionSpec())
+
+        await asyncio.sleep(0.6)
+        assert released == []
