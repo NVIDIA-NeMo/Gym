@@ -146,10 +146,11 @@ thinking enabled per request. Note the paper's model is **DeepSeek-V3.2-Thinking
 abbreviates it. A third run in which the `thinking` kwarg never reached the chat template solves **3 of 100 tasks**
 against the 8 and 6 above, so the mode is not optional.
 
-The reasoning traces themselves are not persisted in the rollouts — `response.reasoning` and `reasoning_tokens` are
-null, and the parser strips the trace rather than inlining it. What distinguishes a thinking run in the stored
-artifacts is output length: mean 14.7k and 15.0k output tokens for the two runs above, against 2.9k for the
-non-thinking third run. Use that, not a trace count, to confirm the mode was live.
+100% of rollouts in both runs carry a reasoning trace, against 0% in the non-thinking run — so the check is a clean
+discriminator, and `leancat-multinode.sub` prints it per run. Look for `output` items of `type: "reasoning"`:
+`response.reasoning` and `usage.output_tokens_details.reasoning_tokens` are null even when thinking is on, so a
+check reading only those fields will wrongly report a thinking run as non-thinking. Output length corroborates:
+mean 14.7k and 15.0k output tokens for the two runs above, against 2.9k for the non-thinking one.
 
 ### Table 3 — specialized provers, **pass@32** (not pass@4)
 
