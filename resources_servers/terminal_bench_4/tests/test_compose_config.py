@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 
-from responses_api_agents.harbor_agent_general.compose_config import _bytes, resolve_compose
+from resources_servers.terminal_bench_4.compose_config import _bytes, resolve_compose
 
 
 def image_record(**config):

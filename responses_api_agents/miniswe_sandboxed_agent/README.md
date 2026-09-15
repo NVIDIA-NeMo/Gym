@@ -1,8 +1,7 @@
 # Sandboxed mini-SWE
 
 Generic mini-SWE 2.1.0 `DefaultAgent` execution on an environment owned by a Gym
-resources server. It uses the same seed/start/verify contract as sandboxed
-OpenCode. It has no SWE-bench image, patch, dataset, or grading assumptions.
+resources server. It uses the sandbox seed/start/verify contract. It has no SWE-bench image, patch, dataset, or grading assumptions.
 
 The existing synchronous mini-SWE loop uses an explicit bridge to Gym's async
 Responses model client and sandbox operations. Cancellation closes pending I/O

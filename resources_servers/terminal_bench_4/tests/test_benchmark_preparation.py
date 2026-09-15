@@ -4,24 +4,20 @@
 import json
 
 import pytest
-from harbor.models.job.config import DatasetConfig
-from harbor.models.task.id import PackageTaskId
 
 from benchmarks.terminal_bench_4 import prepare as preparation
 
 
-def test_prepared_names_match_harbor_package_registry(tmp_path, monkeypatch):
+def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(preparation, "OUTPUT_PATH", tmp_path / "benchmark.jsonl")
     output = preparation.prepare()
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     manifest = json.loads((preparation.BENCHMARK_DIR / "manifest.json").read_text())
-    ids = [PackageTaskId(org="terminal-bench", name=task["name"], ref=task["ref"]) for task in manifest["tasks"]]
-    assert len(rows) == len(ids) == 66
+    tasks = {"terminal-bench/" + task["name"]: task["ref"] for task in manifest["tasks"]}
+    assert len(rows) == len(tasks) == 66
+    assert {row["task_name"] for row in rows} == tasks.keys()
     for row in rows:
-        config = DatasetConfig(name=manifest["dataset"], ref=manifest["ref"], task_names=[row["task_name"]])
-        selected = config._filter_task_ids(ids)
-        assert len(selected) == 1
-        assert row["task_ref"] == selected[0].ref
+        assert row["task_ref"] == tasks[row["task_name"]]
         assert row["dataset_ref"] == manifest["ref"]
         assert "path" not in row
 

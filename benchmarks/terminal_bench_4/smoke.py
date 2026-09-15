@@ -3,9 +3,8 @@
 
 """Run real split-server smoke checks in CPU, Compose, GPU order.
 
-Uses loopback HTTP between Gym services. OpenCode inside a remote sandbox uses
-the public model endpoint directly; mini-SWE routes through the local Gym model
-server. This mode does not certify remote Gym model routing or semantic telemetry.
+Uses loopback HTTP between Gym services. mini-SWE routes model calls through
+the local Gym model server.
 """
 
 import argparse
@@ -26,7 +25,7 @@ from omegaconf import OmegaConf
 from nemo_gym import global_config, server_utils
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
-from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
+from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -65,7 +64,7 @@ async def main(args):
             "benchmarks/terminal_bench_4/resources.yaml",
             "benchmarks/terminal_bench_4/manifest.json",
             "benchmarks/terminal_bench_4/compose-images.json",
-            "responses_api_agents/harbor_agent_general/compose_config.py",
+            "resources_servers/terminal_bench_4/compose_config.py",
             "resources_servers/terminal_bench_4/app.py",
             "resources_servers/terminal_bench_4/lifecycle.py",
             "resources_servers/terminal_bench_4/task.py",
@@ -74,7 +73,6 @@ async def main(args):
             "resources_servers/terminal_bench_4/transfers.py",
             "resources_servers/terminal_bench_4/collection.py",
             "resources_servers/terminal_bench_4/verifier.py",
-            "responses_api_agents/opencode_sandboxed_agent/borrowed.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
         ]
@@ -113,21 +111,6 @@ async def main(args):
     resource_config.task_download_dir = str(args.task_cache)
     resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
     agent_config = next(iter(config[agent_name].responses_api_agents.values()))
-    if args.harness == "opencode":
-        agent_config.opencode_config.model = "tb4_smoke/" + args.model
-        agent_config.opencode_config.provider = {
-            "tb4_smoke": {
-                "npm": "@ai-sdk/openai",
-                "options": {
-                    "baseURL": args.model_url,
-                    "apiKey": "{env:OPENAI_API_KEY}",
-                    "timeout": False,
-                    "chunkTimeout": 600000,
-                },
-                "models": {args.model: {"limit": {"context": 262144, "input": 262144, "output": 16384}}},
-            },
-        }
-        agent_config.opencode_env_from_process = ["OPENAI_API_KEY"]
     model_config = {
         "host": "127.0.0.1",
         "port": ports["policy_model"],
@@ -148,18 +131,10 @@ async def main(args):
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),
         server_client=client,
     )
-    if args.harness == "opencode":
-        agent = OpenCodeSandboxedAgent(
-            config=OpenCodeSandboxedAgentConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
-            server_client=client,
-        )
-    else:
-        from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
-
-        agent = MiniSWESandboxedAgent(
-            config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
-            server_client=client,
-        )
+    agent = MiniSWESandboxedAgent(
+        config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
+        server_client=client,
+    )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
         uvicorn.Server(
@@ -254,7 +229,7 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--harness", choices=["opencode", "miniswe"], default="opencode")
+    parser.add_argument("--harness", choices=["miniswe"], default="miniswe")
     parser.add_argument("--tasks", nargs="*")
     parser.add_argument("--exclude-tasks", nargs="*", default=[])
     parser.add_argument("--category", choices=["cpu", "compose", "gpu"])

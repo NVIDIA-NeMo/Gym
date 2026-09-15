@@ -10,9 +10,9 @@ import pytest
 import yaml
 
 from resources_servers.terminal_bench_4 import environment as module
+from resources_servers.terminal_bench_4.compose_config import resolve_compose
 from resources_servers.terminal_bench_4.environment import Environment, EnvironmentConfig, HealthcheckError
 from resources_servers.terminal_bench_4.task import TaskSettings
-from responses_api_agents.harbor_agent_general.compose_config import resolve_compose
 
 
 def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
