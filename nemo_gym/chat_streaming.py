@@ -30,9 +30,9 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
 
 Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
 call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. This path is intended for eval-only
-streaming clients: token ids and logprobs from the backend response are not carried in the
-``chat.completion.chunk`` schema, and a client that does not set ``stream_options.include_usage``
+error-normalization behavior is fully preserved on this path. External staging stores training
+tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
+schema. A client that does not set ``stream_options.include_usage``
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
 """
 
