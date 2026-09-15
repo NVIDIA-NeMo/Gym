@@ -1,0 +1,185 @@
+# DWRL GenRM Pointwise Comparison Resources Server Config
+#
+# This server compares multiple candidate responses using a GenRM model.
+# The GenRM model uses a special chat template with roles 'response_1', 'response_2',
+# and optionally 'principle' (see use_principle and default_principle below).
+#
+# The GenRM model server is defined by the top-level "genrm_model" block below (same
+# structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
+# genrm_model_server.name to use a different model server (e.g. from another config).
+#
+# Expected GenRM output format (JSON):
+# {
+#     "score_1": <1-5>,  # Individual helpfulness score for response 1
+#     "score_2": <1-5>,  # Individual helpfulness score for response 2
+#     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
+# }
+
+dwrl_pointwise_compare_resources_server:
+  resources_servers:
+    dwrl_genrm_compare_pointwise:
+      entrypoint: app.py
+      
+      # GenRM model server: points to the "genrm_model" block above (or another config with that name)
+      genrm_model_server:
+        type: responses_api_models
+        name: dwrl_model
+      
+      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
+      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      num_rollouts_per_prompt: ???
+      
+      # Generation params for GenRM calls
+      genrm_responses_create_params:
+        messages: []
+        max_tokens: 16384
+        temperature: 1.0
+        top_p: 0.95
+      
+      # Number of judge passes per pair (for majority voting)
+      num_judges_per_comparison: 1
+      
+      # Principle-based comparison
+      use_principle: true
+      default_principle: "Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user prompt. Begin your evaluation by generating your own answer to the prompt. You must provide your answer before judging any answers. When evaluating the assistant's response, compare the assistant's response with your answer. You must identify and correct any mistakes or inaccurate information. Then consider if the assistant's response is helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when the user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user rather than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive. Then consider the creativity and novelty of the assistant's response when needed. Finally, identify any missing important information in the assistant's response which would be beneficial to include when responding to the user prompt."
+      
+      # Aggregator method (only "simple_tiebreaker" is currently supported)
+      aggregator_method: simple_tiebreaker
+      
+      # Bonus for shortest reasoning trace if in top percentile
+      reasoning_bonus: 0.0
+      # Bonus for shortest final answer if in top percentile
+      answer_bonus: 0.0
+      # Top percentile threshold (e.g., 0.2 = top 20%)
+      top_percentile: 0.2
+      # Group-relative length penalty coefficients
+      # Shorter responses get bonus, longer get penalty (mean-centered)
+      group_reasoning_length_penalty_coeff: 0.0
+      group_answer_length_penalty_coeff: 0.0
+      
+      # Default scores when parsing fails
+      default_score: -100.0
+      
+      # DWRL-specific
+      bt_prompt: "Based on your evaluation, is the original response good? Answer with only a single word: yes or no"
+      score_token: "yes"
+      
+      # Debug logging
+      debug_logging: false
+      
+      # Parse retry configuration
+      genrm_parse_retries: 3
+      genrm_parse_retry_sleep_s: 0.2
+      
+      # Server metadata
+      domain: rlhf
+      verified: false
+      description: DWRL pointwise comparison for RLHF training
+      value: Compare multiple candidate responses using DWRL-pointwise model
+      
+      dwrl_prompt: |
+        You are an expert evaluation judge specializing in the assessment of LLM responses. You are impartial, rigorous, and consistent. Given the conversation context and a single response to the user's latest query, you will follow the evaluation plan and scoring guidelines exactly as written below.
+        
+        #### Conversation Context ####
+        {context}
+        
+        #### Response to be Scored ####
+        [The Start of Response]
+        {response}
+        [The End of Response]
+        
+        #### Evaluation Plan ####
+        {principle}
+        
+        #### Scoring Guidelines ####
+        Based on the evaluation plan above, assign scores using these scales:
+        
+        **Individual Helpfulness Scores (1-5):**
+        - 5: Extremely Helpful - Completely aligned with what the user was asking for
+        - 4: Mostly Helpful - Generally useful with minor room for improvement
+        - 3: Partially Helpful - Misses the overall goal in some way
+        - 2: Borderline Unhelpful - Mostly doesn't capture what the user wanted
+        - 1: Not Helpful - Completely missed the essence of the request
+        
+        #### Output Format ####
+        Analyze step by step following the evaluation plan, then provide your judgment as JSON:
+        ```json
+        {{
+            "response_analysis": "Your detailed analysis of the Response based on the evaluation plan",
+            "score_1": <1-5>
+        }}
+        ```
+
+# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
+# Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
+dwrl_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ???
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      replace_developer_role_with_system: true
+      ray_worker_py_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
+      debug: false
+      
+      # Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
+      #extra_body:
+      #  temperature: 1.0
+      #  top_p: 0.95
+      #  max_tokens: null
+      
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
+      hf_home: null
+      
+      vllm_serve_env_vars:
+        # If your tp * pp is greater than one node or one model instance spans more than one node, set this to `span`!
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+      
+      # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
+      vllm_serve_kwargs:
+        # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
+        attention_backend: FLASH_ATTN
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+        
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+        #enable_auto_tool_choice: true
+        tool_call_parser: null
+        reasoning_parser: null
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16
+
+genrm_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: dwrl_pointwise_compare_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+
+genrm_simple_agent_reasoning_off:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: dwrl_pointwise_compare_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_reasoning_off
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl

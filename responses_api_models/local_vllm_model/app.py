@@ -151,7 +151,9 @@ class LocalVLLMModel(VLLMModel):
 
         # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version
         # this return_routed_experts argument isn't present in 0.17.0, so this must be from 0.16.x
-        final_args.return_routed_experts = final_args.enable_return_routed_experts
+        #final_args.return_routed_experts = final_args.enable_return_routed_experts
+        if hasattr(final_args, "enable_return_routed_experts"):
+            final_args.return_routed_experts = final_args.enable_return_routed_experts
 
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
