@@ -1,41 +1,3 @@
-> Keywords: Tool Use, Multi-step Reasoning, Environment Interaction, Scientific Tasks
-
-This resources server adapts [Aviary environments](https://github.com/Future-House/aviary) into the NeMo Gym resources-server interface, so NeMo Gym agents can interact with Aviary `Environment`s. This allows one to implement tool and environment logic in Aviary, and deploy the environment for inference or training with Gym.
-
-### Implemented servers in this folder
-
-- **GSM8K**: `gsm8k_app.py`
-  - Meant primarily as an example, this implements [GSM8k](https://arxiv.org/abs/2110.14168) as a set of environments equipped with a calculator tool.
-- **HotPotQA**: `hotpotqa_app.py`
-  - The HotPotQA environment asks agents to perform multi-hop question answering on the [HotPotQA dataset](https://aclanthology.org/D18-1259/)
-- **BixBench**: `notebook_app.py`
-  - Implements the [BixBench dataset](https://arxiv.org/abs/2503.00096) as a set of environments that allow execution of a Jupyter notebook.
-  - Also serves as an example for how to implement notebook-backed environments for other scientific computational tasks.
-- **BixBench-Hypothesis**: `hypotest_app.py (bundled), client_app.py (remote)`
-  - Implements the [BixBench-Hypothesis dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-bixbench_hypothesis) with a REPL-style code interface and testing hypothesis testing capabilities.
-- **Client/proxy to a remote Aviary dataset server**: `client_app.py`
-  - A generic interface to an Aviary `TaskDatasetServer`. Can be used to interact with any Aviary environments being served remotely.
-
-
-# Example usage
-
-Run the GSM8K Aviary resources server together with a model config:
-
-```bash
-gym env start \
-    --resources-server aviary/gsm8k_aviary \
-    --model-type vllm_model
-```
-
-Then collect rollouts:
-
-```bash
-gym eval run --no-serve \
-    --agent gsm8k_aviary_agent \
-    --input resources_servers/aviary/data/example.jsonl \
-    --output resources_servers/aviary/data/example_rollouts.jsonl
-```
-
 # BixBench-Hypothesis (BBH)
 BixBench-Hypothesis is a dataset proposed by Edison Scientific to measure LLM capabilities for testing hypotheses in bioinformatics contexts. Edison Scientific and NVIDIA have also collaborated to release BBH-Train, an RL training dataset meant to improve model capabilities on bioinformatics-related data analysis.
 
@@ -196,7 +158,7 @@ sbatch \
 # Licensing information
 Code: Apache 2.0
 
-Data: MIT (GSM8k),  Apache 2.0 (BixBench), CC BY 4.0 (BixBench-Hypothesis)
+Data: CC BY 4.0 (BixBench-Hypothesis)
 
 Dependencies
 - nemo_gym: Apache 2.0
