@@ -60,6 +60,7 @@ When solving bugs, follow these steps:
     - For any unrelated newly created files (for example, temporary debug files created while reproducing the issue), delete them before completing the task to ensure they are not included.
     - Make sure that in the final state of the repository, only the clean, intentional fix changes are present, with no unrelated file modifications and no changes to any test files.
 
+Do NOT commit, push, or format the diff yourself. Do NOT run `git checkout` on tracked files. Work only inside {workspace_path}.
 
 Do NOT commit, push, or format the diff yourself. Do NOT run `git checkout` on tracked files. Work only inside {workspace_path}.
 

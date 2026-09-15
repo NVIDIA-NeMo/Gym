@@ -1,0 +1,3 @@
+# Hypotest's LiteLLM dependency requires openai>=2.8.0. Keep the newer SDK
+# isolated to this resource-server venv; other Gym processes retain Gym's pin.
+openai==2.15.0
