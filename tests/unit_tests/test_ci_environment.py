@@ -865,28 +865,26 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
 
 
-def test_setup_dev_and_lint_run_offline_with_container_baked_tools() -> None:
-    # The CI container (NEMO_GYM_CONTAINER=1) pre-bakes uv and pre-commit, and
-    # the managed validation sandbox has no package-index egress. In that
-    # container both scripts must reuse the baked tools and resolve from the uv
-    # cache (--offline); outside it they keep the online download path.
+def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
+    # setup_dev.sh installs uv itself (a bootstrap tool, not a project
+    # dependency), then syncs the dev extra; in the CI container
+    # (NEMO_GYM_CONTAINER=1) it reuses the baked uv and syncs offline.
     setup_dev = SETUP_DEV.read_text()
     lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
 
-    # setup_dev.sh: in the container reuse the baked uv and sync from cache
-    # offline; otherwise download uv and sync online as before.
     assert 'if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv' in setup_dev
     assert "setup_uv_sync_args=(--offline)" in setup_dev
     assert "setup_uv_sync_args=()" in setup_dev
     assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
 
-    # lint.sh: in the container reuse the baked pre-commit; otherwise install it
-    # into the tool venv as before.
-    assert 'if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v pre-commit' in lint
-    assert lint.count("pip install") == 1
-    assert 'pip install --disable-pip-version-check --require-hashes' in lint
-    assert '--no-deps "pre-commit==${pre_commit_version}"' in lint
-    assert '--hash "sha256:${pre_commit_sha256_sdist}" --hash "sha256:${pre_commit_sha256_wheel}"' in lint
+    # lint.sh: pre-commit always comes from the lockfile (dev extra). The CI
+    # image installs it into the project venv at build time and local/online
+    # setups get it from `uv sync --extra dev`, so lint.sh performs no ad-hoc
+    # pip/uv install of its own.
+    assert "command -v pre-commit" in lint
+    assert "pip install" not in lint
+    assert "uv pip install" not in lint
+    assert "uv sync --extra dev" in lint
 
 
 def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
@@ -908,19 +906,13 @@ def test_cicd_main_runs_on_merge_queue() -> None:
     assert "    types: [checks_requested]" in on_block
 
 
-def test_dockerfile_installs_pre_commit_on_path_for_offline_lint() -> None:
-    # lint.sh's offline branch reuses a baked pre-commit only if the final image
-    # provides one on PATH. The persistent project environment is synced with
-    # only vllm+telemetry (no dev), so the Dockerfile must install pre-commit
-    # into it explicitly or the offline branch never triggers and lint.sh falls
-    # back to a network-dependent pip install. The install is hash-pinned from
-    # uv.lock (sdist + wheel) with --require-hashes, so the exact immutable
-    # artifact is bound (no resolution outside the committed lockfile).
+def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
+    # lint.sh runs pre-commit from PATH, so the final image must provide it
+    # there. pre-commit is a dev-extra dependency, so the persistent project
+    # venv (already on PATH) must be synced with the dev extra, and there must
+    # be no ad-hoc pip/uv install naming the package directly.
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
-    assert 'uv pip install --offline --no-deps --require-hashes' in dockerfile
-    assert '"pre-commit==4.3.0"' in dockerfile
-    assert '--hash "sha256:499fe450cc9d42e9d58e606262795ecb64dd05438943c62b66f6a8673da30b16"' in dockerfile
-    assert '--hash "sha256:2b0747ad7e6e967169136edffee14c16e148a778a54e4f967921aa1ebf2308d8"' in dockerfile
-    # The on-PATH environment is the persistent project venv.
-    assert "UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv" in dockerfile
+    assert "uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev" in dockerfile
+    assert "uv sync --locked --extra vllm --extra telemetry --extra dev" in dockerfile
     assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile
+    assert "uv pip install" not in dockerfile

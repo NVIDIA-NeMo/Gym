@@ -165,7 +165,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -201,7 +201,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
 
 # Seed the runtime uv cache with the full dependency set (including the dev
 # extra and the project itself) so that CI scripts can run offline: setup_dev.sh
@@ -212,17 +212,6 @@ ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
 RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
         uv sync --locked --extra vllm --extra telemetry --extra dev && \
-    # Install pre-commit into the persistent project environment (already on \
-    # PATH at /opt/nemo_gym_venv/bin) so scripts/ci/lint.sh can run offline in \
-    # this container. Pin by sha256 (from uv.lock: sdist and wheel) with \
-    # --require-hashes and --no-deps so the exact immutable artifact is \
-    # installed; --offline serves it from the seeded runtime cache (dev \
-    # extra), so no network and no resolution outside the lockfile. \
-    UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv \
-        uv pip install --offline --no-deps --require-hashes \
-            "pre-commit==4.3.0" \
-            --hash "sha256:499fe450cc9d42e9d58e606262795ecb64dd05438943c62b66f6a8673da30b16" \
-            --hash "sha256:2b0747ad7e6e967169136edffee14c16e148a778a54e4f967921aa1ebf2308d8" && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
