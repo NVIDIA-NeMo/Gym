@@ -135,9 +135,9 @@ export UCX_RNDV_THRESH=0
 export NCCL_NVLS_ENABLE=1
 
 # OCI-HSG has these parameters enabled by default:
-# export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1
-# export NCCL_CUMEM_ENABLE=1
-# export NCCL_MNNVL_ENABLE=1
+export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1
+export NCCL_CUMEM_ENABLE=1
+export NCCL_MNNVL_ENABLE=1
 
 source "$VLLM_CONFIG"
 
