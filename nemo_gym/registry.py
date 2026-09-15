@@ -156,7 +156,7 @@ def _runnable_resource_config(
     datasets = [
         dataset
         for group, _name, config in servers
-        if group == "responses_api_agents"
+        if group in {"responses_api_agents", "processors"}
         for dataset in (config.get("datasets") or [])
         if isinstance(dataset, (dict, DictConfig))
     ]
@@ -339,6 +339,7 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
     value: Optional[str] = None
     resources_servers: List[str] = []
     agent: Optional[str] = None
+    processor: Optional[str] = None
     datasets: List[str] = []
     for group_key, server_name, server_config in iter_server_configs(raw):
         if group_key == "resources_servers":
@@ -351,6 +352,12 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
             for dataset in server_config.get("datasets") or []:
                 if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
                     datasets.append(str(dataset["name"]))
+        elif group_key == "processors":
+            if processor is None:
+                processor = server_name
+            for dataset in server_config.get("datasets") or []:
+                if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
+                    datasets.append(str(dataset["name"]))
 
     return {
         "domain": domain,
@@ -358,5 +365,6 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
         "value": value,
         "resources_servers": resources_servers,
         "agent": agent,
+        "processor": processor,
         "datasets": datasets,
     }

@@ -57,6 +57,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    PROCESSOR_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -70,6 +71,7 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.processors.contracts import EpisodeRequest, EpisodeResponse
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -820,12 +822,101 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
 
+def _rollout_target(row: Dict[str, Any]) -> Tuple[str, str]:
+    for ref_key in (PROCESSOR_REF_KEY_NAME, AGENT_REF_KEY_NAME):
+        ref = row.get(ref_key)
+        if isinstance(ref, dict) and ref.get("name"):
+            return ref["name"], ref_key
+    raise ValueError("A rollout row must include processor_ref or agent_ref with a name.")
+
+
+def _episode_request_from_row(row: Dict[str, Any]) -> EpisodeRequest:
+    target_name, _ = _rollout_target(row)
+    task_index = row[TASK_INDEX_KEY_NAME]
+    rollout_index = row[ROLLOUT_INDEX_KEY_NAME]
+    task_source = str(row.get(TASK_SOURCE_KEY_NAME) or target_name)
+    task_id = next(
+        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        str(task_index),
+    )
+    excluded = {
+        AGENT_REF_KEY_NAME,
+        PROCESSOR_REF_KEY_NAME,
+        RESPONSES_CREATE_PARAMS_KEY_NAME,
+        ROLLOUT_ID_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        SKILLS_REF_KEY_NAME,
+        TASK_INDEX_KEY_NAME,
+        TASK_SOURCE_KEY_NAME,
+        ATTEMPT_INDEX_KEY_NAME,
+        "deadline",
+    }
+    return EpisodeRequest.model_validate(
+        {
+            "episode_id": {
+                "rollout_id": str(row.get(ROLLOUT_ID_KEY_NAME) or f"{task_index}-{rollout_index}"),
+                "attempt": row.get(ATTEMPT_INDEX_KEY_NAME, 0),
+            },
+            "task": {"task_source": task_source, "task_id": task_id},
+            "responses_create_params": row[RESPONSES_CREATE_PARAMS_KEY_NAME],
+            "task_data": {key: value for key, value in row.items() if key not in excluded},
+            "deadline": row.get("deadline"),
+        }
+    )
+
+
+def _project_episode_response(request: EpisodeRequest, payload: Dict[str, Any]) -> Dict[str, Any]:
+    response = EpisodeResponse.model_validate(payload)
+    if response.episode_id != request.episode_id or response.task != request.task:
+        raise ValueError("EpisodeResponse identity does not match its EpisodeRequest.")
+
+    result = {
+        **request.task_data,
+        RESPONSES_CREATE_PARAMS_KEY_NAME: request.responses_create_params.model_dump(mode="json"),
+    }
+    if response.response is not None:
+        result["response"] = response.response.model_dump(mode="json")
+    if response.failure is not None:
+        result.update(
+            {
+                NG_FAILURE_CLASS_KEY: (
+                    AGENT_RUN_ERROR_FAILURE_CLASS
+                    if response.response is not None
+                    else AGENT_REQUEST_FAILED_FAILURE_CLASS
+                ),
+                NG_TERMINAL_KEY: not response.failure.retryable,
+                "failure_reason": response.failure.message,
+                "episode_failure": response.failure.model_dump(mode="json"),
+            }
+        )
+        return result
+
+    verification = response.verification
+    reserved = set(result) | {"response", "reward", "reward_components", "mask_sample", "failure_reason"}
+    collisions = reserved & verification.verifier_data.keys()
+    private = sorted(key for key in verification.verifier_data if key.startswith("_ng_"))
+    if collisions or private:
+        names = sorted(collisions) + private
+        raise ValueError(f"verifier_data collides with compatibility fields: {names}")
+    result.update(verification.verifier_data)
+    result.update(
+        {
+            "reward": verification.reward,
+            "reward_components": verification.reward_components,
+            "mask_sample": verification.mask_sample,
+        }
+    )
+    if response.agent_observations is not None:
+        result["ng_agent_observations"] = response.agent_observations.model_dump(mode="json")
+    return result
+
+
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    target_name, target_ref_key = _rollout_target(row)
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        ("processor_name" if target_ref_key == PROCESSOR_REF_KEY_NAME else "agent_name"): target_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -1048,17 +1139,19 @@ class RolloutCollectionHelper(BaseModel):
         # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
-        row_idxs_missing_agent_ref: List[int] = []
+        row_idxs_missing_rollout_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
-            # Routing basis: the name this row routes by — its agent_ref.name when present, else
-            # its task_source (resolved to an agent by resolve_task_sources once the merged config
-            # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
+            processor_name = (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name")
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            basis = agent_name if agent_name is not None else row.get(TASK_SOURCE_KEY_NAME)
-            if config.agent_map:
+            basis = processor_name or agent_name or row.get(TASK_SOURCE_KEY_NAME)
+            if processor_name is not None and agent_name is None:
+                # Keep the compatibility grouping key while processor_ref owns dispatch.
+                agent_name = processor_name
+                row[AGENT_REF_KEY_NAME] = {"name": processor_name}
+            if config.agent_map and processor_name is None:
                 # A row may carry both an agent_ref and a task_source (derived artifacts do);
                 # a map entry for either re-routes it, the agent name taking precedence.
                 mapped = next(
@@ -1080,14 +1173,16 @@ class RolloutCollectionHelper(BaseModel):
             # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
             # target — the row's agent when known, else deferred to task_source resolution.
             targets: List[Optional[str]]
-            if config.fan_out and basis is not None and basis in config.fan_out:
+            if processor_name is not None:
+                targets = [processor_name]
+            elif config.fan_out and basis is not None and basis in config.fan_out:
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
                 targets = [agent_name]
             elif row.get(TASK_SOURCE_KEY_NAME) is not None:
                 targets = [None]
             else:
-                row_idxs_missing_agent_ref.append(row_idx)
+                row_idxs_missing_rollout_ref.append(row_idx)
                 continue
 
             # Responses create params
@@ -1154,10 +1249,11 @@ class RolloutCollectionHelper(BaseModel):
                 stacklevel=2,
             )
 
-        if row_idxs_missing_agent_ref:
+        if row_idxs_missing_rollout_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Provide +agent_name (or "
-                "+agent_map with a _default entry), or include agent_ref or task_source in the data."
+                f"No agent specified and no processor specified for rows {row_idxs_missing_rollout_ref}. "
+                "Provide +agent_name (or +agent_map with a _default entry), or include "
+                "processor_ref, agent_ref, or task_source."
             )
 
         if agents_missing_from_num_repeats:
@@ -1393,6 +1489,8 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if PROCESSOR_REF_KEY_NAME in row:
+                result[PROCESSOR_REF_KEY_NAME] = row[PROCESSOR_REF_KEY_NAME]
             if TASK_SOURCE_KEY_NAME in row:
                 result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
@@ -1817,7 +1915,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             raise ValueError("Cannot resolve task_source to an agent: " + "; ".join(errors))
 
         for row in examples:
-            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None:
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and (row.get(PROCESSOR_REF_KEY_NAME) or {}).get(
+                "name"
+            ) is None:
                 ts = row.get(TASK_SOURCE_KEY_NAME)
                 if ts is not None:
                     row[AGENT_REF_KEY_NAME] = {"name": resolution[ts]}
@@ -1829,15 +1929,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Without this, the first bad row dies mid-collection with a raw omegaconf ConfigKeyError
         after valid rows have already been dispatched.
         """
-        requested = {name for row in examples if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None}
+        requested = {
+            name
+            for row in examples
+            if (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name") is None
+            and (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
+        }
         available = {
             str(name)
             for name, block in global_config_dict.items()
             if isinstance(block, DictConfig) and "responses_api_agents" in block
         }
         unknown = sorted(requested - available)
-        if not unknown:
-            return
         hints = []
         for name in unknown:
             # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
@@ -1847,10 +1950,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 continue
             close = get_close_matches(name, available, n=1)
             hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
-        raise ValueError(
-            f"Rows reference agents not present in the running config: {', '.join(hints)}. "
-            "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
-        )
+        if hints:
+            raise ValueError(
+                f"Rows reference agents not present in the running config: {', '.join(hints)}. "
+                "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
+            )
+
+        processors = {
+            name for row in examples if (name := (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name")) is not None
+        }
+        available_processors = {
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and "processors" in block
+        }
+        unknown_processors = sorted(processors - available_processors)
+        if unknown_processors:
+            raise ValueError(
+                f"Rows reference processors not present in the running config: {unknown_processors}. "
+                "Include the processor's config in the run."
+            )
 
     @staticmethod
     def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
@@ -1860,7 +1979,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         routes = {
             (name, row.get(TASK_SOURCE_KEY_NAME))
             for row in examples
-            if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
+            if (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name") is None
+            and (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
         }
         rejected: Dict[Tuple[str, str], str] = {}
         for agent, task_source in routes:
@@ -1918,9 +2038,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    target_name, target_ref_key = _rollout_target(row)
+                    request_json: Dict[str, Any] = row
+                    if target_ref_key == PROCESSOR_REF_KEY_NAME:
+                        request_json = _episode_request_from_row(row).model_dump(mode="json")
+                    res = await server_client.post(server_name=target_name, url_path="/run", json=request_json)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    if target_ref_key == PROCESSOR_REF_KEY_NAME:
+                        result = _project_episode_response(_episode_request_from_row(row), result)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000

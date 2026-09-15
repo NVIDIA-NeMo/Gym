@@ -386,15 +386,14 @@ class TrainDataProcessor(BaseModel):
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
 
-        # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
-        # the task schema and verifier) or by agents (self-contained environments that verify
-        # in-process, e.g. tau2 — and, transitionally, legacy configs that have not moved their
-        # datasets yet). Model servers cannot declare datasets.
+        # Datasets may be declared by resources servers, agents, or episode processors.
         agent_configs: List[ServerInstanceConfig] = [
             c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_agents"
         ]
         declaring_configs: List[ServerInstanceConfig] = [
-            c for c in server_instance_configs if c.SERVER_TYPE in ("responses_api_agents", "resources_servers")
+            c
+            for c in server_instance_configs
+            if c.SERVER_TYPE in ("responses_api_agents", "resources_servers", "processors")
         ]
         model_configs_with_data = [
             c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_models" and c.datasets
@@ -797,12 +796,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
             # resources_server reference at all) may own a schema itself, under
             # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
             # dangling is skipped: its schema home is the (missing) resources server.
-            if c.SERVER_TYPE != "responses_api_agents":
+            if c.SERVER_TYPE not in ("responses_api_agents", "processors"):
                 return None
             if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
                 return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+            impl_key = next(iter(getattr(c, c.SERVER_TYPE)))
+            base_folder = c.SERVER_TYPE
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None

@@ -732,6 +732,7 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
 #: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
 #: rather than imported, because base_resources_server and friends import *this* module.
 _TELEMETRY_SERVER_TYPE_BY_BASE = {
+    "BaseProcessor": "processors",
     "SimpleResourcesServer": "resources_servers",
     "SimpleResponsesAPIAgent": "responses_api_agents",
     "SimpleResponsesAPIModel": "responses_api_models",
