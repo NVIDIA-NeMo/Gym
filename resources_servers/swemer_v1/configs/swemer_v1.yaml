@@ -1,0 +1,66 @@
+# Resources server for Swemer's Agentic-v1 SWE task packages.
+#
+# Unlike the other SWE resources servers, rows are NOT prepared from a public dataset: this is an
+# internal dataset, sourced from local delivery folders (ext-nvidia-agentic) plus the same image
+# manifest swemer_v2 uses (swemer_v2_images.tsv, filtered to repo == "v1"). See the README.
+#
+# Grading goes through responses_api_agents.swe_agents.swe_bench_ext (the swe-bench-ext harness's
+# own output-flag injection and result parsing) rather than a hand-rolled parser, since v1 spans
+# ~22 test_framework values -- see verification.SUPPORTED_FRAMEWORKS.
+swemer_v1_resources_server:
+  resources_servers:
+    swemer_v1:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: false
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Spans Go/Rust/Java/C++ builds alongside npm-installed JS/TS suites -- install/compile
+        # bound like SWE-rebench's non-Python rows, same sizing as that server.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-v1
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose
+# golden patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swemer_v1/apply_golden_patch.py.
+swemer_v1_golden_patch_resources_server:
+  resources_servers:
+    swemer_v1:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-v1-golden-patch
