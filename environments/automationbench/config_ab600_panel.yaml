@@ -1,0 +1,41 @@
+# Validation-only companion to config.yaml.
+#
+# Registers a SECOND instance of the same agent and environment under the name
+# `automationbench_aa`, with the reward pinned to the guardrail-gated Artificial
+# Analysis headline. Load it together with config.yaml when the training rows
+# are scored by another reward_fn (partial_credit) but the validation panel
+# must still report the AA-comparable number in one run.
+#
+# Why a second agent rather than reading the metric out of the rollout: NeMo RL
+# promotes only top-level numeric keys of the verify result to metric series,
+# and the rubric's zero-weighted metrics sit under response.metrics, so
+# aa_headline never becomes a scalar series there. A second agent puts it in
+# `reward`, where it does. Rows reach this agent by their own agent_ref.name;
+# no training row should ever be routed here.
+automationbench_aa:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: other
+      description: AutomationBench validation panel scored with the guardrail-gated Artificial Analysis headline metric.
+      value: Report the AA-comparable benchmark score alongside training on another reward.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: automationbench_env
+      vf_env_args:
+        max_turns: 50
+        toolset: api
+        # PINNED. Changing this makes the panel report something that is not
+        # the AA headline while still being named after it.
+        reward_fn: aa_headline
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 131072
+      temperature: 1.0
+      top_p: 1.0
+      client_timeout_s: 3600
+      client_connect_timeout_s: 60
+      client_max_retries: 0
