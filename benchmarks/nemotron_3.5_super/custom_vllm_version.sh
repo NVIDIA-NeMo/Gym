@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:nightly-2a02f6efe319c885e3ccbcecde402e0028f9ec1e}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/bxyu-nvidia/vllm.git}"
-VLLM_BRANCH="${VLLM_BRANCH:-bxyu/mamba-cache-group-annotation}"
+VLLM_BRANCH="${VLLM_BRANCH:-bxyu/mtp-fix-try02}"
 VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
 VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-2a02f6efe319c885e3ccbcecde402e0028f9ec1e}"
 BUILD_ROOT=/opt/super-vl-evals
