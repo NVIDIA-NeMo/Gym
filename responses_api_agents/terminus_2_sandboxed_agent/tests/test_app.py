@@ -163,6 +163,54 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     ]
 
 
+def _agent_config(**overrides):
+    defaults = dict(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="app.py",
+        name="terminus_2_1_agent",
+        resources_server=ResourcesServerRef(type="resources_servers", name="swebench_resources_server"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        max_turns=100,
+        enable_summarize=True,
+        proactive_summarization_threshold=8000,
+        tmux_pane_width=160,
+        tmux_pane_height=40,
+        dump_trajectory=False,
+        debug=False,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
+        sandbox_provider="opensandbox",
+        sandbox_timeout=10800,
+        remote_tmux_binary_path=None,
+    )
+    return Terminus2AgentConfig(**(defaults | overrides))
+
+
+@pytest.mark.parametrize(
+    "task_timeout, max_agent_timeout, expected",
+    [
+        # No per-task budget in the dataset row: fall back to the flat wall.
+        (None, None, 10800),
+        # Per-task budget wins over the flat wall, in both directions.
+        (900, None, 900),
+        (12000, None, 12000),
+        # The cap only binds when the per-task budget exceeds it.
+        (12000, 7200, 7200),
+        (900, 7200, 900),
+        # The cap also bounds the fallback.
+        (None, 7200, 7200),
+    ],
+)
+def test_resolve_agent_timeout(task_timeout, max_agent_timeout, expected):
+    server = Terminus2Agent(
+        config=_agent_config(max_agent_timeout=max_agent_timeout),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert server._resolve_agent_timeout(task_timeout) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
@@ -267,6 +315,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         "command_exec_time_pct": 40.0,
         "model_call_time_pct": 60.0,
         "terminus2_time_taken": 10.0,
+        "agent_timeout": 10.0,
         "model_calls_gt_10min": 0,
         "num_proactive_compactions": 0,
         "num_compactions": 2,
