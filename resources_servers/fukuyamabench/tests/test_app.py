@@ -409,7 +409,18 @@ class TestCorpusCompleteness:
         assert "loaded 4" in str(excinfo.value)
         assert not output.exists(), "a short split must not be left on disk"
 
-    def test_cli_rejects_an_unknown_set_name(self, tmp_path, monkeypatch) -> None:
+    def test_cli_rejects_an_unknown_set_before_fetching(self, tmp_path, monkeypatch) -> None:
+        """Rejecting the argument must not cost a download.
+
+        Asserting only on SystemExit would still pass if the validation moved
+        back below the fetch, because a warm cache or a working network hides
+        the ordering. Stubbing the fetch makes the test independent of both.
+        """
+
+        def _must_not_fetch(*_args, **_kwargs):
+            raise AssertionError("fetch_mechanisms() must not be called for an unknown set")
+
+        monkeypatch.setattr(prepare, "fetch_mechanisms", _must_not_fetch)
         monkeypatch.setattr(
             sys,
             "argv",
@@ -418,6 +429,50 @@ class TestCorpusCompleteness:
         with pytest.raises(SystemExit) as excinfo:
             prepare.main()
         assert "Unknown set" in str(excinfo.value)
+
+    @pytest.mark.parametrize("limit", ["0", "-1"])
+    def test_cli_rejects_a_non_positive_limit(self, limit, tmp_path, monkeypatch) -> None:
+        """0 previously meant "no limit" and -1 truncated to a single row."""
+        output = tmp_path / "out.jsonl"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prepare",
+                "--output",
+                str(output),
+                "--sets",
+                "S",
+                "--source-dir",
+                str(FIXTURES),
+                "--limit",
+                limit,
+            ],
+        )
+        with pytest.raises(SystemExit):
+            prepare.main()
+        assert not output.exists(), "a rejected limit must not write a split"
+
+    def test_cli_accepts_a_positive_limit(self, tmp_path, monkeypatch) -> None:
+        """The supported subset path still works, and bypasses the manifest check."""
+        output = tmp_path / "out.jsonl"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "prepare",
+                "--output",
+                str(output),
+                "--sets",
+                "S",
+                "--source-dir",
+                str(FIXTURES),
+                "--limit",
+                "3",
+            ],
+        )
+        prepare.main()
+        assert len(output.read_text().strip().splitlines()) == 3
 
 
 class TestTaskDataSchema:
