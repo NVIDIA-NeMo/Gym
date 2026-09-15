@@ -13,22 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import zipfile
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
-from openai import APIStatusError, APITimeoutError
 
 from resources_servers.gdpval.comparison import (
     B_WIN_RESPONSE,
     FILE_TYPE_MAP,
-    REQUEST_MAX_ATTEMPTS,
     TIE_RESPONSE,
     Judge,
     parse_judgement,
     run_trials,
-    send_judge_request,
 )
 from resources_servers.gdpval.judge_panel import (
     AUDIO_EXTS,
@@ -439,44 +434,3 @@ class TestRunTrialsPanel:
         assert second.args[2][:-1] == first.args[2]
         assert len(second.args[2]) == len(first.args[2]) + 1
         assert "unstructured" not in str(second.args[2]).lower()
-
-
-@pytest.mark.parametrize("status_timeout", [False, True])
-@pytest.mark.parametrize("retry_timeouts,recover", [(False, False), (True, True), (True, False)])
-def test_pairwise_transport_timeout_retry_is_opt_in_and_bounded(monkeypatch, status_timeout, retry_timeouts, recover):
-    request = httpx.Request("POST", "https://judge.invalid/v1/chat/completions")
-    error = (
-        APIStatusError("Request timed out", response=httpx.Response(408, request=request), body={})
-        if status_timeout
-        else APITimeoutError(request=request)
-    )
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="BOXED[B]"), finish_reason="stop")]
-    )
-    client = MagicMock()
-    client.chat.completions.create.side_effect = (
-        [error] * (REQUEST_MAX_ATTEMPTS - 1) + [response] if recover else error
-    )
-    sleep = MagicMock()
-    monkeypatch.setattr("resources_servers.gdpval.comparison.time.sleep", sleep)
-    if recover:
-        assert send_judge_request(client, "judge", [], retry_timeouts=retry_timeouts) == "BOXED[B]"
-    else:
-        with pytest.raises(type(error)):
-            send_judge_request(client, "judge", [], retry_timeouts=retry_timeouts)
-    attempts = REQUEST_MAX_ATTEMPTS if retry_timeouts else 1
-    assert client.chat.completions.create.call_count == attempts
-    assert sleep.call_count == attempts - 1
-    calls = client.chat.completions.create.call_args_list
-    assert all(call == calls[0] for call in calls)
-
-
-def test_pairwise_length_warning_contains_usage_without_response_text(caplog):
-    client = MagicMock()
-    client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="Private response text"), finish_reason="length")],
-        usage=SimpleNamespace(completion_tokens=32768),
-    )
-    assert send_judge_request(client, "judge", []) == "Private response text"
-    assert "completion_tokens=32768" in caplog.text
-    assert "Private response text" not in caplog.text

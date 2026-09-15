@@ -450,7 +450,6 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     sections_by_judge=sections_by_judge,
                     num_trials=self.config.pairwise_num_trials,
                     invalid_response_retries=2,
-                    retry_timeouts=True,
                     return_raw_responses=self.config.persist_raw_judge_responses,
                     rng=rng,
                 )
