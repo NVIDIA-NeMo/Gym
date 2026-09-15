@@ -206,18 +206,6 @@ def test_allows_unmapped_optional_positional_only_entrypoint() -> None:
     assert validate_invocation(config)[0] is OptionalPositionalOnlyAgent
 
 
-@pytest.mark.parametrize("aliases", [{"": "server"}, {"helper": " "}, {" ": "server"}])
-def test_rejects_empty_model_aliases(aliases: dict[str, str]) -> None:
-    with pytest.raises(ValidationError, match="model_aliases"):
-        invocation_config(model_aliases=aliases)
-
-
-def test_model_aliases_come_from_configuration() -> None:
-    config = invocation_config(model_aliases={"helper": "helper_model"})
-    assert config.model_aliases == {"helper": "helper_model"}
-    assert invocation_config().model_aliases == {}
-
-
 def test_validate_invocation_rejects_missing_required_mapping() -> None:
     config = invocation_config(
         arguments={

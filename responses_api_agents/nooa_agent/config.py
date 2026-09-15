@@ -62,7 +62,6 @@ class NOOAInvocationConfig(BaseModel):
     execution_mode: Literal["embedded"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
     arguments: dict[str, NOOAArgumentBinding]
-    model_aliases: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("agent_class")
     @classmethod
@@ -78,13 +77,6 @@ class NOOAInvocationConfig(BaseModel):
         if not value.isidentifier() or value.startswith("_"):
             raise ValueError("entrypoint must be a public Python method name")
         return value
-
-    @field_validator("model_aliases")
-    @classmethod
-    def validate_model_aliases(cls, aliases: dict[str, str]) -> dict[str, str]:
-        if any(not alias.strip() or not server.strip() for alias, server in aliases.items()):
-            raise ValueError("model_aliases must map non-empty NOOA names to non-empty Gym model-server names")
-        return aliases
 
     @model_validator(mode="after")
     def validate_argument_names(self) -> "NOOAInvocationConfig":
