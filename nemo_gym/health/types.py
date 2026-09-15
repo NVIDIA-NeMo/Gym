@@ -135,6 +135,7 @@ class _LineSlice:
 class _WorkerInput:
     line: _LineSlice
     ignored_checks: frozenset[str]
+    raw_line: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)

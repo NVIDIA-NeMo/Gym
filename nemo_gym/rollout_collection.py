@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    RolloutFileConfigMixin,
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
@@ -69,7 +70,8 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.jsonl_io import open_jsonl
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, uncompressed_path
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -571,7 +573,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(RolloutFileConfigMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -648,6 +650,16 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
         +num_samples_in_parallel=10
     ```
     """
+
+    @model_validator(mode="after")
+    def _reject_compressed_custom_driver(self):
+        if self.rollout_collection_driver and self.output_jsonl_fpath.endswith(".zst"):
+            raise ConfigError(
+                "Compressed rollout output is supported by Gym's built-in collector only. "
+                "The configured rollout_collection_driver owns its file IO and has not opted into compression; "
+                "remove --rollouts-file-compress and use a .jsonl output filename."
+            )
+        return self
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
@@ -816,7 +828,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
-        output_fpath = Path(self.output_jsonl_fpath)
+        output_fpath = uncompressed_path(Path(self.output_jsonl_fpath))
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
 
@@ -1181,7 +1193,7 @@ class RolloutCollectionHelper(BaseModel):
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
-        with Path(config.output_jsonl_fpath).open("rb") as f:
+        with open_jsonl(config.output_jsonl_fpath, "rb") as f:
             result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
         results = [orjson.loads(p[0]) for p in result_strs]
 
@@ -1379,7 +1391,7 @@ class RolloutCollectionHelper(BaseModel):
                 flush=True,
             )
 
-        results_file = output_fpath.open("ab")
+        results_file = open_jsonl(output_fpath, "ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
         for future in self._run_examples_with_metadata(
@@ -1994,7 +2006,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return setup_server_client_utils(head_server_config)
 
 
-class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
+class RolloutAggregationConfig(RolloutFileConfigMixin, BaseNeMoGymCLIConfig):
     """
     Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
@@ -2094,7 +2106,7 @@ class RolloutAggregationHelper(BaseModel):
 
         results: List[Dict] = []
         for shard_path in input_paths:
-            with open(shard_path, "rb") as f:
+            with open_jsonl(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
@@ -2110,7 +2122,7 @@ class RolloutAggregationHelper(BaseModel):
 
         if config.merge_shards:
             print(f"Merging shards into {output_fpath}")
-            with output_fpath.open("wb") as out:
+            with open_jsonl(output_fpath, "wb") as out:
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 

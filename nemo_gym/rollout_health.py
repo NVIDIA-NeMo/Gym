@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections import Counter, defaultdict, deque
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -61,10 +61,13 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.jsonl_io import open_jsonl
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
 _PROCESS_POOL_MAX_CHUNKSIZE = 128
+_STREAM_MAX_PENDING_BYTES = 64 * 1024 * 1024
+_STREAM_PENDING_ROWS_PER_WORKER = 2
 
 
 __all__ = [
@@ -95,6 +98,10 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
     with open(line.path, "rb") as handle:
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
+    return _parse_record(raw)
+
+
+def _parse_record(raw: bytes) -> tuple[dict[str, Any], str | None]:
     try:
         parsed = orjson.loads(raw)
         if not isinstance(parsed, dict):
@@ -105,7 +112,7 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
-    record, parse_error = _read_record(payload.line)
+    record, parse_error = _read_record(payload.line) if payload.raw_line is None else _parse_record(payload.raw_line)
     unreadable_identity = f"__unreadable_record__:input-{payload.line.source_index}:line-{payload.line.line_number}"
     task_index = record.get(TASK_INDEX_KEY, unreadable_identity if parse_error else payload.line.ordinal)
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
@@ -262,6 +269,58 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                 )
                 ordinal += 1
     return slices
+
+
+def _stream_worker_inputs(paths: Sequence[Path], ignored: frozenset[str]) -> Iterator[_WorkerInput]:
+    """Decompress each source once and retain only the current physical JSONL line."""
+    ordinal = 0
+    for source_index, path in enumerate(paths):
+        with open_jsonl(path, "rb") as handle:
+            for line_number, raw in enumerate(handle, 1):
+                if not raw.strip():
+                    continue
+                yield _WorkerInput(
+                    line=_LineSlice(str(path), 0, len(raw), ordinal, source_index, line_number),
+                    ignored_checks=ignored,
+                    raw_line=raw,
+                )
+                ordinal += 1
+
+
+def _stream_health_checks(paths: Sequence[Path], ignored: frozenset[str], workers: int) -> list[RolloutDigest]:
+    """Bound submitted payloads by bytes and rows; a single oversized row may exceed the byte budget.
+
+    One additional row can be held by the reader while waiting for queue space. Process serialization and
+    each worker's parsed record require additional memory. Only compact digests accumulate across the run.
+    """
+    if workers == 1:
+        return [_worker(item) for item in _stream_worker_inputs(paths, ignored)]
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            pending = deque()
+            pending_bytes = 0
+            digests = []
+            for item in _stream_worker_inputs(paths, ignored):
+                size = item.line.length
+                while pending and (
+                    len(pending) >= workers * _STREAM_PENDING_ROWS_PER_WORKER
+                    or pending_bytes + size > _STREAM_MAX_PENDING_BYTES
+                ):
+                    future, previous_size = pending.popleft()
+                    digests.append(future.result())
+                    pending_bytes -= previous_size
+                pending.append((pool.submit(_worker, item), size))
+                pending_bytes += size
+            for future, _ in pending:
+                digests.append(future.result())
+            return digests
+    except (NotImplementedError, BrokenProcessPool, OSError) as exc:
+        warnings.warn(
+            f"Process pool unavailable or failed ({exc}); rereading rollout streams and running health checks serially.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return [_worker(item) for item in _stream_worker_inputs(paths, ignored)]
 
 
 def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
@@ -469,47 +528,50 @@ def run_health_checks(
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
-    lines = _index_jsonl(paths)
-    worker_inputs = [
-        _WorkerInput(
-            line=line,
-            ignored_checks=ignored,
-        )
-        for line in lines
-    ]
-
     max_workers = workers if workers is not None else min(os.cpu_count() or 1, 8)
     if max_workers < 1:
         raise ValueError("workers must be at least 1")
-    if len(worker_inputs) <= 1 or max_workers == 1:
-        worker_results = [_worker(item) for item in worker_inputs]
+    if any(path.suffix == ".zst" for path in paths):
+        worker_results = _stream_health_checks(paths, ignored, max_workers)
     else:
-        try:
-            pool = ProcessPoolExecutor(max_workers=max_workers)
-        except (NotImplementedError, OSError) as exc:
-            warnings.warn(
-                f"Process pool unavailable ({exc}); running rollout health checks serially.",
-                RuntimeWarning,
-                stacklevel=2,
+        lines = _index_jsonl(paths)
+        worker_inputs = [
+            _WorkerInput(
+                line=line,
+                ignored_checks=ignored,
             )
+            for line in lines
+        ]
+
+        if len(worker_inputs) <= 1 or max_workers == 1:
             worker_results = [_worker(item) for item in worker_inputs]
         else:
             try:
-                with pool:
-                    worker_results = list(
-                        pool.map(
-                            _worker,
-                            worker_inputs,
-                            chunksize=_process_pool_chunksize(len(worker_inputs), max_workers),
-                        )
-                    )
-            except (BrokenProcessPool, OSError) as exc:
+                pool = ProcessPoolExecutor(max_workers=max_workers)
+            except (NotImplementedError, OSError) as exc:
                 warnings.warn(
-                    f"Process pool failed ({exc}); running rollout health checks serially.",
+                    f"Process pool unavailable ({exc}); running rollout health checks serially.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 worker_results = [_worker(item) for item in worker_inputs]
+            else:
+                try:
+                    with pool:
+                        worker_results = list(
+                            pool.map(
+                                _worker,
+                                worker_inputs,
+                                chunksize=_process_pool_chunksize(len(worker_inputs), max_workers),
+                            )
+                        )
+                except (BrokenProcessPool, OSError) as exc:
+                    warnings.warn(
+                        f"Process pool failed ({exc}); running rollout health checks serially.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    worker_results = [_worker(item) for item in worker_inputs]
 
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
@@ -529,6 +591,8 @@ def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Pat
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
     selected = Path(rollout_file) if rollout_file is not None else Path("rollouts.jsonl")
     rollout_path = selected if selected.is_absolute() else run_dir / selected
+    if rollout_file is None and not rollout_path.is_file():
+        rollout_path = rollout_path.with_suffix(".jsonl.zst")
     if not rollout_path.is_file():
         raise FileNotFoundError(f"Rollout JSONL not found: {rollout_path}")
     return rollout_path

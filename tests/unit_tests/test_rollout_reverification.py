@@ -276,7 +276,8 @@ class TestYieldInputsAndRolloutsPaired:
     def _write_jsonl(self, path: Path, rows: list) -> None:
         path.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
 
-    def test_pairs_input_and_rollout_by_task_and_rollout_index(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_pairs_input_and_rollout_by_task_and_rollout_index(self, tmp_path: Path, compressed: bool) -> None:
         inputs = [
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q1"},
@@ -289,6 +290,10 @@ class TestYieldInputsAndRolloutsPaired:
         rollouts_path = tmp_path / "rollouts.jsonl"
         self._write_jsonl(inputs_path, inputs)
         self._write_jsonl(rollouts_path, rollouts)
+        if compressed:
+            from nemo_gym.jsonl_io import compress_jsonl
+
+            rollouts_path = compress_jsonl(rollouts_path)
 
         pairs = list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path))
 
@@ -1904,12 +1909,16 @@ class TestRunFromConfigResumeFromCache:
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
+    @pytest.mark.parametrize("compressed", [False, True])
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, compressed: bool
     ) -> None:
-        out = tmp_path / "output.jsonl"
+        from nemo_gym.jsonl_io import open_jsonl
+
+        out = tmp_path / ("output.jsonl.zst" if compressed else "output.jsonl")
         # task 0 already completed by a prior run, with a distinctive reward
-        out.write_bytes(orjson.dumps({**self._row("agent_a", 0), "reward": 1.0}) + b"\n")
+        with open_jsonl(out, "wb") as f:
+            f.write(orjson.dumps({**self._row("agent_a", 0), "reward": 1.0}) + b"\n")
 
         pairs = [
             InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {"o": 0}}),
@@ -1918,16 +1927,17 @@ class TestRunFromConfigResumeFromCache:
         dispatched: list = []
         self._patch(monkeypatch, pairs, dispatched)
 
-        returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, resume_from_cache=True)
-        )
+        config = self._make_config(tmp_path, resume_from_cache=True)
+        config.output_jsonl_fpath = str(out)
+        returned = await RolloutReverificationHelper().run_from_config(config)
 
         # only the missing task (1) is re-verified
         assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [1]
 
         # The cached task-0 row appears in the file EXACTLY ONCE (append mode preserves it on disk;
         # the dispatch loop only writes newly-verified rows).
-        rows = self._read_jsonl(out)
+        with open_jsonl(out, "rb") as f:
+            rows = [orjson.loads(line) for line in f]
         assert len(rows) == 2
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
         assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1

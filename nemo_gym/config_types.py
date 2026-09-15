@@ -38,6 +38,22 @@ from rich.text import Text
 ########################################
 
 
+class RolloutFileConfigMixin(BaseModel):
+    """Opt in to compressed rollout output by flag or the ``.jsonl.zst`` suffix."""
+
+    output_jsonl_fpath: str
+    rollouts_file_compress: bool = Field(
+        default=False,
+        description="Write Zstandard-compressed rollout JSONL; appends .zst to the output filename if needed.",
+    )
+
+    @model_validator(mode="after")
+    def _resolve_rollout_compression(self):
+        if self.rollouts_file_compress and not self.output_jsonl_fpath.endswith(".zst"):
+            self.output_jsonl_fpath += ".zst"
+        return self
+
+
 class BaseNeMoGymCLIConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod

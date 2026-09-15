@@ -41,7 +41,9 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.jsonl_io import open_jsonl
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.path_utils import aggregate_metrics_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -2572,11 +2574,12 @@ class TestRolloutCollection:
         assert [result["case"] for result in actual_failure_results] == ["case-1"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
 
+    @pytest.mark.parametrize("compressed", [False, True])
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
-        self, tmp_path: Path, empty_global_config: MagicMock
+        self, tmp_path: Path, empty_global_config: MagicMock, compressed: bool
     ) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
-        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath = tmp_path / ("output.jsonl.zst" if compressed else "output.jsonl")
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
@@ -2599,7 +2602,8 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my agent name"},
             "case": "cached",
         }
-        output_jsonl_fpath.write_bytes(orjson.dumps(cached_result) + b"\n")
+        with open_jsonl(output_jsonl_fpath, "wb") as f:
+            f.write(orjson.dumps(cached_result) + b"\n")
 
         captured: dict[str, list[dict]] = {}
 
@@ -2620,6 +2624,9 @@ class TestRolloutCollection:
         assert [result["case"] for result in actual_returned_results] == ["new", "cached"]
         assert [result["case"] for result in captured["results"]] == ["new", "cached"]
         assert [row["x"] for row in captured["rows"]] == [0, 1]
+
+        with open_jsonl(output_jsonl_fpath, "rb") as f:
+            assert [orjson.loads(line)["case"] for line in f] == ["cached", "new"]
 
     def test_load_from_cache(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -3031,12 +3038,15 @@ class TestDisableAggregationAndCallerTaskIndex:
 class TestRolloutAggregationHelper:
     """End-to-end shape of `ng_aggregate_rollouts`: glob → load → sort → aggregate."""
 
-    async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("compressed", [False, True])
+    async def test_run_from_config_full_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compressed: bool
+    ) -> None:
         # Two shards. Records have globally-stamped task indices (out of order)
         # — the helper should sort by (task_index, rollout_index) before calling
         # _call_aggregate_metrics so downstream groupby is deterministic.
         shard0 = tmp_path / "rollouts-chunk0.jsonl"
-        shard1 = tmp_path / "rollouts-chunk1.jsonl"
+        shard1 = tmp_path / ("rollouts-chunk1.jsonl.zst" if compressed else "rollouts-chunk1.jsonl")
         records_shard0 = [
             {
                 AGENT_REF_KEY_NAME: {"name": "a"},
@@ -3063,7 +3073,8 @@ class TestRolloutAggregationHelper:
             },
         ]
         shard0.write_text("\n".join(json.dumps(r) for r in records_shard0) + "\n")
-        shard1.write_text("\n".join(json.dumps(r) for r in records_shard1) + "\n")
+        with open_jsonl(shard1, "wt") as f:
+            f.write("\n".join(json.dumps(r) for r in records_shard1) + "\n")
 
         output_fpath = tmp_path / "rollouts.jsonl"
 
@@ -3074,7 +3085,7 @@ class TestRolloutAggregationHelper:
             captured["rows"] = rows
             captured["output_fpath"] = output_fpath
             # Touch a sentinel file so the helper's return value is meaningful.
-            metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            metrics_fpath = aggregate_metrics_path_for(output_fpath)
             metrics_fpath.write_text("[]")
             return metrics_fpath
 
@@ -3084,6 +3095,7 @@ class TestRolloutAggregationHelper:
             input_glob=f"{shard0},{shard1}",
             output_jsonl_fpath=str(output_fpath),
             merge_shards=True,
+            rollouts_file_compress=compressed,
         )
         metrics_fpath = await RolloutAggregationHelper().run_from_config(cfg)
 
@@ -3093,8 +3105,10 @@ class TestRolloutAggregationHelper:
         # row already carries AGENT_REF_KEY_NAME).
         assert captured["rows"] is captured["results"]
         # Merged shard concatenation honoured (merge_shards=True).
+        output_fpath = Path(cfg.output_jsonl_fpath)
         assert output_fpath.exists()
-        assert sum(1 for _ in output_fpath.open()) == 3
+        with open_jsonl(output_fpath) as f:
+            assert sum(1 for _ in f) == 3
         # Metrics file path returned and points next to the merged JSONL.
         assert metrics_fpath == tmp_path / "rollouts_aggregate_metrics.json"
         assert metrics_fpath.exists()
@@ -4045,3 +4059,46 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+@pytest.mark.parametrize("flag,suffix", [(True, ".jsonl"), (False, ".jsonl.zst"), (True, ".jsonl.zst")])
+def test_rollout_compression_config_and_sidecars(tmp_path, flag, suffix):
+    from nemo_gym.path_utils import failures_path_for
+
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="input.jsonl",
+        output_jsonl_fpath=str(tmp_path / ("rollouts" + suffix)),
+        rollouts_file_compress=flag,
+    )
+    output = Path(config.output_jsonl_fpath)
+    assert output.name == "rollouts.jsonl.zst"
+    assert config.materialized_jsonl_fpath.name == "rollouts_materialized_inputs.jsonl"
+    assert failures_path_for(output).name == "rollouts_failures.jsonl"
+    assert aggregate_metrics_path_for(output).name == "rollouts_aggregate_metrics.json"
+    with pytest.raises(ConfigError, match="built-in collector only"):
+        E2ERolloutCollectionConfig(
+            split="benchmark",
+            output_jsonl_fpath=str(tmp_path / ("rollouts" + suffix)),
+            rollouts_file_compress=flag,
+            rollout_collection_driver="custom.module:collect",
+        )
+
+
+def test_collection_resume_rejects_truncated_compressed_output_without_modifying_it(tmp_path):
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="input.jsonl",
+        output_jsonl_fpath=str(tmp_path / "rollouts.jsonl.zst"),
+        resume_from_cache=True,
+    )
+    row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "agent"}}
+    config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+    output = Path(config.output_jsonl_fpath)
+    with open_jsonl(output, "wb") as handle:
+        handle.write(orjson.dumps(row) + b"\n")
+        handle.flush()
+        handle.write(orjson.dumps({**row, TASK_INDEX_KEY_NAME: 1}) + b"\n")
+    damaged = output.read_bytes()[:-1]
+    output.write_bytes(damaged)
+    with pytest.raises(EOFError):
+        RolloutCollectionHelper()._load_from_cache(config)
+    assert output.read_bytes() == damaged
