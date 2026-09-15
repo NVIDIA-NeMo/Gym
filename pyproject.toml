@@ -441,6 +441,11 @@ override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
 
+    # hermes-agent hard-pins openai==2.24.0, which conflicts with nemo-gym's own
+    # openai==2.44.0 pin (see [project].dependencies) and makes uv's resolver refuse
+    # to install `gym env start`'s per-server venvs (e.g. hermes_math_agent) outright.
+    "openai==2.44.0",
+
     # Codec-bearing packages — never installed in the shipped package or container.
     # Binary wheels bundle libavcodec / static FFmpeg executables (H.264, H.265, AAC)
     # that may incur MPEG-LA royalties. Servers that genuinely need these declare
