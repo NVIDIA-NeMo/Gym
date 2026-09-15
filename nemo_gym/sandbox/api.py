@@ -15,6 +15,7 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import shlex
 import tempfile
 import threading
 import uuid
@@ -49,6 +50,7 @@ SYNC_OPERATION_TIMEOUT_S = 3600.0
 # Matches the providers' non-process exec sentinel (see docker provider).
 SANDBOX_PTY_RUNTIME_RETURN_CODE = 125
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+SETSID_TIMEOUT_MARKER = "__nemo_gym_exec_setsid_timeout__"
 
 
 def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable: bool) -> SandboxExecResult:
@@ -491,6 +493,49 @@ class AsyncSandbox:
             timeout_s=timeout_s,
             user=user,
         )
+
+    async def exec_setsid(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+        poll_interval_s: float = 0.5,
+    ) -> SandboxExecResult:
+        """Run ``command`` under ``setsid`` so processes it backgrounds outlive this call.
+
+        OpenSandbox kills a command's process group when the exec returns, which
+        would take a ``nohup ... &`` server with it. Output comes back merged; on
+        ``timeout_s`` the detached group is killed and ``error_type`` is ``"timeout"``.
+        """
+        run_dir = f"/tmp/nemo-gym-setsid-{uuid.uuid4().hex}"
+        inner = f"echo $$ > {run_dir}/pid\n{command}\necho $? > {run_dir}/exit\n"
+        on_timeout = ""
+        deadline = ""
+        if timeout_s is not None:
+            deadline = f"deadline=$(( $(date +%s) + {int(timeout_s)} )); "
+            on_timeout = (
+                f"if [ $(date +%s) -ge $deadline ]; then "
+                f"pid=$(cat {run_dir}/pid); kill -TERM -$pid 2>/dev/null; sleep 2; kill -KILL -$pid 2>/dev/null; "
+                f"cat {run_dir}/log; echo {SETSID_TIMEOUT_MARKER} >&2; rm -rf {run_dir}; exit 124; fi; "
+            )
+        script = (
+            f"mkdir -p {run_dir} && "
+            f"setsid bash -c {shlex.quote(inner)} > {run_dir}/log 2>&1 < /dev/null & "
+            f"{deadline}"
+            f"until [ -f {run_dir}/exit ]; do {on_timeout}sleep {poll_interval_s}; done; "
+            f"cat {run_dir}/log; code=$(cat {run_dir}/exit); rm -rf {run_dir}; exit $code"
+        )
+        # The in-sandbox deadline does the killing; the provider timeout is only a backstop.
+        provider_timeout_s = None if timeout_s is None else timeout_s + 60
+        result = await self.exec(script, cwd=cwd, env=env, timeout_s=provider_timeout_s, user=user)
+        if result.return_code == 124 and SETSID_TIMEOUT_MARKER in (result.stdout or "") + (result.stderr or ""):
+            return SandboxExecResult(
+                stdout=result.stdout, stderr=result.stderr, return_code=result.return_code, error_type="timeout"
+            )
+        return result
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)

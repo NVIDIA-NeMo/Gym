@@ -723,8 +723,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await sandbox.exec(
-                command=command,
+            # Servers the agent leaves running must survive into verify(); a plain exec kills them on return.
+            result = await sandbox.exec_setsid(
+                command,
                 timeout_s=self.config.sandbox_timeout,
             )
         except Exception as exc:

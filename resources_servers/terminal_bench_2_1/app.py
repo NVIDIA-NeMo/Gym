@@ -254,7 +254,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
-            golden_patch_result = await eval_sandbox.exec(
+            # solve.sh may leave a server running for test.sh; a plain exec kills it on return.
+            golden_patch_result = await eval_sandbox.exec_setsid(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
             )

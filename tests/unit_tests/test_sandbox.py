@@ -352,6 +352,73 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+def test_exec_setsid_runs_command_in_its_own_session() -> None:
+    asyncio.run(_assert_exec_setsid_runs_command_in_its_own_session())
+
+
+async def _assert_exec_setsid_runs_command_in_its_own_session() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    result = await sandbox.exec_setsid("bash solve.sh", timeout_s=30)
+
+    [call] = provider.exec_calls
+    assert "setsid bash -c " in call["command"]
+    assert "bash solve.sh" in call["command"]
+    assert "kill -TERM -" in call["command"]
+    assert call["timeout_s"] == 90
+    assert result.return_code == 0
+    assert result.error_type is None
+
+
+def test_exec_setsid_without_timeout_has_no_deadline() -> None:
+    asyncio.run(_assert_exec_setsid_without_timeout_has_no_deadline())
+
+
+async def _assert_exec_setsid_without_timeout_has_no_deadline() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    await sandbox.exec_setsid("sleep 1", timeout_s=None)
+
+    [call] = provider.exec_calls
+    assert call["timeout_s"] is None
+    assert "date +%s" not in call["command"]
+    assert "kill -TERM -" not in call["command"]
+
+
+def test_exec_setsid_reports_timeout_only_when_marker_is_present() -> None:
+    asyncio.run(_assert_exec_setsid_reports_timeout_only_when_marker_is_present())
+
+
+async def _assert_exec_setsid_reports_timeout_only_when_marker_is_present() -> None:
+    from nemo_gym.sandbox.api import SETSID_TIMEOUT_MARKER
+
+    class ExitingProvider(FakeSandboxProvider):
+        stdout = ""
+
+        async def exec(self, handle, command, **kwargs):
+            await super().exec(handle, command, **kwargs)
+            return SandboxExecResult(stdout=self.stdout, stderr=None, return_code=124)
+
+    provider = ExitingProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    provider.stdout = f"partial output\n{SETSID_TIMEOUT_MARKER}\n"
+    timed_out = await sandbox.exec_setsid("sleep 999", timeout_s=1)
+    assert timed_out.return_code == 124
+    assert timed_out.error_type == "timeout"
+    assert timed_out.stdout.startswith("partial output")
+
+    provider.stdout = "the command itself exited 124\n"
+    own_exit = await sandbox.exec_setsid("exit 124", timeout_s=1)
+    assert own_exit.return_code == 124
+    assert own_exit.error_type is None
+
+
 def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
     asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
 
