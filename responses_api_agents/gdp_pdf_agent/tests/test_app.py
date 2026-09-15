@@ -34,6 +34,7 @@ from responses_api_agents.gdp_pdf_agent.app import (
     DocumentDelivery,
     GdpPdfAgent,
     GdpPdfAgentConfig,
+    _build_task_text_block,
     _compose_pages,
     _delivery_notice_blocks,
     _input_limit,
@@ -198,10 +199,16 @@ class TestDocumentDeliveryAdapt:
 
     def test_stops_at_the_floor(self) -> None:
         delivery = DocumentDelivery(80, None)
+        # DPI 80 -> 72 (floor).
         assert delivery.adapt("context", None, min_dpi=72) is True
         assert delivery.image_dpi == 72
-        assert delivery.adapt("context", None, min_dpi=72) is False
+        assert delivery.text_only_fallback is False
+        # Floor still doesn't fit -> engage text-only fallback (one more retry).
+        assert delivery.adapt("context", None, min_dpi=72) is True
         assert delivery.image_dpi == 72
+        assert delivery.text_only_fallback is True
+        # Still failing with text-only -> genuinely give up.
+        assert delivery.adapt("context", None, min_dpi=72) is False
 
     def test_image_count_with_explicit_cap(self) -> None:
         delivery = DocumentDelivery(150, None)
@@ -297,7 +304,7 @@ class TestManifestTextBlocks:
         assert pages_truncated == 0
         assert len(blocks) == 1
         assert _block_type(blocks[0]) == "input_text"
-        assert blocks[0]["text"].startswith("<document>")
+        assert blocks[0]["text"].startswith("## Page 1")
 
     def test_max_pages_truncates_and_is_reported(self) -> None:
         manifest = _load_manifest(self.manifest_path)
@@ -398,6 +405,54 @@ class TestDeliveryMetadataAndNotice:
         delivery.image_pages_covered = 10
         delivery.image_coverage_end_page = 10
         assert _delivery_notice_blocks(delivery) == []
+
+
+class TestBuildTaskTextBlock:
+    def test_reference_shape_with_prompt_and_extracted_text(self) -> None:
+        block = _build_task_text_block(
+            prompt_blocks=[{"type": "input_text", "text": "What is the cap?"}],
+            delivery_notice_blocks=[],
+            page_text_blocks=[{"type": "input_text", "text": "## Page 1\n\nfoo"}],
+        )
+        assert block["type"] == "input_text"
+        text = block["text"]
+        assert text.startswith("You are answering a task using text extracted from the source PDF.")
+        assert "Task:\nWhat is the cap?" in text
+        assert "Extracted PDF text:\n## Page 1" in text
+
+    def test_folds_delivery_notice_between_task_and_extracted_text(self) -> None:
+        block = _build_task_text_block(
+            prompt_blocks=[{"type": "input_text", "text": "Q?"}],
+            delivery_notice_blocks=[{"type": "input_text", "text": "<document_delivery>\ncomposites\n</document_delivery>"}],
+            page_text_blocks=[{"type": "input_text", "text": "## Page 1\n\nbody"}],
+        )
+        text = block["text"]
+        # Delivery notice appears after the task but before the extracted text section.
+        task_idx = text.index("Task:")
+        notice_idx = text.index("composites")
+        extract_idx = text.index("Extracted PDF text:")
+        assert task_idx < notice_idx < extract_idx
+
+    def test_omits_extracted_section_when_no_page_text(self) -> None:
+        block = _build_task_text_block(
+            prompt_blocks=[{"type": "input_text", "text": "Q?"}],
+            delivery_notice_blocks=[],
+            page_text_blocks=[],
+        )
+        text = block["text"]
+        assert "Task:\nQ?" in text
+        assert "Extracted PDF text" not in text
+
+
+class TestDocumentDeliveryTextOnlyFallback:
+    def test_falls_back_to_text_only_after_dpi_floor(self) -> None:
+        delivery = DocumentDelivery(72, None)  # already at floor
+        assert delivery.text_only_fallback is False
+        # First adapt at floor flips to text-only fallback (retryable).
+        assert delivery.adapt("context_length", None, min_dpi=72) is True
+        assert delivery.text_only_fallback is True
+        # A second adapt at floor -- with text-only already engaged -- gives up.
+        assert delivery.adapt("context_length", None, min_dpi=72) is False
 
 
 class TestRun:

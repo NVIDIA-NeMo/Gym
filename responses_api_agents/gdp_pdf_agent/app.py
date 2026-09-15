@@ -124,6 +124,7 @@ class DocumentDelivery:
         self.image_pages_covered = 0
         self.image_pages_omitted = 0
         self.image_coverage_end_page: Optional[int] = None
+        self.text_only_fallback = False
         self.attempts: list[dict[str, Any]] = []
 
     def record(self, limit: Optional[str] = None) -> dict[str, Any]:
@@ -135,6 +136,7 @@ class DocumentDelivery:
             "image_pages_covered": self.image_pages_covered,
             "image_pages_omitted": self.image_pages_omitted,
             "image_coverage_end_page": self.image_coverage_end_page,
+            "text_only_fallback": self.text_only_fallback,
             "limit": limit,
         }
 
@@ -150,6 +152,12 @@ class DocumentDelivery:
             self.max_images = min(self.max_images, cap) if self.max_images is not None else cap
             return True
         if self.image_dpi <= min_dpi:
+            # One last safety net: if pages still don't fit even at the DPI floor, drop images
+            # entirely and retry text-only. Matches the reference provider's observed behavior
+            # of sending long documents (e.g. 168-page 10-Ks) as pure text.
+            if not self.text_only_fallback:
+                self.text_only_fallback = True
+                return True
             return False
         # AA publishes the endpoints (150 and 72), not a decrement schedule.
         # Reduce by 20% per rejected request, always trying the 72 DPI floor.
@@ -285,15 +293,22 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
 def _manifest_text_blocks(manifest: dict[str, Any], *, max_pages: Optional[int]) -> tuple[list[dict[str, Any]], int]:
     """Extracted text doesn't change across retry attempts (unlike page images, which get resized
     smaller on a DPI backoff), so this only needs to run once per row. Returns ``(content_blocks,
-    pages_truncated)`` -- at most one ``input_text`` block, empty if nothing extractable."""
+    pages_truncated)`` -- at most one ``input_text`` block, empty if nothing extractable.
+
+    Pages are joined with explicit ``## Page N`` markers so the model can cite page numbers and
+    anchor text to visual page boundaries -- matches the reference provider's formatting."""
     pages = manifest["pages"]
     total_pages = len(pages)
     page_limit = total_pages if max_pages is None else min(max_pages, total_pages)
     pages_truncated = total_pages - page_limit
-    text = "\n\n".join(page["text"] for page in pages[:page_limit])
-    if not text.strip():
+    kept = pages[:page_limit]
+    if not any(p["text"].strip() for p in kept):
         return [], pages_truncated
-    return [{"type": "input_text", "text": f"<document>\n{text.strip()}\n</document>"}], pages_truncated
+    parts = []
+    for p in kept:
+        page_number = p.get("page_number", len(parts) + 1)
+        parts.append(f"## Page {page_number}\n\n{p['text'].strip()}")
+    return [{"type": "input_text", "text": "\n\n".join(parts)}], pages_truncated
 
 
 def _render_manifest_images(
@@ -386,6 +401,25 @@ def _prompt_blocks(row: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(block) for block in content if block.get("type") == "input_text"]
 
 
+def _build_task_text_block(
+    prompt_blocks: list[dict[str, Any]],
+    delivery_notice_blocks: list[dict[str, Any]],
+    page_text_blocks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Fold prompt + delivery notice + page-marked extracted text into ONE ``input_text`` block,
+    matching the reference provider's request shape. Preamble+prompt+extracted text all live in
+    a single string, page-marked, prepended by the standard 'You are answering...' preamble."""
+    prompt_text = "\n\n".join(b["text"] for b in prompt_blocks if b.get("text")).strip()
+    delivery_notice = "\n\n".join(b["text"] for b in delivery_notice_blocks if b.get("text")).strip()
+    extracted = "\n\n".join(b["text"] for b in page_text_blocks if b.get("text")).strip()
+    parts = ["You are answering a task using text extracted from the source PDF.", "Task:\n" + prompt_text]
+    if delivery_notice:
+        parts.append(delivery_notice)
+    if extracted:
+        parts.append("Extracted PDF text:\n" + extracted)
+    return {"type": "input_text", "text": "\n\n".join(parts)}
+
+
 def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
     """Remove input_image blocks from the serialized rollout result.
 
@@ -475,7 +509,9 @@ class GdpPdfAgent(SimpleAgent):
 
             while True:
                 image_blocks: list[dict[str, Any]] = []
-                if self.config.include_images:
+                # Text-only fallback (delivery.text_only_fallback=True) suppresses image render
+                # after the DPI floor was hit and pages still didn't fit -- see adapt() below.
+                if self.config.include_images and not delivery.text_only_fallback:
                     image_blocks, image_pages_truncated = _render_manifest_images(
                         manifest,
                         manifest_dir,
@@ -487,7 +523,10 @@ class GdpPdfAgent(SimpleAgent):
                     )
                     pages_truncated = max(pages_truncated, image_pages_truncated)
                 delivery_notice_blocks = _delivery_notice_blocks(delivery)
-                content = [*prompt_blocks, *delivery_notice_blocks, *text_blocks, *image_blocks]
+                # Reference request shape: images FIRST, then a single unified text block that
+                # contains the preamble + user prompt + extracted PDF text with ## Page N markers.
+                task_text_block = _build_task_text_block(prompt_blocks, delivery_notice_blocks, text_blocks)
+                content = [*image_blocks, task_text_block]
                 params_dict = body.responses_create_params.model_dump(exclude_unset=True)
                 params_dict["input"] = [{"role": "user", "content": content}]
                 params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict)
