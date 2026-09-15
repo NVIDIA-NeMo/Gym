@@ -1,0 +1,129 @@
+---
+title: "Private Benchmark: GitLab MR"
+description: "Submit an internal benchmark merge request to nv-internal-main."
+position: 5
+---
+
+# Private Benchmark: GitLab MR
+
+Use this guide for private benchmark contributions to the internal Gym project,
+targeting `nv-internal-main`.
+
+## 1. Confirm Access, Then Create an Internal-Only Branch
+
+Confirm project access, feature-branch permissions, a reviewer, and approved
+data/artifact storage. Model endpoints must also be approved for private inputs.
+If feature branches are restricted, ask for the project's internal-fork workflow.
+
+Set `GYM_INTERNAL_REPO_URL` to the approved internal clone URL without credentials.
+Run from a directory where `Gym-private` does not exist:
+
+```bash title="private-branch"
+git clone --origin internal --single-branch --branch nv-internal-main \
+  "${GYM_INTERNAL_REPO_URL:?Set the approved internal Gym clone URL first}" Gym-private
+cd Gym-private
+git switch --create benchmark/safety_example --no-track internal/nv-internal-main
+git remote -v
+```
+
+Verify the internal remote and keep this checkout separate from public work.
+Do not add a GitHub push remote or transfer private commits to public `main`.
+Public release requires a separate review. Ask a maintainer if the target branch
+or required commands are unavailable.
+
+## 2. Author Locally; Separate Source Code From Dataset Storage
+
+Complete [Contribute a Benchmark, steps 2–5](/main/contribute/environments/benchmark-contribution#2-set-up-and-scaffold-in-that-checkout)
+in `Gym-private`, using its lockfile and Python requirements. Use a small
+synthetic or approved fixture for preparation and scorer tests. Document the
+private dataset's source, version, access, and permitted use in the README.
+
+An MR reviews code and configuration; dataset storage and access are separate.
+For Gym's GitLab registry backend:
+
+- Pass `--storage gitlab`; the default is Hugging Face.
+- Obtain registry access separately from Git clone access.
+- Agree dataset/version/artifact identifiers, permissions, and retention before
+  uploading. Do not overwrite a reviewed version.
+- Implement access to the pinned source in `prepare.py`, retaining an offline
+  fixture path. Initial fixture checks need no dataset transfer.
+
+### Registry Configuration
+
+Create a private configuration outside the checkout, restrict its permissions
+to your user, and set `GYM_DATASET_CONFIG` to its absolute path:
+
+```yaml title="private-registry-config"
+mlflow_tracking_uri: "<approved-registry-MLflow-tracking-URI>"
+mlflow_tracking_token: "<local-secret>"
+```
+
+Dataset commands load this file through `config_paths`, not `--config`.
+After approval, download a small fixture using the agreed identifiers and a
+fresh destination in the existing `GYM_PRIVATE_DATA_DIR`:
+
+```bash title="private-registry-download"
+gym dataset download --storage gitlab \
+  "+config_paths=['${GYM_DATASET_CONFIG:?Set the private registry config path first}']" \
+  --name safety_example --revision 0.0.1 --artifact example.jsonl \
+  --output "${GYM_PRIVATE_DATA_DIR:?Set an existing approved private data directory}/example.jsonl"
+```
+
+The identifiers are examples, not a provisioned dataset. The same `config_paths`
+argument applies to `gym dataset upload --storage gitlab`; uploads require
+approval for the data and destination. See the [dataset CLI reference](/main/reference/cli-commands#datasets).
+
+<Warning>
+Do not use `gym dataset migrate` for private data: it transfers to Hugging Face
+and can delete the GitLab copy. Keep credentials, raw datasets, resolved configs,
+and model outputs out of commits and MR attachments. Share redacted summaries
+or restricted artifact links.
+</Warning>
+
+## 3. Push and Open a Draft MR
+
+Review all commits, the final diff, and the internal push destination:
+
+```bash title="private-review"
+git log --format=fuller --patch internal/nv-internal-main..HEAD
+git diff --check internal/nv-internal-main...HEAD
+git diff --stat internal/nv-internal-main...HEAD
+git diff internal/nv-internal-main...HEAD
+git remote get-url --push internal
+```
+
+Resolve secrets or unapproved data before pushing. Deleting content in a later
+commit does not remove it from history.
+
+```bash title="private-push"
+git push --set-upstream internal HEAD:refs/heads/benchmark/safety_example
+```
+
+In the internal project's GitLab UI, create a draft MR:
+
+- Source: `benchmark/safety_example` in the approved internal project.
+- Target: `nv-internal-main`.
+- Complete the MR template and
+  [benchmark review description](/main/contribute/environments/benchmark-contribution#review-description-copy-into-your-pr-or-mr).
+- Name the benchmark maintainer and request a reviewer under the internal
+  branch's CODEOWNERS and approval rules.
+- If you need Gym-team maintenance and PR/MR review ownership,
+  [request maintained status](/main/contribute/environments/benchmark-contribution#request-gym-team-maintenance).
+
+## 4. Inspect the MR Pipeline and Obtain Review
+
+The [GitLab CI configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/.gitlab-ci.yml)
+runs for MR events targeting `nv-internal-main`; a branch push alone does not
+trigger this workflow.
+
+| Check or failure | Action |
+| --- | --- |
+| No MR pipeline | Check the target branch, MR event, CI permissions, and `.gitlab-ci.yml`. |
+| `gym-cpu-ci` | Open the downstream pipeline; this bridge depends on its result. |
+| `gym-cpu-ci-junit` | Inspect JUnit report transfer separately from the bridge/test result. |
+| Runner, access, or trigger failure | Share the internal pipeline link and job name with a maintainer. Do not inject credentials or repeatedly retry setup failures. |
+| Scorer or preparation failure | Reproduce with the small fixture, fix the cause, and push a follow-up commit. |
+
+Follow the live project's required checks and approval policies. Keep restricted
+logs internal. Once checks and review prerequisites are resolved, mark the MR
+ready for an authorized maintainer to merge.

@@ -1,0 +1,84 @@
+---
+title: "Public Benchmark: GitHub PR"
+description: "Submit a benchmark pull request to NVIDIA-NeMo/Gym main."
+position: 4
+---
+
+# Public Benchmark: GitHub PR
+
+Use this guide for contributions approved for public release to
+[NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym), branch `main`.
+For private content, follow the [GitLab MR guide](/main/contribute/environments/benchmark-private-contribution).
+
+## 1. Create a Public-Only Working Branch
+
+Fork the repository in GitHub. Set `GYM_PUBLIC_FORK_URL` to your fork's HTTPS
+clone URL without credentials. Run from a directory where `Gym-public` does not exist:
+
+```bash title="public-branch"
+git clone --origin upstream --branch main https://github.com/NVIDIA-NeMo/Gym.git Gym-public
+cd Gym-public
+git remote add origin "${GYM_PUBLIC_FORK_URL:?Set your public fork clone URL first}"
+git fetch upstream main
+git switch --create benchmark/safety_example --no-track upstream/main
+git remote -v
+```
+
+Verify that `upstream` points to NVIDIA-NeMo/Gym and `origin` to your fork.
+Keep internal commits and remotes out of this checkout. Contributors with
+upstream write access may use a maintainer-approved feature branch instead;
+do not push directly to `main`.
+
+## 2. Author and Test the Benchmark
+
+Complete [Contribute a Benchmark, steps 2–5](/main/contribute/environments/benchmark-contribution#2-set-up-and-scaffold-in-that-checkout)
+in `Gym-public`. Replace `safety_example` consistently.
+
+Confirm redistribution rights for code and fixtures. Remove private data and
+infrastructure details from files and commit messages. CI logs and PR attachments
+are public too.
+
+## 3. Push and Open a Draft PR
+
+Review the branch's commits, final diff, and push destination:
+
+```bash title="public-review"
+git log --format=fuller --patch upstream/main..HEAD
+git diff --check upstream/main...HEAD
+git diff --stat upstream/main...HEAD
+git diff upstream/main...HEAD
+git remote get-url --push origin
+```
+
+<Warning>
+Inspect every commit. Deleting a secret or private row in a later commit does
+not remove it from history. Resolve any exposure before pushing.
+</Warning>
+
+After confirming the history and destination:
+
+```bash title="public-push"
+git push --set-upstream origin HEAD:refs/heads/benchmark/safety_example
+```
+
+In GitHub, select **New pull request → compare across forks**:
+
+- Base: `NVIDIA-NeMo/Gym`, branch `main`.
+- Head: your fork, branch `benchmark/safety_example`.
+- Open a draft and complete the PR template, including the
+  [benchmark review description](/main/contribute/environments/benchmark-contribution#review-description-copy-into-your-pr-or-mr).
+- Name the benchmark maintainer and request a reviewer.
+- If you need Gym-team maintenance and PR review ownership,
+  [request maintained status](/main/contribute/environments/benchmark-contribution#request-gym-team-maintenance).
+
+## 4. Resolve Checks and Review
+
+Follow the PR's required checks and the
+[contribution checklist](https://github.com/NVIDIA-NeMo/Gym/blob/main/.github/PULL_REQUEST_TEMPLATE.md):
+applicable tests, pre-commit, and DCO sign-off. CI may run more tests than your
+local scorer checks; documentation changes also receive Fern checks.
+
+Reproduce failing tests before rerunning CI. Ask a maintainer about workflow
+approval or runner-access failures; do not add credentials or weaken checks.
+Push fixes to the same feature branch, then mark the PR ready for review.
+Maintainers approve and merge the contribution.

@@ -1,0 +1,36 @@
+[
+  {
+    "title": "Native exact-answer control",
+    "page": "get-started/native-onboarding.mdx",
+    "prerequisites": "Python 3.13.14; frozen Gym checkout; approved model endpoint for live step",
+    "review_route": "Native onboarding maintainer; named reviewer pending",
+    "structural": "Scaffold and verifier tests included",
+    "runtime": "One-sample real-model smoke passed; lifecycle acceptance still limited",
+    "parity": "Control only; no benchmark claim",
+    "trace": "Smoke health unobserved without captures; not trace acceptance"
+  },
+  {
+    "title": "Harbor local task",
+    "page": "get-started/harbor-onboarding.mdx",
+    "dependency_file": "responses_api_agents/harbor_agent/requirements.txt",
+    "dependency_name": "harbor",
+    "prerequisites": "Separate adapter environment; Docker daemon; image access; approved model endpoint",
+    "review_route": "Harbor adapter maintainer; named reviewer pending",
+    "structural": "Task, oracle and negative verifier tests included",
+    "runtime": "Real Docker/model acceptance pending",
+    "parity": "Not established",
+    "trace": "Native Harbor artifacts; canonical Gym trace unavailable"
+  },
+  {
+    "title": "Legacy Verifiers local environment",
+    "page": "get-started/verifiers-onboarding.mdx",
+    "dependency_file": "responses_api_agents/verifiers_agent/requirements.txt",
+    "dependency_name": "verifiers",
+    "prerequisites": "Python 3.13.14 (below 3.14); separate adapter environment; local fixture; approved model endpoint",
+    "review_route": "Verifiers adapter maintainer; named reviewer pending",
+    "structural": "Local environment and conversion tests included",
+    "runtime": "Corrected rubric passed one-sample real-model smoke (v0); lifecycle acceptance still limited",
+    "parity": "Not established; not current Hub v1 support",
+    "trace": "Adapter output only; canonical Gym trace unavailable"
+  }
+]

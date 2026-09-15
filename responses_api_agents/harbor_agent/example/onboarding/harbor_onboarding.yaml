@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+harbor_onboarding:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      domain: agent
+      description: One local Harbor task with bounded execution and automatic container cleanup
+      concurrency: 1
+      datasets:
+        - name: harbor_onboarding
+          type: validation
+          jsonl_fpath: ${oc.env:GYM_REPO_ROOT}/responses_api_agents/harbor_agent/example/onboarding/input.jsonl
+          license: Apache 2.0
+          num_repeats: 1
+      harbor_datasets:
+        onboarding:
+          local_dataset_path: ${oc.env:GYM_REPO_ROOT}/responses_api_agents/harbor_agent/example/onboarding/tasks
+          workdir: /app
+      harbor_agent_name: null
+      harbor_agent_import_path: responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym
+      harbor_agent_kwargs:
+        max_turns: 3
+        enable_summarize: false
+        collect_rollout_details: true
+        trajectory_config:
+          raw_content: true
+        nemo_model_server_timeout_sec: 60
+        model_info:
+          max_input_tokens: 8192
+          max_output_tokens: 512
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+      harbor_environment_type: docker
+      harbor_environment_kwargs: {}
+      harbor_no_delete: false
+      harbor_agent_max_timeout: 180
+      harbor_verifier_max_timeout: 10
+      harbor_timeout_multiplier: 1.0
+      harbor_jobs_dir: ${oc.env:GYM_HARBOR_RUN_DIR}/native-jobs
+      model_server:
+        type: responses_api_models
+        name: policy_model
