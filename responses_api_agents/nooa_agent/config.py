@@ -132,6 +132,14 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = Field(default=10, gt=0)
     concurrency: int = Field(default=8, gt=0)
     run_timeout_secs: float = Field(default=2100, gt=0)
+    # Native .nooa.jsonl journal location. The import-time default honours the
+    # NOOA_TRACE_DIR env var, but that only sees the SERVER process env — a
+    # per-run export in the eval process was silently ignored and journals
+    # landed in the default dir. Set this knob (or trace_dir in the overlay
+    # yaml) so a run's journal lands next to its own artifacts.
+    nooa_trace_dir: str | None = None
+    # Experiment tag attached to exported traces (falls back to TRACE_EXPERIMENT).
+    trace_experiment: str | None = None
 
 
 def load_agent_class(path: str) -> type[Agent]:

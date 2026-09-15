@@ -81,6 +81,70 @@ def _configure_native_file_journal() -> None:
 _configure_native_file_journal()
 
 
+def _apply_trace_config(config: "NOOAAgentConfig") -> None:
+    """Point the native journal at the config's per-run trace dir/experiment.
+
+    ``_configure_native_file_journal`` runs at *import* time and honours the
+    NOOA_TRACE_DIR / TRACE_EXPERIMENT env vars of whichever process imported
+    this module — the Gym head server. An eval-side ``export NOOA_TRACE_DIR=...``
+    never reaches that process, so per-run journals silently landed in the
+    default dir (observed on TB circuit-fibsqrt nemotron legs: attempts wrote to
+    results/native-traces/ instead of the per-leg native-traces5/). The agent
+    config IS delivered to the server via the overlay yaml — the same channel
+    model_call_capture_dir uses — so prefer it here and reconfigure the
+    exporters at agent construction, before any spans exist.
+    """
+    import os
+
+    trace_dir = getattr(config, "nooa_trace_dir", None)
+    experiment = getattr(config, "trace_experiment", None)
+    if not trace_dir and not experiment:
+        return
+
+    if trace_dir:
+        os.environ["NOOA_TRACE_DIR"] = trace_dir
+    if experiment:
+        os.environ["TRACE_EXPERIMENT"] = experiment
+
+    exporters = []
+    if trace_dir:
+        from nooa.tracing import exporters as nooa_exporters
+
+        exporters.append(nooa_exporters.journal_file(trace_dir))
+    endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:5001")
+    try:
+        from nooa.tracing import probe_otlp_endpoint
+
+        if probe_otlp_endpoint(endpoint):
+            from nooa.tracing import exporters as nooa_exporters
+
+            exporters.append(nooa_exporters.journal(endpoint=endpoint))
+    except Exception:
+        pass
+    if exporters:
+        from nooa.tracing import enable_tracing
+
+        enable_tracing(exporters=exporters)
+
+    # Re-tag the live provider's resource so OTLP exports carry the configured
+    # experiment. Resource attrs are frozen at first enable_tracing otherwise,
+    # and spans capture the provider resource at start — this runs at agent
+    # construction, before any span of the rollout exists.
+    if experiment:
+        try:
+            from opentelemetry import trace
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+
+            provider = trace.get_tracer_provider()
+            if isinstance(provider, SDKTracerProvider):
+                provider._resource = provider._resource.merge(
+                    Resource.create({"experiment": experiment})
+                )
+        except Exception:  # pragma: no cover - observability must never kill a run
+            pass
+
+
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
 NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
 
@@ -182,6 +246,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             resources_server_name=self.config.resources_server.name,
             max_steps=self.config.max_steps,
         )
+        _apply_trace_config(self.config)
         super().model_post_init(context)
 
     async def _episode(
