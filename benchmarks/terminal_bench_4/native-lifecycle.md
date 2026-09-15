@@ -3,7 +3,7 @@
 ## Implementation and compatibility
 
 The TB4 resources server uses `gym-tb4-native`, version `1`. Harbor is no longer a
-TB4 dependency. The agent handoff schemas, mini-SWE/OpenCode profiles, model
+TB4 dependency. The agent handoff schemas, mini-SWE profile, model
 routing, task pins, image pins, and official grading commands remain unchanged.
 The earlier [agent/resources migration](migration.md) is a historical record of
 the Harbor-backed reference implementation.
@@ -65,7 +65,7 @@ The complete execution field inventory maps to:
 | Image, CPU, memory, storage, GPU count/type, build budget | `task.py`, `environment.py` |
 | Environment variables, user, workdir, health check | `task.py`, `environment.py` |
 | Compose commands, dependencies, image metadata, capabilities, shared memory | Existing Compose normalizer and Gym Compose/provider APIs |
-| MCP declarations and task skills directory | Existing seed schema and unchanged agent implementations |
+| MCP declarations and task skills directory | Existing seed schema and unchanged mini-SWE implementation |
 | Artifact source/destination/exclusions/service, collect hooks | `collection.py`, `transfers.py` |
 | Separate verifier image/settings, network policy, execution budget, verifier env/user | `verifier.py`, `environment.py`, `lifecycle.py` |
 | Descriptive task/author metadata | Accepted without changing execution |
@@ -119,24 +119,18 @@ snapshots; the unchanged `ks-solver-cpp` solution still earns 1.0.
 
 The current GPU endpoint rejects EFS host paths, so GPU tasks retain their
 original filesystem/transfer lifecycle with an explicit fallback diagnostic.
-Enabling EFS on that endpoint remains deployment work. OpenCode reaches official
-verification for `rs-archive-clone`, but `risk-scorer-replay` encounters a separate
-harness setup limitation: its image lacks curl and the non-root user cannot
-install system packages. The full native baseline below predates the EFS update;
-this follow-up is representative smoke coverage, not a new 66-task baseline.
+Enabling EFS on that endpoint remains deployment work. The full native baseline
+below predates the EFS update; this follow-up is representative smoke coverage,
+not a new 66-task baseline.
 
 The frozen source is `flafrance/terminal-bench-4` at `8b41d2fdf`, plus the existing
 uncommitted SYS_PTRACE provider/config/test changes. It is preserved in the
-separate `Gym-tb4-reference` checkout. The baseline health records are captured in
-[health-baseline.json](health-baseline.json). OpenCode has 50/52 CPU, 9/11 Compose,
-and 3/3 GPU healthy; mini-SWE has 5/5 sampled CPU, 8/11 Compose, and 3/3 GPU healthy.
-The later OpenCode SYS_PTRACE follow-up is included in that baseline.
-
-The subsequent full-CPU mini-SWE sweep uses those five measured mini-SWE tasks
-and the OpenCode CPU results as expectations for the 47 previously unmeasured
-mini-SWE tasks. These cross-harness expectations are recorded separately in
-`cpu-miniswe-expectations.json`; the frozen reference baseline is preserved.
-Fresh mini-SWE reference runs reproduce both known CPU setup failures.
+separate `Gym-tb4-reference` checkout. The mini-SWE baseline health records are
+captured in [health-baseline.json](health-baseline.json): 5/5 sampled CPU,
+8/11 Compose, and 3/3 GPU healthy. The subsequent full CPU sweep measured all
+52 tasks with mini-SWE; use [health-native-miniswe-cpu.json](health-native-miniswe-cpu.json)
+for current CPU comparisons. Fresh mini-SWE reference runs reproduce both known
+CPU setup failures.
 
 Pass `--baseline-health benchmarks/terminal_bench_4/health-baseline.json` to the
 smoke runner. It records baseline status and regressions, and advances CPU →
@@ -159,7 +153,7 @@ The recorded timeout and response survive retries. Pre-commit checks pass.
 
 The first GPU sweep caught a conventional artifact-directory initialization
 regression on `fp8-rmsnorm-gemm`. Restoring the reference directory layout fixed
-both harnesses; a regression fixture reproduces the failed directory probe and
+mini-SWE; a regression fixture reproduces the failed directory probe and
 checks restoration. The original failed attempts remain in the validation
 artifacts alongside the successful reruns.
 
@@ -177,22 +171,18 @@ request replay evidence, and successful reruns remain in the validation artifact
 
 Smokes used `gpt-5.4-mini-2026-03-17`, three agent steps, and a 900-second agent
 cap. The initial rollout followed CPU → Compose → GPU; the subsequent mini-SWE
-sweep expanded CPU coverage from five representatives to all 52 CPU tasks. Both
-harnesses have now exercised all 66 tasks. The full mini-SWE CPU sweep was 47/52
+sweep expanded CPU coverage from five representatives to all 52 CPU tasks.
+mini-SWE has now exercised all 66 tasks. The full mini-SWE CPU sweep was 47/52
 healthy on its first attempt and 49/52 after the recorded retries.
 
 | Harness | Category | Baseline healthy | Native healthy |
 | --- | --- | ---: | ---: |
-| OpenCode | CPU | 50/52 | 50/52 |
-| OpenCode | Compose | 9/11 | 9/11 |
-| OpenCode | GPU | 3/3 | 3/3 |
 | mini-SWE | CPU | 5/5 sampled | 49/52 |
 | mini-SWE | Compose | 8/11 | 9/11 |
 | mini-SWE | GPU | 3/3 | 3/3 |
 
 All previously measured healthy results remain healthy. `kv-live-surgery` is
-newly healthy with mini-SWE. The newly covered `retro-console-soc` remains below
-the cross-harness CPU expectation: the full sweep and unchanged-profile retry
+newly healthy with mini-SWE. The newly covered `retro-console-soc` remains unhealthy: the full sweep and unchanged-profile retry
 submitted Verilog stubs with `frame_done` permanently low. The official tests
 allow two 600-second simulations inside a 1,200-second overall verifier budget,
 so these submissions time out without an official reward. Replaying the first
@@ -212,10 +202,8 @@ Live category results and cleanup audit are recorded in `health-report.md` in
 that artifact directory. The complete native mini-SWE CPU measurements are
 committed separately in [health-native-miniswe-cpu.json](health-native-miniswe-cpu.json);
 pass that file to `--baseline-health` for future mini-SWE CPU comparisons.
-`native-health.json` in the artifact directory contains both harnesses across all
-66 tasks. Capped smoke rewards are not benchmark scores. The
-standalone OpenCode smoke retains its public model endpoint mode and does not
-certify remote Gym model routing. The official MCP task remains subject to its
+`native-health.json` in the artifact directory includes the historical results
+across all 66 tasks. Capped smoke rewards are not benchmark scores. The official MCP task remains subject to its
 existing deployment blocker; mocked routing or a different MCP task is not a
 substitute for that missing live coverage.
 

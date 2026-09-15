@@ -16,10 +16,8 @@
 import asyncio
 import json
 import logging
-import sqlite3
 import sys
 import time
-from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
@@ -38,7 +36,6 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -53,9 +50,6 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
-from nemo_gym.server_utils import get_server_url
-from responses_api_agents.opencode_agent.app import _parse_opencode_session
 
 
 logger = logging.getLogger(__name__)
@@ -76,9 +70,6 @@ def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
-    model_server: ModelServerRef | None = None
-    opencode_context_window: int = Field(default=262144, gt=0)
-    opencode_max_steps: int | None = Field(default=None, gt=0)
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
@@ -139,41 +130,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
         ## Harbor owns the full run() lifecycle.
         raise NotImplementedError
 
-    def rollout_id_from_run(self, body) -> str | None:
-        # HarborRunRequest gives the Gym index aliases named Pydantic fields;
-        # the base correlator otherwise looks for their original _ng_* names.
-        if isinstance(body, HarborRunRequest):
-            body = body.model_dump(by_alias=True)
-        return super().rollout_id_from_run(body)
-
-    def configure_opencode(self, job_config: JobConfig, body: HarborRunRequest) -> None:
-        """Route OpenCode through Gym while retaining Harbor's task configuration."""
-        if self.config.model_server is None and self.config.opencode_max_steps is None:
-            return
-        agent = job_config.agents[0].model_copy(deep=True)
-        if agent.name != "opencode":
-            raise ValueError("model_server and opencode_max_steps require the OpenCode harness")
-        overlay = deepcopy(agent.kwargs.get("opencode_config") or {})
-        if self.config.model_server is not None:
-            agent.model_name = "nemo_gym/dummy_model"
-            base_url = self.base_url_for_run(get_server_url(self.config.model_server.name), body) + "/v1"
-            window = self.config.opencode_context_window
-            overlay.setdefault("provider", {})["nemo_gym"] = {
-                "npm": "@ai-sdk/openai-compatible",
-                "options": {
-                    "baseURL": base_url,
-                    "apiKey": "dummy_key",  # pragma: allowlist secret
-                    "timeout": False,
-                    "chunkTimeout": 600000,
-                },
-                "models": {"dummy_model": {"limit": {"context": window, "input": window, "output": window}}},
-            }
-        if self.config.opencode_max_steps is not None:
-            for name in ("build", "general", "explore", "scout"):
-                overlay.setdefault("agent", {}).setdefault(name, {})["steps"] = self.config.opencode_max_steps
-        agent.kwargs["opencode_config"] = overlay
-        job_config.agents = [agent]
-
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
             try:
@@ -182,7 +138,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ## Use a stable job name to allow resume.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
-                self.configure_opencode(job_config, body)
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"), body.task_name
@@ -424,20 +379,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         return output_items
 
-    @staticmethod
-    def opencode_observations(trajectory_paths: list[Path]) -> AgentObservationBundle:
-        """Reuse Gym's OpenCode producer on Harbor's saved session databases."""
-        combined = AgentObservationBundle(source="opencode")
-        for path in trajectory_paths:
-            database = path.parent / "opencode/xdg-data/opencode/opencode.db"
-            try:
-                observations = _parse_opencode_session(database, str(path.parent))
-                combined.records.extend(observations.records)
-                combined.gaps.extend(observations.gaps)
-            except (sqlite3.DatabaseError, OSError, ValueError) as exc:
-                combined.gaps.append(ObservationGap(code="agent_artifact_unreadable", detail=type(exc).__name__))
-        return combined
-
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         trial_paths = TrialPaths(trial_dir)
         trial = TrialResult.model_validate_json(trial_paths.result_path.read_text())
@@ -458,25 +399,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
-        trajectories: list[Trajectory] = []
+        trajectories = [
+            Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
+        ]
         conversion_warnings: list[str] = []
-        output = []
-        for _, trajectory_path in path_entries:
-            try:
-                trajectory_json = trajectory_path.read_text()
-            except FileNotFoundError:
-                if not self.has_graded_agent_exception(trial):
-                    raise
-                # A stopped agent may never export ATIF, while Harbor still runs
-                # its verifier. Keep the official grade and disclose missing IO.
-                conversion_warnings.append(
-                    f"ATIF trajectory missing after a graded agent exception: {trajectory_path}"
-                )
-                output.append([])
-            else:
-                trajectory = Trajectory.model_validate_json(trajectory_json)
-                trajectories.append(trajectory)
-                output.append(self.convert_atif_to_gym_responses(trajectory, conversion_warnings))
+        output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
 
         if len(output) > 1:
             logger.warning(
@@ -536,23 +463,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     },
                 ),
                 "reward": reward,
-                "harbor_exception": (
-                    {
-                        "type": trial.exception_info.exception_type,
-                        "message": trial.exception_info.exception_message,
-                    }
-                    if trial.exception_info is not None
-                    else None
-                ),
-                **(
-                    {
-                        "ng_agent_observations": self.opencode_observations(
-                            [trajectory_path for _, trajectory_path in path_entries]
-                        )
-                    }
-                    if self.config.harbor_agent.name == "opencode"
-                    else {}
-                ),
                 "atif_conversion": {
                     "lossless": not conversion_warnings,
                     "warnings": conversion_warnings,
@@ -595,17 +505,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
         )
 
     @staticmethod
-    def has_graded_agent_exception(trial: TrialResult) -> bool:
-        # Harbor still grades agent timeouts and nonzero exits. Preserve that
-        # official reward while retaining the agent error in the rollout.
-        return (
-            trial.exception_info is not None
-            and trial.exception_info.exception_type in {"AgentTimeoutError", "NonZeroAgentExitCodeError"}
-            and trial.verifier_result is not None
-            and bool(trial.verifier_result.rewards)
-        )
-
-    @staticmethod
     async def run_job(job_config_dict: dict, task_name: str) -> str:
         job_config = JobConfig.model_validate(job_config_dict)
         job_err: Exception | None = None
@@ -630,12 +529,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
-                if trial_result.exception_info is not None and not HarborAgent.has_graded_agent_exception(
-                    trial_result
-                ):
+                if trial_result.exception_info is not None:
                     exception_info = trial_result.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
-                    result_path.replace(result_path.with_name("failed-result.json"))
+                    result_path.unlink()
                     raise RuntimeError(
                         f"Harbor trial failed with {exception_info.exception_type}: {exception_info.exception_message}"
                     )

@@ -26,8 +26,8 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
+from resources_servers.terminal_bench_4.compose_config import resolve_compose
 from resources_servers.terminal_bench_4.task import Settings, resolve_env
-from responses_api_agents.harbor_agent_general.compose_config import resolve_compose
 
 
 class EnvironmentConfig(Settings):

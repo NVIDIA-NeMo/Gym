@@ -19,7 +19,7 @@ Other benchmarks and the general Harbor integrations remain supported by their
 existing code. This is not a repository-wide removal of Harbor.
 
 Do not introduce a workflow engine, plugin registry, generic benchmark schema,
-new server, or common session-manager API. Do not change mini-SWE/OpenCode prompts,
+new server, or common session-manager API. Do not change mini-SWE prompts,
 tool behavior, model routing, or their borrowed-sandbox interfaces.
 
 ## 1. Compatibility contract
@@ -35,7 +35,7 @@ Preserve these endpoints and their request/response schemas:
 
 Retain `SandboxConnection`, `SandboxedSeedResponse`, `AgentTermination`,
 `SandboxedVerifyRequest`, and `SandboxedVerifyResponse` in
-`nemo_gym/sandbox/handoff.py`. Retain `run_borrowed()` and both TB4 agent paths.
+`nemo_gym/sandbox/handoff.py`. Retain `run_borrowed()` and the mini-SWE TB4 agent path.
 The agent continues to attach using `owns_sandbox=False`; only resources destroy
 the sandbox collection. Provider credentials stay out of descriptors and records.
 
@@ -165,7 +165,7 @@ Keep the sequence in `lifecycle.py` and `collection.py` readable as straight-lin
 async code. Avoid a base environment class mirroring Harbor. A concrete owned
 collection may expose `main`, named services, and `stop()` using Gym objects.
 Retain the Compose normalization logic currently in
-`responses_api_agents/harbor_agent_general/compose_config.py`; it already has no
+`resources_servers/terminal_bench_4/compose_config.py`; it already has no
 Harbor imports. Avoid duplicating it solely to change its directory. Relocate it
 with compatibility imports only if the implementation establishes a clear need.
 
@@ -320,7 +320,7 @@ all preserve ownership and produce at most one evaluation per live session.
 - Point TB4 configs at the native implementation and remove TB4's Harbor runtime
   dependency. Update smoke source hashes, artifact readers, README, and migration
   notes. Keep the historical Harbor migration record identifiable as history.
-- Run real HTTP rollouts using both mini-SWE and OpenCode and the existing model
+- Run real HTTP rollouts using mini-SWE and the existing model
   routing, inspecting actual agent actions, verifier outputs, and cleanup.
 - Cover the feature matrix below; run all 66 task preparations and supported
   task evaluations, documenting infrastructure blockers explicitly. A blocked
@@ -346,7 +346,7 @@ or explicitly document their scope before declaring migration complete.
 | Sessions | Duplicate seed/start/verify, conflicting execution IDs, cookie isolation, verify-vs-timeout/cancel races, disconnected requests, late first verify after deadline |
 | Lifecycle | Worker disappears during setup/run, shutdown during every phase, provider cleanup failure, no leaked slots/transports/collections |
 | Persistence | Exact completed-response replay, closed evaluation without submission, legacy completed records, rejection of interrupted sessions |
-| Agents | Real mini-SWE and OpenCode episodes; task MCP and skills exercised where declared; unchanged model routing and usage/trajectory reporting |
+| Agents | Real mini-SWE episodes; task MCP and skills exercised where declared; unchanged model routing and usage/trajectory reporting |
 | Independence | Fresh TB4 environment with no Harbor package; preparation, server import/start, and representative end-to-end evaluation succeed |
 
 Use deterministic sandbox-boundary tests for races and collection behavior, plus
