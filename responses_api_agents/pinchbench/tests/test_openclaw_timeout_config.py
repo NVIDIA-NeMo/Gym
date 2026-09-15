@@ -125,6 +125,24 @@ def test_the_judge_timeout_is_absent_when_unset():
     assert "PINCHBENCH_JUDGE_TIMEOUT_SECONDS" not in env
 
 
+def test_provider_headers_reach_the_openclaw_provider(tmp_path):
+    headers = {"X-Inference-Priority": "batch", "X-Custom-Route": "pinchbench"}
+    agent = make_agent(provider_headers=headers)
+
+    assert json.loads(agent._task_env("task_x")["PINCHBENCH_PROVIDER_HEADERS"]) == headers
+
+    config = _generate_openclaw_config(tmp_path, provider_headers=headers)
+    assert config["models"]["providers"]["custom"]["headers"] == headers
+
+
+def test_provider_headers_are_absent_when_unset(tmp_path):
+    env = make_agent()._task_env("task_x")
+    config = _generate_openclaw_config(tmp_path)
+
+    assert "PINCHBENCH_PROVIDER_HEADERS" not in env
+    assert "headers" not in config["models"]["providers"]["custom"]
+
+
 def test_the_baked_patch_reads_the_judge_timeout_from_the_environment():
     """lib_grading hardcodes DEFAULT_JUDGE_TIMEOUT_SECONDS, so the patch must
     make it configurable; the judge runs a full OpenClaw session and its

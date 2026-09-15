@@ -24,9 +24,25 @@ from vllm.platforms import resolve_obj_by_qualname
 import responses_api_models.local_vllm_model.app
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, DictConfig
 from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
+from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
 
 
 class TestApp:
+    def test_local_dp_ranks_increment_per_worker_node(self, monkeypatch) -> None:
+        placement_groups = [object(), object(), object(), object()]
+        node_ids = ["node-a", "node-b", "node-a", "node-b"]
+        placement_group_data = {
+            placement_group: {"bundles_to_node_id": {0: node_id}}
+            for placement_group, node_id in zip(placement_groups, node_ids)
+        }
+        monkeypatch.setattr(
+            responses_api_models.local_vllm_model.local_vllm_model_actor.ray.util,
+            "placement_group_table",
+            placement_group_data.__getitem__,
+        )
+
+        assert _get_local_dp_ranks(placement_groups) == [0, 0, 1, 1]
+
     def test_sanity_vllm_import(self) -> None:
         import vllm
 

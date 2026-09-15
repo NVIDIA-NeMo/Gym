@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
 import os
 import shlex
 import shutil
+import signal
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +29,7 @@ from time import time
 from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
+import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -354,8 +357,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
-    context_window: int = 262144
-    max_output_tokens: int = 131072
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
 
@@ -383,6 +386,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     config: OpenClawAgentConfig
     sem: Semaphore = None
+    sigterm_events: set = Field(default_factory=set)
+    sigterm_handler_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # deny the interactive "message" channel so the headless agent finishes
@@ -418,22 +423,23 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if self.config.model_server:
             providers = cfg.setdefault("models", {}).setdefault("providers", {})
             nemo = providers.setdefault("nemo", {})
+            model_entry = {
+                "id": self.config.model,
+                "name": self.config.model,
+                "api": "openai-completions",
+                "reasoning": True,
+                "input": ["text"],
+            }
+            if self.config.context_window is not None:
+                model_entry["contextWindow"] = self.config.context_window
+            if self.config.max_output_tokens is not None:
+                model_entry["maxTokens"] = self.config.max_output_tokens
             nemo.update(
                 {
                     "api": "openai-completions",
                     "baseUrl": self._resolve_model_base_url(rollout_id),
                     "apiKey": "EMPTY",  # pragma: allowlist secret
-                    "models": [
-                        {
-                            "id": self.config.model,
-                            "name": self.config.model,
-                            "api": "openai-completions",
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": self.config.context_window,
-                            "maxTokens": self.config.max_output_tokens,
-                        }
-                    ],
+                    "models": [model_entry],
                 }
             )
         self._merge_headless_tool_denies(cfg)
@@ -479,10 +485,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            self._kill_process_tree(proc.pid)
             await proc.communicate()
             raise TimeoutError(f"Timed out after {timeout}s: {shlex.join(args)}") from None
+        except asyncio.CancelledError:
+            # Cancellation (e.g. SIGTERM salvage) only stops us from awaiting the process; it does
+            # not stop the process itself. Kill it here so we never leak an orphaned process tree.
+            self._kill_process_tree(proc.pid)
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """Kill a subprocess and every descendant it has already started."""
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for child in reversed(children):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            parent.kill()
 
     @staticmethod
     def _session_file(envelope: Optional[dict[str, Any]]) -> Optional[Path]:
@@ -490,6 +517,50 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
         session_file = agent_meta.get("sessionFile") if isinstance(agent_meta, dict) else None
         return Path(session_file) if isinstance(session_file, str) and session_file else None
+
+    @staticmethod
+    def _find_partial_session(home: Path) -> Optional[Path]:
+        """Locate OpenClaw's session file on disk when there is no completion envelope to point at
+        it, i.e. the run was cut short by a timeout. OpenClaw writes the session incrementally, so
+        the transcript up to the last completed turn is already on disk; return the most recently
+        written .jsonl under the OpenClaw home that parses to at least one message."""
+        try:
+            candidates = sorted(
+                (p for p in home.rglob("*.jsonl") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return None
+        for path in candidates:
+            try:
+                if parse_openclaw_session(path.read_text(errors="replace")):
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _install_sigterm_handler(self) -> None:
+        """Install one process-level wrapper that fans SIGTERM out to active runs.
+
+        Keep the event loop's existing handler registered so uvicorn still receives the signal
+        through Python's wakeup fd and performs its normal graceful shutdown.
+        """
+        if self.sigterm_handler_installed:
+            return
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm(signum, frame) -> None:
+            for event in self.sigterm_events:
+                event.set()
+            if callable(previous):
+                previous(signum, frame)
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+            self.sigterm_handler_installed = True
+        except ValueError:
+            pass  # signal handlers need the main thread; fall back to timeout-only salvage
 
     async def _run_openclaw(
         self,
@@ -509,17 +580,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         try:
             code, _, stderr = await self._run_exec(
-                [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
+                [*self.config.command_parts, "onboard", "--non-interactive", "--accept-risk", "--skip-health"],
                 cwd=str(work_dir),
                 env=env,
                 timeout=self.config.setup_timeout,
             )
             if code:
-                LOG.warning("openclaw setup exited %d: %s", code, stderr)
+                raise RuntimeError(f"openclaw onboard exited {code}: {stderr}")
 
             config_path = home / ".openclaw" / "openclaw.json"
             if not config_path.is_file():
-                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}: {stderr}")
+                raise RuntimeError(f"openclaw onboard did not produce a config at {config_path}: {stderr}")
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 
@@ -538,16 +609,48 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 prompt,
                 *self.config.extra_args,
             ]
-            code, stdout, stderr = await self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            # Run OpenClaw, salvaging a partial transcript if the run is cut short. It can be cut
+            # short two ways: our own self.config.timeout (raises TimeoutError), or an outer
+            # harness/sandbox timeout that SIGTERMs this whole process during its grace window before
+            # SIGKILL. In the SIGTERM case a plain `finally` would not run in time and the workdir
+            # would be lost, so we stop waiting on the signal, read OpenClaw's incrementally-written
+            # session off disk, and return it. Returning quickly lets the harness still write the
+            # response before the SIGKILL, so no harness change is needed.
+            code, stdout, stderr = None, "", ""
+            self._install_sigterm_handler()
+            sigterm_hit = asyncio.Event()
+            self.sigterm_events.add(sigterm_hit)
+            run_task = asyncio.ensure_future(
+                self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            )
+            try:
+                term_task = asyncio.ensure_future(sigterm_hit.wait())
+                done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
+                term_task.cancel()
+                if run_task in done:
+                    code, stdout, stderr = run_task.result()
+                else:
+                    LOG.warning("openclaw received SIGTERM; salvaging partial session")
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await run_task
+            except TimeoutError:
+                LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
+            finally:
+                self.sigterm_events.discard(sigterm_hit)
+
             if code:
                 LOG.warning("openclaw exited %d: %s", code, stderr)
-            LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
+            if stdout:
+                LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
 
             fallback_items, usage = parse_openclaw_output(stdout)
             envelope = _decode_last_json_dict_suffix(stdout)
 
+            # On a normal finish the envelope points at the session file; on a cut-short run there is
+            # no envelope, so fall back to locating the partial session that OpenClaw wrote to disk.
             output_items: list[Any] = []
-            session_path = self._session_file(envelope)
+            session_path = self._session_file(envelope) or self._find_partial_session(home)
             if session_path and session_path.is_file():
                 session_text = session_path.read_text(errors="replace")
                 output_items = parse_openclaw_session(session_text)

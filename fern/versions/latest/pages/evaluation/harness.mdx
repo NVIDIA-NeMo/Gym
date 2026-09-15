@@ -1,0 +1,91 @@
+---
+title: "Compare Harnesses"
+description: "Ablate the agent harness the same way you ablate the model — swap it, hold everything else fixed, and measure the score delta."
+position: 3
+---
+
+An agent harness turns a model into an agent: it manages conversation state, routes tool calls, and
+decides when a task is complete. Two harnesses can produce materially different scores on the same model and tasks, and a harness that performs well with one model may underperform with another. Treat the harness as an experimental variable to isolate and evaluate, not a fixed part of the environment
+
+`--agent-type` runs an environment or benchmark with a harness other than the one its config names,
+without editing any config. To ablate the harness, hold everything else fixed — model, dataset, and repeat count — and vary only `--agent-type`, writing each run to its own output:
+
+```bash
+gym list agents
+gym eval run \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+```
+
+Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation — for example (illustrative, not real output):
+
+| Harness | Pass rate |
+|---|---|
+| `opencode_sandboxed_agent` | 41% |
+| `terminus_2_sandboxed_agent` | 68% |
+
+A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
+[Swapping the agent](/reference/cli-commands#swapping-the-agent).
+
+## The composed instance is renamed
+
+Composition replaces the environment's agent and renames the server instance after the harness that
+runs it, so metrics and `gym env status` report what actually ran. Composing
+`terminus_2_sandboxed_agent` onto `terminal_bench_2_1_opencode_sandboxed_agent` produces
+`terminal_bench_2_1_terminus_2_sandboxed_agent`.
+
+That name is what you use to route rollouts when the servers are already up:
+
+```bash
+gym env start \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
+```
+
+End-to-end rollouts collection (without the `--no-serve` flag) keeps working — rows stamped with the
+pre-swap instance are re-routed for you under the hood.
+
+## Not every pairing is valid
+
+A verifier is written against the behavior of a particular harness. A resources server can declare
+which harnesses are compatible with it in
+[`allowed_agents`](/reference/configuration#resources-server-fields), and Gym refuses an undeclared
+pairing before any server starts:
+
+```text
+'simple_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
+so it cannot be scored correctly:
+  - terminal_bench_2_1_opencode_sandboxed_agent uses terminal_bench_2_1_opencode_resources_server
+    and accepts opencode_sandboxed_agent, terminus_2_sandboxed_agent
+
+Select one of: opencode_sandboxed_agent, terminus_2_sandboxed_agent. Or pass
+--allow-unsupported-pairing (or set NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
+```
+
+<Warning>
+`--allow-unsupported-pairing` bypasses this check at your own risk: an unsupported harness can score incorrectly without erroring.
+</Warning>
+
+A server that declares nothing accepts any harness — such environments are swappable without further
+setup.
+
+## Self-contained environments
+
+Some agent servers own their environment and declare no resources server. Those are left alone by a swap,
+because there would be nothing for the incoming harness to bind to. If every agent in a config
+is self-contained, selecting a harness fails with `no other agent instance to rehost it on`.
+
+<Cards>
+
+<Card title="Configure Agents" href="/agent-server">
+Set up a built-in or custom agent harness.
+</Card>
+
+<Card title="CLI Reference" href="/reference/cli-commands#swapping-the-agent">
+Flags, modes, and error messages for agent selection.
+</Card>
+
+</Cards>

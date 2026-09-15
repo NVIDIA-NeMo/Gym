@@ -1,0 +1,89 @@
+---
+title: "Metrics"
+description: ""
+position: 5
+---
+NeMo Gym emits a small, deliberate set of metrics. This page lists them, and explains what
+is deliberately absent and why.
+
+## Application Telemetry, Not Experiment Telemetry
+
+These metrics answer "how is this software behaving?" — where time goes, what failed, how
+a configuration performs on hardware you do not control.
+
+They do not answer "how is my run doing?" Reward, accuracy, and benchmark scores are
+experiment telemetry. They belong in Weights & Biases or MLflow, which are built for
+comparing runs and keep data for the lifetime of a project. NeMo Gym already reports them
+through `AggregateMetricsMixin` and continues to do so, unchanged.
+
+Mirroring reward into OpenTelemetry would put a number in a system that aggregates across
+every deployment and retains for weeks. That is the wrong home for it, and the two systems
+would disagree the first time one dropped a sample.
+
+## Metrics NeMo Gym Emits
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.rollout.duration_ms` | Histogram | ms | Wall-clock duration of one rollout, from the agent server's `/run`. |
+| `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
+| `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
+| `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
+
+Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
+wall-clock time, and dropping those samples would bias the histogram toward the fast path.
+
+### What `gym.verify.success_rate` Measures
+
+It measures whether the **verification call completed**, not whether the task passed.
+
+A verifier that correctly scores a wrong answer is a success. A verifier that raises an
+exception is a failure. Task correctness is experiment telemetry, and putting it here would
+turn this into a low-resolution accuracy metric living in the wrong system.
+
+The value is cumulative over the reporting process's lifetime, not a windowed rate. A gauge
+carries last-value semantics, so a rate cannot be expressed directly. A long-lived server
+therefore shows a figure that moves more slowly as it ages. Read it as "this process's
+success fraction so far," and use traces for anything finer.
+
+### Why Only the Orchestrator Reports `gym.servers.active`
+
+`gym.servers.active` is a gauge, so the exported value is whichever process wrote last.
+If every server reported it, the result would be neither the fleet size nor any process's
+view of it. The orchestrator is the only process that knows how many servers it started,
+so it is the only writer. It sets the count after startup and zero on shutdown.
+
+## HTTP Metrics
+
+FastAPI auto-instrumentation emits the standard HTTP server metrics on every NeMo Gym
+server:
+
+| Metric | Dimensions |
+| --- | --- |
+| `http.server.request.duration` | `http.route`, `http.request.method`, `http.response.status_code` |
+
+Use these for request latency. They are dimensioned, so you can compare `/verify` against
+`/v1/responses`, or isolate 500s, which is what latency questions usually require.
+
+### A Note on `gym.server.request_duration_ms`
+
+`nemo-lens` declares a `gym.server.request_duration_ms` histogram. NeMo Gym does not use
+it.
+
+At the pinned `nemo-lens` version, that instrument records without attributes. Every
+endpoint of every server type would land in one undimensioned histogram: a verification,
+an inference call, and a liveness probe sharing one set of buckets. The result answers no
+question anyone has. The dimensioned `http.server.request.duration` above supersedes it.
+
+## Enabling and Disabling
+
+Metrics follow the master switch and can be turned off independently:
+
+```yaml
+telemetry:
+  enabled: true
+  metrics_enabled: false   # traces only
+```
+
+Metrics export on a timer. The default interval is 10 seconds and is configurable with the
+standard `OTEL_METRIC_EXPORT_INTERVAL` environment variable, in milliseconds. A process
+that lives for less than one interval may exit before exporting anything.

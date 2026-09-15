@@ -14,6 +14,7 @@ gpqa_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: gpqa_mcqa_resources_server
       datasets:
