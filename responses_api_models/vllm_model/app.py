@@ -516,11 +516,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
         with self._generation_cut_restore_lock:
             for prefix in receipt.prefixes:
-                if (
-                    prefix.disposition != "durable_prefix"
-                    or prefix.frozen_buffer_id is None
-                    or not prefix.frozen_buffer_id.startswith("active/")
-                ):
+                if prefix.disposition != "durable_prefix" or prefix.cut_kind != "active_prefix":
                     continue
                 replacement = (prefix.rollout_id, prefix.attempt_index + 1)
                 if replacement in excluded_replacements:
