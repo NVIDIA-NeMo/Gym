@@ -946,17 +946,16 @@ def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
     assert "uv pip install" not in dockerfile
 
 
-def test_lint_workflow_provisions_pre_commit_before_lint() -> None:
-    # lint.sh resolves pre-commit from PATH (the lockfile dev extra). setup_dev.sh
-    # sources the dev venv's activate, which only affects the current shell, so the
-    # lint job must run setup_dev.sh and lint.sh in the SAME step (setup first).
+def test_lint_workflow_installs_only_pinned_pre_commit() -> None:
+    # The lint job must NOT source setup_dev.sh: its uv fallback could download a remote
+    # installer. It provisions only the pinned pre-commit and runs it directly.
     steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
         "lint-check"
     ]["steps"]
     run_cmds = [step.get("run", "") for step in steps]
+    joined = "\n".join(run_cmds)
 
-    (lint_cmd,) = (cmd for cmd in run_cmds if "scripts/ci/lint.sh" in cmd)
-    assert "scripts/ci/setup_dev.sh" in lint_cmd, "lint.sh must share a step with setup_dev.sh"
-    assert lint_cmd.index("scripts/ci/setup_dev.sh") < lint_cmd.index(
-        "scripts/ci/lint.sh"
-    ), "setup_dev.sh must run before lint.sh"
+    assert "scripts/ci/setup_dev.sh" not in joined, "lint job must not source setup_dev.sh (uv installer risk)"
+    assert "scripts/ci/lint.sh" not in joined, "lint job should not invoke lint.sh directly"
+    assert "pre-commit==4.3.0" in joined, "lint job must install the pinned pre-commit"
+    assert "pre-commit run --all-files" in joined, "lint job must run pre-commit"

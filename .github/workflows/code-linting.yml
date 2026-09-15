@@ -32,8 +32,9 @@ jobs:
           submodules: 'recursive'
 
       - name: Check lint
-        # setup_dev.sh activates the dev venv (pre-commit) in the current shell, so it
-        # must run in the SAME step as lint.sh for the PATH change to be visible.
+        # Provision only the pinned pre-commit into an isolated venv; do NOT source
+        # setup_dev.sh here (its uv fallback would download a remote installer).
         run: |
-          source ./scripts/ci/setup_dev.sh
-          ./scripts/ci/lint.sh
+          python -m venv .cache/lint-venv
+          .cache/lint-venv/bin/python -m pip install --disable-pip-version-check pre-commit==4.3.0
+          .cache/lint-venv/bin/pre-commit run --all-files --show-diff-on-failure --color=always
