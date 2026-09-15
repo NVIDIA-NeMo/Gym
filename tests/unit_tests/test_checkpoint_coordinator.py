@@ -34,6 +34,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -47,7 +48,10 @@ from nemo_gym._checkpoint import (
     AdmissionParkedError,
     AdmissionState,
     AgentBoundaryRecord,
+    AgentCheckpointCoordinatorService,
     AgentCheckpointParticipant,
+    AgentCheckpointWorkerHandler,
+    AgentCompletedExecutionAcknowledgementError,
     AgentStaleAttemptError,
     ContinuationAlreadyOwnedError,
     ContinuationRetiredError,
@@ -125,6 +129,162 @@ async def _stop_pool(pool: _Pool) -> None:
     for _, agent in pool.workers:
         await agent.stop()
     await pool.coordinator.stop()
+
+
+async def _start_agent_checkpoint_pool(
+    socket_path: Path,
+) -> tuple[
+    AdmissionCoordinator,
+    AgentCheckpointCoordinatorService,
+    list[tuple[AgentCheckpointParticipant, WorkerAdmissionAgent]],
+]:
+    coordinator = AdmissionCoordinator(socket_path, expected_workers=2)
+    service = AgentCheckpointCoordinatorService(coordinator, instance_name="agent")
+    coordinator.service_handler = service
+    await coordinator.start()
+    workers = []
+    for index in range(2):
+        limiter = AdmissionLimiter()
+        worker = WorkerAdmissionAgent(coordinator.socket_path, f"agent-worker-{index}", limiter)
+        participant = AgentCheckpointParticipant(
+            "agent",
+            continuation_registry=worker.continuation_registry_client(),
+            owner_id=worker.worker_id,
+        )
+        worker.command_handler = AgentCheckpointWorkerHandler(participant)
+        await worker.start()
+        workers.append((participant, worker))
+    await coordinator.wait_until(lambda status: status["workers"]["live"] == 2, timeout_s=2.0)
+    return coordinator, service, workers
+
+
+async def _stop_agent_checkpoint_pool(
+    coordinator: AdmissionCoordinator,
+    workers: list[tuple[AgentCheckpointParticipant, WorkerAdmissionAgent]],
+) -> None:
+    for _, worker in workers:
+        await worker.stop()
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_checkpoint_service_commits_and_restores_across_workers(sock_dir, tmp_path) -> None:
+    coordinator, service, workers = await _start_agent_checkpoint_pool(sock_dir / "source.sock")
+    executions = []
+    parked = []
+    try:
+        for index, (participant, _) in enumerate(workers):
+            rollout_id = f"rollout-{index}"
+            execution = await participant.begin(rollout_id, 0, task=asyncio.current_task())
+            executions.append((participant, execution))
+
+        deadline_ts = time.time() + 5.0
+        prepare = asyncio.create_task(
+            service(
+                "prepare",
+                {"checkpoint_id": "checkpoint-1", "deadline_ts": deadline_ts},
+            )
+        )
+        while any(participant.status()["state"] == "accepting" for participant, _ in workers):
+            await asyncio.sleep(0)
+        for index, (participant, execution) in enumerate(executions):
+            parked.append(
+                asyncio.create_task(
+                    participant.commit_boundary(
+                        execution,
+                        AgentBoundaryRecord(
+                            rollout_id=f"rollout-{index}",
+                            attempt_index=0,
+                            boundary_index=1,
+                            output_items=[],
+                            last_committed_model_call_id=f"call-{index}",
+                        ),
+                    )
+                )
+            )
+
+        prepared = await prepare
+        assert prepared["ready_to_commit"]
+        assert prepared["parked_with_boundary"] == 2
+        committed = await service(
+            "commit",
+            {
+                "checkpoint_id": "checkpoint-1",
+                "checkpoint_dir": str(tmp_path),
+                "deadline_ts": deadline_ts,
+            },
+        )
+        assert committed["records"] == 2
+        await service(
+            "resume",
+            {"checkpoint_id": "checkpoint-1", "deadline_ts": deadline_ts},
+        )
+        await asyncio.gather(*parked)
+        for participant, execution in executions:
+            await participant.finish(execution, outcome="failed")
+    finally:
+        await _stop_agent_checkpoint_pool(coordinator, workers)
+
+    restored_coordinator, restored_service, restored_workers = await _start_agent_checkpoint_pool(
+        sock_dir / "restored.sock"
+    )
+    try:
+        deadline_ts = time.time() + 5.0
+        restored = await restored_service(
+            "restore",
+            {
+                "checkpoint_id": "checkpoint-2",
+                "checkpoint_dir": str(tmp_path),
+                "deadline_ts": deadline_ts,
+            },
+        )
+        assert restored["records"] == 2
+        await restored_service(
+            "resume",
+            {"checkpoint_id": "checkpoint-2", "deadline_ts": deadline_ts},
+        )
+
+        owner = restored_workers[1][0]
+        replacement = await owner.begin("rollout-0", 1, task=None)
+        assert owner.continuation(replacement).last_committed_model_call_id == "call-0"
+        with pytest.raises(DuplicateExecutionError, match="already has an active /run"):
+            await restored_workers[0][0].begin("rollout-0", 1, task=None)
+        await owner.finish(replacement, outcome="failed")
+    finally:
+        await _stop_agent_checkpoint_pool(restored_coordinator, restored_workers)
+
+
+@pytest.mark.asyncio
+async def test_agent_checkpoint_service_validates_cross_worker_acknowledgements_before_release(sock_dir) -> None:
+    coordinator, service, workers = await _start_agent_checkpoint_pool(sock_dir / "acknowledgement.sock")
+    try:
+        receipts = []
+        for index, (participant, _) in enumerate(workers):
+            execution = await participant.begin(f"rollout-{index}", 0, task=asyncio.current_task())
+            await participant.finish(execution, outcome="completed", result={"reward": float(index)})
+            receipts.append(participant.completion_receipt(f"rollout-{index}", 0))
+
+        invalid = receipts[1].model_copy(update={"result_digest": "f" * 64})
+        with pytest.raises(AgentCompletedExecutionAcknowledgementError, match="receipt mismatch"):
+            await service(
+                "acknowledge_completed",
+                {
+                    "executions": [
+                        receipts[0].model_dump(mode="json"),
+                        invalid.model_dump(mode="json"),
+                    ]
+                },
+            )
+
+        assert all(participant.status()["completed_unacknowledged"] == 1 for participant, _ in workers)
+        acknowledged = await service(
+            "acknowledge_completed",
+            {"executions": [receipt.model_dump(mode="json") for receipt in receipts]},
+        )
+        assert acknowledged["acknowledged"] == [receipt.model_dump(mode="json") for receipt in receipts]
+        assert all(participant.status()["completed_unacknowledged"] == 0 for participant, _ in workers)
+    finally:
+        await _stop_agent_checkpoint_pool(coordinator, workers)
 
 
 @pytest.mark.asyncio

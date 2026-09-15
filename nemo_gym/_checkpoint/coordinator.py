@@ -43,7 +43,8 @@ import asyncio
 import json
 import threading
 from pathlib import Path
-from typing import Any, Callable, Generic, Hashable, Iterable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Generic, Hashable, Iterable, Optional, TypeVar
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, Query
 
@@ -207,6 +208,12 @@ class ContinuationRegistry(Generic[_ContinuationKey, _ContinuationValue]):
         with self._lock:
             return key in self._retired
 
+    def owner_id(self, key: _ContinuationKey) -> Optional[str]:
+        """Return the current worker owner, if this identity is active."""
+        with self._lock:
+            entry = self._entries.get(key)
+            return entry.owner_id if entry is not None else None
+
     def status(self) -> dict[str, int]:
         """Return bounded cardinality diagnostics without exposing payloads."""
         with self._lock:
@@ -245,6 +252,23 @@ class WorkerRegistrationError(ControlError):
     """A worker attempted to join while checkpoint membership was frozen."""
 
     code = "worker_registration_rejected"
+
+
+class WorkerCommandError(ControlError):
+    """One worker failed a service-level checkpoint operation."""
+
+    code = "worker_command_failed"
+
+
+class CoordinatorServiceError(ControlError):
+    """A coordinator-owned service operation failed."""
+
+    def __init__(self, detail: str, *, code: str = "coordinator_service_error") -> None:
+        super().__init__(detail)
+        self.code = code
+
+
+CHECKPOINT_COORDINATOR_SOCKET_ENV = "NG_CHECKPOINT_COORDINATOR_SOCKET"
 
 
 class WorkerRecord:
@@ -288,10 +312,12 @@ class AdmissionCoordinator:
         expected_workers: int,
         *,
         continuation_registry: Optional[ContinuationRegistry[Any, Any]] = None,
+        service_handler: Optional[Callable[[str, dict[str, Any]], Awaitable[Any]]] = None,
     ) -> None:
         self.socket_path = Path(socket_path)
         self.expected_workers = expected_workers
         self.continuation_registry = continuation_registry or ContinuationRegistry()
+        self.service_handler = service_handler
         self._workers: dict[str, WorkerRecord] = {}
         self._state = AdmissionState.ACCEPTING
         self._checkpoint_id: Optional[str] = None
@@ -300,6 +326,8 @@ class AdmissionCoordinator:
         self._tombstones: list[dict[str, Any]] = []
         self._server: Optional[asyncio.base_events.Server] = None
         self._changed = asyncio.Condition()
+        self._worker_command_results: dict[str, dict[str, dict[str, Any]]] = {}
+        self._request_tasks: set[asyncio.Task[Any]] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -317,6 +345,11 @@ class AdmissionCoordinator:
         for record in self._workers.values():
             if record.connected:
                 record.writer.close()
+        for task in self._request_tasks:
+            task.cancel()
+        if self._request_tasks:
+            await asyncio.gather(*self._request_tasks, return_exceptions=True)
+        self._request_tasks.clear()
         if self.socket_path.exists():
             self.socket_path.unlink()
 
@@ -384,6 +417,16 @@ class AdmissionCoordinator:
                     await self._notify()
                 elif kind == "continuation_request":
                     await self._handle_continuation_request(record, message)
+                elif kind == "service_request":
+                    task = asyncio.create_task(self._handle_service_request(record, message))
+                    self._request_tasks.add(task)
+                    task.add_done_callback(self._request_tasks.discard)
+                elif kind == "worker_command_result":
+                    command_id = str(message.get("command_id", ""))
+                    results = self._worker_command_results.get(command_id)
+                    if results is not None:
+                        results[record.worker_id] = message
+                        await self._notify()
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
         finally:
@@ -468,6 +511,98 @@ class AdmissionCoordinator:
                     "result": result,
                 },
             )
+
+    async def _handle_service_request(self, record: WorkerRecord, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id", ""))
+        operation = str(message.get("operation", ""))
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            if not request_id:
+                raise ValueError("service request_id must be non-empty")
+            if self.service_handler is None:
+                raise ValueError("checkpoint coordinator has no service handler")
+            result = await self.service_handler(operation, payload)
+        except ControlError as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": error.code,
+                "detail": error.detail,
+            }
+        except ValueError as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": "invalid_service_request",
+                "detail": str(error),
+            }
+        except Exception as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": "coordinator_service_error",
+                "detail": f"{type(error).__name__}: {error}",
+            }
+        else:
+            response = {
+                "type": "service_result",
+                "request_id": request_id,
+                "result": result,
+            }
+        try:
+            await self._write_to_worker(record, response)
+        except ConnectionResetError:
+            record.connected = False
+
+    async def run_worker_command(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float,
+        worker_ids: Optional[Iterable[str]] = None,
+    ) -> dict[str, Any]:
+        """Run one command on the selected frozen worker membership."""
+        live = {worker_id: record for worker_id, record in self._workers.items() if record.connected}
+        selected_ids = tuple(sorted(live if worker_ids is None else set(worker_ids)))
+        if not selected_ids:
+            raise MissingWorkersError("checkpoint command has no target workers")
+        missing = [worker_id for worker_id in selected_ids if worker_id not in live]
+        if missing:
+            raise MissingWorkersError(f"checkpoint command targets disconnected workers: {missing!r}")
+        if worker_ids is None and len(selected_ids) != self.expected_workers:
+            raise MissingWorkersError(
+                f"checkpoint command requires {self.expected_workers} workers, found {len(selected_ids)}"
+            )
+
+        command_id = uuid4().hex
+        results: dict[str, dict[str, Any]] = {}
+        self._worker_command_results[command_id] = results
+        try:
+            command = {
+                "type": "worker_command",
+                "command_id": command_id,
+                "operation": operation,
+                "payload": payload,
+            }
+            await asyncio.gather(*(self._write_to_worker(live[worker_id], command) for worker_id in selected_ids))
+            await self.wait_until(lambda _: len(results) == len(selected_ids), timeout_s=timeout_s)
+            missing_results = [worker_id for worker_id in selected_ids if worker_id not in results]
+            if missing_results:
+                raise MissingWorkersError(
+                    f"checkpoint command {operation!r} timed out waiting for workers: {missing_results!r}"
+                )
+            failures = {worker_id: result for worker_id, result in results.items() if result.get("error") is not None}
+            if failures:
+                details = "; ".join(
+                    f"{worker_id}: {result['error']}" for worker_id, result in sorted(failures.items())
+                )
+                raise WorkerCommandError(f"checkpoint command {operation!r} failed: {details}")
+            return {worker_id: results[worker_id].get("result") for worker_id in selected_ids}
+        finally:
+            self._worker_command_results.pop(command_id, None)
 
     async def _write_to_worker(self, record: WorkerRecord, message: dict[str, Any]) -> None:
         async with record.write_lock:
@@ -624,6 +759,76 @@ class AdmissionCoordinator:
                     return self.status()
 
 
+class AdmissionCoordinatorRunner:
+    """Run one coordinator event loop beside a multi-worker Uvicorn parent."""
+
+    def __init__(self, coordinator: AdmissionCoordinator) -> None:
+        self.coordinator = coordinator
+        self._ready = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_event: Optional[asyncio.Event] = None
+        self._error: Optional[BaseException] = None
+
+    def start(self, *, timeout_s: float = 10.0) -> None:
+        if self._thread is not None:
+            raise RuntimeError("checkpoint coordinator runner is already started")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="nemo-gym-checkpoint-coordinator",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout_s):
+            raise RuntimeError("checkpoint coordinator did not start before its deadline")
+        if self._error is not None:
+            raise RuntimeError("checkpoint coordinator failed to start") from self._error
+
+    def stop(self, *, timeout_s: float = 10.0) -> None:
+        thread = self._thread
+        loop = self._loop
+        stop_event = self._stop_event
+        if thread is None:
+            return
+        if loop is not None and stop_event is not None:
+            loop.call_soon_threadsafe(stop_event.set)
+        thread.join(timeout_s)
+        if thread.is_alive():
+            raise RuntimeError("checkpoint coordinator did not stop before its deadline")
+        self._thread = None
+        if self._error is not None:
+            raise RuntimeError("checkpoint coordinator failed") from self._error
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            try:
+                await self.coordinator.start()
+                self._stop_event = asyncio.Event()
+            except BaseException as error:
+                self._error = error
+                self._ready.set()
+                return
+            self._ready.set()
+            try:
+                await self._stop_event.wait()
+            finally:
+                await self.coordinator.stop()
+
+        try:
+            loop.run_until_complete(serve())
+        except BaseException as error:
+            self._error = error
+            self._ready.set()
+        finally:
+            loop.close()
+            self._loop = None
+            self._stop_event = None
+
+
 class WorkerAdmissionAgent:
     """The per-worker side of the coordination protocol.
 
@@ -642,6 +847,7 @@ class WorkerAdmissionAgent:
         pid: int = 0,
         server_name: str = "policy",
         cut_timeout_s: float = 10.0,
+        command_handler: Optional[Callable[[str, dict[str, Any]], Awaitable[Any]]] = None,
     ) -> None:
         self.socket_path = Path(socket_path)
         self.worker_id = worker_id
@@ -649,11 +855,15 @@ class WorkerAdmissionAgent:
         self.pid = pid
         self.server_name = server_name
         self.cut_timeout_s = cut_timeout_s
+        self.command_handler = command_handler
         self._writer: Optional[asyncio.StreamWriter] = None
         self._listener: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._continuation_requests: dict[str, asyncio.Future[Any]] = {}
         self._next_continuation_request_id = 0
+        self._service_requests: dict[str, asyncio.Future[Any]] = {}
+        self._next_service_request_id = 0
+        self._command_tasks: set[asyncio.Task[Any]] = set()
         self._coordinator_sequence = 0
         self._checkpoint_id: str | None = None
 
@@ -695,11 +905,26 @@ class WorkerAdmissionAgent:
             if not future.done():
                 future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
         self._continuation_requests.clear()
+        for future in self._service_requests.values():
+            if not future.done():
+                future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
+        self._service_requests.clear()
+        for task in self._command_tasks:
+            task.cancel()
+        if self._command_tasks:
+            await asyncio.gather(*self._command_tasks, return_exceptions=True)
+        self._command_tasks.clear()
 
     async def _listen(self, reader: asyncio.StreamReader) -> None:
         async for message in _read_messages(reader):
             if message.get("type") in {"continuation_result", "continuation_error"}:
                 self._complete_continuation_request(message)
+            elif message.get("type") in {"service_result", "service_error"}:
+                self._complete_service_request(message)
+            elif message.get("type") == "worker_command":
+                task = asyncio.create_task(self._run_worker_command(message))
+                self._command_tasks.add(task)
+                task.add_done_callback(self._command_tasks.discard)
             else:
                 await self._apply_state_message(message)
 
@@ -763,6 +988,35 @@ class WorkerAdmissionAgent:
         """Return the async continuation client bound to this worker identity."""
         return ContinuationRegistryClient(self)
 
+    def service_client(self) -> "CoordinatorServiceClient":
+        """Return the async client for coordinator-owned checkpoint operations."""
+        return CoordinatorServiceClient(self)
+
+    async def _run_worker_command(self, message: dict[str, Any]) -> None:
+        command_id = str(message.get("command_id", ""))
+        operation = str(message.get("operation", ""))
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        error = None
+        result = None
+        try:
+            if not command_id:
+                raise ValueError("worker command_id must be non-empty")
+            if self.command_handler is None:
+                raise ValueError("worker has no checkpoint command handler")
+            result = await self.command_handler(operation, payload)
+        except Exception as caught:
+            error = {"type": type(caught).__name__, "detail": str(caught)}
+        await self._write(
+            {
+                "type": "worker_command_result",
+                "command_id": command_id,
+                "result": result,
+                "error": error,
+            }
+        )
+
     async def _continuation_request(self, operation: str, **payload: Any) -> Any:
         if self._writer is None or self._writer.is_closing():
             raise ConnectionError("checkpoint coordinator connection is not active")
@@ -797,6 +1051,47 @@ class WorkerAdmissionAgent:
                 future.set_exception(ContinuationRetiredError(detail))
             else:
                 future.set_exception(ValueError(detail))
+        else:
+            future.set_result(message.get("result"))
+
+    async def _service_request(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> Any:
+        if self._writer is None or self._writer.is_closing():
+            raise ConnectionError("checkpoint coordinator connection is not active")
+        self._next_service_request_id += 1
+        request_id = f"{self.worker_id}:service:{self._next_service_request_id}"
+        future = asyncio.get_running_loop().create_future()
+        self._service_requests[request_id] = future
+        try:
+            await self._write(
+                {
+                    "type": "service_request",
+                    "request_id": request_id,
+                    "operation": operation,
+                    "payload": payload,
+                }
+            )
+            return await asyncio.wait_for(future, timeout=timeout_s or self.cut_timeout_s)
+        finally:
+            self._service_requests.pop(request_id, None)
+
+    def _complete_service_request(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id", ""))
+        future = self._service_requests.get(request_id)
+        if future is None or future.done():
+            return
+        if message.get("type") == "service_error":
+            future.set_exception(
+                CoordinatorServiceError(
+                    str(message.get("detail", "checkpoint coordinator service request failed")),
+                    code=str(message.get("error_code", "coordinator_service_error")),
+                )
+            )
         else:
             future.set_result(message.get("result"))
 
@@ -847,6 +1142,22 @@ class ContinuationRegistryClient:
             entries=[{"key": list(key), "value": value} for key, value in entries.items()],
             retired=[list(key) for key in retired],
         )
+
+
+class CoordinatorServiceClient:
+    """Async client for one coordinator-owned checkpoint service."""
+
+    def __init__(self, worker: WorkerAdmissionAgent) -> None:
+        self._worker = worker
+
+    async def request(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> Any:
+        return await self._worker._service_request(operation, payload, timeout_s=timeout_s)
 
 
 def build_coordinator_control_app(

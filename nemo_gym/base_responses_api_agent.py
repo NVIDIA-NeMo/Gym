@@ -13,23 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import os
+import shutil
+import tempfile
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from functools import wraps
+from pathlib import Path
 from typing import Any, ClassVar, Optional
+from uuid import uuid4
 from warnings import warn
 
 import orjson
 from fastapi import Body, FastAPI, Request
 from pydantic import PrivateAttr
 
+from nemo_gym._checkpoint.admission import AdmissionLimiter
 from nemo_gym._checkpoint.agent import (
     AGENT_EXECUTION_GENERATION_HEADER,
     COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
     DISCARD_RESTORED_CONTINUATION_FEATURE,
     AgentBoundaryRecord,
+    AgentCheckpointCoordinatorService,
     AgentCheckpointParticipant,
+    AgentCheckpointWorkerHandler,
     AgentExecution,
     install_agent_checkpoint,
 )
@@ -37,7 +45,17 @@ from nemo_gym._checkpoint.artifacts import (
     AGENT_CONTINUATION_INDEX_FEATURE,
     AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE,
 )
-from nemo_gym._checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
+from nemo_gym._checkpoint.control import (
+    ControlCapabilities,
+    MultiProcessCapability,
+    checkpoint_control_auth_token,
+)
+from nemo_gym._checkpoint.coordinator import (
+    CHECKPOINT_COORDINATOR_SOCKET_ENV,
+    AdmissionCoordinator,
+    AdmissionCoordinatorRunner,
+    WorkerAdmissionAgent,
+)
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -69,12 +87,49 @@ from nemo_gym.rollout_correlation import (
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
+    ServerProcessCompanion,
     SimpleServer,
     apply_rollout_prefix,
     rollout_path_prefix,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+class _AgentCheckpointCoordinatorCompanion:
+    """Own the coordinator socket and event loop beside the Uvicorn parent."""
+
+    def __init__(self, *, instance_name: str, expected_workers: int) -> None:
+        self._socket_directory = Path(tempfile.mkdtemp(prefix="ng-agent-checkpoint-", dir="/tmp"))
+        self._previous_socket = os.environ.get(CHECKPOINT_COORDINATOR_SOCKET_ENV)
+        self.coordinator = AdmissionCoordinator(
+            self._socket_directory / "coordinator.sock",
+            expected_workers=expected_workers,
+        )
+        self.coordinator.service_handler = AgentCheckpointCoordinatorService(
+            self.coordinator,
+            instance_name=instance_name,
+        )
+        self._runner = AdmissionCoordinatorRunner(self.coordinator)
+
+    def start(self) -> "_AgentCheckpointCoordinatorCompanion":
+        try:
+            self._runner.start()
+        except BaseException:
+            shutil.rmtree(self._socket_directory, ignore_errors=True)
+            raise
+        os.environ[CHECKPOINT_COORDINATOR_SOCKET_ENV] = str(self.coordinator.socket_path)
+        return self
+
+    def stop(self) -> None:
+        try:
+            self._runner.stop()
+        finally:
+            if self._previous_socket is None:
+                os.environ.pop(CHECKPOINT_COORDINATOR_SOCKET_ENV, None)
+            else:
+                os.environ[CHECKPOINT_COORDINATOR_SOCKET_ENV] = self._previous_socket
+            shutil.rmtree(self._socket_directory, ignore_errors=True)
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -99,6 +154,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     checkpoint_continuation_supported: ClassVar[bool] = False
     checkpoint_resource_dependencies_supported: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentCheckpointParticipant] = PrivateAttr(default=None)
+    _checkpoint_worker_agent: Optional[WorkerAdmissionAgent] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -188,15 +244,74 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         auth_token = self.checkpoint_control_auth_token()
         if auth_token is None or not self.checkpoint_continuation_supported:
             return
+        coordinator_client = None
+        coordinator_socket = self._checkpoint_coordinator_socket()
+        if coordinator_socket is not None:
+            if self._checkpoint_worker_agent is not None:
+                raise RuntimeError("agent checkpoint worker is already configured")
+            worker_id = f"{self.config.name}:{os.getpid()}:{uuid4().hex}"
+            worker_agent = WorkerAdmissionAgent(
+                coordinator_socket,
+                worker_id,
+                AdmissionLimiter(),
+                pid=os.getpid(),
+                server_name=self.config.name,
+            )
+            participant = AgentCheckpointParticipant(
+                self.config.name,
+                continuation_registry=worker_agent.continuation_registry_client(),
+                owner_id=worker_id,
+            )
+            worker_agent.command_handler = AgentCheckpointWorkerHandler(participant)
+            self._checkpoint_participant = participant
+            self._checkpoint_worker_agent = worker_agent
+            coordinator_client = worker_agent.service_client()
+            self._install_checkpoint_worker_lifespan(app, worker_agent)
+
         install_agent_checkpoint(
             app,
             participant=self.checkpoint_participant(),
             fence=self.checkpoint_fence(),
             auth_token=auth_token,
+            coordinator_client=coordinator_client,
         )
+
+    def _install_checkpoint_worker_lifespan(self, app: FastAPI, worker_agent: WorkerAdmissionAgent) -> None:
+        main_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def checkpoint_worker_lifespan(app: FastAPI):
+            await worker_agent.start()
+            try:
+                async with main_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await worker_agent.stop()
+
+        app.router.lifespan_context = checkpoint_worker_lifespan
+
+    def _checkpoint_coordinator_socket(self) -> Optional[Path]:
+        if (self.config.num_workers or 1) <= 1:
+            return None
+        raw_socket = os.environ.get(CHECKPOINT_COORDINATOR_SOCKET_ENV)
+        return Path(raw_socket) if raw_socket else None
+
+    def start_process_companion(self) -> Optional[ServerProcessCompanion]:
+        workers = self.config.num_workers or 1
+        if workers <= 1 or self.checkpoint_control_auth_token() is None or not self.checkpoint_continuation_supported:
+            return None
+        return _AgentCheckpointCoordinatorCompanion(
+            instance_name=self.config.name,
+            expected_workers=workers,
+        ).start()
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()
+        if self._checkpoint_coordinator_socket() is not None:
+            capabilities.multi_process = MultiProcessCapability(
+                mode="coordinator",
+                num_workers=self.config.num_workers or 1,
+            )
         if self.checkpoint_control_auth_token() is not None and self.checkpoint_continuation_supported:
             capabilities.checkpoint_mode = "export_restore"
             capabilities.concurrency_contract = "serialized_per_session"

@@ -22,6 +22,7 @@ operation restores the entry phase so a retry or abort is still possible.
 """
 
 import asyncio
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -341,6 +342,73 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
         "discard_restored_continuation_v1",
         "agent_resource_dependency_index_v1",
     ]
+
+
+def test_multiworker_agent_checkpoint_lifecycle_uses_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+
+    class _WhiteboxAgent(SimpleResponsesAPIAgent):
+        checkpoint_continuation_supported = True
+
+        async def responses(self, body):
+            raise NotImplementedError
+
+        async def run(self, body):
+            raise NotImplementedError
+
+    config = BaseResponsesAPIAgentConfig(
+        host="agent.test",
+        port=80,
+        entrypoint="app.py",
+        name="whitebox",
+        num_workers=2,
+    )
+    parent = _WhiteboxAgent(config=config, server_client=_server_client())
+    companion = parent.start_process_companion()
+    assert companion is not None
+    try:
+        first = _WhiteboxAgent(config=config, server_client=_server_client())
+        second = _WhiteboxAgent(config=config, server_client=_server_client())
+        with TestClient(first.setup_webserver()) as first_client, TestClient(second.setup_webserver()):
+            headers = {"authorization": "Bearer checkpoint-secret"}
+            capabilities = first_client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
+            assert capabilities["multi_process"] == {"mode": "coordinator", "num_workers": 2}
+
+            deadline_ts = time.time() + 5.0
+            prepared = first_client.post(
+                "/ng-control/v1/agent-checkpoint/prepare",
+                json={"checkpoint_id": "checkpoint-1", "deadline_ts": deadline_ts},
+                headers=headers,
+            )
+            assert prepared.status_code == 200
+            assert first._checkpoint_worker_agent is not None
+            assert second._checkpoint_worker_agent is not None
+            assert prepared.json()["ready_to_commit"]
+
+            committed = first_client.post(
+                "/ng-control/v1/agent-checkpoint/commit",
+                json={
+                    "checkpoint_id": "checkpoint-1",
+                    "checkpoint_dir": str(tmp_path),
+                    "deadline_ts": deadline_ts,
+                },
+                headers=headers,
+            )
+            assert committed.status_code == 200
+            assert committed.json()["records"] == 0
+
+            resumed = first_client.post(
+                "/ng-control/v1/agent-checkpoint/resume",
+                json={"checkpoint_id": "checkpoint-1", "deadline_ts": deadline_ts},
+                headers=headers,
+            )
+            assert resumed.status_code == 200
+            assert resumed.json() == {"state": "accepting", "released": 0}
+    finally:
+        companion.stop()
 
 
 def test_capabilities_route_reflects_live_fence_phase() -> None:

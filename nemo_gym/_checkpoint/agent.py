@@ -39,10 +39,12 @@ from nemo_gym._checkpoint.artifacts import (
 )
 from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPhase, ControlError, ControlFence
 from nemo_gym._checkpoint.coordinator import (
+    AdmissionCoordinator,
     ContinuationAlreadyOwnedError,
     ContinuationRegistry,
     ContinuationRegistryClient,
     ContinuationRetiredError,
+    CoordinatorServiceClient,
 )
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
@@ -1182,25 +1184,34 @@ def load_agent_checkpoint_records(checkpoint_root: Path, manifest_path: Path) ->
 
 
 def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
-    directory = _agent_checkpoint_directory(checkpoint_dir, participant.instance_name)
+    records, source_checkpoint_id, continuation_index = _load_agent_state_for_restore(
+        checkpoint_dir,
+        participant.instance_name,
+    )
+    participant.install_restored(records)
+    return {
+        "records": len(records),
+        "source_checkpoint_id": source_checkpoint_id,
+        "continuation_index": continuation_index.model_dump(mode="json"),
+    }
+
+
+def _load_agent_state_for_restore(
+    checkpoint_dir: Path,
+    instance_name: Optional[str],
+) -> tuple[list[AgentBoundaryRecord], str, CheckpointArtifactReference]:
+    directory = _agent_checkpoint_directory(checkpoint_dir, instance_name)
     manifest_path = directory / AGENT_MANIFEST_NAME
     if not manifest_path.exists():
         raise AgentCheckpointError(f"agent checkpoint has no committed manifest at {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("instance_name") != participant.instance_name:
+    if manifest.get("instance_name") != instance_name:
         raise AgentCheckpointError(
-            f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, "
-            f"not {participant.instance_name!r}"
+            f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, not {instance_name!r}"
         )
     records = _load_agent_archive_records(directory, checkpoint_root=checkpoint_dir, manifest=manifest)
     continuation_index = _validate_continuation_index(checkpoint_dir, manifest, records)
-    participant.install_restored(records)
-    result: dict[str, Any] = {
-        "records": len(records),
-        "source_checkpoint_id": manifest["checkpoint_id"],
-    }
-    result["continuation_index"] = continuation_index.model_dump(mode="json")
-    return result
+    return records, str(manifest["checkpoint_id"]), continuation_index
 
 
 def _validate_continuation_index(
@@ -1254,12 +1265,332 @@ def _agent_checkpoint_directory(checkpoint_dir: Path, instance_name: Optional[st
     return directory
 
 
+class AgentCheckpointWorkerHandler:
+    """Execute coordinator commands against one worker-local participant."""
+
+    def __init__(self, participant: AgentCheckpointParticipant) -> None:
+        self.participant = participant
+
+    async def __call__(self, operation: str, payload: dict[str, Any]) -> Any:
+        if operation == "prepare":
+            return await self.participant.prepare(float(payload["deadline_ts"]))
+        if operation == "status":
+            return self.participant.status()
+        if operation == "records_for_commit":
+            return [record.model_dump(mode="json") for record in self.participant.records_for_commit()]
+        if operation == "install_restored":
+            records = [AgentBoundaryRecord.model_validate(item) for item in payload.get("records", ())]
+            await self.participant.install_restored_async(records)
+            return {"records": len(records)}
+        if operation == "resume":
+            return await self.participant.resume()
+        if operation == "retire_owned":
+            rollout_id = str(payload["rollout_id"])
+            attempt_index = int(payload["attempt_index"])
+            if self.participant.resolve(rollout_id, attempt_index) is None:
+                return {"retired": False, "tombstoned": False}
+            return await self.participant.retire(rollout_id, attempt_index)
+        if operation == "completion_receipt":
+            return self.participant.completion_receipt(
+                str(payload["rollout_id"]),
+                int(payload["attempt_index"]),
+            ).model_dump(mode="json")
+        if operation == "acknowledge_completed":
+            receipts = [AgentCompletionReceipt.model_validate(item) for item in payload.get("executions", ())]
+            acknowledged = await self.participant.acknowledge_completed(receipts)
+            return [receipt.model_dump(mode="json") for receipt in acknowledged]
+        raise ValueError(f"unknown agent checkpoint worker operation {operation!r}")
+
+
+class AgentCheckpointCoordinatorService:
+    """Own one logical agent checkpoint participant across Uvicorn workers."""
+
+    def __init__(self, coordinator: AdmissionCoordinator, *, instance_name: Optional[str]) -> None:
+        self.coordinator = coordinator
+        self.instance_name = _validate_instance_name(instance_name)
+        self.fence = ControlFence()
+        self._acknowledged: dict[tuple[str, int], AgentCompletionReceipt] = {}
+
+    async def __call__(self, operation: str, payload: dict[str, Any]) -> Any:
+        if operation == "prepare":
+            return await self._prepare(AgentPrepareRequest.model_validate(payload))
+        if operation == "status":
+            checkpoint_id = str(payload.get("checkpoint_id", ""))
+            self.fence.require_phase(checkpoint_id, frozenset(CheckpointPhase))
+            return {"checkpoint_id": checkpoint_id, **await self._status()}
+        if operation == "commit":
+            return await self._commit(AgentCommitRequest.model_validate(payload))
+        if operation == "restore":
+            return await self._restore(AgentRestoreRequest.model_validate(payload))
+        if operation == "resume":
+            return await self._resume(AgentResumeRequest.model_validate(payload))
+        if operation == "retire":
+            return await self._retire(AgentRetireRequest.model_validate(payload))
+        if operation == "discard_restored_continuation":
+            return self._discard(AgentDiscardRestoredContinuationRequest.model_validate(payload))
+        if operation == "completion_receipt":
+            return await self._completion_receipt(payload)
+        if operation == "acknowledge_completed":
+            request = AgentCompletedExecutionAcknowledgementRequest.model_validate(payload)
+            return await self._acknowledge_completed(request)
+        if operation == "acknowledge":
+            receipt = AgentAcknowledgeRequest.model_validate(payload)
+            idempotent = (receipt.rollout_id, receipt.attempt_index) in self._acknowledged
+            await self._acknowledge_completed(AgentCompletedExecutionAcknowledgementRequest(executions=[receipt]))
+            return {"acknowledged": not idempotent, "idempotent": idempotent}
+        raise ValueError(f"unknown agent checkpoint service operation {operation!r}")
+
+    async def _prepare(self, body: AgentPrepareRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            reports = await self.coordinator.run_worker_command(
+                "prepare",
+                {"deadline_ts": body.deadline_ts},
+                timeout_s=max(body.remaining(), 0.001),
+            )
+            result = self._aggregate_status(reports)
+            if not result["ready_to_commit"]:
+                raise AgentPrepareIncompleteError(
+                    "agent prepare is incomplete: "
+                    f"running={result['running']}, "
+                    f"parked_without_boundary={result['parked_without_boundary']}, "
+                    f"completed_unacknowledged={result['completed_unacknowledged']}"
+                )
+            return result
+
+        result = await self.fence.run_operation(
+            body.checkpoint_id,
+            "agent-checkpoint/prepare",
+            allowed_phases=frozenset({CheckpointPhase.IDLE}),
+            phase_during=CheckpointPhase.PREPARING,
+            phase_after=CheckpointPhase.PREPARING,
+            run=run,
+            deadline=body,
+        )
+        self.fence.mark_prepared(body.checkpoint_id)
+        return result
+
+    async def _status(self) -> dict[str, Any]:
+        reports = await self.coordinator.run_worker_command("status", {}, timeout_s=10.0)
+        return self._aggregate_status(reports)
+
+    async def _commit(self, body: AgentCommitRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            worker_records = await self.coordinator.run_worker_command(
+                "records_for_commit",
+                {},
+                timeout_s=max(body.remaining(), 0.001),
+            )
+            records = [AgentBoundaryRecord.model_validate(item) for items in worker_records.values() for item in items]
+            return await asyncio.to_thread(
+                _commit_agent_records,
+                records,
+                Path(body.checkpoint_dir),
+                checkpoint_id=body.checkpoint_id,
+                instance_name=self.instance_name,
+            )
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "agent-checkpoint/commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=run,
+            deadline=body,
+        )
+
+    async def _restore(self, body: AgentRestoreRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            records, source_checkpoint_id, continuation_index = await asyncio.to_thread(
+                _load_agent_state_for_restore,
+                Path(body.checkpoint_dir),
+                self.instance_name,
+            )
+            await self.coordinator.run_worker_command(
+                "install_restored",
+                {"records": [record.model_dump(mode="json") for record in records]},
+                timeout_s=max(body.remaining(), 0.001),
+            )
+            return {
+                "records": len(records),
+                "source_checkpoint_id": source_checkpoint_id,
+                "continuation_index": continuation_index.model_dump(mode="json"),
+            }
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "agent-checkpoint/restore",
+            allowed_phases=frozenset({CheckpointPhase.IDLE}),
+            phase_during=CheckpointPhase.RESTORING,
+            phase_after=CheckpointPhase.RESTORED_PAUSED,
+            run=run,
+            deadline=body,
+        )
+
+    async def _resume(self, body: AgentResumeRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            reports = await self.coordinator.run_worker_command(
+                "resume",
+                {},
+                timeout_s=max(body.remaining(), 0.001),
+            )
+            return {
+                "state": "accepting",
+                "released": sum(int(report["released"]) for report in reports.values()),
+            }
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "agent-checkpoint/resume",
+            allowed_phases=frozenset(
+                {
+                    CheckpointPhase.IDLE,
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
+            ),
+            phase_during=self.fence.phase,
+            phase_after=CheckpointPhase.IDLE,
+            run=run,
+            retire_outcome="resumed",
+        )
+
+    async def _retire(self, body: AgentRetireRequest) -> dict[str, Any]:
+        self.fence.require_phase(
+            body.checkpoint_id,
+            frozenset({CheckpointPhase.IDLE, CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+        )
+        key = (body.rollout_id, body.attempt_index)
+        owner_id = self.coordinator.continuation_registry.owner_id(key)
+        if owner_id is None:
+            self.coordinator.continuation_registry.retire(key)
+            return {"retired": False, "tombstoned": True}
+        results = await self.coordinator.run_worker_command(
+            "retire_owned",
+            {"rollout_id": body.rollout_id, "attempt_index": body.attempt_index},
+            timeout_s=max(body.remaining(), 0.001),
+            worker_ids=(owner_id,),
+        )
+        return results[owner_id]
+
+    def _discard(self, body: AgentDiscardRestoredContinuationRequest) -> dict[str, Any]:
+        self.fence.require_phase(body.checkpoint_id, frozenset({CheckpointPhase.RESTORED_PAUSED}))
+        return {
+            "discarded": self.coordinator.continuation_registry.discard_available(
+                (body.rollout_id, body.attempt_index)
+            )
+        }
+
+    async def _completion_receipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rollout_id = str(payload["rollout_id"])
+        attempt_index = int(payload["attempt_index"])
+        owner_id = self.coordinator.continuation_registry.owner_id((rollout_id, attempt_index))
+        if owner_id is None:
+            raise AgentCompletedExecutionAcknowledgementError(
+                f"rollout {rollout_id!r} attempt {attempt_index} has no completed result receipt"
+            )
+        result = await self.coordinator.run_worker_command(
+            "completion_receipt",
+            {"rollout_id": rollout_id, "attempt_index": attempt_index},
+            timeout_s=10.0,
+            worker_ids=(owner_id,),
+        )
+        return result[owner_id]
+
+    async def _acknowledge_completed(
+        self,
+        body: AgentCompletedExecutionAcknowledgementRequest,
+    ) -> dict[str, Any]:
+        by_owner: dict[str, list[AgentCompletionReceipt]] = {}
+        pending: list[tuple[str, AgentCompletionReceipt]] = []
+        for receipt in body.executions:
+            key = (receipt.rollout_id, receipt.attempt_index)
+            acknowledged = self._acknowledged.get(key)
+            if acknowledged is not None:
+                if acknowledged != receipt:
+                    raise AgentCompletedExecutionAcknowledgementError(
+                        f"acknowledgement does not match rollout {receipt.rollout_id!r} "
+                        f"attempt {receipt.attempt_index}'s completed receipt"
+                    )
+                continue
+            owner_id = self.coordinator.continuation_registry.owner_id(key)
+            if owner_id is None:
+                raise AgentCompletedExecutionAcknowledgementError(
+                    f"rollout {receipt.rollout_id!r} attempt {receipt.attempt_index} "
+                    "has no completed result to acknowledge"
+                )
+            by_owner.setdefault(owner_id, []).append(receipt)
+            pending.append((owner_id, receipt))
+
+        async def validate_receipt(owner_id: str, receipt: AgentCompletionReceipt) -> None:
+            results = await self.coordinator.run_worker_command(
+                "completion_receipt",
+                {
+                    "rollout_id": receipt.rollout_id,
+                    "attempt_index": receipt.attempt_index,
+                },
+                timeout_s=10.0,
+                worker_ids=(owner_id,),
+            )
+            actual = AgentCompletionReceipt.model_validate(results[owner_id])
+            if actual != receipt:
+                raise AgentCompletedExecutionAcknowledgementError(
+                    f"acknowledgement receipt mismatch for rollout {receipt.rollout_id!r} "
+                    f"attempt {receipt.attempt_index}"
+                )
+
+        # Preserve the single-worker all-or-nothing contract: validate the
+        # complete cross-worker batch before asking any owner to release data.
+        await asyncio.gather(*(validate_receipt(owner_id, receipt) for owner_id, receipt in pending))
+
+        async def acknowledge_owner(owner_id: str, receipts: list[AgentCompletionReceipt]) -> None:
+            await self.coordinator.run_worker_command(
+                "acknowledge_completed",
+                {"executions": [receipt.model_dump(mode="json") for receipt in receipts]},
+                timeout_s=10.0,
+                worker_ids=(owner_id,),
+            )
+
+        await asyncio.gather(*(acknowledge_owner(owner_id, receipts) for owner_id, receipts in by_owner.items()))
+        for receipt in body.executions:
+            self._acknowledged[(receipt.rollout_id, receipt.attempt_index)] = receipt
+        return AgentCompletedExecutionAcknowledgementResponse(acknowledged=body.executions).model_dump(mode="json")
+
+    @staticmethod
+    def _aggregate_status(reports: dict[str, Any]) -> dict[str, Any]:
+        values = list(reports.values())
+        count_fields = (
+            "running",
+            "parked",
+            "parked_with_boundary",
+            "parked_without_boundary",
+            "completed_unacknowledged",
+            "acknowledged_completed",
+            "active",
+        )
+        list_fields = (
+            "blocking_attempts",
+            "completed_unacknowledged_attempts",
+            "selected_boundaries",
+            "executions",
+        )
+        return {
+            "state": "accepting" if all(value["state"] == "accepting" for value in values) else "preparing",
+            "ready_to_commit": all(bool(value["ready_to_commit"]) for value in values),
+            **{field: sum(int(value[field]) for value in values) for field in count_fields},
+            **{field: [item for value in values for item in value[field]] for field in list_fields},
+        }
+
+
 def install_agent_checkpoint(
     app: FastAPI,
     *,
     participant: AgentCheckpointParticipant,
     fence: ControlFence,
     auth_token: str,
+    coordinator_client: Optional[CoordinatorServiceClient] = None,
 ) -> None:
     """Install acknowledgement, prepare, commit, restore, resume, and retire routes."""
 
@@ -1269,6 +1600,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "acknowledge",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
         return await participant.acknowledge(body)
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed")
@@ -1277,6 +1614,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "acknowledge_completed",
+                body.model_dump(mode="json"),
+                timeout_s=10.0,
+            )
         acknowledged = await participant.acknowledge_completed(body.executions)
         return AgentCompletedExecutionAcknowledgementResponse(acknowledged=acknowledged).model_dump()
 
@@ -1287,6 +1630,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "completion_receipt",
+                {"rollout_id": rollout_id, "attempt_index": attempt_index},
+                timeout_s=10.0,
+            )
         return participant.completion_receipt(rollout_id, attempt_index).model_dump(mode="json")
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/prepare")
@@ -1295,6 +1644,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "prepare",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
 
         async def run() -> dict[str, Any]:
             result = await participant.prepare(body.deadline_ts)
@@ -1326,6 +1681,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "status",
+                {"checkpoint_id": checkpoint_id},
+                timeout_s=10.0,
+            )
         fence.require_phase(
             checkpoint_id,
             frozenset(CheckpointPhase),
@@ -1338,6 +1699,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "commit",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
 
         async def run() -> dict[str, Any]:
             # The participant belongs to this event loop. Materialize its state
@@ -1366,6 +1733,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "restore",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
 
         async def run() -> dict[str, Any]:
             return await asyncio.to_thread(restore_agent_state, participant, Path(body.checkpoint_dir))
@@ -1385,6 +1758,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "resume",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
 
         async def run() -> dict[str, Any]:
             return await participant.resume()
@@ -1413,6 +1792,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "retire",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
         fence.require_phase(
             body.checkpoint_id,
             frozenset({CheckpointPhase.IDLE, CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
@@ -1425,6 +1810,12 @@ def install_agent_checkpoint(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "discard_restored_continuation",
+                body.model_dump(mode="json"),
+                timeout_s=_coordinator_request_timeout(body),
+            )
         fence.require_phase(
             body.checkpoint_id,
             frozenset({CheckpointPhase.RESTORED_PAUSED}),
@@ -1433,3 +1824,8 @@ def install_agent_checkpoint(
             body.rollout_id,
             body.attempt_index,
         )
+
+
+def _coordinator_request_timeout(body: CheckpointControlRequest) -> float:
+    """Leave a small response budget after the coordinator's own deadline."""
+    return max(body.remaining(), 0.001) + 1.0
