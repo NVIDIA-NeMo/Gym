@@ -12,18 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.google_search.app import (
+    BaseGetPageContentRequest,
+    BaseSearchQueryRequest,
     GoogleSearchResourcesServer,
     GoogleSearchResourcesServerConfig,
+    GoogleSearchVerifyRequest,
     box_parser,
 )
 
 
 class TestApp:
-    def test_sanity(self) -> None:
+    @staticmethod
+    def _make_server() -> GoogleSearchResourcesServer:
         config = GoogleSearchResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
@@ -32,7 +38,29 @@ class TestApp:
             google_api_key="dummy_key",  # pragma: allowlist secret
             google_cx="dummy_cx",
         )
-        GoogleSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return GoogleSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _make_verify_request(output: list[dict]) -> GoogleSearchVerifyRequest:
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=output,
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        return GoogleSearchVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question"}]},
+            response=response,
+            expected_answer="B",
+            task_difficulty_qwen3_32b_avg_8=0.5,
+        )
+
+    def test_sanity(self) -> None:
+        self._make_server()
 
     def test_box_parser_valid_content(self) -> None:
         """Test box_parser with valid boxed content"""
@@ -51,3 +79,72 @@ class TestApp:
         # Test with empty string
         result = box_parser("")
         assert result is None
+
+    async def test_verify_extracts_standard_response_content(self) -> None:
+        request = self._make_verify_request(
+            [
+                {
+                    "id": "msg_test",
+                    "content": [
+                        {"annotations": [], "text": "Reasoning. ", "type": "output_text"},
+                        {"annotations": [], "text": "\\boxed{B}", "type": "output_text"},
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ]
+        )
+
+        result = await self._make_server().verify(request)
+
+        assert result.reward == 1.0
+        assert result.parsed_option == "B"
+
+    async def test_verify_returns_zero_for_unparseable_output(self) -> None:
+        request = self._make_verify_request(
+            [
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "No boxed answer", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ]
+        )
+
+        result = await self._make_server().verify(request)
+
+        assert result.reward == 0.0
+        assert result.parsed_option is None
+
+    async def test_verify_returns_zero_for_empty_output(self) -> None:
+        result = await self._make_server().verify(self._make_verify_request([]))
+
+        assert result.reward == 0.0
+        assert result.parsed_option is None
+
+    async def test_search_uses_shared_async_client(self) -> None:
+        response = MagicMock(ok=True)
+        response.json = AsyncMock(return_value={"items": [{"title": "result"}]})
+
+        with patch("resources_servers.google_search.app.request", AsyncMock(return_value=response)) as mock_request:
+            result = await self._make_server().search(BaseSearchQueryRequest(query="test query"))
+
+        assert json.loads(result.search_results) == {"items": [{"title": "result"}]}
+        assert mock_request.await_args.kwargs["method"] == "GET"
+        assert mock_request.await_args.kwargs["params"]["q"] == "test query"
+
+    async def test_browse_fetches_page_without_blocking_event_loop(self) -> None:
+        response = MagicMock(ok=True)
+        response.text = AsyncMock(return_value="<html><body>Page</body></html>")
+
+        with (
+            patch("resources_servers.google_search.app.request", AsyncMock(return_value=response)) as mock_request,
+            patch("resources_servers.google_search.app.trafilatura.extract", return_value="Page text"),
+        ):
+            result = await self._make_server().browse(BaseGetPageContentRequest(url="https://example.com"))
+
+        assert result.page_content == "Page text"
+        assert mock_request.await_args.kwargs["url"] == "https://example.com"

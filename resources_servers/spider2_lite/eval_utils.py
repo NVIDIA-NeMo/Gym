@@ -82,18 +82,14 @@ async def execute_sqlite_async(
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
 ) -> Optional[ResultSet]:
-    """Execute SQL asynchronously via thread executor, bounded by semaphore."""
+    """Execute SQL asynchronously via Ray, bounded by semaphore."""
     async with semaphore:
         task = execute_sqlite_remote.remote(db_path, sql)
-        fut: asyncio.Future = asyncio.wrap_future(task.future())
-
-        _, in_progress = await asyncio.wait([fut], timeout=timeout_s)
-
-        if in_progress:
+        try:
+            return await asyncio.wait_for(task, timeout=timeout_s)
+        except TimeoutError:
             ray.cancel(task)
             return None
-        else:
-            return ray.get(task)
 
 
 def _col_vector(rows: ResultSet, col_idx: int) -> list[Any]:
