@@ -888,3 +888,75 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
+    setup_dev = SETUP_DEV.read_text()
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    # Reuse a present pinned uv; verify the version before trusting it.
+    assert "command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.11.29" ]]" in setup_dev
+    # Only the no-uv fallback downloads the installer.
+    assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
+
+    # lint.sh: pre-commit always comes from the lockfile (dev extra). The CI
+    # image installs it into the project venv at build time and local/online
+    # setups get it from `uv sync --extra dev`, so lint.sh performs no ad-hoc
+    # pip/uv install of its own.
+    assert "command -v pre-commit" in lint
+    assert "pip install" not in lint
+    assert "uv pip install" not in lint
+    assert "uv sync --extra dev" in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_cicd_main_runs_on_merge_queue() -> None:
+    # The CICD workflow is required and must run for merge-queue commits, or
+    # queued changes lose their integration check.
+    on_block = CICD_MAIN_WORKFLOW.read_text().split("\non:", 1)[1].split("\nconcurrency:", 1)[0]
+
+    assert "  merge_group:" in on_block
+    assert "    types: [checks_requested]" in on_block
+
+
+def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
+    # lint.sh runs pre-commit from PATH, so the final image must provide it
+    # there. pre-commit is a dev-extra dependency, so the persistent project
+    # venv (already on PATH) must be synced with the dev extra, and there must
+    # be no ad-hoc pip/uv install naming the package directly.
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    assert "uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev" in dockerfile
+    assert "uv sync --locked --extra vllm --extra telemetry --extra dev" in dockerfile
+    assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile
+    assert "uv pip install" not in dockerfile
+
+
+def test_lint_workflow_provisions_pre_commit_before_lint() -> None:
+    # lint.sh resolves pre-commit from PATH (the lockfile dev extra). setup_dev.sh
+    # sources the dev venv's activate, which only affects the current shell, so the
+    # lint job must run setup_dev.sh and lint.sh in the SAME step (setup first).
+    steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
+        "lint-check"
+    ]["steps"]
+    run_cmds = [step.get("run", "") for step in steps]
+
+    (lint_cmd,) = (cmd for cmd in run_cmds if "scripts/ci/lint.sh" in cmd)
+    assert "scripts/ci/setup_dev.sh" in lint_cmd, "lint.sh must share a step with setup_dev.sh"
+    assert lint_cmd.index("scripts/ci/setup_dev.sh") < lint_cmd.index(
+        "scripts/ci/lint.sh"
+    ), "setup_dev.sh must run before lint.sh"
