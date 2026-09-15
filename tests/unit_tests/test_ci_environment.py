@@ -915,6 +915,7 @@ def test_dockerfile_installs_pre_commit_on_path_for_offline_lint() -> None:
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
 
     assert "UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv" in dockerfile
-    assert "uv pip install --offline pre-commit" in dockerfile
-    # The on-PATH environment is the persistent project venv.
+    assert "uv pip install --locked --offline pre-commit" in dockerfile
+    # --locked binds the install to uv.lock (no resolution outside the lockfile);
+    # the on-PATH environment is the persistent project venv.
     assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile

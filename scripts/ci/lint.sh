@@ -8,7 +8,7 @@ ci_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ci_dir
 repo_root="$(cd "${ci_dir}/../.." && pwd)"
 readonly repo_root
-readonly pre_commit_version="4.3.0"  # matches the dev-extra version the image installs offline
+readonly pre_commit_version="4.3.0"  # exact version pinned in uv.lock (dev extra); the image installs this offline
 readonly tool_venv="${repo_root}/.cache/nemo-gym-ci/pre-commit-${pre_commit_version}"
 
 # shellcheck source=scripts/ci/sanitize_env.sh
