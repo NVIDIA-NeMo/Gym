@@ -892,7 +892,8 @@ class AggregateMetricsMixin:
 
         Receives verify responses grouped by task: tasks[i] is a list of rollout
         dicts for task i. Each dict has at minimum reward, plus any custom fields
-        from the verify response (e.g. symbolic_correct, judgement-gen-base).
+        from the verify response (e.g. symbolic_correct, judgement-gen-base). The
+        callback runs first for the full dataset and then once for each repeat.
 
         Use for metrics that need the full dataset at once:
         - Confidence intervals (ArenaMetrics)
@@ -1030,7 +1031,7 @@ def _add_custom_repeat_metrics(
     custom_metrics: Dict[str, Any],
     compute_metrics_fn: Any,
 ) -> None:
-    """Recompute benchmark metrics per repeat and refresh their across-repeat statistics."""
+    """Recompute benchmark metrics per repeat, replacing generic collisions and their aggregates."""
     if not custom_metrics or not repeat_level_metrics:
         return
 
@@ -1075,9 +1076,8 @@ def compute_aggregate_metrics(
     for both group-level (per-task) and agent-level metrics.
 
     Optionally accepts custom functions for benchmark-specific customization:
-      - compute_metrics_fn: receives ALL verify responses grouped by task
-        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
-        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
+      - compute_metrics_fn: receives verify responses grouped by task, first for the full
+        dataset and then once per repeat. Its returned dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
     """
     if not verify_responses:
