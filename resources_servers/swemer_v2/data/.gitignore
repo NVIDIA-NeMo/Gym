@@ -1,0 +1,10 @@
+# Training JSONL embeds patch/test content from an internal dataset -- not ours to redistribute
+# via this repo. Distributed offline; there is no prepare script for it here.
+#
+# example.jsonl/example_rollouts.jsonl are a deliberate, small (5-row) exception: CI's
+# data-validation gate (gym env test +should_validate_data=true) requires a committed sample, and
+# 5 rows is the same order of exposure supported_instance_ids.txt already carries (instance ids
+# only, no patch content -- example.jsonl adds patch/test_patch content for 5 specific instances).
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

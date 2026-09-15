@@ -1,0 +1,74 @@
+# Resources server for AweAI-Team/Scale-SWE.
+#
+# Every row carries its own prebuilt image (aweaiteam/scaleswe:...) and a pre_commands string
+# that performs its own checkout and git-history scrub -- so there is no image repository or
+# per-language configuration here. 20,181 rows, entirely Python, one test runner (pytest).
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # Pure Python, no compilation: pytest runs against a handful of named files, not a full
+      # suite build. Sized well under the SWE-rebench compiled-language shape.
+      evaluation_timeout: 1200
+      is_verifying_golden_patch: false
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Limits are the BURST ceiling; requests are the guaranteed floor -- see
+        # resources_servers/swe_rebench/configs/swe_rebench.yaml for the measurement behind this
+        # split (2.8x faster than requests==limits at no cost in resolved rate or incompletes).
+        #
+        # memory_mib raised 8192 -> 16384 on direct evidence, not a guess: a full-set 20,181-row
+        # run at the 8Gi limit had 695 rows (3.4% of the whole set) die at pod CREATION with
+        # `OOMKilled (exit code 137)`, concentrated in a handful of repos (durandtibo's
+        # coola/feu/grizz/iden -- torch-adjacent tensor tooling -- alone were 335 of the 695).
+        # These never reach the test phase, so no per-task CPU/timeout signal catches them; the
+        # only way to see it was reading the actual sandbox-creation error.
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 20
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 20
+        metadata:
+          benchmark: scale-swe
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose
+# golden patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/scale_swe/apply_golden_patch.py.
+scale_swe_golden_patch_resources_server:
+  resources_servers:
+    scale_swe:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1200
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # See scale_swe_resources_server above: raised on direct OOMKilled evidence from a
+        # full-set run at the previous 8Gi limit.
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 20
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 20
+        metadata:
+          benchmark: scale-swe-golden-patch
