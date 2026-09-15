@@ -23,7 +23,7 @@ from aiohttp import ClientOSError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pytest import CaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -306,6 +306,82 @@ class TestServerUtils:
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
             headers={"x-existing": "value"},
         )
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.server_utils.ServerDisconnectedError])
+    async def test_explicit_transport_attempt_cap_disables_request_retry(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+        internal: bool,
+        error_type: type[Exception],
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=error_type("transport failed"))
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+
+        with raises(error_type, match="transport failed"):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _internal=internal,
+                _max_num_tries=1,
+            )
+
+        assert client.request.await_count == 1
+
+    @mark.parametrize("attempt_cap", [0, -1])
+    async def test_explicit_transport_attempt_cap_rejects_nonpositive_values(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, connection_errors=0)
+        with raises(ValueError, match="_max_num_tries must be at least 1"):
+            await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
+        client.request.assert_not_awaited()
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_explicit_transport_attempt_cap_counts_mixed_errors(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(
+            side_effect=[
+                RuntimeError("generic failure"),
+                nemo_gym.server_utils.ClientOSError("socket failure"),
+                "must not be reached",
+            ]
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils.asyncio,
+            "sleep",
+            AsyncMock(),
+        )
+
+        with raises(
+            nemo_gym.server_utils.ClientOSError,
+            match="socket failure",
+        ):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _max_num_tries=2,
+            )
+
+        assert client.request.await_count == 2
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -840,11 +916,20 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         return client
 
-    async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(None, 3), (1, 1), (5, 3)])
+    async def test_request_bounded_connection_retries_surface_dead_endpoint(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool, attempt_cap: int | None, expected_attempts: int
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, connection_errors=10)
         with raises(ClientOSError):
-            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
-        assert client.request.await_count == 3
+            await nemo_gym.server_utils.request(
+                "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+        assert client.request.await_count == expected_attempts
+        assert "_max_num_tries" not in client.request.call_args.kwargs
+        assert "_max_connection_retries" not in client.request.call_args.kwargs
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
         client = self._mock_global_client(monkeypatch, connection_errors=4)

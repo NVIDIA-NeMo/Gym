@@ -14,9 +14,12 @@
 # limitations under the License.
 import asyncio
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -27,12 +30,28 @@ from nemo_gym.base_responses_api_model import (
     aggregate_model_call_metrics,
     read_model_call_records,
 )
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
+from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,
     SimpleModelServerConfig,
+    UpstreamRetryPolicy,
 )
+
+
+PROVIDER_RETRY_POLICY = {
+    "max_attempts": 11,
+    "pre_request_jitter_seconds": [0.0, 0.2],
+    "backoff_initial_seconds": 1.0,
+    "backoff_multiplier": 2.0,
+    "backoff_jitter_fraction": 0.5,
+    "terminal_http_status_codes": [400],
+}
 
 
 def _response_data() -> dict:
@@ -63,7 +82,7 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(self, max_concurrent_requests=None, **config_overrides):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -73,7 +92,7 @@ class TestApp:
             entrypoint="",
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
-            drop_input_reasoning_items=drop_input_reasoning_items,
+            **config_overrides,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -304,6 +323,55 @@ class TestApp:
         assert "reasoning" not in sent_types
         assert "message" in sent_types
 
+    @pytest.mark.parametrize("provider_effort", ["none", "minimal"])
+    def test_responses_preserves_provider_reasoning_effort(self, provider_effort: str) -> None:
+        server = self._setup_server()
+        provider_response = {**_response_data(), "reasoning": {"effort": provider_effort}}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=provider_response)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/responses",
+            json={"input": "hello", "reasoning": {"effort": "minimal"}},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["reasoning"]["effort"] == provider_effort
+        server._client.create_response.assert_awaited_once_with(
+            input="hello", reasoning={"effort": "minimal"}, model="dummy_model"
+        )
+
+    async def test_responses_preserves_reasoning_behavior_when_retrying(self) -> None:
+        server = self._setup_server(
+            drop_input_reasoning_items=True,
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        response_data = {**_response_data(), "reasoning": {"effort": "none"}}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            side_effect=[TimeoutError("transient provider timeout"), response_data]
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"type": "reasoning", "id": "r1", "summary": []},
+                {"role": "user", "content": "hi", "type": "message"},
+            ]
+        )
+
+        response = await server.responses(body)
+
+        assert response.reasoning.effort == "none"
+        assert server._client.create_response.await_count == 2
+        for call in server._client.create_response.await_args_list:
+            assert call.kwargs == {
+                "input": [{"role": "user", "content": "hi", "type": "message"}],
+                "model": "dummy_model",
+            }
+        assert body.input[0].type == "reasoning"
+        assert response_data["reasoning"]["effort"] == "none"
+
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()
         assert isinstance(server._semaphore, type(nullcontext()))
@@ -326,3 +394,434 @@ class TestApp:
 
         await asyncio.gather(*(worker() for _ in range(8)))
         assert peak == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("upstream_retry_policy", "upstream_max_num_tries"),
+        [
+            ({}, None),
+            (PROVIDER_RETRY_POLICY, 1),
+        ],
+    )
+    async def test_upstream_calls_respect_max_concurrency(
+        self,
+        upstream_retry_policy: dict,
+        upstream_max_num_tries: int | None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(openai_model_module.random, "uniform", lambda _low, _high: 0.0)
+        server = self._setup_server(
+            max_concurrent_requests=2,
+            upstream_retry_policy=upstream_retry_policy,
+            upstream_max_num_tries=upstream_max_num_tries,
+        )
+        release_operations = asyncio.Event()
+        two_operations_started = asyncio.Event()
+        started = 0
+        in_flight = 0
+        peak = 0
+
+        async def operation() -> str:
+            nonlocal started, in_flight, peak
+            started += 1
+            in_flight += 1
+            peak = max(peak, in_flight)
+            if started == 2:
+                two_operations_started.set()
+            await release_operations.wait()
+            in_flight -= 1
+            return "completed"
+
+        tasks = [asyncio.create_task(server._call_upstream(operation)) for _ in range(8)]
+        await asyncio.wait_for(two_operations_started.wait(), timeout=1.0)
+
+        # Give every queued task an opportunity to run. Only two provider
+        # operations can have crossed the semaphore at this point.
+        await asyncio.sleep(0)
+        assert started == 2
+        assert peak == 2
+
+        release_operations.set()
+        assert await asyncio.gather(*tasks) == ["completed"] * 8
+
+    @pytest.mark.asyncio
+    async def test_upstream_pool_timeout_only_times_slot_acquisition(self) -> None:
+        server = self._setup_server(
+            max_concurrent_requests=1,
+            upstream_pool_timeout_seconds=0.01,
+        )
+        operation_called = False
+        await server._semaphore.acquire()
+
+        async def operation() -> str:
+            nonlocal operation_called
+            operation_called = True
+            return "completed"
+
+        try:
+            with pytest.raises(TimeoutError, match="acquiring an upstream provider slot"):
+                await server._call_upstream(operation)
+        finally:
+            server._semaphore.release()
+
+        assert operation_called is False
+
+    @pytest.mark.asyncio
+    async def test_retry_backoff_releases_concurrency_slot(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        original_sleep = asyncio.sleep
+        first_request_in_backoff = asyncio.Event()
+        permit_first_request_retry = asyncio.Event()
+        second_operation_started = asyncio.Event()
+
+        async def controlled_sleep(seconds: float) -> None:
+            if seconds == 1.0:
+                first_request_in_backoff.set()
+                await permit_first_request_retry.wait()
+            else:
+                await original_sleep(0)
+
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", controlled_sleep)
+        monkeypatch.setattr(openai_model_module.random, "uniform", lambda _low, _high: 0.0)
+        server = self._setup_server(
+            max_concurrent_requests=1,
+            upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            upstream_max_num_tries=1,
+        )
+        first_attempts = 0
+
+        async def first_operation() -> str:
+            nonlocal first_attempts
+            first_attempts += 1
+            if first_attempts == 1:
+                raise RuntimeError("transient")
+            return "first completed"
+
+        async def second_operation() -> str:
+            second_operation_started.set()
+            return "second completed"
+
+        first_task = asyncio.create_task(server._call_upstream(first_operation))
+        await asyncio.wait_for(first_request_in_backoff.wait(), timeout=1.0)
+
+        # With a single slot, this second request can reach the provider only
+        # if the failed first attempt released the slot before its backoff.
+        second_task = asyncio.create_task(server._call_upstream(second_operation))
+        await asyncio.wait_for(second_operation_started.wait(), timeout=1.0)
+        assert await second_task == "second completed"
+
+        permit_first_request_retry.set()
+        assert await first_task == "first completed"
+        assert first_attempts == 2
+
+    def test_multi_attempt_retry_policy_requires_inner_retries_disabled(self) -> None:
+        with pytest.raises(ValueError, match="upstream_max_num_tries=1"):
+            self._setup_server(
+                upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            )
+
+    @pytest.mark.asyncio
+    async def test_retry_policy_matches_configured_jitter_and_backoff(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        sleeps = []
+        jitter_values = iter((0.1, 0.25, 0.1))
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            openai_model_module.random,
+            "uniform",
+            lambda _low, _high: next(jitter_values),
+        )
+        server = self._setup_server(
+            max_concurrent_requests=50,
+            upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            upstream_max_num_tries=1,
+            upstream_request_timeout_seconds=300,
+            upstream_connect_timeout_seconds=300,
+            upstream_pool_timeout_seconds=300,
+        )
+        calls = 0
+
+        async def flaky_operation():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("transient")
+            return "completed"
+
+        assert await server._call_upstream(flaky_operation) == "completed"
+        assert calls == 2
+        assert sleeps == [0.1, 1.25, 0.1]
+        assert server._client.max_num_tries == 1
+        assert server._client.request_timeout_seconds == 300
+        assert server._client.connect_timeout_seconds == 300
+        assert server.config.upstream_pool_timeout_seconds == 300
+
+    def test_pool_timeout_requires_a_concurrency_limit(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="upstream_pool_timeout_seconds requires max_concurrent_requests",
+        ):
+            self._setup_server(upstream_pool_timeout_seconds=300)
+
+    def test_connect_timeout_requires_a_request_timeout(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=("upstream_connect_timeout_seconds requires upstream_request_timeout_seconds"),
+        ):
+            self._setup_server(upstream_connect_timeout_seconds=60)
+
+    def test_propagated_status_codes_must_be_http_errors(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="must contain HTTP error statuses",
+        ):
+            self._setup_server(propagate_upstream_http_status_codes=[200, 600])
+
+    @pytest.mark.asyncio
+    async def test_retry_policy_does_not_retry_terminal_http_400(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            openai_model_module.random,
+            "uniform",
+            lambda _low, _high: 0.1,
+        )
+        server = self._setup_server(
+            upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            upstream_max_num_tries=1,
+        )
+        calls = 0
+
+        async def bad_request():
+            nonlocal calls
+            calls += 1
+            raise ClientResponseError(
+                SimpleNamespace(real_url="https://api.openai.com/v1/responses"),
+                (),
+                status=400,
+                message="bad request",
+            )
+
+        with pytest.raises(ClientResponseError):
+            await server._call_upstream(bad_request)
+
+        assert calls == 1
+        assert sleeps == [0.1]
+
+    @pytest.mark.asyncio
+    async def test_responses_preserves_provider_http_400_across_server_hop(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        async def fake_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", fake_sleep)
+        server = self._setup_server(
+            upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            upstream_max_num_tries=1,
+            propagate_upstream_http_status_codes=[400],
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            side_effect=ClientResponseError(
+                SimpleNamespace(real_url="https://api.openai.com/v1/responses"),
+                (),
+                status=400,
+                message="bad request",
+            )
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert exc_info.value.status_code == 400
+        assert server._client.create_response.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+    async def test_default_retry_policy_does_not_translate_provider_http_400(
+        self,
+        endpoint: str,
+    ) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=400,
+            message="bad request",
+        )
+        server = self._setup_server()
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+
+        if endpoint == "responses":
+            server._client.create_response = AsyncMock(side_effect=provider_error)
+            operation = server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+        else:
+            server._client.create_chat_completion = AsyncMock(side_effect=provider_error)
+            operation = server.chat_completions(
+                NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+            )
+
+        with pytest.raises(ClientResponseError) as exc_info:
+            await operation
+
+        assert exc_info.value is provider_error
+
+    @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+    def test_opt_in_preserves_provider_http_400_across_server_hop(self, endpoint: str) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=400,
+            message="bad request",
+        )
+        server = self._setup_server(propagate_upstream_http_status_codes=[400])
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        client = TestClient(app)
+
+        if endpoint == "responses":
+            operation = server._client.create_response = AsyncMock(side_effect=provider_error)
+            response = client.post("/v1/responses", json={"input": "hello"})
+        else:
+            operation = server._client.create_chat_completion = AsyncMock(side_effect=provider_error)
+            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hello"}]})
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Upstream provider request failed with HTTP 400"}
+        operation.assert_awaited_once()
+
+    @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+    @pytest.mark.parametrize("status_code", [429, 503])
+    def test_opt_in_preserves_provider_http_error_after_retries(self, endpoint: str, status_code: int) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=status_code,
+            message="private upstream error details",
+        )
+        server = self._setup_server(
+            propagate_upstream_http_status_codes=[status_code],
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        client = TestClient(app)
+
+        if endpoint == "responses":
+            operation = server._client.create_response = AsyncMock(side_effect=provider_error)
+            response = client.post("/v1/responses", json={"input": "hello"})
+        else:
+            operation = server._client.create_chat_completion = AsyncMock(side_effect=provider_error)
+            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hello"}]})
+
+        assert response.status_code == status_code
+        assert response.json() == {"detail": f"Upstream provider request failed with HTTP {status_code}"}
+        assert operation.await_count == 2
+
+    @pytest.mark.parametrize("propagate_status_codes", [[], [400]])
+    async def test_exhausted_retries_wrap_http_errors_without_matching_opt_in(self, propagate_status_codes) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=429,
+            message="rate limited",
+        )
+        server = self._setup_server(
+            propagate_upstream_http_status_codes=propagate_status_codes,
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        operation = AsyncMock(side_effect=provider_error)
+
+        with pytest.raises(RuntimeError, match="after 2 attempts") as exc_info:
+            await server._call_upstream(operation)
+
+        assert exc_info.value.__cause__ is provider_error
+        assert operation.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_policy_stops_after_configured_provider_attempts(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            openai_model_module.random,
+            "uniform",
+            lambda _low, _high: 0.0,
+        )
+        server = self._setup_server(
+            upstream_retry_policy=PROVIDER_RETRY_POLICY,
+            upstream_max_num_tries=1,
+        )
+        calls = 0
+
+        async def always_fails():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("transient")
+
+        with pytest.raises(RuntimeError, match="after 11 attempts"):
+            await server._call_upstream(always_fails)
+
+        assert calls == 11
+        assert sleeps == [
+            0.0,
+            1.0,
+            0.0,
+            2.0,
+            0.0,
+            4.0,
+            0.0,
+            8.0,
+            0.0,
+            16.0,
+            0.0,
+            32.0,
+            0.0,
+            64.0,
+            0.0,
+            128.0,
+            0.0,
+            256.0,
+            0.0,
+            512.0,
+            0.0,
+        ]
+
+    @pytest.mark.parametrize(
+        "pre_request_jitter_seconds",
+        [(-0.1, 0.2), (0.2, 0.1)],
+    )
+    def test_retry_policy_rejects_invalid_pre_request_jitter(
+        self,
+        pre_request_jitter_seconds: tuple[float, float],
+    ) -> None:
+        with pytest.raises(ValueError, match="nonnegative, ordered"):
+            UpstreamRetryPolicy(
+                pre_request_jitter_seconds=pre_request_jitter_seconds,
+            )

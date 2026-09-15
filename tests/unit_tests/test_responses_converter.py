@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseFunctionWebSearch,
     NeMoGymResponseInputText,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
@@ -1505,6 +1506,19 @@ def test_split_on_reasoning():
     inputs, outputs = split_responses_input_output_items([user, reasoning])
     assert inputs == [user]
     assert outputs == [reasoning]
+
+
+def test_split_on_web_search_call():
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    web_search_call = NeMoGymResponseFunctionWebSearch(
+        id="ws_1",
+        type="web_search_call",
+        status="completed",
+        action={"type": "search", "query": "current weather"},
+    )
+    inputs, outputs = split_responses_input_output_items([user, web_search_call])
+    assert inputs == [user]
+    assert outputs == [web_search_call]
 
 
 @pytest.mark.parametrize(
