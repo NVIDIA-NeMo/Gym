@@ -157,11 +157,31 @@ def _make_keepalive_socket_factory(
     return factory
 
 
+def set_ulimit(target_soft_limit: int = 65535) -> None:
+    # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
+    current_soft, current_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if current_soft == resource.RLIM_INFINITY:
+        return
+    if current_hard != resource.RLIM_INFINITY:
+        target_soft_limit = min(target_soft_limit, current_hard)
+    if current_soft >= target_soft_limit:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target_soft_limit, current_hard))
+    except (OSError, ValueError) as e:
+        print(
+            f"Failed to raise the file descriptor soft limit from {current_soft} to {target_soft_limit}: {e}. "
+            "This can cause connection errors. Consider increasing the limit with ulimit -Sn."
+        )
+
+
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
+    # Standalone collectors skip the server/Ray startup that normally raises this limit.
+    set_ulimit()
     num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
         connector=TCPConnector(
@@ -942,24 +962,6 @@ repr(e): {repr(e)}"""
             profiler.dump()
             return Response()
 
-    def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
-        # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
-        resource_type = resource.RLIMIT_NOFILE
-        current_soft, current_hard = resource.getrlimit(resource_type)
-
-        if current_soft < target_soft_limit:
-            try:
-                resource.setrlimit(resource_type, (target_soft_limit, current_hard))
-            except ValueError as e:
-                print(
-                    "Found ulimit of %s and failed to automatically increase "
-                    "with error %s. This can cause fd limit errors like "
-                    "`OSError: [Errno 24] Too many open files`. Consider "
-                    "increasing with ulimit -n",
-                    current_soft,
-                    e,
-                )
-
     def prefix_server_logs(self) -> None:  # pragma: no cover
         # Adapted from https://github.com/vllm-project/vllm/blob/ab74b2a27a4eb88b90356bfb4b452d29edf05574/vllm/utils/system_utils.py#L205
 
@@ -1029,7 +1031,7 @@ repr(e): {repr(e)}"""
 
             maybe_auto_expose(server, app)
         server.setup_liveness(app)
-        server.set_ulimit()
+        set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
         # Register last so cancellation wraps the complete request stack.

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import multiprocessing
+import resource
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -21,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pytest import CaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -47,6 +48,7 @@ from nemo_gym.server_utils import (
     _make_keepalive_socket_factory,
     initialize_ray,
     raise_for_status,
+    set_ulimit,
 )
 
 
@@ -67,6 +69,65 @@ def _return_exception_from_child_process(error: ClientResponseError) -> ClientRe
 
 
 class TestServerUtils:
+    @mark.parametrize(
+        "soft,hard,expected_soft",
+        [
+            (1024, 1048576, 65535),
+            (1024, 4096, 4096),
+            (1024, resource.RLIM_INFINITY, 65535),
+            (resource.RLIM_INFINITY, resource.RLIM_INFINITY, None),
+            (65536, 1048576, None),
+            (4096, 4096, None),
+        ],
+    )
+    def test_raise_file_descriptor_limit(
+        self, monkeypatch: MonkeyPatch, soft: int, hard: int, expected_soft: int | None
+    ) -> None:
+        monkeypatch.setattr(resource, "getrlimit", MagicMock(return_value=(soft, hard)))
+        setrlimit = MagicMock()
+        monkeypatch.setattr(resource, "setrlimit", setrlimit)
+
+        set_ulimit()
+
+        if expected_soft is None:
+            setrlimit.assert_not_called()
+        else:
+            setrlimit.assert_called_once_with(resource.RLIMIT_NOFILE, (expected_soft, hard))
+
+    @mark.parametrize("error", [OSError("permission denied"), ValueError("invalid limit")])
+    def test_raise_file_descriptor_limit_warns_on_failure(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str], error: Exception
+    ) -> None:
+        monkeypatch.setattr(resource, "getrlimit", MagicMock(return_value=(1024, 4096)))
+        monkeypatch.setattr(resource, "setrlimit", MagicMock(side_effect=error))
+
+        set_ulimit()
+
+        warning = capsys.readouterr().out
+        assert "from 1024 to 4096" in warning
+        assert str(error) in warning
+        assert "ulimit -Sn" in warning
+
+    async def test_global_client_raises_fd_limit_before_connector(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(resource, "getrlimit", MagicMock(return_value=(1024, 4096)))
+        setrlimit = MagicMock()
+        monkeypatch.setattr(resource, "setrlimit", setrlimit)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        connector_type = nemo_gym.server_utils.TCPConnector
+
+        def connector_after_limit(**kwargs):
+            setrlimit.assert_called_once_with(resource.RLIMIT_NOFILE, (4096, 4096))
+            return connector_type(**kwargs)
+
+        monkeypatch.setattr(nemo_gym.server_utils, "TCPConnector", connector_after_limit)
+        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        try:
+            assert client is nemo_gym.server_utils.get_global_aiohttp_client()
+            assert not client.closed
+        finally:
+            await client.close()
+
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
             CIMultiDict(
