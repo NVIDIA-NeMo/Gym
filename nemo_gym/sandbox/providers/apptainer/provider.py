@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -24,16 +25,18 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -57,6 +60,7 @@ APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not 
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
+APPTAINER_ISOLATED_NETWORK_FLAGS = ("--net", "--netns-path")
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -98,6 +102,7 @@ class ApptainerCreateConfig:
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
+    port_lock_dir: str | None = None
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
@@ -157,6 +162,7 @@ class _ApptainerInstance:
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
     env: dict[str, str] = field(default_factory=dict)
+    port_locks: list[TextIO] = field(default_factory=list)
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
@@ -184,6 +190,14 @@ def _resolve_image(image: str) -> str:
     if "://" in image or image.startswith(("/", ".")) or image.endswith(".sif"):
         return image
     return f"docker://{image}"
+
+
+def _uses_isolated_network(start_args: list[str], env: Mapping[str, str]) -> bool:
+    if env.get("APPTAINER_UNSHARE_NET", "").lower() in {"1", "true", "yes", "on"}:
+        return True
+    return any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in start_args for flag in APPTAINER_ISOLATED_NETWORK_FLAGS
+    )
 
 
 def _to_sandbox_status(state: str | None) -> SandboxStatus:
@@ -393,8 +407,45 @@ class ApptainerProvider:
             stdout_b = out_f.read()
             stderr_b = err_f.read()
 
-        return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
-        return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+            return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
+            return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+
+    def _reserve_service_ports(self, ports: tuple[int, ...]) -> list[TextIO]:
+        if not ports:
+            return []
+        configured = self._create_config.port_lock_dir
+        lock_dir = Path(configured).expanduser() if configured else Path(tempfile.gettempdir()) / "nemo-gym-apptainer"
+        locks: list[TextIO] = []
+        try:
+            for port in ports:
+                lock_path = lock_dir / f"port-{port}.lock"
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_file = lock_path.open("a+")
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    lock_file.close()
+                    raise ApptainerCreateError(f"Apptainer service port {port} is already reserved") from error
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                        probe.bind(("127.0.0.1", port))
+                except OSError as error:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    lock_file.close()
+                    raise ApptainerCreateError(f"Apptainer service port {port} is already in use") from error
+                locks.append(lock_file)
+            return locks
+        except Exception:
+            self._release_service_ports(locks)
+            raise
+
+    @staticmethod
+    def _release_service_ports(locks: list[TextIO]) -> None:
+        for lock_file in reversed(locks):
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                lock_file.close()
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Start an apptainer instance and return a ready handle.
@@ -434,34 +485,37 @@ class ApptainerProvider:
         # Extra per-sandbox bind mounts (validated before we allocate anything).
         extra_binds = _coerce_binds(spec.provider_options.get("binds"))
 
-        # host staging dir (bind-mounted in), mount point, unique name.
-        mount_point = self._create_config.mount_point
-        staging_dir = Path(
-            tempfile.mkdtemp(prefix="nemo-gym-apptainer-")
-        )  # create a new empty temp directory on the host and returns that path
-        name = INSTANCE_NAME_PREFIX + uuid.uuid4().hex
-
-        # build the `apptainer instance start` command line.
-        argv: list[str] = [self._binary, "instance", "start"]
-        argv += ["--bind", f"{staging_dir}:{mount_point}"]
-        for bind in self._exec_config.default_binds:
-            argv += ["--bind", bind]
-        for bind in extra_binds:
-            argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
-        resource_limit_flags = _resource_limit_flags(spec.resources)
-        if resource_limit_flags and self._create_config.apply_resource_limits:
-            if "--fakeroot" in start_args:
-                LOGGER.warning(
-                    "Skipping apptainer CPU/memory resource flags because create.extra_start_args contains --fakeroot."
-                )
-            else:
-                argv += resource_limit_flags
-        argv += _resource_passthrough_flags(spec.resources)
-        argv += start_args
+        if spec.ports and _uses_isolated_network(start_args, self._subprocess_env):
+            raise ValueError("SandboxSpec.ports require the host network; remove --net or --netns-path")
 
-        # start the instance; clean up the staging dir on any failure.
+        port_locks = self._reserve_service_ports(spec.ports)
+        staging_dir: Path | None = None
+        handle: SandboxHandle | None = None
         try:
+            # Host staging dir (bind-mounted in), mount point, unique name.
+            mount_point = self._create_config.mount_point
+            staging_dir = Path(tempfile.mkdtemp(prefix="nemo-gym-apptainer-"))
+            name = INSTANCE_NAME_PREFIX + uuid.uuid4().hex
+
+            # Build the `apptainer instance start` command line.
+            argv: list[str] = [self._binary, "instance", "start"]
+            argv += ["--bind", f"{staging_dir}:{mount_point}"]
+            for bind in self._exec_config.default_binds:
+                argv += ["--bind", bind]
+            for bind in extra_binds:
+                argv += ["--bind", bind]
+            resource_limit_flags = _resource_limit_flags(spec.resources)
+            if resource_limit_flags and self._create_config.apply_resource_limits:
+                if "--fakeroot" in start_args:
+                    LOGGER.warning(
+                        "Skipping apptainer CPU/memory resource flags because create.extra_start_args contains --fakeroot."
+                    )
+                else:
+                    argv += resource_limit_flags
+            argv += _resource_passthrough_flags(spec.resources)
+            argv += start_args
+
             with _private_env_file(staging_dir, env_file_content) as env_file:
                 if env_file is not None:
                     argv += ["--no-eval", "--env-file", str(env_file)]
@@ -472,10 +526,18 @@ class ApptainerProvider:
                     daemonize=True,
                 )
         except TimeoutError as e:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_service_ports(port_locks)
             raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
+        except BaseException:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_service_ports(port_locks)
+            raise
         if code != 0:
             shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_service_ports(port_locks)
             raise ApptainerCreateError(
                 f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
             )
@@ -490,6 +552,7 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=image,
                 env=dict(spec.env),
+                port_locks=port_locks,
             ),
         )
 
@@ -498,7 +561,7 @@ class ApptainerProvider:
         # running instance / staging dir.
         try:
             await self._verify_created_handle(handle)
-        except Exception:
+        except BaseException:
             await self._cleanup_failed_create_handle(handle)
             raise
 
@@ -554,7 +617,10 @@ class ApptainerProvider:
                 [self._binary, "instance", "stop", inst.name],
                 timeout_s=self._exec_config.default_timeout_s,
             )
-        shutil.rmtree(inst.staging_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(inst.staging_dir, ignore_errors=True)
+        finally:
+            self._release_service_ports(inst.port_locks)
 
     async def exec(
         self,
@@ -712,6 +778,10 @@ class ApptainerProvider:
         # Not listed -> it has been stopped (or never existed anymore).
         return SandboxStatus.STOPPED
 
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port on Apptainer's host network."""
+        return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}")
+
     async def close(self, handle: SandboxHandle) -> None:
         """Stop the instance and clean up the host staging dir.
         Runs apptainer instance stop <name>
@@ -738,6 +808,8 @@ class ApptainerProvider:
             shutil.rmtree(inst.staging_dir, ignore_errors=False)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
+        finally:
+            self._release_service_ports(getattr(inst, "port_locks", []))
 
         if stop_error is not None:
             raise stop_error
