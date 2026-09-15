@@ -19,6 +19,7 @@ import re
 import statistics
 import warnings
 from collections import Counter, defaultdict
+from numbers import Real
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,12 +32,14 @@ from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    ACROSS_REPEATS_MARKER,
     AGENT_REF_KEY_NAME,
     AVG_SAMPLE_STD_DEV_SUFFIX,
     CI_HIGH_95_ACROSS_REPEATS_PREFIX,
     CI_HIGH_95_PREFIX,
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
     CI_LOW_95_PREFIX,
+    HISTOGRAM_PREFIX,
     HISTOGRAM_STAT_NAME,
     MAX_ACROSS_REPEATS_PREFIX,
     MAX_PREFIX,
@@ -54,6 +57,7 @@ from nemo_gym.global_config import (
     P75_PREFIX,
     ROLLOUT_INDEX_KEY_NAME,
     SE_ACROSS_REPEATS_PREFIX,
+    SE_PREFIX,
     SEM_PREFIX,
     STAT_SEPARATOR,
     STD_ACROSS_REPEATS_PREFIX,
@@ -63,6 +67,76 @@ from nemo_gym.global_config import (
     STD_STAT_NAME,
     TASK_INDEX_KEY_NAME,
 )
+
+
+# Metrics with these names are already summaries or uncertainty estimates.
+# We do not compute second-order `*_across_repeats/*` statistics for
+# them.
+REPEAT_AGGREGATION_EXCLUDED_PREFIXES = (
+    MAX_PREFIX,
+    MIN_PREFIX,
+    MEDIAN_PREFIX,
+    STD_PREFIX,
+    SE_PREFIX,
+    SEM_PREFIX,
+    P25_PREFIX,
+    P75_PREFIX,
+    CI_LOW_95_PREFIX,
+    CI_HIGH_95_PREFIX,
+    HISTOGRAM_PREFIX,
+    "variance/",
+    "var/",
+    "mad/",
+    "iqr/",
+)
+REPEAT_AGGREGATION_EXCLUDED_SUFFIXES = (
+    "/max",
+    "/min",
+    "/median",
+    "/std",
+    "/se",
+    "/sem",
+    "/p5",
+    "/p25",
+    "/p50",
+    "/p75",
+    "/p90",
+    "/p95",
+    "/p99",
+    "/ci_low_95",
+    "/ci_high_95",
+    "/ci_lower",
+    "/ci_upper",
+    "/variance",
+    "/var",
+    "/mad",
+    "/iqr",
+    "_ci95_lower",
+    "_ci95_upper",
+    "std_dev_across_runs",
+    "std_err_across_runs",
+    "avg_sample_std_dev",
+)
+REPEAT_AGGREGATION_EXCLUDED_NAMES = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    "sample_count",
+    "missing_count",
+    "num_repeats",
+    "max_rollouts_per_task",
+    "token_usage_version",
+)
+
+
+def is_repeat_aggregatable_metric(name: object) -> bool:
+    """Whether a per-repeat field is a point estimate, rather than an existing statistic."""
+    return (
+        isinstance(name, str)
+        and name not in REPEAT_AGGREGATION_EXCLUDED_NAMES
+        and not name.startswith(REPEAT_AGGREGATION_EXCLUDED_PREFIXES)
+        and not name.endswith(REPEAT_AGGREGATION_EXCLUDED_SUFFIXES)
+        and ACROSS_REPEATS_MARKER not in name
+    )
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
@@ -329,18 +403,24 @@ class RewardProfiler:
 
         return repeat_metrics
 
-    def _aggregate_repeat_level_metrics(self, repeat_level_metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _aggregate_repeat_level_metrics(
+        self,
+        repeat_level_metrics: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         """Aggregate per-repeat estimates (e.g. mean/reward) across repeats, per agent.
 
         Treats each repeat's stat as one observation and reports the statistics across
-        repeats.
+        repeats. Existing summaries and uncertainty estimates are retained in the input
+        rows but excluded here to avoid calculating statistics over statistics.
         """
         if not repeat_level_metrics:
             return []
 
         df = DataFrame.from_records(repeat_level_metrics)
         df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
-        numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith(MEAN_PREFIX)]
+        numeric_cols = [
+            col for col in df.select_dtypes(include="number").columns if is_repeat_aggregatable_metric(col)
+        ]
 
         aggregated_metrics = []
         for agent_name, group in df.groupby("agent_name"):
@@ -812,7 +892,8 @@ class AggregateMetricsMixin:
 
         Receives verify responses grouped by task: tasks[i] is a list of rollout
         dicts for task i. Each dict has at minimum reward, plus any custom fields
-        from the verify response (e.g. symbolic_correct, judgement-gen-base).
+        from the verify response (e.g. symbolic_correct, judgement-gen-base). The
+        callback runs first for the full dataset and then once for each repeat.
 
         Use for metrics that need the full dataset at once:
         - Confidence intervals (ArenaMetrics)
@@ -938,6 +1019,52 @@ def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: 
     return summary
 
 
+def _is_finite_number(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _add_custom_repeat_metrics(
+    profiler: RewardProfiler,
+    verify_responses: List[Dict[str, Any]],
+    repeat_level_metrics: List[Dict[str, Any]],
+    agent_metrics: Dict[str, Any],
+    custom_metrics: Dict[str, Any],
+    compute_metrics_fn: Any,
+) -> None:
+    """Recompute benchmark metrics per repeat, replacing generic collisions and their aggregates."""
+    if not custom_metrics or not repeat_level_metrics:
+        return
+
+    responses_by_repeat: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for response in verify_responses:
+        responses_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response)
+
+    numeric_metric_names = [name for name, value in custom_metrics.items() if _is_finite_number(value)]
+    for repeat_metrics in repeat_level_metrics:
+        rollout_idx = repeat_metrics[ROLLOUT_INDEX_KEY_NAME]
+        for name in custom_metrics:
+            repeat_metrics.pop(name, None)
+        try:
+            repeat_custom = compute_metrics_fn(_group_by_task(responses_by_repeat[rollout_idx]))
+        except Exception as e:
+            warnings.warn(
+                f"Benchmark custom repeat metrics were omitted for repeat {rollout_idx}: {e!r}",
+                stacklevel=2,
+            )
+            continue
+        for name in numeric_metric_names:
+            value = repeat_custom.get(name)
+            if _is_finite_number(value):
+                repeat_metrics[name] = float(value)
+
+    for name in list(agent_metrics):
+        if ACROSS_REPEATS_MARKER in name and name.split(ACROSS_REPEATS_MARKER, 1)[1] in custom_metrics:
+            agent_metrics.pop(name)
+
+    for aggregate in profiler._aggregate_repeat_level_metrics(repeat_level_metrics):
+        agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -949,9 +1076,8 @@ def compute_aggregate_metrics(
     for both group-level (per-task) and agent-level metrics.
 
     Optionally accepts custom functions for benchmark-specific customization:
-      - compute_metrics_fn: receives ALL verify responses grouped by task
-        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
-        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
+      - compute_metrics_fn: receives verify responses grouped by task, first for the full
+        dataset and then once per repeat. Its returned dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
     """
     if not verify_responses:
@@ -980,11 +1106,6 @@ def compute_aggregate_metrics(
             if k != "agent_ref":
                 agent_metrics[k] = v
 
-    # Same as agent_level_metrics above — callers nest this list under the real agent_ref.
-    serialized_repeat_level_metrics = [
-        {k: v for k, v in entry.items() if k != "agent_ref"} for entry in repeat_level_metrics
-    ]
-
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
@@ -995,6 +1116,7 @@ def compute_aggregate_metrics(
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
     # Custom metrics computed from all raw verify responses grouped by task
+    custom: Dict[str, Any] = {}
     if compute_metrics_fn:
         tasks = _group_by_task(verify_responses)
         custom = compute_metrics_fn(tasks)
@@ -1013,10 +1135,27 @@ def compute_aggregate_metrics(
 
         serialized_agent.update(custom)
 
+    serialized_agent["num_repeats"] = len({vr.get(ROLLOUT_INDEX_KEY_NAME, 0) for vr in verify_responses})
+
+    # Select headline metrics before repeat calls can mutate benchmark callback state.
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(MEAN_PREFIX)}
+
+    if compute_metrics_fn:
+        _add_custom_repeat_metrics(
+            rp,
+            verify_responses,
+            repeat_level_metrics,
+            serialized_agent,
+            custom,
+            compute_metrics_fn,
+        )
+
+    serialized_repeat_level_metrics = [
+        {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
+    ]
 
     ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
 

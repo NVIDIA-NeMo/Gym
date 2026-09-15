@@ -12,13 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffing two loaded runs: metric rows and per-task sample flips.
+"""Diffing two loaded runs: metric rows, difference confidence intervals, and per-task sample flips."""
 
-Pure computation -- no filesystem access, no statistics. Confidence intervals are read verbatim
-from what the runs already recorded; for now nothing here estimates, tests, or judges.
-"""
-
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from scipy import stats
 
 from nemo_gym.comparison.loading import LoadedRun
 from nemo_gym.comparison.schema import (
@@ -92,6 +91,8 @@ def _numeric(value: Any) -> Optional[float]:
 
 def is_comparable_metric(name: str) -> bool:
     """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
+    if name == "num_repeats":
+        return False
     if name.startswith(DISPERSION_PREFIXES):
         return False
     if ACROSS_REPEATS_MARKER in name:
@@ -125,15 +126,61 @@ def _metric_value(metrics: Dict[str, Any], name: str) -> Optional[MetricValue]:
     )
 
 
+def _comparison_value(metric: MetricValue) -> float:
+    return metric.mean_across_repeats if metric.mean_across_repeats is not None else metric.value
+
+
+def _repeat_metric_values(run: LoadedRun, name: str) -> List[float]:
+    """Finite numeric values for one metric, with one observation per repeat."""
+    values = [_numeric(entry.get(name)) for entry in run.repeat_level_metrics if isinstance(entry, dict)]
+    return [value for value in values if value is not None and math.isfinite(value)]
+
+
+def _welch_delta_confidence_interval(
+    baseline: LoadedRun, candidate: LoadedRun, name: str
+) -> Tuple[Optional[float], Optional[float]]:
+    """Two-sided 95% Welch interval for candidate minus baseline."""
+    mean_across_repeats_name = f"{MEAN_ACROSS_REPEATS_PREFIX}{name}"
+    if any(_numeric(run.agent_metrics.get(mean_across_repeats_name)) is None for run in (baseline, candidate)):
+        return None, None
+
+    baseline_values = _repeat_metric_values(baseline, name)
+    candidate_values = _repeat_metric_values(candidate, name)
+    if len(baseline_values) < 2 or len(candidate_values) < 2:
+        return None, None
+    if len(set(baseline_values)) == len(set(candidate_values)) == 1:
+        delta = candidate_values[0] - baseline_values[0]
+        return delta, delta
+
+    test_result = stats.ttest_ind(candidate_values, baseline_values, equal_var=False)
+    interval = test_result.confidence_interval(confidence_level=0.95)
+
+    low, high = float(interval.low), float(interval.high)
+    if not math.isfinite(low) or not math.isfinite(high):
+        return None, None
+    return low, high
+
+
 def _candidate_metric_value(
-    metrics: Dict[str, Any], name: str, baseline_value: Optional[float]
+    metrics: Dict[str, Any],
+    name: str,
+    baseline_value: Optional[float],
+    delta_ci: Tuple[Optional[float], Optional[float]],
 ) -> Optional[CandidateMetricValue]:
     base = _metric_value(metrics, name)
     if base is None:
         return None
-    delta = None if baseline_value is None else base.value - baseline_value
+    value = _comparison_value(base)
+    delta = None if baseline_value is None else value - baseline_value
     delta_pct = None if delta is None or not baseline_value else delta / abs(baseline_value) * 100.0
-    return CandidateMetricValue(**base.model_dump(), delta=delta, delta_pct=delta_pct)
+    delta_ci_low, delta_ci_high = delta_ci
+    return CandidateMetricValue(
+        **base.model_dump(),
+        delta=delta,
+        delta_pct=delta_pct,
+        delta_ci_low=delta_ci_low,
+        delta_ci_high=delta_ci_high,
+    )
 
 
 def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> List[MetricRow]:
@@ -152,9 +199,15 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
         if not is_comparable_metric(name):
             continue
         baseline_value = _metric_value(baseline_metrics, name)
+        baseline_point = _comparison_value(baseline_value) if baseline_value else None
         candidate_values = [
-            _candidate_metric_value(metrics, name, baseline_value.value if baseline_value else None)
-            for metrics in candidate_metrics
+            _candidate_metric_value(
+                metrics,
+                name,
+                baseline_point,
+                _welch_delta_confidence_interval(baseline, candidate, name) if baseline_value else (None, None),
+            )
+            for candidate, metrics in zip(candidates, candidate_metrics)
         ]
         present_in = ["baseline"] if baseline_value else []
         present_in += [f"candidate[{i}]" for i, value in enumerate(candidate_values) if value is not None]
@@ -365,8 +418,8 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
         )
     if not baseline.has_repeat_cis and not any(run.has_repeat_cis for run in candidates):
         notes.append(
-            "Neither run recorded cross-repeat confidence intervals, so every CI cell is empty. "
-            "They are written for `mean/*` metrics when a run has 2 or more repeats."
+            "Neither run recorded per-run cross-repeat confidence intervals, so every baseline/candidate "
+            "CI cell is empty. They are written for repeat-aggregated metrics when a run has 2 or more repeats."
         )
     one_sided = [row.metric for row in rows if len(row.present_in) < 1 + len(candidates)]
     if one_sided:
