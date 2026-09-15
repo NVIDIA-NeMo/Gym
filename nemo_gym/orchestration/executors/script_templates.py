@@ -97,6 +97,25 @@ def render_ray_prelude() -> str:
     return _RAY_PRELUDE
 
 
+def escape_for_single_quoted_block(body: str) -> str:
+    """Make `body` safe to embed inside a single-quoted `bash -c '...'` block.
+
+    POSIX shells do not nest single quotes: an inner quote ENDS the outer string
+    rather than nesting in it. Every value that had to be quoted -- a Hydra
+    override containing a space, or any of the JSON blobs vLLM flags take
+    (`--hf-overrides '{"architectures":[...]}'`) -- would otherwise break out of
+    the block and word-split. Both failure modes have been observed on real
+    submissions: Hydra rejecting `+multistage.stages=[{num_tasks:` on its own,
+    and `/usr/bin/env: Argument list too long` from a multi-node vLLM command
+    whose JSON flags reopened the quoting.
+
+    `'"'"'` is the standard end-quote / literal-quote / reopen-quote sequence.
+    It leaves `$VAR` and `$(( ))` untouched, which matters: the inner shell is
+    the one meant to expand them.
+    """
+    return body.replace("'", "'\"'\"'")
+
+
 def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:
     """Render the Ray head/worker bootstrap that wraps a single vLLM instance's TP/PP command so
     it spans multiple Slurm nodes.
@@ -106,7 +125,13 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
     pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
     rank ($SLURM_NODEID).
     """
-    return _VLLM_RAY_SYMMETRIC_RUN.format(total_nodes=total_nodes, resource_flags=resource_flags, inner_cmd=inner_cmd)
+    # Only the interpolated values are escaped; the template's own structure is
+    # what the quoting is meant to preserve.
+    return _VLLM_RAY_SYMMETRIC_RUN.format(
+        total_nodes=total_nodes,
+        resource_flags=escape_for_single_quoted_block(resource_flags),
+        inner_cmd=escape_for_single_quoted_block(inner_cmd),
+    )
 
 
 def render_health_check(name: str, port: int, path: str, timeout: int) -> str:
@@ -125,13 +150,18 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
-def render_repo_checkout(repo: str, ref: str) -> str:
-    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`."""
+def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
+    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`.
+
+    `dest` is emitted verbatim so it may be a shell expression (the driver passes
+    `"$GYM_SRC/gym"` to clone outside the job directory); omit it to clone into a
+    directory named after the repo in the current one.
+    """
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+    target = dest if dest is not None else shlex.quote(repo_name)
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
     return (
-        f"({ensure_git})"
-        f" && git clone {shlex.quote(repo)} && cd {shlex.quote(repo_name)} && git checkout {shlex.quote(ref)}"
+        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} && git checkout {shlex.quote(ref)}"
     )
 
 
@@ -154,10 +184,16 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
+        # Clone to /tmp rather than the job directory: a checkout plus its .venv
+        # inside every benchmark's rundir is slow to write on lustre and noise in
+        # the artifacts. `cd` into it because a benchmark's prepare_script and
+        # jsonl_fpath resolve against cwd; the driver's output path is absolute,
+        # so nothing depends on the clone being reachable afterwards.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            render_repo_checkout(repo, ref),
+            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv
             # venv` instead reads requires-python from pyproject.toml and auto-downloads a
@@ -176,4 +212,5 @@ def render_driver_entrypoint(
 
     preamble.append('exec "$@"')
     body = "\n    ".join(["set -euo pipefail", *preamble])
+    body = escape_for_single_quoted_block(body)
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""

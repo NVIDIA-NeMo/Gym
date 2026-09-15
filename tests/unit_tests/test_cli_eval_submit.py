@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import json
+import sys
 
 import pytest
 import yaml
@@ -21,7 +23,9 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
-from nemo_gym.cli.main import _eval_submit
+from nemo_gym.cli.main import _eval_submit, main
+from nemo_gym.orchestration.api import SlurmComputeConfig
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -30,8 +34,8 @@ DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}}}
 JOB = {"output_path": "/tmp/gym-jobs"}
 
 
-def _args(config_path, *, dry_run: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(config=str(config_path), dry_run=dry_run)
+def _args(config_path, *, dry_run: bool = False, json_output: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(config=str(config_path), dry_run=dry_run, json=json_output)
 
 
 def _capture_submit(monkeypatch: MonkeyPatch) -> dict:
@@ -246,3 +250,144 @@ class TestEvalSubmitConfigGroupComposition:
         _eval_submit(_args(config_path), overrides=[])
 
         assert captured["config"].job.output_path == "/tmp/gym-jobs"
+
+
+def _record(*, failed: bool = False) -> SubmissionRecord:
+    return SubmissionRecord(
+        gym_job_id="gym-job-20260909T100203Z-abc123",
+        gym_version="0.6.0",
+        submitted_at="2026-09-09T10:02:03Z",
+        run_dir="/jobs/gym-job-20260909T100203Z-abc123",
+        cluster="hsg",
+        executor="slurm",
+        submitted_by="wprazuch",
+        hostname="login-01",
+        benchmarks=[
+            BenchmarkJob(
+                benchmark="gsm8k",
+                job_dir="/jobs/gym-job-20260909T100203Z-abc123/gsm8k",
+                job_id=None if failed else "12345",
+                error="sbatch: error: bad account" if failed else None,
+            )
+        ],
+    )
+
+
+def _returning(monkeypatch: MonkeyPatch, record):
+    monkeypatch.setattr(submit_module, "submit", lambda config, *, dry_run=False: record)
+
+
+def _config_file(tmp_path):
+    path = tmp_path / "submit.yaml"
+    path.write_text(yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}))
+    return path
+
+
+class TestEvalSubmitOutput:
+    def test_human_output_names_each_benchmark_and_job(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record())
+
+        _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        out = capsys.readouterr().out
+        assert "gsm8k" in out and "12345" in out
+        assert "/jobs/gym-job-20260909T100203Z-abc123" in out
+
+    def test_json_output_is_the_record_and_nothing_else(self, tmp_path, monkeypatch, capsys):
+        record = _record()
+        _returning(monkeypatch, record)
+
+        _eval_submit(_args(_config_file(tmp_path), json_output=True), overrides=[])
+
+        assert json.loads(capsys.readouterr().out) == json.loads(record.model_dump_json())
+
+    def test_a_failed_benchmark_exits_non_zero(self, tmp_path, monkeypatch):
+        _returning(monkeypatch, _record(failed=True))
+
+        with pytest.raises(SystemExit) as exit_info:
+            _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        assert exit_info.value.code == 1
+
+    def test_a_failed_benchmark_still_emits_json(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record(failed=True))
+
+        with pytest.raises(SystemExit):
+            _eval_submit(_args(_config_file(tmp_path), json_output=True), overrides=[])
+
+        assert json.loads(capsys.readouterr().out)["benchmarks"][0]["job_id"] is None
+
+    def test_dry_run_prints_nothing_extra_and_does_not_exit(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, None)
+
+        _eval_submit(_args(_config_file(tmp_path), dry_run=True, json_output=True), overrides=[])
+
+        assert capsys.readouterr().out == ""
+
+
+class TestEvalSubmitThroughTheRealCli:
+    """Drive `gym eval submit` the way a caller does: `main()` with argv, and
+    nothing between it and the code under test but a fake executor.
+
+    Every other test in this file monkeypatches `submit_module.submit`, which
+    replaces the function the `@experimental` decorator wraps -- so the
+    decorator never runs, and anything it writes to stdout is invisible. That
+    is how a warning printed in front of the JSON shipped: EFB does
+    `json.loads(result.stdout)` on the whole stream and gets a JSONDecodeError,
+    so no run is ever recorded. These tests parse the *entire* stdout.
+    """
+
+    def _fake_executor(self, monkeypatch, record):
+        class _FakeExecutor:
+            def run(self, config, *, dry_run: bool = False):
+                return record
+
+        monkeypatch.setattr(submit_module, "_EXECUTORS", {SlurmComputeConfig: _FakeExecutor})
+
+    def _argv(self, monkeypatch, config_path, *extra):
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "submit", "--config", str(config_path), *extra])
+
+    def test_json_stdout_parses_whole(self, tmp_path, monkeypatch, capsys):
+        record = _record()
+        self._fake_executor(monkeypatch, record)
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        main()
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == json.loads(record.model_dump_json())
+
+    def test_the_experimental_warning_goes_to_stderr(self, tmp_path, monkeypatch, capsys):
+        self._fake_executor(monkeypatch, _record())
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        main()
+
+        captured = capsys.readouterr()
+        assert "experimental" in captured.err
+        assert "experimental" not in captured.out
+
+    def test_json_stdout_parses_whole_when_a_benchmark_failed(self, tmp_path, monkeypatch, capsys):
+        # The partial-failure path still has to hand EFB a parseable record:
+        # that is what keeps the siblings that did queue from being stranded.
+        self._fake_executor(monkeypatch, _record(failed=True))
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        assert json.loads(capsys.readouterr().out)["benchmarks"][0]["job_id"] is None
+
+    def test_human_output_survives_an_error_containing_markup(self, tmp_path, monkeypatch, capsys):
+        # An sbatch message with square brackets is markup to rich: without
+        # escaping it is either eaten or raises MarkupError mid-report.
+        record = _record(failed=True)
+        record.benchmarks[0].error = "sbatch: error: Invalid account [dev] for user"
+        self._fake_executor(monkeypatch, record)
+        self._argv(monkeypatch, _config_file(tmp_path))
+
+        with pytest.raises(SystemExit):
+            main()
+
+        assert "[dev]" in capsys.readouterr().out
