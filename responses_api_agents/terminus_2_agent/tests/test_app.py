@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,18 +11,23 @@ import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
 
+from nemo_gym.agents import Terminus2Harness as ExportedTerminus2Harness
+from nemo_gym.agents.config import AgentHarnessConfig, AgentModelConfig
+from nemo_gym.agents.terminus_2 import (
+    LocalEnvironment,
+    LocalTmuxSession,
+    StandaloneTerminus2,
+    Terminus2Harness,
+    _extract_instruction,
+)
+from nemo_gym.agents.terminus_2_output import trajectory_to_responses
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.terminus_2_agent.app import (
-    LocalEnvironment,
-    LocalTmuxSession,
-    StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
-    _extract_instruction,
 )
-from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -37,10 +43,7 @@ def _config(**kwargs) -> Terminus2AgentConfig:
 
 
 def _make_agent(**kwargs) -> Terminus2Agent:
-    with patch("responses_api_agents.terminus_2_agent.app.Terminus2Agent.model_post_init"):
-        agent = Terminus2Agent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return Terminus2Agent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 class TestInstructionExtraction:
@@ -92,7 +95,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "darwin"):
+        with patch("nemo_gym.agents.terminus_2.sys.platform", "darwin"):
             command = session._tmux_start_session
         assert "script -qc" not in command
         assert "tmux new-session" in command
@@ -105,7 +108,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "linux"):
+        with patch("nemo_gym.agents.terminus_2.sys.platform", "linux"):
             command = session._tmux_start_session
         assert "script -qc" in command
 
@@ -158,6 +161,27 @@ class TestTrajectoryOutput:
 
 
 class TestResponses:
+    @pytest.mark.parametrize(
+        "config_model,request_model,expected",
+        [
+            ("config-model", "request-model", "config-model"),
+            (None, "request-model", "request-model"),
+            (None, None, "global-model"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_model_precedence(self, config_model, request_model, expected) -> None:
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"policy_model_name": "global-model"}
+        agent = Terminus2Agent(config=_config(model=config_model), server_client=client)
+        agent._harness._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        body = NeMoGymResponseCreateParamsNonStreaming(model=request_model, input="task")
+
+        with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
+            response = await agent.responses(request=None, body=body)
+
+        assert response.model == expected
+
     @pytest.mark.asyncio
     async def test_default_workspace_is_temporary_and_removed(self) -> None:
         agent = _make_agent()
@@ -172,10 +196,10 @@ class TestResponses:
             assert seen_workspace.is_dir()
 
         terminus.run = AsyncMock(side_effect=capture_workspace)
-        agent._build_agent = MagicMock(return_value=terminus)
+        agent._harness._build_agent = MagicMock(return_value=terminus)
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
-        await agent._run_terminus(body, "task", "http://model/v1")
+        await agent._harness._run_terminus(body, "task", "http://model/v1")
 
         assert seen_workspace is not None
         assert not seen_workspace.exists()
@@ -204,7 +228,7 @@ class TestResponses:
             "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4},
         }
         context = AgentContext(n_input_tokens=10, n_output_tokens=4, n_cache_tokens=0)
-        agent._run_terminus = AsyncMock(return_value=(trajectory, context, {}, False, True))
+        agent._harness._run_terminus = AsyncMock(return_value=(trajectory, context, {}, False, True))
 
         body = NeMoGymResponseCreateParamsNonStreaming(
             model="ignored-request-model",
@@ -221,13 +245,13 @@ class TestResponses:
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
-        called_instruction = agent._run_terminus.await_args.args[1]
+        called_instruction = agent._harness._run_terminus.await_args.args[1]
         assert called_instruction == "system config\n\ninput system\n\nsolve it"
 
     @pytest.mark.asyncio
     async def test_empty_trajectory_gets_assistant_message(self) -> None:
         agent = _make_agent()
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        agent._harness._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
@@ -240,20 +264,25 @@ class TestResponses:
     async def test_direct_response_waits_for_concurrency_slot(self) -> None:
         agent = _make_agent()
         agent.sem = asyncio.Semaphore(0)
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        agent._harness._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
             task = asyncio.create_task(agent.responses(request=None, body=body))
             await asyncio.sleep(0)
-            agent._run_terminus.assert_not_awaited()
+            agent._harness._run_terminus.assert_not_awaited()
             agent.sem.release()
             await task
 
-        agent._run_terminus.assert_awaited_once()
+        agent._harness._run_terminus.assert_awaited_once()
 
 
 class TestConfig:
+    def test_harness_uses_shared_config(self) -> None:
+        config = AgentHarnessConfig(model=AgentModelConfig(model="test-model", base_url="http://model/v1"))
+        assert ExportedTerminus2Harness is Terminus2Harness
+        assert Terminus2Harness(config).config is config
+
     def test_webserver_routes_build(self) -> None:
         _make_agent().setup_webserver()
 
@@ -276,14 +305,14 @@ class TestConfig:
         data = yaml.safe_load(path.read_text())
         assert config_name in data
 
-    def test_requirements_share_harbor_pin(self) -> None:
+    def test_requirements_use_core_extra_and_shared_source_pin(self) -> None:
         agent_dir = Path(__file__).resolve().parent.parent
-        terminus_requirement = next(
-            line for line in (agent_dir / "requirements.txt").read_text().splitlines() if line.startswith("harbor @")
-        )
+        project = tomllib.loads((agent_dir.parents[1] / "pyproject.toml").read_text())
+        source = project["tool"]["uv"]["sources"]["harbor"]
         harbor_requirement = next(
             line
             for line in (agent_dir.parent / "harbor_agent" / "requirements.txt").read_text().splitlines()
             if line.startswith("harbor @")
         )
-        assert terminus_requirement == harbor_requirement
+        assert harbor_requirement == f"harbor @ git+{source['git']}@{source['rev']}"
+        assert "nemo-gym[dev,terminus-2]" in (agent_dir / "requirements.txt").read_text()

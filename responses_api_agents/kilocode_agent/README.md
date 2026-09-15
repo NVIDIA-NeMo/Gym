@@ -22,13 +22,9 @@ gym eval run --no-serve --agent kilocode_math_agent \
   --output kilocode_rollout.jsonl
 ```
 
-Per request the agent writes `kilo.json` into an isolated run dir and runs one `kilo run --auto
---pure --format json`, then parses the streamed JSON events for the trajectory. The subprocess runs
-with `KILO_NO_DAEMON=1` (fresh embedded server per run — no shared daemon), `KILO_DB=:memory:`
-(ephemeral sessions), and per-run `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed inside the run dir, so
-runs don't share state and the global `~/.config/kilo` never bleeds in. `--pure` runs without
-external plugins, so codebase indexing never starts. The project `kilo.json` written into the run dir
-supplies the provider and permissions.
+Each request passes `kilo_config` through `KILO_CONFIG_CONTENT`, leaving the project's
+`kilo.json` untouched. Per-run data directories, an in-memory database, and
+`KILO_NO_DAEMON=1` isolate state. `--pure` disables external plugins and indexing.
 
 ## Model server
 
@@ -99,7 +95,7 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
 - `setup_timeout`: reserved, currently unused
 - `timeout`: seconds for the `kilo run` call (the only runaway bound — Kilo has no `--max-turns`)
 - `extra_args`: extra flags appended to `kilo run`
-- `kilo_config`: written to `kilo.json` in the run dir (OpenCode-compatible schema)
+- `kilo_config`: supplied as per-run Kilo config (OpenCode-compatible schema)
 - `context_window`: the served model's context window. Kilo measures the session against it, but only
   auto-compacts when `kilo_config` also sets `compaction.threshold_percent`; `0` turns the accounting
   off entirely. `model_server` only.

@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 import pytest
 
+from nemo_gym.agents.claude_code_observability import (
+    associate_claude_code_compaction_calls,
+    extract_claude_code_observations,
+)
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallRecord,
@@ -22,10 +26,6 @@ from nemo_gym.rollout_observability import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
-)
-from responses_api_agents.claude_code_agent.observability import (
-    associate_claude_code_compaction_calls,
-    extract_claude_code_observations,
 )
 
 
@@ -473,7 +473,7 @@ def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp_path:
     )
 
     with patch(
-        "responses_api_agents.claude_code_agent.observability.associate_claude_code_compaction_calls",
+        "nemo_gym.agents.claude_code_observability.associate_claude_code_compaction_calls",
         side_effect=RuntimeError,
     ):
         merge_model_call_capture_into_record(record, [tmp_path])
