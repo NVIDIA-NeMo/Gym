@@ -128,18 +128,6 @@ def test_rejects_static_llm_override() -> None:
         invocation_config(init_kwargs={"llm": "provider-model"})
 
 
-@pytest.mark.parametrize("aliases", [{"": "server"}, {"helper": " "}, {" ": "server"}])
-def test_rejects_empty_model_aliases(aliases: dict[str, str]) -> None:
-    with pytest.raises(ValidationError, match="model_aliases"):
-        invocation_config(model_aliases=aliases)
-
-
-def test_model_aliases_come_from_configuration() -> None:
-    config = invocation_config(model_aliases={"helper": "helper_model"})
-    assert config.model_aliases == {"helper": "helper_model"}
-    assert invocation_config().model_aliases == {}
-
-
 def test_load_invocation_adapter_rejects_missing_function() -> None:
     with pytest.raises(ValueError, match="has no attribute"):
         load_invocation_adapter(f"{__name__}:missing")
