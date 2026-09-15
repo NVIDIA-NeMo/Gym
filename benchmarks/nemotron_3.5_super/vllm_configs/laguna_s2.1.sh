@@ -10,8 +10,8 @@ VLLM_COMMON_ARGS=(
     --distributed-executor-backend mp
     --data-parallel-backend mp
     --enable-auto-tool-choice
-    --tool-call-parser qwen3_coder
-    --reasoning-parser nemotron_v3
+    --tool-call-parser poolside_v1
+    --reasoning-parser poolside_v1
     --enable-chunked-prefill
     --enable-prefix-caching
     --kv-cache-dtype fp8
