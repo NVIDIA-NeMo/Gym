@@ -29,6 +29,7 @@ from uuid import uuid4
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
+from openai.types.responses import ResponseUsage
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
@@ -563,6 +564,19 @@ class TestSynthesizeSSE:
         assert failed["status"] == "failed"
         assert failed["error"] == {"code": "server_error", "message": "boom"}
         assert failed["output"] == []
+
+    def test_unknown_usage_details_are_reported_as_zero_on_the_wire(self) -> None:
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"]["cached_tokens"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"] == {"cached_tokens": 0}
+            assert usage["output_tokens_details"] == {"reasoning_tokens": 0}
+            assert usage["total_tokens"] == 10
+            ResponseUsage.model_validate(usage)
+        # The caller's response keeps the unknown marker; only the SSE copy is normalized.
+        assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
 
 
 # The streaming sanitizer intentionally removes these input item types.
