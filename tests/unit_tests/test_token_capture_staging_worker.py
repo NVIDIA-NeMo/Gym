@@ -193,9 +193,9 @@ def test_generation_chunk_record_contains_only_new_generated_tokens() -> None:
 
 
 def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
-    capture, sink = _capture()
-    original = capture.begin_call(_root())
-    cut = capture.build_prefix_record(
+    original_capture, sink = _capture(weight_version=7)
+    original = original_capture.begin_call(_root())
+    cut = original_capture.build_prefix_record(
         original,
         prompt_token_ids=[10, 11],
         generated_token_ids=[12],
@@ -213,14 +213,15 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
             digest=cut.digest,
         ),
     )
-    resumed = capture.begin_call(
+    resumed_capture, _ = _capture(sink, weight_version=9)
+    resumed = resumed_capture.begin_call(
         admission,
         prefix_token_ids=[],
         generation_cut=cut,
         generation_cut_staging_keys=admission.generation_cut.staging_keys,
     )
 
-    coords = capture.complete_call(
+    coords = resumed_capture.complete_call(
         resumed,
         prompt_token_ids=[10, 11, 12],
         generated_token_ids=[13],
@@ -233,6 +234,41 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
     assert sink.records[-1].token_ids_delta == [10, 11, 12, 13]
     assert sink.records[-1].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
     assert sink.records[-1].generation_log_probs_delta == [0.0, 0.0, -0.25, -0.5]
+    # The exact old/new behavior logprobs survive the resume. The aggregate
+    # record uses the oldest version so staleness admission is conservative.
+    assert coords.weight_version == 7
+    assert sink.records[-1].weight_version == 7
+
+
+def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:
+    newer_capture, _ = _capture(weight_version=9)
+    cut = newer_capture.build_prefix_record(
+        newer_capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    admission = CaptureAdmission(
+        rollout_id="rollout-1-a1",
+        model_call_id="c2",
+        mode="text",
+        generation_cut=GenerationCutContinuation(
+            source_capture_key="rollout-1",
+            source_model_call_id="c1",
+            staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
+            generation_token_count=1,
+            digest=cut.digest,
+        ),
+    )
+    older_capture, _ = _capture(weight_version=7)
+
+    with pytest.raises(CaptureError, match="newer than current rollout version"):
+        older_capture.begin_call(
+            admission,
+            prefix_token_ids=[],
+            generation_cut=cut,
+            generation_cut_staging_keys=admission.generation_cut.staging_keys,
+        )
 
 
 def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:
