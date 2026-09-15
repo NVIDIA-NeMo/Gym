@@ -187,6 +187,11 @@ class AnySweInstanceConfig(AnySweAgentConfig, AnySweServerConfig):
 class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
 
+    # `SWEBenchMetrics` declares `mask_sample` too, to parse the metrics file where the key
+    # may be absent, and it wins the MRO. Restate the contract field so a consumer reading
+    # this response's schema sees the contract's type, default and description.
+    mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
+
 
 class GymAgentHarnessProcessor(BaseModel):
     config: Any
@@ -683,13 +688,22 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             meta, response.metadata = response.metadata, None
             metrics = SWEBenchMetrics.model_validate_json(meta["metrics"])
 
+            instance_config = AnySweInstanceConfig.model_validate_json(meta["instance_config"])
+
+            # `_should_mask_sample` writes the decision to the metrics file, so the metrics
+            # are the one source. Mirror it onto the compatibility `instance_config` field,
+            # which keeps its default here, and pass it once at the top level.
+            mask_sample = bool(metrics.mask_sample)
+            instance_config.mask_sample = mask_sample
+
             return AnySweVerifyResponse(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {"input": json.loads(meta["input"]), "tools": [t.model_dump() for t in (response.tools or [])]},
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
-                **metrics.model_dump(),
-                instance_config=AnySweInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
+                mask_sample=mask_sample,
+                **metrics.model_dump(exclude={"mask_sample"}),
+                instance_config=instance_config.model_dump(),
             )
 
 

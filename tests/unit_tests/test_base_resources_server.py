@@ -22,6 +22,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
@@ -70,3 +71,96 @@ class TestBaseResourcesServer:
 
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
+
+
+class TestVerifyResponseFailureReporting:
+    """`mask_sample` / `failure_reason` on the contract, so every environment can use them."""
+
+    def _params(self) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(input="hi")
+
+    def _response(self) -> NeMoGymResponse:
+        return NeMoGymResponse.model_construct(id="resp-1", output=[])
+
+    def test_defaults_keep_existing_environments_unchanged(self) -> None:
+        response = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=0.0)
+        assert response.mask_sample is False
+        assert response.failure_reason is None
+
+    def test_round_trip_preserves_the_flag_and_reason(self) -> None:
+        response = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.0,
+            mask_sample=True,
+            failure_reason="judge_unavailable",
+        )
+        dumped = response.model_dump()
+        assert dumped["mask_sample"] is True
+        assert dumped["failure_reason"] == "judge_unavailable"
+
+    def test_zero_reward_is_not_implicitly_masked(self) -> None:
+        """A policy that scores zero must stay a valid sample."""
+        response = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=0.0)
+        assert response.mask_sample is False
+
+    def test_a_degraded_but_legitimately_scored_rollout_is_not_masked(self) -> None:
+        """The diagnosis is independent of the decision to exclude the sample."""
+        response = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.4,
+            failure_reason="one retry was needed to reach the judge",
+        )
+        assert response.mask_sample is False
+        assert response.failure_reason is not None
+
+
+class TestFailureKindOnTheContract:
+    """The groupable half of the diagnosis, drawn from the shared vocabulary."""
+
+    def _params(self) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(input="hi")
+
+    def _response(self) -> NeMoGymResponse:
+        return NeMoGymResponse.model_construct(id="resp-1", output=[])
+
+    def _verify(self, **kwargs) -> BaseVerifyResponse:
+        return BaseVerifyResponse(
+            responses_create_params=self._params(), response=self._response(), reward=0.0, **kwargs
+        )
+
+    def test_absent_by_default(self) -> None:
+        assert self._verify().failure_kind is None
+
+    def test_a_registered_kind_round_trips(self) -> None:
+        assert self._verify(failure_kind=SESSION_LOST).model_dump()["failure_kind"] == SESSION_LOST
+
+    def test_naming_a_kind_does_not_decide_usability(self) -> None:
+        """A degraded but validly measured sample names a kind and stays unmasked."""
+        degraded = self._verify(failure_kind=JUDGE_FAILED, failure_reason="one retry was needed")
+
+        assert degraded.mask_sample is False
+        assert degraded.failure_kind == JUDGE_FAILED
+
+    def test_an_unregistered_kind_warns_but_the_response_survives(self, caplog) -> None:
+        """Dropping the response would replace a wrong label with a lost failure."""
+        import logging
+
+        from nemo_gym import failure_kinds
+
+        failure_kinds._WARNED_UNKNOWN.discard("invented_kind")
+        with caplog.at_level(logging.WARNING):
+            response = self._verify(failure_kind="invented_kind")
+
+        assert response.failure_kind == "invented_kind"
+        assert any("invented_kind" in record.getMessage() for record in caplog.records)
+
+    def test_an_environment_can_namespace_its_own(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            response = self._verify(failure_kind="lexmount_browser:quota_exhausted")
+
+        assert response.failure_kind == "lexmount_browser:quota_exhausted"
+        assert caplog.records == []
