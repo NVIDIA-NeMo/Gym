@@ -218,7 +218,7 @@ def test_rejects_row_tool_not_in_trusted_allowlist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_resource_calls_are_serialized() -> None:
+async def test_concurrent_resource_calls_are_serialized_with_independent_timing() -> None:
     active = 0
     maximum_active = 0
 
@@ -232,6 +232,7 @@ async def test_concurrent_resource_calls_are_serialized() -> None:
 
     client = MagicMock()
     client.post = AsyncMock(side_effect=post)
+    observations: list[GymToolExecution] = []
     tools = build_tool_namespace(
         namespace_name="weather",
         server_client=client,
@@ -239,9 +240,61 @@ async def test_concurrent_resource_calls_are_serialized() -> None:
         tools=[weather_tool()],
         allowed_tools=frozenset({"get_weather"}),
         cookies={},
-        observations=[],
+        observations=observations,
     )
 
-    await asyncio.gather(tools.get_weather("Paris"), tools.get_weather("Berlin"))
+    outputs = await asyncio.gather(tools.get_weather("Paris"), tools.get_weather("Berlin"))
 
+    # Stateful resource transport is intentionally serialized because the calls share
+    # a cookie jar/session, but each concurrent request retains its own observation.
     assert maximum_active == 1
+    assert {output["city"] for output in outputs} == {"Paris", "Berlin"}
+    assert len(observations) == 2
+    assert len({observation.tool_call_id for observation in observations}) == 2
+    by_city = {observation.arguments["city"]: observation for observation in observations}
+    assert set(by_city) == {"Paris", "Berlin"}
+    for city, observation in by_city.items():
+        assert observation.output == {"city": city}
+        assert observation.status == "completed"
+        assert observation.error_type is None
+        assert observation.started_at <= observation.completed_at
+        assert observation.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transport_failure_does_not_overwrite_sibling_observation() -> None:
+    async def post(**kwargs: Any) -> FakeResponse:
+        city = kwargs["json"]["city"]
+        await asyncio.sleep(0)
+        if city == "Paris":
+            raise ConnectionError("Paris transport failed")
+        return FakeResponse({"city": city})
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    observations: list[GymToolExecution] = []
+    tools = build_tool_namespace(
+        namespace_name="weather",
+        server_client=client,
+        resources_server_name="resources",
+        tools=[weather_tool()],
+        allowed_tools=frozenset({"get_weather"}),
+        cookies={},
+        observations=observations,
+    )
+
+    results = await asyncio.gather(tools.get_weather("Paris"), tools.get_weather("Berlin"), return_exceptions=True)
+
+    assert isinstance(results[0], ConnectionError)
+    assert results[1] == {"city": "Berlin"}
+    assert len(observations) == 2
+    assert len({observation.tool_call_id for observation in observations}) == 2
+    by_city = {observation.arguments["city"]: observation for observation in observations}
+    assert by_city["Paris"].status == "failed"
+    assert by_city["Paris"].error_type == "ConnectionError"
+    assert by_city["Paris"].output is None
+    assert by_city["Berlin"].status == "completed"
+    assert by_city["Berlin"].error_type is None
+    assert by_city["Berlin"].output == {"city": "Berlin"}
+    assert all(observation.started_at <= observation.completed_at for observation in observations)
+    assert all(observation.duration_ms >= 0 for observation in observations)

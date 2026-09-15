@@ -21,7 +21,7 @@ and remaining work.
 | C3 | Canonical `TrajectoryTurn` records preserve answer, reasoning, and tool-call activity | Met | `GymTraceHooks.record_model_response()` separates non-reasoning `answer` items from dedicated `reasoning_content`; persisted collector round-trip test | Preserve the round-trip regression. |
 | C4 | Model-visible input and output history is reconstructable from persisted rollout JSONL | Met | `AgentInvocation.conversation`; captured model request/response payloads; canonical `ng_trajectory` | Add one acceptance fixture proving reconstruction after JSON round-trip. |
 | C5 | Tool output, status, start/completion timestamps, and duration | Met | `TrajectoryToolCall`; `_GymToolDispatcher.invoke()`; NOOA code-execution hooks; collector output merge | Add failure/cancellation round-trip coverage. |
-| C6 | Independent timing for parallel tool calls | Partial | Per-call IDs and timing fields exist | Prove independent records under concurrent requests; define serialized stateful-resource versus truly parallel stateless/sandbox semantics. |
+| C6 | Independent timing for parallel tool calls | Met | Concurrent requests retain distinct IDs, timestamps, durations, status, output, and failure evidence; stateful resource transport serialization is explicitly tested | Preserve successful and failed-sibling concurrency regressions. |
 | C7 | Resource-server-backed and custom or sandbox-backed benchmarks | Partial | Resource-server capability E2E; seeded sandbox attachment in `runner.py`; real external rollouts | Add a committed seeded-Docker E2E test on the final stack. |
 | C8 | Turn identity, timestamp, question, resolution, and step metadata | Met | Exact Responses input, call-start timestamp, terminal invocation resolution, and cumulative tool-step count are emitted and round-trip tested | Preserve nested/failure-path coverage. |
 | C9 | Captured model requests and responses retain their payloads | Met | `TrajectoryModelCall.request` / `.response`; capture projection | Keep payload round-trip assertions. |
@@ -81,7 +81,7 @@ The audit that created this document ran:
 
 - [x] C3/C8 canonical turn fields implemented and persisted round-trip test added.
 - [x] C11 turn ownership ambiguity/conflict tests added.
-- [ ] C6 concurrent timing behavior and semantics tested.
+- [x] C6 concurrent timing behavior and semantics tested.
 - [ ] C7 resource-server and seeded-sandbox E2E routes tested.
 - [ ] H13 edge cases tested.
 - [ ] Acceptance-matrix fixture passes all applicable health checks.
