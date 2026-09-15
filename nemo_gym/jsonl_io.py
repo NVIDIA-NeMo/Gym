@@ -101,6 +101,9 @@ def compress_jsonl(path: str | Path, *, remove_source: bool = True) -> Path:
             with path.open("rb") as source, open_jsonl(temporary, "wb") as target:
                 shutil.copyfileobj(source, target, length=1024 * 1024)
                 target.flush()
+                # mkstemp defaults to 0600. Preserve ordinary source access permissions
+                # for shared archives, without copying special setuid/setgid/sticky bits.
+                os.fchmod(target.fileno(), os.fstat(source.fileno()).st_mode & 0o777)
                 os.fsync(target.fileno())
             if not same_jsonl_bytes(path, temporary):
                 raise OSError(f"Compressed JSONL verification failed: {path}")

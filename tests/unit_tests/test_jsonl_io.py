@@ -113,3 +113,18 @@ def test_failed_byte_verification_keeps_original(tmp_path, monkeypatch):
         compress_jsonl(path)
     assert path.read_bytes() == original
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("source_mode", [0o640, 0o644])
+def test_compression_preserves_shared_reader_permissions(tmp_path, source_mode):
+    path = tmp_path / "records.jsonl"
+    original = b'{"evidence":"shared"}\n'
+    path.write_bytes(original)
+    path.chmod(source_mode)
+
+    destination = compress_jsonl(path)
+
+    assert not path.exists()
+    assert destination.stat().st_mode & 0o7777 == source_mode
+    with open_jsonl(destination, "rb") as reader:
+        assert reader.read() == original
