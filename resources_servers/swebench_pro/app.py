@@ -272,7 +272,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except NotImplementedError:
             # Providers without PTY support (e.g. docker) still serve exec-based agents;
             # opencode-style agents require a PTY-capable provider.
-            print(f"PTY sessions unavailable for this sandbox provider; serving exec-only.", file=sys.stderr)
+            print("PTY sessions unavailable for this sandbox provider; serving exec-only.", file=sys.stderr)
             pty_session = None
         if self.config.apply_anti_cheating:
             anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"

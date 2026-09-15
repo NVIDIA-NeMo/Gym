@@ -138,9 +138,7 @@ def _apply_trace_config(config: "NOOAAgentConfig") -> None:
 
             provider = trace.get_tracer_provider()
             if isinstance(provider, SDKTracerProvider):
-                provider._resource = provider._resource.merge(
-                    Resource.create({"experiment": experiment})
-                )
+                provider._resource = provider._resource.merge(Resource.create({"experiment": experiment}))
         except Exception:  # pragma: no cover - observability must never kill a run
             pass
 
