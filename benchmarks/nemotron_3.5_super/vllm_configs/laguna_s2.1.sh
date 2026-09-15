@@ -2,7 +2,10 @@
 
 GYM_MODEL_PARAMS=()
 
-# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
+# @bxyu-nvidia: May not need these params
+# --kv-cache-dtype fp8
+# --no-disable-hybrid-kv-cache-manager
+# --block-size 128
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -14,12 +17,8 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser poolside_v1
     --enable-chunked-prefill
     --enable-prefix-caching
-    --kv-cache-dtype fp8
-    --no-disable-hybrid-kv-cache-manager
-    --block-size 128
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --skip-mm-profiling
     --data-parallel-size 1
     --data-parallel-size-local 1
     --tensor-parallel-size 4
