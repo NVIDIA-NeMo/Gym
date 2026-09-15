@@ -708,3 +708,40 @@ class TestEdgeCases:
 
         paths = _extract_paths_from_command("echo hello world")
         assert paths == []
+
+
+class TestMissingArgumentIsNotAMatch:
+    """Regression: vLLM's qwen3_coder parser silently drops a parameter whose
+    header lost its '=' ('<parametercommand>'), producing e.g.
+    execute_bash({"security_risk": "LOW"}) with no command. The verifier used
+    to give such a call full target and similarity credit, which RL learned
+    to exploit (malformed-command calls out-scored well-formed ones)."""
+
+    def test_bash_missing_rollout_command_fails_target_match(self):
+        r_args = {"security_risk": "LOW"}
+        e_args = {"command": "cd /repo && pytest tests/"}
+        assert not verify_target_match("bash", r_args, "bash", e_args)
+
+    def test_bash_missing_rollout_command_scores_zero_similarity(self):
+        r_args = {"security_risk": "LOW"}
+        e_args = {"command": "cd /repo && pytest tests/"}
+        assert compute_argument_similarity("bash", r_args, "bash", e_args) == 0.0
+
+    def test_bash_missing_expected_command_fails_target_match(self):
+        r_args = {"command": "ls -la"}
+        e_args = {"security_risk": "LOW"}
+        assert not verify_target_match("bash", r_args, "bash", e_args)
+
+    def test_bash_both_commands_missing_is_neutral(self):
+        assert verify_target_match("bash", {}, "bash", {})
+        assert compute_argument_similarity("bash", {}, "bash", {}) == 1.0
+
+    def test_edit_missing_rollout_command_fails_target_match(self):
+        r_args = {"path": "/workspace/foo.py"}
+        e_args = {"path": "/workspace/foo.py", "command": "view"}
+        assert not verify_target_match("edit", r_args, "edit", e_args)
+
+    def test_edit_both_commands_present_and_equal_still_matches(self):
+        r_args = {"path": "/workspace/foo.py", "command": "view"}
+        e_args = {"path": "/workspace/foo.py", "command": "view"}
+        assert verify_target_match("edit", r_args, "edit", e_args)
