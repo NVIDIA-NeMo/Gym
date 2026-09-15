@@ -397,11 +397,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _validate_logical_coordinates(self, body: GenRMCompareVerifyRequest) -> None:
         """Reject malformed cohort members before mutating shared state."""
         expected_size = self.config.num_rollouts_per_prompt
-        if body.task_index is None and not body.group_id:
-            raise HTTPException(
-                status_code=422,
-                detail=f"either {TASK_INDEX_KEY_NAME} or {GROUP_ID_KEY_NAME} is required for cohort comparison",
-            )
         if body.rollout_index is None:
             raise HTTPException(status_code=422, detail=f"{ROLLOUT_INDEX_KEY_NAME} is required for cohort comparison")
         if not 0 <= body.rollout_index < expected_size:

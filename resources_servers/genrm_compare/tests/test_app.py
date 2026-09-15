@@ -550,18 +550,29 @@ class TestGenRMCompareResourcesServer:
         assert [result.reward for result in results] == [1.0, 2.0]
         assert len(next(iter(server._verify_cohorts.values())).members) == 2
 
-    async def test_verify_rejects_missing_or_invalid_logical_coordinates(self, config):
+    async def test_verify_supports_legacy_prompt_only_cohort(self, config, monkeypatch: MonkeyPatch):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
+        monkeypatch.setattr(server, "_run_compare", run_compare)
+
+        results = await asyncio.gather(
+            server.verify(self._verify_request(0, task_index=None)),
+            server.verify(self._verify_request(1, task_index=None)),
+        )
+
+        assert [result.reward for result in results] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
+
+    async def test_verify_rejects_invalid_logical_coordinates(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
-        with pytest.raises(HTTPException) as missing_identity:
-            await server.verify(self._verify_request(0, task_index=None))
         with pytest.raises(HTTPException) as missing_rollout_index:
             await server.verify(self._verify_request(None))
         with pytest.raises(HTTPException) as invalid_rollout_index:
             await server.verify(self._verify_request(2))
 
-        assert missing_identity.value.status_code == 422
         assert missing_rollout_index.value.status_code == 422
         assert invalid_rollout_index.value.status_code == 422
         assert server._verify_cohorts == {}
