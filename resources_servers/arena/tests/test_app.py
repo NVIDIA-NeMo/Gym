@@ -803,6 +803,7 @@ class TestArenaResourcesServer:
                 "mask_sample",
                 "failure_kind",
                 "failure_reason",
+                "env_session_id",
                 "question_id",
                 "question",
                 "baseline_answer",
