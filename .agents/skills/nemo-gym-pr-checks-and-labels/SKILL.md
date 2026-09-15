@@ -108,7 +108,7 @@ Then classify the complete PR diff using the same precedence as CI:
 | Diff classification | Paths | CI test scope | Local evidence |
 |---|---|---|---|
 | CI docs-classified | Only `**.md`, `fern/**`, `LICENSE`, or `benchmarks/**` | Unit tests are skipped | For Fern changes, follow `fern/README.md`; for non-doc files under `benchmarks/**`, run targeted preparation/tests; otherwise run relevant docs/link checks |
-| Server-only | One or more files in `resources_servers/**`, `responses_api_agents/**`, or `responses_api_models/**`, with no uncategorized files | Core and sandbox coverage tests plus tests for changed servers | Run `gym env test +entrypoint=<component>/<name>` for each changed component and targeted core tests when shared behavior is exercised |
+| Server-only | One or more files in `resources_servers/**`, `responses_api_agents/**`, or `responses_api_models/**`, with no uncategorized files | Core and sandbox coverage tests plus tests for changed servers | Run `gym env test +entrypoint=<component>/<name> +should_validate_data=true` for each changed component and targeted core tests when shared behavior is exercised |
 | Full | Any uncategorized file, including core code, CI, scripts, test infrastructure, or native skill-discovery links | Core and sandbox coverage tests plus the eight-shard server suite | Run targeted tests for the changed contract; use `gym dev test` and `gym env test --all` when the change warrants the full local cost |
 
 The precedence is full over server-only over CI docs-classified. A Markdown
@@ -117,9 +117,11 @@ edit matches the Markdown rule, while adding a `.claude/skills` or
 `.codex/skills` symlink makes the diff full-scope under the current classifier.
 
 For server-only changes, replace `<component>` with `resources_servers`,
-`responses_api_agents`, or `responses_api_models`. The
+`responses_api_agents`, or `responses_api_models`. CI passes
+`+should_validate_data=true` for every changed component; the flag performs
+additional data validation only for resources servers. The
 `gym env test --resources-server <name>` form is shorthand for resources
-servers only.
+servers only and should use the same flag.
 
 Additional evidence is required by behavior, not just path:
 
