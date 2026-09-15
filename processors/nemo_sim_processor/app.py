@@ -40,6 +40,7 @@ from processors.nemo_sim_processor.contracts import (
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_AGENT_ID_BY_ALIAS = {"user_model": "user", "assistant_model": "assistant"}
 
 
 class NeMoSimProcessorConfig(BaseProcessorConfig):
@@ -159,11 +160,11 @@ class _ConversationBridge:
         gym_response = NeMoGymResponse.model_validate(response_data)
         self.cookies_by_alias[alias].update(response.cookies)
         self.responses_by_alias[alias].append(gym_response)
-        if alias in {"user_model", "assistant_model"}:
+        if alias in _AGENT_ID_BY_ALIAS:
             self.agent_turns.append(
                 AgentTurn(
                     sequence=len(self.agent_turns),
-                    participant="user" if alias == "user_model" else "assistant",
+                    agent_id=_AGENT_ID_BY_ALIAS[alias],
                     request=request_params,
                     response=gym_response,
                     observations=_agent_observations(target.name, trajectory_data),
@@ -225,6 +226,10 @@ def _response_text(response: NeMoGymResponse) -> str:
     return "\n".join(chunks)
 
 
+def _last_turn_sequence(agent_turns: list[AgentTurn], agent_id: str) -> int | None:
+    return next((turn.sequence for turn in reversed(agent_turns) if turn.agent_id == agent_id), None)
+
+
 class NeMoSimProcessor(BaseProcessor):
     config: NeMoSimProcessorConfig
 
@@ -256,7 +261,10 @@ class NeMoSimProcessor(BaseProcessor):
             return EpisodeResponse(
                 episode_id=body.episode_id,
                 task=body.task,
-                response=assistant_responses[-1] if assistant_responses else None,
+                agent_turns=bridge.agent_turns,
+                output_turn_sequence=(
+                    _last_turn_sequence(bridge.agent_turns, "assistant") if assistant_responses else None
+                ),
                 failure=EpisodeFailure(
                     kind="agent" if isinstance(error, TimeoutError) else "internal",
                     message=f"NeMo-Sim episode failed ({type(error).__name__})",
@@ -269,6 +277,7 @@ class NeMoSimProcessor(BaseProcessor):
             return EpisodeResponse(
                 episode_id=body.episode_id,
                 task=body.task,
+                agent_turns=bridge.agent_turns,
                 failure=EpisodeFailure(
                     kind="agent",
                     message="NeMo-Sim completed without an Assistant response",
@@ -277,14 +286,14 @@ class NeMoSimProcessor(BaseProcessor):
             )
 
         verifier_data = {
-            "agent_turns": [turn.model_dump(mode="json") for turn in bridge.agent_turns],
             "episode_interaction_protocol": EPISODE_INTERACTION_PROTOCOL,
             "nemo_sim_result": result,
         }
         return EpisodeResponse(
             episode_id=body.episode_id,
             task=body.task,
-            response=assistant_responses[-1],
+            agent_turns=bridge.agent_turns,
+            output_turn_sequence=_last_turn_sequence(bridge.agent_turns, "assistant"),
             verification=EpisodeVerification(
                 reward=float(bool(result.get("conversation_status"))),
                 verifier_data=verifier_data,

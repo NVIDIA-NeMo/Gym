@@ -138,10 +138,10 @@ async def test_returns_ordered_agent_turns_and_focal_response(monkeypatch: pytes
     result = await processor.run(SimpleNamespace(cookies={"session": "shared"}), _request())
 
     assert result.verification.reward == 1
-    assert result.response.output_text == "output-3"
-    turns = result.verification.verifier_data["agent_turns"]
-    assert [(turn["sequence"], turn["participant"]) for turn in turns] == [(0, "user"), (1, "assistant")]
-    assert turns[1]["request"]["input"][0]["content"] == "assistant_model"
+    assert result.output_turn_sequence == 1
+    assert result.agent_turns[result.output_turn_sequence].response.output_text == "output-3"
+    assert [(turn.sequence, turn.agent_id) for turn in result.agent_turns] == [(0, "user"), (1, "assistant")]
+    assert result.agent_turns[1].request.input[0].content == "assistant_model"
 
 
 @pytest.mark.asyncio
@@ -201,7 +201,7 @@ async def test_missing_assistant_is_typed_failure(monkeypatch: pytest.MonkeyPatc
     )
     result = await processor.run(SimpleNamespace(cookies={}), _request())
     assert result.failure.kind == "agent"
-    assert result.response is None
+    assert result.output_turn_sequence is None
 
 
 def test_rejects_unknown_response_parameter_alias() -> None:

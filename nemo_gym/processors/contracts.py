@@ -72,12 +72,12 @@ class EpisodeVerification(BaseModel):
 
 
 class AgentTurn(BaseModel):
-    """One ordered participant activation and its exact model-visible exchange."""
+    """One ordered agent activation and its exact model-visible exchange."""
 
     model_config = ConfigDict(extra="forbid")
 
     sequence: NonNegativeInt
-    participant: str
+    agent_id: str
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
     observations: AgentObservationBundle | None = None
@@ -90,7 +90,8 @@ class EpisodeResponse(BaseModel):
 
     episode_id: EpisodeId
     task: TaskIdentity
-    response: NeMoGymResponse | None = None
+    agent_turns: list[AgentTurn] = Field(default_factory=list)
+    output_turn_sequence: NonNegativeInt | None = None
     verification: EpisodeVerification | None = None
     agent_observations: AgentObservationBundle | None = None
     failure: EpisodeFailure | None = None
@@ -99,6 +100,11 @@ class EpisodeResponse(BaseModel):
     def validate_result(self) -> Self:
         if (self.verification is None) == (self.failure is None):
             raise ValueError("exactly one of verification or failure is required")
-        if self.verification is not None and self.response is None:
-            raise ValueError("a verified episode requires a response")
+        sequences = [turn.sequence for turn in self.agent_turns]
+        if sequences != list(range(len(self.agent_turns))):
+            raise ValueError("agent turn sequences must be contiguous and ordered from zero")
+        if self.verification is not None and self.output_turn_sequence is None:
+            raise ValueError("a verified episode requires an output turn")
+        if self.output_turn_sequence is not None and self.output_turn_sequence >= len(self.agent_turns):
+            raise ValueError("output_turn_sequence must reference an agent turn")
         return self

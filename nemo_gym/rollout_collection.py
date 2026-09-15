@@ -866,32 +866,39 @@ def _episode_request_from_row(row: Dict[str, Any]) -> EpisodeRequest:
 
 
 def _project_episode_response(request: EpisodeRequest, payload: Dict[str, Any]) -> Dict[str, Any]:
-    response = EpisodeResponse.model_validate(payload)
-    if response.episode_id != request.episode_id or response.task != request.task:
+    episode = EpisodeResponse.model_validate(payload)
+    if episode.episode_id != request.episode_id or episode.task != request.task:
         raise ValueError("EpisodeResponse identity does not match its EpisodeRequest.")
 
     result = {
         **request.task_data,
         RESPONSES_CREATE_PARAMS_KEY_NAME: request.responses_create_params.model_dump(mode="json"),
+        "agent_turns": [turn.model_dump(mode="json") for turn in episode.agent_turns],
+        "output_turn_sequence": episode.output_turn_sequence,
     }
-    if response.response is not None:
-        result["response"] = response.response.model_dump(mode="json")
-    if response.failure is not None:
+    output_response = (
+        episode.agent_turns[episode.output_turn_sequence].response
+        if episode.output_turn_sequence is not None
+        else None
+    )
+    if output_response is not None:
+        result["response"] = output_response.model_dump(mode="json")
+    if episode.failure is not None:
         result.update(
             {
                 NG_FAILURE_CLASS_KEY: (
                     AGENT_RUN_ERROR_FAILURE_CLASS
-                    if response.response is not None
+                    if output_response is not None
                     else AGENT_REQUEST_FAILED_FAILURE_CLASS
                 ),
-                NG_TERMINAL_KEY: not response.failure.retryable,
-                "failure_reason": response.failure.message,
-                "episode_failure": response.failure.model_dump(mode="json"),
+                NG_TERMINAL_KEY: not episode.failure.retryable,
+                "failure_reason": episode.failure.message,
+                "episode_failure": episode.failure.model_dump(mode="json"),
             }
         )
         return result
 
-    verification = response.verification
+    verification = episode.verification
     reserved = set(result) | {"response", "reward", "reward_components", "mask_sample", "failure_reason"}
     collisions = reserved & verification.verifier_data.keys()
     private = sorted(key for key in verification.verifier_data if key.startswith("_ng_"))
@@ -906,8 +913,8 @@ def _project_episode_response(request: EpisodeRequest, payload: Dict[str, Any]) 
             "mask_sample": verification.mask_sample,
         }
     )
-    if response.agent_observations is not None:
-        result["ng_agent_observations"] = response.agent_observations.model_dump(mode="json")
+    if episode.agent_observations is not None:
+        result["ng_agent_observations"] = episode.agent_observations.model_dump(mode="json")
     return result
 
 
