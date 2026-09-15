@@ -30,6 +30,8 @@ gym_ci_setup_dev() {
     if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv >/dev/null 2>&1; then
         # Offline container environment: the image already provides uv and a
         # pre-populated uv cache, so install nothing and resolve from the cache only.
+        # Verify the baked uv is the pinned version before trusting it.
+        test "$(uv --version | awk '{print $2}')" = "0.11.29"
         setup_uv_sync_args=(--offline)
     else
         # Online environment (e.g. GitHub Actions): download the pinned uv and let it

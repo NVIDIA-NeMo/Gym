@@ -873,6 +873,8 @@ def test_setup_dev_and_lint_resolve_tools_from_the_lockfile() -> None:
     lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
 
     assert 'if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v uv' in setup_dev
+    # The offline branch must verify the baked uv is the pinned version.
+    assert "test "$(uv --version | awk '{print $2}')" = "0.11.29"" in setup_dev
     assert "setup_uv_sync_args=(--offline)" in setup_dev
     assert "setup_uv_sync_args=()" in setup_dev
     assert "https://astral.sh/uv/0.11.29/install.sh" in setup_dev
@@ -919,14 +921,16 @@ def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
 
 
 def test_lint_workflow_provisions_pre_commit_before_lint() -> None:
-    # lint.sh resolves pre-commit from PATH (the lockfile dev extra), so the
-    # lint job must provision the dev environment (via scripts/ci/setup_dev.sh,
-    # which runs `uv sync --extra dev`) before invoking lint.sh.
+    # lint.sh resolves pre-commit from PATH (the lockfile dev extra). setup_dev.sh
+    # sources the dev venv's activate, which only affects the current shell, so the
+    # lint job must run setup_dev.sh and lint.sh in the SAME step (setup first).
     steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
         "lint-check"
     ]["steps"]
     run_cmds = [step.get("run", "") for step in steps]
 
-    setup_idx = next(i for i, cmd in enumerate(run_cmds) if "scripts/ci/setup_dev.sh" in cmd)
-    lint_idx = next(i for i, cmd in enumerate(run_cmds) if "scripts/ci/lint.sh" in cmd)
-    assert setup_idx < lint_idx, "setup_dev.sh must run before lint.sh"
+    (lint_cmd,) = (cmd for cmd in run_cmds if "scripts/ci/lint.sh" in cmd)
+    assert "scripts/ci/setup_dev.sh" in lint_cmd, "lint.sh must share a step with setup_dev.sh"
+    assert lint_cmd.index("scripts/ci/setup_dev.sh") < lint_cmd.index(
+        "scripts/ci/lint.sh"
+    ), "setup_dev.sh must run before lint.sh"
