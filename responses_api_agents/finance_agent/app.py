@@ -113,6 +113,7 @@ class StopReason(str, Enum):
     MAX_TURNS = "max_turns"
     MAX_TIME = "max_time"
     MAX_OUTPUT_TOKENS = "max_output_tokens"
+    CONTEXT_LENGTH = "context_length"
     ERROR = "error"
 
 
@@ -319,7 +320,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 stop_reason = StopReason.ERROR
                 break
             except Exception as e:
-                if self.config.truncate_on_overflow and self._is_context_overflow_error(e):
+                context_overflow = self._is_context_overflow_error(e)
+                if self.config.truncate_on_overflow and context_overflow:
                     truncated = self._truncate_oldest_exchange(new_outputs)
                     if len(truncated) < len(new_outputs):
                         logger.info(
@@ -331,7 +333,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         new_outputs = truncated
                         continue
                 logger.error("Model call failed on step %d: %s: %s", step, type(e).__name__, e)
-                stop_reason = StopReason.ERROR
+                stop_reason = StopReason.CONTEXT_LENGTH if context_overflow else StopReason.ERROR
                 break
 
             output = model_response.output
