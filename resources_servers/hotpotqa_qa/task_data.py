@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the hotpotqa_qa server.
 
-Parent of the required-expected_answer QA family (hotpotqa_qa, equivalence_rule): the wire
-requires a single ``expected_answer: str`` — the only field ``verify()`` consumes (here graded
+The wire requires a single ``expected_answer: str`` — the only field ``verify()`` consumes (graded
 with SQuAD-normalized exact match and token-overlap F1) — and everything else rides through
-``extra="allow"``. Heirs import ``ExpectedAnswerTaskDataCore`` instead of redefining the field.
-Required-ness mirrors ``HotpotQAQARunRequest`` (app.py): ``expected_answer`` is the sole
-wire-declared field; question/id/type/level are HotpotQA provenance passthrough that nothing
-reads (no subset metrics on type/level).
+``extra="allow"``. Required-ness mirrors ``HotpotQAQARunRequest`` (app.py): ``expected_answer``
+is the sole wire-declared field; question/id/type/level are HotpotQA provenance passthrough that
+nothing reads (no subset metrics on type/level).
 """
 
 from typing import Optional, Union
@@ -16,18 +14,13 @@ from typing import Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ExpectedAnswerTaskDataCore(BaseModel):
-    """Shared core of the family: a required ground-truth answer string, sole verify() input."""
-
+class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     expected_answer: str = Field(
         description="Required ground-truth answer string; the only row field verify() consumes.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
-
-
-class TaskData(ExpectedAnswerTaskDataCore):
     question: Optional[str] = Field(
         default=None,
         description="Original HotpotQA question text; provenance only (the prompt lives in the input messages).",

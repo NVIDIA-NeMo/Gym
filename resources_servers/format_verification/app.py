@@ -16,6 +16,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -23,13 +24,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.format_verification.task_data import TaskData
 
 
 class FormatVerificationResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class FormatVerificationVerifyRequest(BaseVerifyRequest):
+class FormatVerificationVerifyRequest(TaskData, BaseVerifyRequest):
+    # Redeclared: verify() reads this as a plain dict.
+    model_config = ConfigDict(extra="ignore")
     verifier: Dict[str, Any]
 
 

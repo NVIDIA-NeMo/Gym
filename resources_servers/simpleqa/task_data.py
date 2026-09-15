@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the simpleqa server.
 
-Parent of the defensive judge-QA family (simpleqa, omniscience, frontierscience_judge,
-abstention): an optional id + question + ground-truth answer, every field read defensively by an
-LLM-judge ``verify()`` (a missing field becomes an empty string in the judge prompt), with
-``extra="allow"`` provenance passthrough. Heirs import ``JudgeQATaskDataCore`` (id + question;
-abstention names its answer field ``answer``) or ``TaskData`` (adds ``expected_answer``) instead
-of redefining these fields. Required-ness mirrors ``SimpleQARunRequest`` (app.py): all task
-fields are Optional on the wire. The judge prompt template and judge model come from server
-config, not the row.
+An optional id + question + ground-truth answer, every field read defensively by the LLM-judge
+``verify()`` (a missing field becomes an empty string in the judge prompt), with ``extra="allow"``
+provenance passthrough. Required-ness mirrors ``SimpleQARunRequest`` (app.py): all task fields are
+Optional on the wire. The judge prompt template and judge model come from server config, not the
+row.
 """
 
 from typing import Optional, Union
@@ -17,9 +14,7 @@ from typing import Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class JudgeQATaskDataCore(BaseModel):
-    """Shared id + question core of the judge-QA family."""
-
+class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: Optional[Union[int, str]] = Field(
@@ -35,9 +30,6 @@ class JudgeQATaskDataCore(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
-
-
-class TaskData(JudgeQATaskDataCore):
     expected_answer: Optional[str] = Field(
         default=None,
         description=(

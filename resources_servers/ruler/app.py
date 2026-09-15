@@ -15,22 +15,23 @@
 
 from typing import List, Optional
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.ruler.task_data import TaskData
 
 
 class RulerResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class RulerVerifyRequest(BaseVerifyRequest):
-    outputs: List[str]
-    length: int
-    subset: str
+class RulerVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):

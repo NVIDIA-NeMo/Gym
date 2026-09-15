@@ -5,8 +5,7 @@
 Task fields ride at the row top level (no verifier_metadata). All four fields carry permissive
 defaults on the wire (ARCAGIRunRequest), so none is required here. verify() reads only
 ``expected_output`` (exact grid equality against the parsed ``\\boxed{[[...]]}`` answer);
-``train``/``test_input`` exist because the same fields seed the prompt. nvarc's TaskData
-subclasses this model.
+``train``/``test_input`` exist because the same fields seed the prompt.
 """
 
 from typing import Any, Dict, List, Optional

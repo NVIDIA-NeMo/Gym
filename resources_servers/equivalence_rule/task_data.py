@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the equivalence_rule server.
 
-Required-expected_answer QA family heir: extends hotpotqa_qa's ``ExpectedAnswerTaskDataCore``.
 ``expected_answer`` is the only field ``verify()`` consumes (graded by the config-selected rule:
 exact / seq_match / weighted_seq_match on normalized strings); question/dataset/source/hashid/
 context_length are long-context (mrcr-style) provenance passthrough surviving via
@@ -12,12 +11,16 @@ context_length are long-context (mrcr-style) provenance passthrough surviving vi
 
 from typing import Optional, Union
 
-from pydantic import Field
-
-from resources_servers.hotpotqa_qa.task_data import ExpectedAnswerTaskDataCore
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskData(ExpectedAnswerTaskDataCore):
+class TaskData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    expected_answer: str = Field(
+        description="Required ground-truth answer string; the only row field verify() consumes.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
     question: Optional[str] = Field(
         default=None,
         description="Task instruction/question text; provenance only (the prompt lives in the input messages).",

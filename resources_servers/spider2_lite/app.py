@@ -23,6 +23,7 @@ from resources_servers.spider2_lite.eval_utils import (
     execute_sqlite_async,
 )
 from resources_servers.spider2_lite.setup_spider2 import ensure_spider2_lite
+from resources_servers.spider2_lite.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -82,20 +83,8 @@ class Spider2LiteResourcesServerConfig(BaseResourcesServerConfig):
     sql_execution_timeout_s: float = 30.0
 
 
-class Spider2LiteVerifyRequest(BaseVerifyRequest):
+class Spider2LiteVerifyRequest(TaskData, BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    instance_id: Optional[str] = None
-    db_id: str
-    question: str
-
-    gold_sql: Optional[str] = None
-    gold_result: Optional[list[list[list[Any]]]] = None
-
-    ignore_order: bool = True
-    condition_cols: Optional[list] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class Spider2LiteVerifyResponse(BaseVerifyResponse):

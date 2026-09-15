@@ -46,6 +46,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.asr_with_pc.task_data import TaskData
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -232,17 +233,10 @@ class ASRWithPCConfig(BaseResourcesServerConfig):
     task_type: _TASK_TYPES = "ASR-PC"
 
 
-class ASRWithPCVerifyRequest(BaseVerifyRequest):
+class ASRWithPCVerifyRequest(TaskData, BaseVerifyRequest):
     # Allow benchmark-specific reference fields (e.g. ``text_tn``,
     # ``text_itn`` for ASR_LEADERBOARD) to ride on the request.
     model_config = ConfigDict(extra="allow")
-
-    expected_answer: str = ""
-    sample_id: Optional[str] = None
-    split: Optional[str] = None
-    task_type: Optional[_TASK_TYPES] = None
-    audio_duration: Optional[float] = None
-    reference_fields: Optional[List[str]] = None
 
 
 class ASRWithPCVerifyResponse(BaseVerifyResponse):

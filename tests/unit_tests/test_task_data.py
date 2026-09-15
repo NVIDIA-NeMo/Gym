@@ -232,26 +232,54 @@ class TestShippedSchemas:
         names = {p.parent.name for p in SCHEMA_FILES}
         assert {"example_multi_step", "example_mcp_weather", "example_single_tool_call"} <= names
 
+    @staticmethod
+    def _imported_modules(py_file: Path) -> list[str]:
+        modules = []
+        for node in ast.walk(ast.parse(py_file.read_text())):
+            if isinstance(node, ast.Import):
+                modules.extend(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                modules.append(node.module or "")
+        return modules
+
     @pytest.mark.parametrize("schema_file", SCHEMA_FILES, ids=lambda p: p.parent.name)
     def test_imports_are_dependency_light(self, schema_file):
-        tree = ast.parse(schema_file.read_text())
-        for node in ast.walk(tree):
-            modules = []
-            if isinstance(node, ast.Import):
-                modules = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                modules = [node.module or ""]
-            for module in modules:
-                root = module.split(".")[0]
-                allowed = (
-                    root in sys.stdlib_module_names
-                    or module.startswith(self.ALLOWED_IMPORT_PREFIXES)
-                    or (module.startswith("resources_servers.") and module.endswith(".task_data"))
-                )
-                assert allowed, (
-                    f"{schema_file}: import of {module!r} is not allowed in task_data.py "
-                    "(stdlib, pydantic, nemo_gym.task_data, and other servers' task_data only)"
-                )
+        for module in self._imported_modules(schema_file):
+            root = module.split(".")[0]
+            allowed = (
+                root in sys.stdlib_module_names
+                or module.startswith(self.ALLOWED_IMPORT_PREFIXES)
+                or (module.startswith("resources_servers.") and module.endswith(".task_data"))
+            )
+            assert allowed, (
+                f"{schema_file}: import of {module!r} is not allowed in task_data.py "
+                "(stdlib, pydantic, nemo_gym.task_data, and other servers' task_data only)"
+            )
+
+    @pytest.mark.parametrize("schema_file", SCHEMA_FILES, ids=lambda p: p.parent.name)
+    def test_cross_server_schema_imports_mirror_app_imports(self, schema_file):
+        """A schema may import another server's schema only when its own app.py imports that server.
+
+        Sharing field declarations between servers whose app.py files have no relationship couples
+        independent verifiers for no reason, and once a request model inherits its TaskData the foreign
+        server becomes a runtime dependency of the verifier.
+        """
+        own = schema_file.parent.name
+        app_file = schema_file.parent / "app.py"
+        app_imports = self._imported_modules(app_file) if app_file.exists() else []
+        for module in self._imported_modules(schema_file):
+            if not (module.startswith("resources_servers.") and module.endswith(".task_data")):
+                continue
+            target = module.split(".")[1]
+            if target == own:
+                continue
+            app_depends_on_target = any(
+                m == f"resources_servers.{target}" or m.startswith(f"resources_servers.{target}.") for m in app_imports
+            )
+            assert app_depends_on_target, (
+                f"{schema_file}: imports {module!r} but {own}/app.py does not import resources_servers.{target}. "
+                "Inline the fields instead; schema inheritance must mirror a real app.py dependency."
+            )
 
     @pytest.mark.parametrize("schema_file", SCHEMA_FILES, ids=lambda p: p.parent.name)
     def test_loads_and_bans_extra_ignore(self, schema_file):

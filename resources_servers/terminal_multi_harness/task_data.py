@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the terminal_multi_harness server.
 
-Rows pair an ``expected_action`` (the same discriminated union family as
-single_step_tool_use_with_argument_comparison, whose message/function_call variants are imported
-here) with harness-specific verification context: which ``harness``'s tool conventions to grade
-under, the ``declared_tools`` schemas used to validate tool-call arguments, and an optional
-per-row similarity ``threshold``. This server's batch variant differs from the parent's — it adds
-``ordered`` and allows an empty ``calls`` list — so it is redeclared locally, mirroring
-``common/verification_utils.py``.
+Rows pair an ``expected_action`` (a discriminated union of message / function_call /
+function_call_batch actions) with harness-specific verification context: which ``harness``'s tool
+conventions to grade under, the ``declared_tools`` schemas used to validate tool-call arguments,
+and an optional per-row similarity ``threshold``. The action models mirror
+``common/verification_utils.py`` field-for-field; the batch variant adds ``ordered`` and allows
+an empty ``calls`` list.
 
 Committed rows also carry ``uuid`` and ``metadata`` ({harness, example_kind}), which are NOT
 fields of today's wire request model (``TerminalMultiHarnessRunRequest`` uses pydantic's default
@@ -20,14 +19,28 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, TypeAlias, Uni
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from resources_servers.single_step_tool_use_with_argument_comparison.task_data import (
-    FunctionCallAction,
-    MessageAction,
-)
+
+class MessageAction(BaseModel):
+    """The expected action is an assistant chat message."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["message"]
+    content: str
+
+
+class FunctionCallAction(BaseModel):
+    """The expected action is a single tool call."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["function_call"]
+    name: str
+    arguments: str = Field(description="JSON-encoded object string of the expected tool-call arguments.")
 
 
 class FunctionCallBatchAction(BaseModel):
-    """This server's batch variant: adds ``ordered`` and (unlike the parent's) allows empty calls."""
+    """The expected action is a batch of tool calls; ``ordered`` controls order sensitivity."""
 
     model_config = ConfigDict(extra="allow")
 

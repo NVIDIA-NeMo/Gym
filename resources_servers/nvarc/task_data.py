@@ -2,27 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the nvarc server.
 
-nvarc rows extend the arc_agi shape (imported, not redefined) with an ``agent_mode`` switch and
-augmentation/difficulty provenance. NVARCRunRequest does not set extra='allow', so the untyped
-provenance fields below are silently dropped at today's verify boundary (Pydantic default
-extra='ignore'); they are declared here as loose Optional passthrough so the row data stays
-described without over-constraining it.
+nvarc rows carry the ARC grid fields (train / test_input / expected_output / task_id) plus an
+``agent_mode`` switch and augmentation/difficulty provenance. NVARCRunRequest does not set
+extra='allow', so the untyped provenance fields below are silently dropped at today's verify
+boundary (Pydantic default extra='ignore'); they are declared here as loose Optional passthrough
+so the row data stays described without over-constraining it.
 """
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import Field
-
-from resources_servers.arc_agi.task_data import TaskData as ARCAGITaskData
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskData(ARCAGITaskData):
-    # Re-declared from the arc_agi parent because nvarc's verify() also consumes the test grid
-    # (it feeds the extracted program in inductive mode).
+class TaskData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    train: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Demonstration pairs [{'input': grid, 'output': grid}, ...] used to build the prompt.",
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
     test_input: List[List[int]] = Field(
         default_factory=list,
         description="Test grid; prompt-side, and read by verify() in inductive agent_mode.",
         json_schema_extra={"consumed_by": ["verify", "prompt"]},
+    )
+    expected_output: List[List[int]] = Field(
+        default_factory=list,
+        description="Ground-truth output grid; verify() checks exact equality against the extracted grid.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Upstream ARC task identifier.",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )
     agent_mode: Optional[str] = Field(
         default=None,

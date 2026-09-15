@@ -26,19 +26,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.vlm_eval_kit.task_data import TaskData
 
 
 class VlmEvalKitResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class VLMEvalKitVerifyRequest(BaseVerifyRequest):
+class VLMEvalKitVerifyRequest(TaskData, BaseVerifyRequest):
     # We allow extra inputs here since there are many VLMEvalKit benchmarks that are run through the same resources server.
     model_config = ConfigDict(extra="allow")
-
-    benchmark_name: str
-    category: str
-    answer: Any
 
 
 class VLMEvalKitVerifyResponse(VLMEvalKitVerifyRequest, BaseVerifyResponse):

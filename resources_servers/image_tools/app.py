@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.image_tools.task_data import TaskData
 
 
 # Reuse the exact parser and IoU the image-tools agent uses at rollout time, so
@@ -354,13 +355,8 @@ class ImageToolsPivotResourcesServerConfig(BaseResourcesServerConfig):
     log_unparsed_every_n: int = 50
 
 
-class ImageToolsPivotRunRequest(BaseRunRequest):
+class ImageToolsPivotRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    expected_action: Optional[dict[str, Any]] = None
-    expected_answer: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class ImageToolsPivotVerifyRequest(ImageToolsPivotRunRequest, BaseVerifyRequest):

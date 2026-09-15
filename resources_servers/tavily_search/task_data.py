@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-data schema for the tavily_search server (parent of the search-QA pair).
+"""Task-data schema for the tavily_search server.
 
 Two required top-level strings, mirroring ``TavilySearchRunRequest`` (app.py) exactly; there is
 no verifier_metadata. Whether verification runs an LLM judge or an exact string match is chosen
@@ -8,8 +8,6 @@ by server config (``use_judge``), not by row data — both paths consume the sam
 ``use_judge=false``, verify() extracts the span between "Answer:" and "Confidence:" in the last
 assistant message (a fixed extraction regex; ground_truth itself is never a regex) and requires
 exact string equality with ground_truth.
-browsecomp_advanced_harness shares this schema verbatim (its app.py redeclares the identical
-request model) and imports it.
 """
 
 from pydantic import BaseModel, ConfigDict, Field

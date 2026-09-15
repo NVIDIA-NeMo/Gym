@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.equivalence_rule.task_data import TaskData
 
 
 class GradingRule(str, Enum):
@@ -45,10 +46,8 @@ class EquivalenceRuleResourcesServerConfig(BaseResourcesServerConfig):
     grading_rule: GradingRule = GradingRule.EXACT
 
 
-class EquivalenceRuleRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    expected_answer: str
+class EquivalenceRuleRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class EquivalenceRuleVerifyRequest(EquivalenceRuleRunRequest, BaseVerifyRequest):

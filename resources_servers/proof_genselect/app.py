@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from pydantic import PrivateAttr
+from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -15,6 +15,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.proof_genselect.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
@@ -46,13 +47,8 @@ class ProofGenSelectResourcesServerConfig(BaseResourcesServerConfig):
     assert_think_end: bool = False
 
 
-class ProofGenSelectVerifyRequest(BaseVerifyRequest):
-    problem: str
-    proof_1: str
-    proof_2: str
-    correct_index: int
-    score_1: Optional[float] = None
-    score_2: Optional[float] = None
+class ProofGenSelectVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class ProofGenSelectResourcesServer(SimpleResourcesServer):

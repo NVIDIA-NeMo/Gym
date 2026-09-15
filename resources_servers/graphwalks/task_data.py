@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the graphwalks server.
 
-Task fields ride at the row top level (no verifier_metadata in data or code). ``GraphWalksCore``
-holds the fields shared with the lc_niah server, whose rows are derived from graphwalks data;
-lc_niah's TaskData imports it instead of redefining. ``problem_type`` is deliberately NOT part of
-the core because its required-ness differs per wire: GraphWalksVerifyRequest requires it, while
-lc_niah's wire only sees it as an untyped extra.
+Task fields ride at the row top level (no verifier_metadata in data or code). ``problem_type`` is
+wire-required (GraphWalksVerifyRequest) and drives the per-subset metrics breakdown.
 """
 
 from typing import Optional
@@ -14,9 +11,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class GraphWalksCore(BaseModel):
-    """Fields shared by graphwalks and its lc_niah derivative."""
-
+class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     expected_answer: str = Field(
@@ -31,9 +26,6 @@ class GraphWalksCore(BaseModel):
         description="Prompt size in tokens; wire-optional passthrough, never read by verify().",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
-
-
-class TaskData(GraphWalksCore):
     problem_type: str = Field(
         description=(
             "Task family, e.g. 'parents' or 'bfs'. Wire-required (GraphWalksVerifyRequest) but unread by "

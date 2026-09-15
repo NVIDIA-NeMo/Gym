@@ -24,7 +24,9 @@ not carry the marker.
 This module is a dependency-light leaf: it may import only the standard library and Pydantic, and
 per-server ``task_data.py`` modules may import only the standard library, Pydantic, this module,
 and other servers' ``task_data`` modules. That keeps schemas loadable by data tooling (collate,
-``gym env schema``, dataset import) without installing any server's requirements.
+``gym env schema``, dataset import) without installing any server's requirements. A schema may
+import another server's ``task_data`` only when its own ``app.py`` imports that server, so that
+schema inheritance mirrors a real verifier dependency instead of coupling unrelated servers.
 
 Conventions for ``TaskData`` models:
 - ``model_config = ConfigDict(extra="allow")`` by default. ``extra="forbid"`` is opt-in for

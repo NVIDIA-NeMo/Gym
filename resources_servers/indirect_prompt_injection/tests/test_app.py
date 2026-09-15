@@ -242,6 +242,7 @@ class TestApp:
             ]
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -258,6 +259,7 @@ class TestApp:
         server = self.init_server(config)
         response = _make_response([])  # No tool calls at all
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -282,6 +284,7 @@ class TestApp:
             ]
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -302,6 +305,7 @@ class TestApp:
             ]
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -319,6 +323,7 @@ class TestApp:
             ]
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -341,6 +346,7 @@ class TestApp:
             ]
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -357,6 +363,7 @@ class TestApp:
             incomplete_details={"reason": "max_output_tokens"},
         )
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,
@@ -379,6 +386,7 @@ class TestApp:
 
         response = _make_response([_make_function_call_output("get_lab_results", '{"patient_id": "P001"}')])
         verify_request = IPIVerifyRequest(
+            environment=SAMPLE_ENV,
             responses_create_params=SAMPLE_RESPONSES_CREATE_PARAMS,
             response=response,
             injection=SAMPLE_INJECTION,

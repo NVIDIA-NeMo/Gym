@@ -6,7 +6,7 @@ Stateful environment: the row is a pointer whose only task datum is ``task_idx``
 index into an aviary ``TaskDataset`` supplied OUT of the row by the concrete subclass server
 (the aviary_bbh / aviary_bixbench / aviary_gsm8k / aviary_hotpotqa environments). Reward
 accumulates server-side across /step calls keyed by env_id; verify() reads that state, never the
-row. toolsandbox's TaskData subclasses this model.
+row.
 """
 
 from pydantic import BaseModel, ConfigDict, Field

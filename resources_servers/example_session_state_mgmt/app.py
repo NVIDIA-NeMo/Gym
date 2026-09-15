@@ -15,7 +15,7 @@
 from typing import Dict
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -26,6 +26,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.example_session_state_mgmt.task_data import TaskData
 
 
 class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
@@ -44,8 +45,8 @@ class GetCounterValueResponse(BaseModel):
     count: int
 
 
-class StatefulCounterVerifyRequest(BaseVerifyRequest):
-    expected_count: int
+class StatefulCounterVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
