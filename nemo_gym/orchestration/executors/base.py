@@ -14,10 +14,48 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from pathlib import Path
 
 from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord
 
 
 class BaseExecutor(ABC):
     @abstractmethod
-    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> None: ...
+    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
+        """Submit `config` and return the record describing it.
+
+        Returns None on a dry run, which renders the scripts and stops before
+        anything is submitted; every other path either returns a record or
+        raises.
+        """
+
+    def persist(self, record: SubmissionRecord, write_manifest: Callable[[Path, str], None]) -> None:
+        """Store the record, in the order that survives a partial failure.
+
+        Shared by every executor because the ordering and the failure handling
+        are policy rather than transport. The machine-local index goes first
+        precisely because it cannot fail the submit, so if the manifest write
+        does fail there is still a parseable record for the by-hand recovery the
+        error asks for.
+
+        Only the manifest's transport differs per executor, so it arrives as
+        `write_manifest` -- `Connection.write_text` already has this signature --
+        rather than this class owning a connection it cannot know how to open.
+        Call it while that transport is still open: reopening one here would pay
+        a second connection on every submit.
+
+        The jobs are queued by the time this runs, so a failure has to name them
+        or they are stranded with no record anywhere.
+        """
+        record.write_local_index()
+        manifest = Path(record.run_dir) / MANIFEST_NAME
+        try:
+            write_manifest(manifest, record.dumps())
+        except Exception as error:
+            queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
+            raise RuntimeError(
+                f"Submitted jobs but could not write the manifest to {manifest}: {error}. "
+                f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
+            ) from error
