@@ -297,20 +297,45 @@ class TestLegacyRepeatMetricsCache:
         assert not comparison_loading._repeat_metrics_cache_path(aggregate_metrics_path_for(rollout_identity)).exists()
 
 
-class TestNumRepeats:
-    @pytest.mark.parametrize("reported", [7, 7.0])
-    def test_reads_num_repeats_from_agent_metrics(self, tmp_path, reported):
-        entry = _entry(
-            agent_metrics={"mean/reward": 0.5, "num_repeats": reported},
-            groups=[_group(0, [1.0, 0.0, 1.0])],
-        )
-        assert _load(tmp_path, f"reported-{reported}", [entry]).num_repeats == 7
+class TestNumRepeatsDerivation:
+    def test_prefers_expected_num_rollouts(self, tmp_path):
+        run = _load(tmp_path, "base", [_entry(groups=[_group(0, [1.0, 0.0, 1.0])])])
+        assert run.num_repeats == 3
+
+    def test_falls_back_to_repeat_level_metrics(self, tmp_path):
+        groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
+        repeat_level_metrics = [{"_ng_rollout_index": i, "mean/reward": i / 4} for i in range(4)]
+        entry = _entry(groups=groups, repeat_level_metrics=repeat_level_metrics)
+        run = _load(tmp_path, "base", [entry])
+        assert run.num_repeats == 4
+        assert run.repeat_level_metrics == repeat_level_metrics
 
     def test_missing_repeat_level_metrics_loads_as_an_empty_list(self, tmp_path):
         entry = _entry()
         del entry["repeat_level_metrics"]
         run = _load(tmp_path, "base", [entry])
         assert run.repeat_level_metrics == []
+
+    def test_repeat_level_fallback_works_per_agent_in_a_multi_agent_file(self, tmp_path):
+        """Aggregation nests each agent's repeat_level_metrics under its own entry, stripped of
+        `agent_ref`, so the fallback is per-agent regardless of how many agents the file holds."""
+        groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
+        entries = [
+            _entry(agent="a", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(2)]),
+            _entry(agent="b", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(7)]),
+        ]
+        assert _load(tmp_path, "multi", entries, agent="a").num_repeats == 2
+        assert _load(tmp_path, "multi", entries, agent="b").num_repeats == 7
+
+    def test_a_partially_recovered_run_reports_its_full_repeat_count(self, tmp_path):
+        """Some tasks come up short when a run is partially recovered; the run still had 3 repeats.
+
+        Taking the mode instead would report 1 here, and would depend on task ordering when the
+        per-task counts tie.
+        """
+        groups = [_group(0, [1.0, 0.0, 1.0]), _group(1, [1.0]), _group(2, [0.0, 1.0])]
+        run = _load(tmp_path, "base", [_entry(groups=groups)])
+        assert run.num_repeats == 3
 
     def test_unknown_when_nothing_records_it(self, tmp_path):
         run = _load(tmp_path, "base", [_entry(groups=[{"_ng_task_index": 0, "mean/reward": 1.0}])])
@@ -861,27 +886,8 @@ class TestCompareRuns:
             compare_runs(baseline, [candidate])
 
     def test_notes_flag_repeat_mismatch_and_absent_intervals(self, tmp_path):
-        baseline = _load(
-            tmp_path,
-            "base",
-            [
-                _entry(
-                    agent_metrics={"mean/reward": 0.5, "num_repeats": 3},
-                    groups=[_group(0, [1.0, 1.0, 1.0], with_rollout_infos=False)],
-                )
-            ],
-        )
-        candidate = _load(
-            tmp_path,
-            "cand",
-            [
-                _entry(
-                    agent_metrics={"mean/reward": 0.5, "num_repeats": 2},
-                    groups=[_group(0, [1.0, 0.0], with_rollout_infos=False)],
-                )
-            ],
-            role="candidate",
-        )
+        baseline = _load(tmp_path, "base", [_entry(groups=[_group(0, [1.0, 1.0, 1.0])])])
+        candidate = _load(tmp_path, "cand", [_entry(groups=[_group(0, [1.0, 0.0])])], role="candidate")
         comparison = compare_runs(baseline, [candidate])
         assert comparison.baseline_repeat_count == 3 and comparison.candidate_repeat_counts == [2]
         assert any("Repeat counts differ" in note for note in comparison.notes)

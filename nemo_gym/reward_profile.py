@@ -370,8 +370,6 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 sem = std / n**0.5
-                # SEM and the t interval quantify uncertainty in `mean/<col>`. They are
-                # not uncertainty estimates for the median, extrema, or quantiles below.
                 entry.update(
                     {
                         f"{MEAN_PREFIX}{col}": mean,

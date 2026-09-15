@@ -33,6 +33,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
+    EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for
@@ -71,7 +72,7 @@ def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optiona
 
 
 def _repeat_metrics_cache_path(metrics_fpath: Path) -> Path:
-    """Sibling cache for legacy aggregate files without per-repeat statistics."""
+    """Cache for legacy aggregate files without per-repeat statistics."""
     return metrics_fpath.with_stem(f"{metrics_fpath.stem}_repeat_metrics_cache")
 
 
@@ -118,7 +119,7 @@ def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
     return entry | {
         "agent_metrics": computed.agent_metrics
         | (entry.get("agent_metrics") or {})
-        | {"num_repeats": computed.agent_metrics.get("num_repeats")},
+        | {"num_repeats": _derive_num_repeats(entry.get("group_level_metrics", []), computed.repeat_level_metrics)},
         "repeat_level_metrics": computed.repeat_level_metrics,
     }
 
@@ -126,7 +127,7 @@ def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
 def _load_repeat_metrics_cache_if_needed(
     entries: Dict[str, Dict[str, Any]], metrics_fpath: Path
 ) -> Dict[str, Dict[str, Any]]:
-    """Use a sibling cache only when the aggregate predates repeat-level metrics."""
+    """Use a cache only when the aggregate is legacy and predates repeat-level metrics."""
     key = "repeat_level_metrics"
     if all(key in entry for entry in entries.values()):
         return entries
@@ -255,6 +256,28 @@ def resolve_agent_selections(
     )
 
 
+def _derive_num_repeats(
+    group_level_metrics: List[Dict[str, Any]],
+    repeat_level_metrics: List[Dict[str, Any]],
+) -> Optional[int]:
+    """How many repeats the run collected: the most any single task has.
+
+    `expected_num_rollouts` is per task, and a partially recovered run leaves some tasks short of
+    the rest, so the max is the run's repeat count. `repeat_level_metrics` has exactly one entry
+    per repeat but is absent from single-repeat runs and from files written before it existed.
+    """
+    expected = [
+        group[EXPECTED_NUM_ROLLOUTS_KEY_NAME]
+        for group in group_level_metrics
+        if isinstance(group.get(EXPECTED_NUM_ROLLOUTS_KEY_NAME), int)
+    ]
+    if expected:
+        return max(expected)
+    if repeat_level_metrics:
+        return len(repeat_level_metrics)
+    return None
+
+
 def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
     """Narrow a parsed run file to one agent."""
     entry = run_file.entries_by_agent[agent_name]
@@ -270,6 +293,6 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         group_level_metrics=group_level_metrics,
         repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
-        num_repeats=agent_metrics.get("num_repeats"),
+        num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
         has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
     )
