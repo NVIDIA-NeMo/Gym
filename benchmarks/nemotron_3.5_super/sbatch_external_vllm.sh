@@ -14,8 +14,8 @@ SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
-# Empty uses one segment containing all allocated nodes, matching main's
-# behavior. Coupled deployments can override this with their tier size.
+# Empty falls back to main's SEGMENT or the calculated node count below.
+# Coupled deployments can override this with their tier size.
 VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
@@ -135,6 +135,7 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
@@ -217,8 +218,6 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         vllm-router \
             --prefill-policy $ROUTER_PREFILL_POLICY \
             --decode-policy $ROUTER_DECODE_POLICY \
-            --balance-abs-threshold 4 \
-            --balance-rel-threshold 1.1 \
             --vllm-pd-disaggregation \
             --prefill "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT" \
             --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
@@ -287,8 +286,6 @@ else
         router_args=( \
             --prefill-policy $ROUTER_PREFILL_POLICY \
             --decode-policy $ROUTER_DECODE_POLICY \
-            --balance-abs-threshold 4 \
-            --balance-rel-threshold 1.1 \
             --vllm-pd-disaggregation \
             --host \$this_node_hostname \
             --port $ROUTER_SERVER_PORT \
@@ -334,7 +331,7 @@ EOF
 )
 
 NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
-VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-$NUM_NODES}"
+VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-${SEGMENT:-$NUM_NODES}}"
 if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: VLLM_SLURM_SEGMENT must be a positive integer." >&2
     exit 2
@@ -455,7 +452,7 @@ if (( should_run_eval )); then
             --parsable \
             --dependency=afterany:"$main_job_id" \
             --partition=cpu \
-            --qos=cpu-short \
+            --qos=cpu-normal \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \

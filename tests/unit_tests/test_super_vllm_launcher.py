@@ -145,10 +145,6 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
             "cache_aware",
             "--decode-policy",
             "cache_aware",
-            "--balance-abs-threshold",
-            "4",
-            "--balance-rel-threshold",
-            "1.1",
             "--vllm-pd-disaggregation",
             "--host",
             "node0",
@@ -178,7 +174,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         self.assertEqual(args, expected)
 
     def test_independent_mode_preserves_per_node_engines(self):
-        """Keep one engine per node and all router destinations with default or explicit independent mode."""
+        """Keep independent engines and router destinations without injecting balancing thresholds."""
         for mode in (None, "independent"):
             for prefill_count, decode_count in ((1, 1), (1, 4), (4, 4)):
                 env = {"NUM_PREFILL_NODES": str(prefill_count), "NUM_DECODE_NODES": str(decode_count)}
@@ -218,7 +214,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                             self.assertEqual(router, [])
 
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self):
-        """Assign the correct API heads, headless ranks, tier sizes, and ports for each coupled node."""
+        """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""
         for prefill_count, decode_count in ((1, 1), (1, 4), (2, 3), (4, 4)):
             env = {
                 "VLLM_PD_DEPLOYMENT_MODE": "coupled",
@@ -340,11 +336,41 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                 )
                 self.assertEqual(len(calls), 2)
                 self.assertIn(f"--nodes={prefill_count + decode_count}", calls[0])
-                self.assertIn(f"--segment={prefill_count + decode_count}", calls[0])
+                self.assertEqual(
+                    [arg for arg in calls[0] if arg.startswith("--segment=")],
+                    [f"--segment={prefill_count + decode_count}"],
+                )
                 self.assertIn("--time=04:00:00", calls[0])
                 self.assertIn("--ntasks-per-node=1", calls[0])
                 self.assertIn("--exclusive", calls[0])
                 self.assertIn("--dependency=afterany:12345", calls[1])
+
+    def test_segment_controls_resolve_to_one_submission_argument(self):
+        """Prefer the Ultra segment override, then main's SEGMENT, then calculated nodes, without duplicates."""
+        cases = (
+            ({}, "8"),
+            ({"NUM_NODES": "99"}, "8"),
+            ({"SEGMENT": "2"}, "2"),
+            ({"VLLM_SLURM_SEGMENT": "4"}, "4"),
+            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": "2"}, "4"),
+            ({"VLLM_SLURM_SEGMENT": "", "SEGMENT": "2"}, "2"),
+            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": ""}, "4"),
+            ({"VLLM_SLURM_SEGMENT": "", "SEGMENT": ""}, "8"),
+            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": "invalid"}, "4"),
+        )
+        for mode in ("independent", "coupled"):
+            for eval_args in ((), ("--config", "benchmark.yaml")):
+                for segment_env, expected in cases:
+                    with self.subTest(mode=mode, evaluation=bool(eval_args), controls=segment_env):
+                        _, _, _, calls = self.capture_submission(
+                            *eval_args, env={"VLLM_PD_DEPLOYMENT_MODE": mode} | segment_env
+                        )
+                        self.assertEqual(len(calls), 2 if eval_args else 1)
+                        self.assertEqual(
+                            [arg for arg in calls[0] if arg.startswith("--segment=")], [f"--segment={expected}"]
+                        )
+                        if eval_args:
+                            self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
     def test_submission_overrides_do_not_change_cleanup_allocation(self):
         """Apply custom walltime and segment size only to the main job, leaving cleanup CPU-only and short."""
@@ -353,10 +379,11 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         )
         self.assertEqual(len(calls), 2)
         self.assertIn("--time=7-00:00:00", calls[0])
-        self.assertIn("--segment=4", calls[0])
+        self.assertEqual([arg for arg in calls[0] if arg.startswith("--segment=")], ["--segment=4"])
         self.assertIn("--time=00:30:00", calls[1])
         self.assertIn("--nodes=1", calls[1])
         self.assertIn("--partition=cpu", calls[1])
+        self.assertIn("--qos=cpu-normal", calls[1])
         self.assertIn("--gres=none", calls[1])
         self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
@@ -366,6 +393,7 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         cases = {
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
             "VLLM_SLURM_SEGMENT": (("0", "-1", "1.5", "bad"), 2),
+            "SEGMENT": (("0", "-1", "1.5", "bad"), 2),
         }
         for name, (values, expected_status) in cases.items():
             for value in values:
@@ -374,6 +402,18 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                     self.assertEqual(status, expected_status, stderr)
                     self.assertNotIn("unexpected-submission", stdout)
                     self.assertIn(name, stderr)
+
+    def test_invalid_segment_override_does_not_fall_back_to_main(self):
+        """Reject an invalid explicit Ultra segment even when main's SEGMENT supplies a valid fallback."""
+        stub = 'sbatch() { printf "unexpected-submission\\n"; }; source "$@"'
+        for value in ("0", "-1", "1.5", "bad"):
+            with self.subTest(value=value):
+                status, stdout, stderr = self.run_shell(
+                    stub, str(SCRIPT), env={"VLLM_SLURM_SEGMENT": value, "SEGMENT": "4"}
+                )
+                self.assertEqual(status, 2, stderr)
+                self.assertNotIn("unexpected-submission", stdout)
+                self.assertIn("VLLM_SLURM_SEGMENT must be a positive integer", stderr)
 
     def test_serving_only_skips_evaluation_and_cleanup_submission(self):
         """Run only the serving step without eval arguments and preserve its success or failure status."""

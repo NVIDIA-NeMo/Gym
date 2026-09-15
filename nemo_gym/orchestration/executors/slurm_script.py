@@ -16,7 +16,9 @@
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
+from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
@@ -24,14 +26,17 @@ from nemo_gym.orchestration.api import (
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.script_templates import (
+    ENSURE_RAY_INSTALLED,
     bash_var,
     render_driver_entrypoint,
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
+    render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -134,6 +139,8 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
         f" --port {service.port}"
         f" --tensor-parallel-size {service.tensor_parallel_size}"
     )
+    if service.served_model_name:
+        cmd += f" --served-model-name {shlex.quote(service.served_model_name)}"
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
     if service.extra_args:
@@ -210,6 +217,56 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
+def _escape_for_double_quoted_bash(text: str) -> str:
+    """Escape text for safe embedding inside a double-quoted bash string ("...")."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+_RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parent.parent / "ray_serve_gateway.py"
+
+
+def _build_vllm_ray_serve_command(
+    service: VllmServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
+) -> str:
+    # Launches ray_serve_gateway.py, which creates the instances and routes requests via ray.serve.
+    gateway_args = (
+        f"--model {shlex.quote(service.model)}"
+        f" --port {service.port}"
+        f" --tensor-parallel-size {service.tensor_parallel_size}"
+        f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+        f" --number-of-instances {service.number_of_instances}"
+    )
+    if gpus_per_node_values:
+        gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
+    if service.trust_remote_code:
+        gateway_args += " --trust-remote-code"
+    if service.served_model_name:
+        gateway_args += f" --served-model-name {shlex.quote(service.served_model_name)}"
+    if service.extra_args:
+        gateway_args += f" --extra-args {shlex.quote(service.extra_args)}"
+
+    # Embeds the gateway's source directly rather than git-cloning/installing nemo_gym into the
+    # vLLM container - no driver.gym_install needed for this path.
+    write_gateway = render_write_file_from_base64(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text(), "ray_serve_gateway.py")
+    fetch_and_run = (
+        f"{write_gateway}"
+        " && pip install --quiet aiohttp"
+        f" && ({ENSURE_RAY_INSTALLED})"
+        f" && python3 ray_serve_gateway.py {gateway_args}"
+    )
+    if total_nodes <= 1:
+        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance.
+        return f'bash -lc "{_escape_for_double_quoted_bash(fetch_and_run)}"'
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
+    # Double-quote escaping keeps the whole &&-chain as one opaque token for ray symmetric-run's
+    # entrypoint, immune to the outer bash -lc live-parsing its own && operators.
+    return render_vllm_ray_symmetric_run(
+        f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
+    )
+
+
 def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
@@ -227,7 +284,13 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
     return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig,
+    total_nodes: int,
+    gpus_per_node_values: list[int],
+) -> str:
+    if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
+        return _build_vllm_ray_serve_command(service, total_nodes, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -237,6 +300,21 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
     total_ntasks = sum(pool.nodes * pool.ntasks_per_node for pool in compute.node_pools.values())
     return total_nodes, total_ntasks
+
+
+def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+    """Auto-derive model_call_capture_dir from this benchmark's own real output
+    directory when observability is on and the caller didn't set one.
+
+    Hydra interpolation resolves before remote_bench_dir exists (it's computed
+    here, in build_sbatch_script, well after SubmitConfig validation), so
+    there's no way for a YAML value to reference it -- this has to happen in
+    Python, once the real path is known. An explicit model_call_capture_dir in
+    run always wins over this default.
+    """
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+    return run
 
 
 def build_sbatch_script(
@@ -250,6 +328,9 @@ def build_sbatch_script(
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
+    gpus_per_node_values = [
+        pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+    ]
 
     ray_prelude = (
         render_ray_prelude()
@@ -261,7 +342,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, gpus_per_node_values),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/
@@ -290,7 +371,8 @@ def build_sbatch_script(
 
     output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
