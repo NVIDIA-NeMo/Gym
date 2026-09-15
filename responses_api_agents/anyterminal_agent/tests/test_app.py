@@ -33,6 +33,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
@@ -244,7 +245,7 @@ class TestReadTaskMeta:
 # ── AnyTerminalAgent._setup_params ──────────────────────────────────────────────────
 
 
-def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
+def _make_setup_agent(tmp_path: Path, model_server_url: str = "", **config_overrides) -> AnyTerminalAgent:
     # model_post_init has heavy side effects (deps install, provider resolution) that
     # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
     with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
@@ -252,7 +253,7 @@ def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
     agent._server = AnyTerminalServerConfig(
         run_session_id="test_session",
         base_results_dir=tmp_path / "results",
-        model_server_url="",
+        model_server_url=model_server_url,
         nemo_gym_root=PARENT_DIR,
         agent_deps_dir=tmp_path,
     )
@@ -303,6 +304,24 @@ class TestSetupParams:
     def test_global_agent_timeout_rejects_zero(self) -> None:
         with pytest.raises(ValidationError, match="global_agent_timeout"):
             _config(global_agent_timeout=0)
+
+    def test_model_server_url_carries_the_training_capture_prefix(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_id_capture=True)
+        agent.server_client.global_config_dict = {TOKEN_ID_CAPTURE_BLOCK: {"enabled": True}}
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body, rollout_id="7-2")
+
+        assert params.model_server_url == "http://policy:8000/ng-rollout/7-2/training-token-capture"
+
+    def test_model_server_url_keeps_the_plain_rollout_prefix_without_capture(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000")
+        agent.server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: True}
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body, rollout_id="7-2")
+
+        assert params.model_server_url == "http://policy:8000/ng-rollout/7-2"
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────
