@@ -114,4 +114,4 @@ to this stack's changed files. Full pre-commit remains an external-environment g
 - [x] Representative real rollout inspected on the final stack.
 - [x] Scoped Ruff, formatting, whitespace, EOF, and Markdown-name checks pass.
 - [ ] Full pre-commit runner completes (bootstrap currently blocked by host network policy for `github.com`).
-- [ ] All PR commits carry DCO `Signed-off-by` trailers.
+- [x] All PR commits carry DCO `Signed-off-by` trailers.
