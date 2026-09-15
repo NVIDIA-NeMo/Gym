@@ -334,7 +334,6 @@ async def run_verification(
     stdout_section = _slice(output, TEST_OUTPUT_BEGIN, TEST_OUTPUT_END)
     parse_target = result_file_content.strip() or stdout_section
 
-    target_ids = list(inputs.fail_to_pass) + list(inputs.pass_to_pass)
     try:
         statuses = await asyncio.to_thread(parse_test_output, parse_target, inputs.test_framework)
         if not statuses and stdout_section.strip() and parse_target is not stdout_section:
