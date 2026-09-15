@@ -183,7 +183,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "BaseSeedSessionResponse": "base_resources_server",
     "ReverifyMode": "base_resources_server",
     # Agent and model extension points
-    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
+    "BaseResponsesAPIAgentConfig": "agents.base",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "SimpleResponsesAPIModel": "base_responses_api_model",

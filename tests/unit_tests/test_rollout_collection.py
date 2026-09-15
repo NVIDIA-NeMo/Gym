@@ -66,6 +66,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _processor_server_name,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -219,6 +220,17 @@ class TestGetMaxRolloutAttempts:
 
 
 class TestRolloutCollection:
+    def test_processor_server_name_uses_normalized_processor(self) -> None:
+        config = OmegaConf.create(
+            {
+                "simple": {"responses_api_agents": {"simple_agent": {}}},
+                "simple__processor": {"processors": {"single_agent_turn": {}}},
+            }
+        )
+
+        assert _processor_server_name("simple", config) == "simple__processor"
+        assert _processor_server_name("other", config) == "other"
+
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
