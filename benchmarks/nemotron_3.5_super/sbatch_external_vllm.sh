@@ -115,7 +115,7 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 export VLLM_USE_FASTOKENS=1
 
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
-export VLLM_USE_V2_MODEL_RUNNER=0
+# export VLLM_USE_V2_MODEL_RUNNER=0
 
 # @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
