@@ -237,3 +237,38 @@ class TestComputeMetrics:
         key_metrics = resources_server.get_key_metrics(metrics)
         assert key_metrics["xx->xx/judge_score"] == approx(80.0)
         assert key_metrics["eng_Latn->xx/judge_score"] == approx(80.0)
+
+    def test_unparseable_judge_score_counts_as_zero(self) -> None:
+        # A None judge_score (unparseable judge response) must count as 0 in the mean, matching
+        # verify()'s own reward=0.0 treatment -- dropping it instead silently biases the mean
+        # upward. [None, 100.0] must average to 50.0, not 100.0.
+        config = TranslationWithJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="translation_judge_model"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        resources_server = TranslationWithJudgeResourcesServer(
+            config=config, server_client=MagicMock(spec=ServerClient)
+        )
+
+        def _row(judge_score: float | None) -> dict[str, Any]:
+            return {
+                "src_lang": "eng_Latn",
+                "tgt_lang": "deu_Latn",
+                "judge_score": judge_score,
+                "sentence_bleu": 0.0,
+                "sentence_chrf": 0.0,
+            }
+
+        tasks = [
+            [_row(None)],
+            [_row(100.0)],
+        ]
+
+        metrics = resources_server.compute_metrics(tasks)
+
+        assert metrics["eng_Latn->deu_Latn/judge_score"] == approx(50.0)
+        assert metrics["xx->xx/judge_score"] == approx(50.0)

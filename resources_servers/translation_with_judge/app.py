@@ -401,7 +401,10 @@ Candidate translation:
             per_metric: Dict[str, List[float]] = {"judge_score": [], "bleu": [], "chrf": []}
             for run_rows in runs:
                 for metric in per_metric:
-                    values = [row[metric] for row in run_rows if row[metric] is not None]
+                    # An unparseable judge score (None) counts as 0 here, matching verify()'s
+                    # reward=0.0 treatment -- dropping it instead would silently bias the mean
+                    # upward whenever the judge fails to produce a parseable score.
+                    values = [row[metric] if row[metric] is not None else 0.0 for row in run_rows]
                     if values:
                         per_metric[metric].append(sum(values) / len(values))
             per_run_mean[pair] = per_metric
