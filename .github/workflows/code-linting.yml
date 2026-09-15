@@ -32,9 +32,8 @@ jobs:
           submodules: 'recursive'
 
       - name: Check lint
-        # Provision only the pinned pre-commit into an isolated venv; do NOT source
-        # setup_dev.sh here (its uv fallback would download a remote installer).
-        run: |
-          python -m venv .cache/lint-venv
-          .cache/lint-venv/bin/python -m pip install --disable-pip-version-check pre-commit==4.3.0
-          .cache/lint-venv/bin/pre-commit run --all-files --show-diff-on-failure --color=always
+        # Call lint.sh directly: it runs gym_ci_sanitize_environment before hooks and
+        # resolves pre-commit from the lockfile-provided dev environment already on
+        # PATH. We do NOT source setup_dev.sh (its uv fallback would download a remote
+        # installer) and we do NOT pip-install pre-commit (must come from the lockfile).
+        run: ./scripts/ci/lint.sh

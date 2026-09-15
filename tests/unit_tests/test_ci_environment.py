@@ -946,9 +946,10 @@ def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
     assert "uv pip install" not in dockerfile
 
 
-def test_lint_workflow_installs_only_pinned_pre_commit() -> None:
-    # The lint job must NOT source setup_dev.sh: its uv fallback could download a remote
-    # installer. It provisions only the pinned pre-commit and runs it directly.
+def test_lint_workflow_calls_lint_sh_directly() -> None:
+    # The lint job must call lint.sh (which runs gym_ci_sanitize_environment before
+    # hooks). It must NOT source setup_dev.sh (uv fallback would download a remote
+    # installer) and must NOT pip-install pre-commit (it must come from the lockfile).
     steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
         "lint-check"
     ]["steps"]
@@ -956,6 +957,6 @@ def test_lint_workflow_installs_only_pinned_pre_commit() -> None:
     joined = "\n".join(run_cmds)
 
     assert "scripts/ci/setup_dev.sh" not in joined, "lint job must not source setup_dev.sh (uv installer risk)"
-    assert "scripts/ci/lint.sh" not in joined, "lint job should not invoke lint.sh directly"
-    assert "pre-commit==4.3.0" in joined, "lint job must install the pinned pre-commit"
-    assert "pre-commit run --all-files" in joined, "lint job must run pre-commit"
+    assert "scripts/ci/lint.sh" in joined, "lint job must call lint.sh (runs gym_ci_sanitize_environment)"
+    assert "pip install" not in joined, "lint job must not pip-install pre-commit (must come from the lockfile)"
+    assert "pre-commit==" not in joined, "lint job must not install a bare pinned pre-commit"
