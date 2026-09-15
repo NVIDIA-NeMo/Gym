@@ -19,6 +19,7 @@ import re
 import statistics
 import warnings
 from collections import Counter, defaultdict
+from numbers import Real
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1017,6 +1018,52 @@ def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: 
     return summary
 
 
+def _is_finite_number(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _add_custom_repeat_metrics(
+    profiler: RewardProfiler,
+    verify_responses: List[Dict[str, Any]],
+    repeat_level_metrics: List[Dict[str, Any]],
+    agent_metrics: Dict[str, Any],
+    custom_metrics: Dict[str, Any],
+    compute_metrics_fn: Any,
+) -> None:
+    """Recompute benchmark metrics per repeat and refresh their across-repeat statistics."""
+    if not custom_metrics or not repeat_level_metrics:
+        return
+
+    responses_by_repeat: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for response in verify_responses:
+        responses_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response)
+
+    numeric_metric_names = [name for name, value in custom_metrics.items() if _is_finite_number(value)]
+    for repeat_metrics in repeat_level_metrics:
+        rollout_idx = repeat_metrics[ROLLOUT_INDEX_KEY_NAME]
+        for name in custom_metrics:
+            repeat_metrics.pop(name, None)
+        try:
+            repeat_custom = compute_metrics_fn(_group_by_task(responses_by_repeat[rollout_idx]))
+        except Exception as e:
+            warnings.warn(
+                f"Benchmark custom repeat metrics were omitted for repeat {rollout_idx}: {e!r}",
+                stacklevel=2,
+            )
+            continue
+        for name in numeric_metric_names:
+            value = repeat_custom.get(name)
+            if _is_finite_number(value):
+                repeat_metrics[name] = float(value)
+
+    for name in list(agent_metrics):
+        if ACROSS_REPEATS_MARKER in name and name.split(ACROSS_REPEATS_MARKER, 1)[1] in custom_metrics:
+            agent_metrics.pop(name)
+
+    for aggregate in profiler._aggregate_repeat_level_metrics(repeat_level_metrics):
+        agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -1059,11 +1106,6 @@ def compute_aggregate_metrics(
             if k != "agent_ref":
                 agent_metrics[k] = v
 
-    # Same as agent_level_metrics above — callers nest this list under the real agent_ref.
-    serialized_repeat_level_metrics = [
-        {k: v for k, v in entry.items() if k != "agent_ref"} for entry in repeat_level_metrics
-    ]
-
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
@@ -1074,6 +1116,7 @@ def compute_aggregate_metrics(
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
     # Custom metrics computed from all raw verify responses grouped by task
+    custom: Dict[str, Any] = {}
     if compute_metrics_fn:
         tasks = _group_by_task(verify_responses)
         custom = compute_metrics_fn(tasks)
@@ -1092,10 +1135,27 @@ def compute_aggregate_metrics(
 
         serialized_agent.update(custom)
 
+    serialized_agent["num_repeats"] = len({vr.get(ROLLOUT_INDEX_KEY_NAME, 0) for vr in verify_responses})
+
+    # Select headline metrics before repeat calls can mutate benchmark callback state.
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(MEAN_PREFIX)}
+
+    if compute_metrics_fn:
+        _add_custom_repeat_metrics(
+            rp,
+            verify_responses,
+            repeat_level_metrics,
+            serialized_agent,
+            custom,
+            compute_metrics_fn,
+        )
+
+    serialized_repeat_level_metrics = [
+        {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
+    ]
 
     ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
 
