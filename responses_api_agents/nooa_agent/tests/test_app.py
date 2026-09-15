@@ -25,6 +25,7 @@ from fastapi import HTTPException, Response
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_observability import TrajectoryTurn
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.app import (
     NOOA_TERMINATION_ERROR_KEY,
@@ -127,9 +128,10 @@ def server_client() -> ServerClient:
     return ServerClient.model_construct(head_server_config=MagicMock(), global_config_dict={})
 
 
-def make_agent(*, verify_reward: float = 1.0) -> tuple[NOOAAgent, ServerClient]:
+def make_agent(*, verify_reward: float = 1.0, sandbox_handle: str | None = None) -> tuple[NOOAAgent, ServerClient]:
     client = server_client()
-    seed = FakeHTTPResponse({}, cookie=("session", "seed-cookie"))
+    seed_payload = {"sandbox_handle": sandbox_handle} if sandbox_handle is not None else {}
+    seed = FakeHTTPResponse(seed_payload, cookie=("session", "seed-cookie"))
     verify = FakeHTTPResponse(
         {
             "responses_create_params": {"input": [{"role": "user", "content": "Weather in Paris?"}]},
@@ -176,6 +178,46 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
     assert result.reward == 1.0
     assert result.ng_agent_observations is not None
     assert "session=tool-cookie" in outgoing.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_seeded_sandbox_handle_reaches_runner_and_canonical_trajectory_persists() -> None:
+    agent, _ = make_agent(sandbox_handle="seeded-container-id")
+
+    def seeded_result(run_request: object) -> NOOARunResult:
+        result = runner_result(run_request)
+        result.trace = NOOATraceSnapshot(
+            task_id=run_request.task_id,
+            rollout_id=run_request.rollout_id,
+            turns=[
+                TrajectoryTurn(
+                    invocation_id="root",
+                    task_id=run_request.task_id,
+                    rollout_id=run_request.rollout_id,
+                    turn_no=1,
+                    timestamp=1.0,
+                    question="Inspect the seeded sandbox",
+                    answer="Done",
+                    resolved=True,
+                    step_count=1,
+                )
+            ],
+        )
+        return result
+
+    agent.runner.run = AsyncMock(side_effect=seeded_result)
+    result = await agent.run(
+        request(rollout_id="seeded-rollout"),
+        Response(),
+        body(_ng_rollout_id="seeded-rollout"),
+    )
+
+    run_request = agent.runner.run.await_args.args[0]
+    assert run_request.sandbox_handle == "seeded-container-id"
+    assert result.ng_trajectory["task_id"] == "task-1"
+    assert result.ng_trajectory["rollout_id"] == "seeded-rollout"
+    assert result.ng_trajectory["turns"][0]["question"] == "Inspect the seeded sandbox"
+    assert result.ng_trajectory["turns"][0]["resolved"] is True
 
 
 @pytest.mark.asyncio
