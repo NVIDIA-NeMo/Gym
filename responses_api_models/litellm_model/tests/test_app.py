@@ -19,7 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
@@ -150,6 +154,69 @@ class TestNormalizeToResponse:
         data["reasoning"] = {"effort": "high"}
         result = _normalize_to_response(data)
         assert result["reasoning"]["effort"] == "high"
+
+    def test_native_response_null_usage_details_normalized(self) -> None:
+        """Native response with null usage details is normalized for NeMoGymResponse."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": None,
+            "output_tokens_details": None,
+        }
+        result = _normalize_to_response(data)
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert result["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
+        validated = NeMoGymResponse.model_validate(result)
+        assert validated.usage.input_tokens == 10
+        assert validated.usage.input_tokens_details.cached_tokens is None
+        assert validated.usage.output_tokens_details.reasoning_tokens is None
+
+    def test_native_response_reasoning_item_normalized(self) -> None:
+        """Native response reasoning item missing summary and with output_text is normalized."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["output"] = [
+            {
+                "type": "reasoning",
+                "id": "rs_123",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Reasoning steps", "annotations": []}],
+            },
+            {
+                "type": "message",
+                "id": "msg_123",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Answer", "annotations": []}],
+            },
+        ]
+        result = _normalize_to_response(data)
+        reasoning_item = result["output"][0]
+        assert reasoning_item["summary"] == []
+        assert reasoning_item["content"][0]["type"] == "reasoning_text"
+        validated = NeMoGymResponse.model_validate(result)
+        assert len(validated.output) == 2
+        assert validated.output[0].type == "reasoning"
+        assert validated.output[0].summary == []
+        assert validated.output[0].content[0].type == "reasoning_text"
+
+    def test_native_response_usage_details_preserved(self) -> None:
+        """Reported token counts in native response usage details are preserved."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        }
+        result = _normalize_to_response(data)
+        assert result["usage"]["input_tokens_details"]["cached_tokens"] == 4
+        assert result["usage"]["output_tokens_details"]["reasoning_tokens"] == 3
+        validated = NeMoGymResponse.model_validate(result)
+        assert validated.usage.input_tokens_details.cached_tokens == 4
+        assert validated.usage.output_tokens_details.reasoning_tokens == 3
 
     def test_chat_completion_normalization(self) -> None:
         """Standard chat.completion with choices[] is normalized."""
