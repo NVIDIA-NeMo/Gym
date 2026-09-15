@@ -1,7 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared borrowed-environment lifecycle for sandboxed harnesses."""
+"""Run an agent harness in a sandbox owned by a resources server.
+
+Use this lifecycle when task setup and grading need to control the same environment,
+while a separate agent worker runs the harness and makes model calls. For example,
+a benchmark can provision task-specific images and sidecars once, then hand the main
+sandbox to different harnesses without duplicating provisioning or verifier logic.
+
+The resources server implements the seed/start/verify/cancel contract and owns the
+execution deadline and sandbox teardown. The agent supplies setup and execution
+callbacks; this module attaches a borrowed sandbox handle, propagates session
+cookies, requests grading or cancellation, and releases the handle without deleting
+the environment needed by the verifier.
+"""
 
 import asyncio
 from pathlib import Path

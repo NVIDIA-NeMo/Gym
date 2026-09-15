@@ -21,6 +21,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4SeedRequest,
 )
 from resources_servers.terminal_bench_4.task import TaskSettings
+from resources_servers.terminal_bench_4.tests.test_environment import environment_config
 
 
 @pytest.fixture
@@ -31,7 +32,7 @@ async def fixture(tmp_path, monkeypatch):
             port=1,
             name="tb4",
             entrypoint="app.py",
-            environment={},
+            environment=environment_config(sandbox_provider={"local": {}}),
             artifacts_dir=tmp_path,
             agent_max_timeout_sec=2,
             shutdown_timeout_sec=0.01,
@@ -198,8 +199,7 @@ async def test_pins_duplicates_handoff_verification_and_restart(fixture):
     )
     assert verified == retry and verified.reward == 0.75 and verified.evaluation_completed
     assert verified.infrastructure_error is None
-    assert verified.provenance["runtime"] == "gym-tb4-native"
-    assert "harbor_version" not in verified.provenance
+    assert "provenance" not in verified.model_dump()
     assert f.events == [
         "agent_start",
         "quiesce",
@@ -461,7 +461,7 @@ async def test_legacy_closed_result_without_response(fixture):
     path.write_text(json.dumps(state))
     replay = await restart(f).verify(f.request, verify_body(session_id))
     assert replay.reward == result.reward and replay.evaluation_completed
-    assert replay.provenance["harbor_version"] == "0.23.0"
+    assert "provenance" not in replay.model_dump()
 
 
 @pytest.mark.parametrize("owned,operation", [(False, "release"), (False, "stop"), (True, "stop")])

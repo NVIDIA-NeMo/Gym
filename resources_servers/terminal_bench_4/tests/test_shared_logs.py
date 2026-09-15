@@ -15,11 +15,10 @@ import pytest
 from nemo_gym.sandbox import SandboxSpec
 from resources_servers.terminal_bench_4 import shared_logs as module
 from resources_servers.terminal_bench_4.collection import collect
-from resources_servers.terminal_bench_4.environment import EnvironmentConfig
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_collection_verifier import environment
-from resources_servers.terminal_bench_4.tests.test_environment import make_environment
+from resources_servers.terminal_bench_4.tests.test_environment import environment_config, make_environment
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier
 
 
@@ -48,7 +47,7 @@ def shared(tmp_path, monkeypatch):
     mount = tmp_path / "efs"
     mount.mkdir(exist_ok=True)
     monkeypatch.setattr(SharedLogs, "mount", str(mount))
-    config = EnvironmentConfig(
+    config = environment_config(
         sandbox_provider={"opensandbox": {"connection": {"domain": "example.invalid"}}},
         efs_logs_host_path="/mnt/efs/data/shared",
     )

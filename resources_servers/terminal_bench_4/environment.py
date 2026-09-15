@@ -31,24 +31,24 @@ from resources_servers.terminal_bench_4.task import Settings, resolve_env
 
 
 class EnvironmentConfig(Settings):
-    cpu_enforcement_policy: Literal["limit"] = "limit"
-    memory_enforcement_policy: Literal["limit"] = "limit"
-    sandbox_provider: dict[str, Any] = Field(default_factory=dict)
-    sandbox_metadata: dict[str, str] = Field(default_factory=dict)
-    sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
-    sandbox_env: dict[str, str] = Field(default_factory=dict)
-    sandbox_env_by_task: dict[str, dict[str, str]] = Field(default_factory=dict)
-    sandbox_request_gpu_type: bool = True
-    sandbox_split_endpoints: bool = False
-    compose_image_configs: Path | None = None
-    sandbox_ttl_s: float = Field(default=21600, gt=0)
-    sandbox_ready_timeout_s: float = Field(default=900, gt=0)
-    default_exec_timeout_s: float = Field(default=1800, gt=0)
-    exec_shell: str | None = "bash -c"
-    image_rewrites: list[dict[str, str]] = Field(default_factory=list)
-    workdir: str | None = None
-    efs_logs_host_path: str | None = None
-    efs_logs_init_image: str = "python:3.13-slim"
+    cpu_enforcement_policy: Literal["limit"]
+    memory_enforcement_policy: Literal["limit"]
+    sandbox_provider: dict[str, Any]
+    sandbox_metadata: dict[str, str]
+    sandbox_provider_options: dict[str, Any]
+    sandbox_env: dict[str, str]
+    sandbox_env_by_task: dict[str, dict[str, str]]
+    sandbox_request_gpu_type: bool
+    sandbox_split_endpoints: bool
+    compose_image_configs: Path | None
+    sandbox_ttl_s: float = Field(gt=0)
+    sandbox_ready_timeout_s: float = Field(gt=0)
+    default_exec_timeout_s: float = Field(gt=0)
+    exec_shell: str | None
+    image_rewrites: list[dict[str, str]]
+    workdir: str | None
+    efs_logs_host_path: str | None
+    efs_logs_init_image: str
 
 
 class HealthcheckError(RuntimeError):

@@ -1,24 +1,11 @@
 # Terminal-Bench 4.0
 
-TB4 uses separate Gym agent and resources servers. The resources server resolves
-66 official task packages from the pinned manifest, provisions their environments,
-and runs the official verifier. The selected agent owns model calls and harness
-execution on the supplied main sandbox.
+[Official Terminal-Bench 4.0 benchmark](https://www.tbench.ai/news/terminal-bench-4-0) (66 tasks).
 
 ## Profiles
 
 - `terminal_bench_4/miniswe`: mini-SWE **2.1.0** `DefaultAgent`, with a generic
   text-action prompt, Gym Responses model adapter, and task-local MCP CLI.
-
-The profile loads `resources.yaml`. Harness settings live in the profile;
-provisioning, CPU/GPU endpoint aliases, task budgets, and cleanup live in the
-resources configuration. The existing general Harbor and SWE-bench integrations
-remain available with their existing dependencies and defaults.
-
-The resources runtime uses Gym's native TB4 lifecycle, with no Harbor package
-required. Resources own preparation, deadlines, main/sidecar artifact collection,
-separate verification, and cleanup. See the [handoff contract](../../resources_servers/terminal_bench_4/README.md)
-and [native lifecycle notes](native-lifecycle.md).
 
 ## Dataset and deployment
 
@@ -66,12 +53,6 @@ mini-SWE's loop runs in the agent worker and calls the Gym model server.
 MCP tasks also need Python venv/pip
 for its pinned task-local `mcp==1.29.0` client.
 
-For capped smoke runs, add `++tb4_max_steps=3` and
-`++tb4_agent_max_timeout_sec=900`. The cap can only shorten the task's official
-agent budget. Default runs have no step cap or timeout override. Installation
-uses the separate 360-second harness-setup budget. Provider renewal keeps
-resources alive without extending agent execution.
-
 Select tasks during preparation:
 
 ```sh
@@ -84,11 +65,17 @@ Prepare again without filters for all tasks. The profile defaults to one attempt
 official leaderboard submissions use five. Scheduler allocations must cover
 setup, the full official agent budget, and verification.
 
-## Validation
+## Infra validation
 
-Validate CPU, then Compose, then GPU. Use the existing task-health records as
-baseline evidence. A grade of zero can be a healthy smoke outcome; absent setup,
-model execution, grading, or required artifacts is not a successful model run.
+For capped smoke runs, add `++tb4_max_steps=3` and
+`++tb4_agent_max_timeout_sec=900`. The cap can only shorten the task's official
+agent budget. Default runs have no step cap or timeout override. Installation
+uses the separate 360-second harness-setup budget. Provider renewal keeps
+resources alive without extending agent execution.
+
+Validate CPU, then Compose, then GPU. A grade of zero can be a healthy smoke
+outcome; absent setup, model execution, grading, or required artifacts is not a
+successful model run.
 Infrastructure failures carry `infrastructure_error` and `_ng_failure_class` and
 must be excluded from model-negative aggregates.
 
@@ -99,7 +86,6 @@ It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 ```sh
 PYTHONPATH=. python benchmarks/terminal_bench_4/smoke.py \
   --harness miniswe --category cpu --env-file /path/to/private.env \
-  --baseline-health benchmarks/terminal_bench_4/health-baseline.json \
   --output results/tb4-smoke/cpu
 ```
 
@@ -107,21 +93,3 @@ Repeat for the Compose and GPU categories. `health.json`
 requires both model-output evidence and an official grade. Inspect trajectories,
 verifier output, and resource cleanup before promoting coverage. Capped runs are
 not benchmark scores; missing submissions can exit grading before deeper tests.
-
-The complete observed mini-SWE CPU results are recorded separately in
-[health-native-miniswe-cpu.json](health-native-miniswe-cpu.json). To repeat all
-52 CPU tasks against those native results:
-
-```sh
-PYTHONPATH=. python benchmarks/terminal_bench_4/smoke.py \
-  --harness miniswe --category cpu --env-file /path/to/private.env \
-  --baseline-health benchmarks/terminal_bench_4/health-native-miniswe-cpu.json \
-  --output results/tb4-smoke/miniswe-cpu
-```
-
-`health-baseline.json` retains the measured mini-SWE reference baseline (five CPU,
-11 Compose, and three GPU tasks).
-
-See [native lifecycle notes](native-lifecycle.md) for the current implementation and
-validation record. The [earlier migration notes](migration.md) describe the historical
-Harbor-backed reference.

@@ -1,10 +1,5 @@
 # TB4 resources server
 
-This server owns pinned task resolution, environments, sidecars, official budgets,
-verification, artifacts, and cleanup. Agent workers own the evaluated harness.
-Runtime: `gym-tb4-native` version 1, using Gym's sandbox and Compose APIs directly.
-Harbor is not required for TB4 preparation, server startup, or execution.
-
 ## Contract
 
 1. `/seed_session` accepts `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
@@ -76,7 +71,7 @@ execution user. This allows non-root images to initialize their log directories
 and keeps root verifier reward-directory protections effective. Compose mounts
 these logs in `main`; sidecar mounts and collection order remain unchanged.
 
-A CPU helper (`environment.efs_logs_init_image`, default `python:3.13-slim`)
+A CPU helper (`environment.efs_logs_init_image`, configured as `python:3.13-slim`)
 initializes ownership and remains alive until both workloads are stopped. It
 reuses the collected `/logs/artifacts` archive through EFS after agent teardown,
 avoiding its upload from the resources host to the verifier. The archive is
@@ -99,6 +94,3 @@ deletion fails, EFS data is retained to avoid deleting a live mount. Persistent
 session records include the helper ID and exact EFS host path/subdirectory for
 recovery. Provider TTL expires sandboxes after abrupt process death, but EFS data
 requires separate cleanup in that case.
-
-This server is not marked verified: deployment smoke evidence and category gaps
-are recorded in the [native lifecycle notes](../../benchmarks/terminal_bench_4/native-lifecycle.md).
