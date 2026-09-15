@@ -20,7 +20,7 @@ name: Validate CODEOWNERS Membership
 
 on:
   schedule:
-    - cron: "0 */4 * * *"
+    - cron: "0 13 * * *"
   workflow_dispatch:
 
 permissions:
