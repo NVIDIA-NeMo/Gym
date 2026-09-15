@@ -248,3 +248,71 @@ def test_nano_omni_parser_rejects_transport_and_sequence_errors() -> None:
         parse_nano_omni_tool_calls(
             [_native_item("terminate", {"status": "success"}), _native_item("navigate", {"url": "back"})]
         )
+
+
+def test_nano_omni_reference_profile_accepts_more_than_eight_unmodified_calls() -> None:
+    # A real rollout returned eleven valid calls in one response. A response
+    # count limit is a profile choice, not a tool-protocol validity rule.
+    calls = [
+        {"type": "function_call", "call_id": f"call-{index}", "name": "navigate", "arguments": '{ "url": "back" }'}
+        for index in range(11)
+    ]
+    before = json.dumps(calls)
+    with pytest.raises(ActionParseError, match="8-call limit"):
+        parse_nano_omni_tool_calls(calls)
+    action = parse_nano_omni_tool_calls(calls, max_calls=None)
+    assert len(action.arguments["calls"]) == 11
+    assert [call["id"] for call in action.arguments["calls"]] == [call["call_id"] for call in calls]
+    assert json.dumps(calls) == before
+    assert action.terminal is False
+    # Removing the count cap must not enable JSON repair or weaker validation.
+    with pytest.raises(ActionParseError, match="invalid JSON arguments"):
+        parse_nano_omni_tool_calls(
+            calls + [{"type": "function_call", "name": "computer", "arguments": "{"}], max_calls=None
+        )
+
+
+@pytest.mark.parametrize("invalid_arguments", ['{"actions":"[]"}', '{"actions":['])
+def test_invalid_later_call_exposes_only_complete_validated_prefix(invalid_arguments) -> None:
+    calls = [
+        {
+            "type": "function_call",
+            "call_id": "first",
+            "name": "computer",
+            "arguments": '{ "actions": [{"action":"left_click","coordinate":[0.2,0.3]}] }',
+        },
+        {"type": "function_call", "call_id": "bad", "name": "computer", "arguments": invalid_arguments},
+        {"type": "function_call", "call_id": "unreached", "name": "navigate", "arguments": '{"url":"back"}'},
+    ]
+    before = json.dumps(calls)
+    with pytest.raises(ActionParseError) as error:
+        parse_nano_omni_tool_calls(calls, max_calls=None)
+    prefix = error.value.validated_prefix
+    assert prefix is not None
+    assert prefix.terminal is False
+    assert prefix.arguments["calls"] == [
+        {"id": "first", "name": "computer", "arguments": json.loads(calls[0]["arguments"])}
+    ]
+    assert json.dumps(calls) == before
+
+
+@pytest.mark.parametrize("prefix_kind", ["none", "at_limit", "over_limit", "terminate", "invalid_nested_action"])
+def test_invalid_batch_does_not_expose_unsafe_or_over_budget_prefix(prefix_kind) -> None:
+    good = {"type": "function_call", "name": "navigate", "arguments": '{"url":"back"}'}
+    bad = {"type": "function_call", "name": "computer", "arguments": '{"actions":"[]"}'}
+    prefix = {
+        "none": [],
+        "at_limit": [good],
+        "over_limit": [good, good],
+        "terminate": [{"type": "function_call", "name": "terminate", "arguments": '{"status":"success"}'}],
+        "invalid_nested_action": [
+            {
+                "type": "function_call",
+                "name": "computer",
+                "arguments": '{"actions":[{"action":"wait","duration":0},{"action":"wait","duration":-1}]}',
+            }
+        ],
+    }[prefix_kind]
+    with pytest.raises(ActionParseError) as error:
+        parse_nano_omni_tool_calls(prefix + [bad], max_calls=1 if prefix_kind in {"at_limit", "over_limit"} else None)
+    assert error.value.validated_prefix is None

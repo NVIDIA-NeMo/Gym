@@ -77,6 +77,20 @@ from nemo_gym.token_id_capture.staging.records import (
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
+
+def _is_context_length_error(error: ClientResponseError) -> bool:
+    """Recognize vLLM's context-budget 400 across serving-version wordings."""
+
+    if error.status != 400:
+        return False
+    message = error.response_content.decode(errors="replace").lower()
+    return (
+        "context length" in message
+        or "max_tokens" in message
+        or ("decoder prompt" in message and "longer than the maximum model length" in message)
+    )
+
+
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
@@ -936,12 +950,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            if _is_context_length_error(e):
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
@@ -1397,11 +1406,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
-            result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
+            if _is_context_length_error(e):
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise

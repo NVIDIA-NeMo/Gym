@@ -45,6 +45,7 @@ class VisualBrowserDriverConfig(WebResourcesServerConfig):
     action_delay_seconds: float = Field(default=2.0, ge=0, le=30)
     default_timeout_ms: int = Field(default=45_000, ge=1_000, le=600_000)
     terminate_on_action_error: bool = True
+    max_tool_calls: int | None = Field(default=8, ge=1)
     max_computer_actions: int = Field(default=20, ge=1, le=100)
     record_video: bool = False
     browser_channel: str | None = None
@@ -359,6 +360,7 @@ class VisualBrowserDriver:
                     for call in calls
                     if isinstance(call, dict)
                 ],
+                max_calls=self.config.max_tool_calls,
                 max_computer_actions=self.config.max_computer_actions,
             )
             if validated_action.terminal != action.terminal:

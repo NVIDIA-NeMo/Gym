@@ -11,7 +11,11 @@ webarena_environment:
   _inherit_from: webarena_browser
   resources_servers:
     webarena_browser:
-      terminate_on_action_error: false
+      # The reference ends interaction on execution errors, then evaluates the
+      # live state. Do not continue issuing actions or force a failure reward.
+      terminate_on_action_error: true
+      # Match the agent-side limit through execution-side revalidation too.
+      max_tool_calls: null
 
 webarena_benchmark_agent:
   _inherit_from: web_agent
@@ -24,9 +28,18 @@ webarena_benchmark_agent:
       max_steps: 100
       max_parse_retries: 2
       # Use model-server parser output without JSON or tool-alias repair.
+      # The reference iterates all returned tool calls, with no response-count
+      # cap. Per-computer-action validation and execution timeouts still apply.
+      nano_omni_max_tool_calls: null
       nano_omni_max_computer_actions: 20
-      nano_omni_parse_retry_feedback: true
-      nano_omni_parse_retry_temperature: 0.2
+      # Invalid arguments are an action failure in the reference. Stop and
+      # evaluate; only missing tool calls use the bounded parse-retry budget.
+      nano_omni_retry_invalid_tool_calls: false
+      # Repeat a rejected policy request without harness-authored correction
+      # text or a sampling override, matching the reference retry lifecycle.
+      nano_omni_parse_retry_feedback: false
+      nano_omni_parse_retry_temperature: null
+      nano_omni_parse_retry_delay_secs: 1.0
       model_turn_max_retries: 19
       model_retry_delay_secs: 5.0
       max_image_history: 3
