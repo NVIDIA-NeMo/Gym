@@ -286,7 +286,10 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
     assert len(requests) == 1 + min(empty_answers + 1, 3)
     assert sum("first check" in str(request["messages"]) for request in requests) == 1
     assert all(request == requests[1] for request in requests[1:])
-    assert caplog.text.count("completion_tokens=32768") == empty_answers
+    assert (
+        sum("Invalid binary judge answer reached its token limit" in r.message for r in caplog.records)
+        == empty_answers
+    )
     assert "Submitted artifact" not in caplog.text
     records = [record.getMessage() for record in caplog.records if record.name.endswith(".binary_transport")]
     assert len(records) == len(requests)

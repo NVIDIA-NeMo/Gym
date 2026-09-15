@@ -112,7 +112,7 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
         if judge_mode == "pairwise":
             monkeypatch.setattr(
                 "resources_servers.aa_briefcase_lite.app.OpenAI",
-                lambda **kwargs: OpenAI(http_client=transport, **kwargs),
+                lambda **kwargs: OpenAI(**{**kwargs, "http_client": transport}),
             )
             pairwise_judge = resource._pairwise_judges([judge])[0]
             assert pairwise_judge.model == expected_model
