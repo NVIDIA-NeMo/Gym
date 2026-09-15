@@ -884,7 +884,9 @@ def test_setup_dev_and_lint_run_offline_with_container_baked_tools() -> None:
     # into the tool venv as before.
     assert 'if [[ "${NEMO_GYM_CONTAINER:-}" == "1" ]] && command -v pre-commit' in lint
     assert lint.count("pip install") == 1
-    assert 'pip install --disable-pip-version-check "pre-commit==${pre_commit_version}"' in lint
+    assert 'pip install --disable-pip-version-check --require-hashes' in lint
+    assert '--no-deps "pre-commit==${pre_commit_version}"' in lint
+    assert '--hash "sha256:${pre_commit_sha256_sdist}" --hash "sha256:${pre_commit_sha256_wheel}"' in lint
 
 
 def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
@@ -911,11 +913,14 @@ def test_dockerfile_installs_pre_commit_on_path_for_offline_lint() -> None:
     # provides one on PATH. The persistent project environment is synced with
     # only vllm+telemetry (no dev), so the Dockerfile must install pre-commit
     # into it explicitly or the offline branch never triggers and lint.sh falls
-    # back to a network-dependent pip install.
+    # back to a network-dependent pip install. The install is hash-pinned from
+    # uv.lock (sdist + wheel) with --require-hashes, so the exact immutable
+    # artifact is bound (no resolution outside the committed lockfile).
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
-
+    assert 'uv pip install --offline --no-deps --require-hashes' in dockerfile
+    assert '"pre-commit==4.3.0"' in dockerfile
+    assert '--hash "sha256:499fe450cc9d42e9d58e606262795ecb64dd05438943c62b66f6a8673da30b16"' in dockerfile
+    assert '--hash "sha256:2b0747ad7e6e967169136edffee14c16e148a778a54e4f967921aa1ebf2308d8"' in dockerfile
+    # The on-PATH environment is the persistent project venv.
     assert "UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv" in dockerfile
-    assert "uv pip install --locked --offline pre-commit" in dockerfile
-    # --locked binds the install to uv.lock (no resolution outside the lockfile);
-    # the on-PATH environment is the persistent project venv.
     assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile
