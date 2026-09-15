@@ -44,6 +44,17 @@ def _configure_async_http() -> None:
     from nemo_gym.server_utils import get_global_aiohttp_client
 
     class E2BAiohttpTransport(AiohttpTransport):
+        async def handle_async_request(self, request):
+            response = await super().handle_async_request(request)
+            if response.status_code == 404:
+                await response.aread()
+                if not response.content:
+                    # Compatible gateways may return an empty 404. The SDK
+                    # expects a JSON error even when kill() will return False.
+                    await response.aclose()
+                    return httpx.Response(404, json={"message": "Not found"}, request=request)
+            return response
+
         async def aclose(self) -> None:
             # The shared session is owned and closed by server_utils.
             return None
