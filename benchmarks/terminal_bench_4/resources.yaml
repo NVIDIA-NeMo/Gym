@@ -47,7 +47,7 @@ terminal_bench_4:
                 setup_command: "if ! command -v python3 >/dev/null 2>&1; then\n  apt-get update && DEBIAN_FRONTEND=noninteractive\
                   \ apt-get install -y --no-install-recommends python3;\nfi"
               runtime_requirements:
-                resize_shared_memory: true
+                shm_size_metadata_key: nemo.nvidia.com/shm
                 capability_probes:
                   SYS_PTRACE: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1
                     << 19))) -ne 0; }
