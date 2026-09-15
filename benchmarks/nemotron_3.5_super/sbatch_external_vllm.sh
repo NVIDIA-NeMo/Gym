@@ -121,7 +121,7 @@ export VLLM_USE_FASTOKENS=1
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 
 # TODO @bxyu-nvidia: Unfortunately there's an accuracy issue with the rust frontend in vLLM 0.29.0, around 1-2% delta on SWE Verified.
-export VLLM_USE_RUST_FRONTEND=1
+# export VLLM_USE_RUST_FRONTEND=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
