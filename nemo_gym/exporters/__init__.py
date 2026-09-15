@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config_types import ExporterConfig, LangSmithConfig, MLFlowConfig, WANDBConfig
 from nemo_gym.exporters.base import BaseExporter
 
 
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Backend name -> (config model, "module:class").
 EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str]] = {
+    "langsmith": (LangSmithConfig, "nemo_gym.exporters.langsmith:LangSmithExporter"),
     "wandb": (WANDBConfig, "nemo_gym.exporters.wandb:WandbExporter"),
     "mlflow": (MLFlowConfig, "nemo_gym.exporters.mlflow:MLflowExporter"),
 }
