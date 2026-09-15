@@ -161,6 +161,22 @@ class Environment:
                 self.settings.docker_image,
                 json.loads(image_path.read_text()),
             )
+            if self.log_role == "agent":
+                if self.task.name == "terminal-bench/medical-claims-processing":
+                    # pwuser cannot edit /etc/hosts; its only peer URL is the
+                    # browser's initial workspace page (which uses relative URLs).
+                    document["services"]["playwright-mcp"]["x-sandbox"] = {
+                        "hosts": [],
+                        "resolve_environment": ["BROWSER_URL"],
+                    }
+                    # Use the image's default pwuser without an explicit su.
+                    document["services"]["playwright-mcp"].pop("user", None)
+                elif self.task.name == "terminal-bench/payments-pipeline-fix":
+                    # This single broker uses localhost for its controller.
+                    # Clients still resolve its advertised kafka:9092 address.
+                    document["services"]["kafka"]["x-sandbox"] = {"hosts": []}
+                    # Use the image's default appuser without an explicit su.
+                    document["services"]["kafka"].pop("user", None)
             if "opensandbox" in self.provider_config:
                 for service in document["services"].values():
                     if service.get("shm_size") is not None:

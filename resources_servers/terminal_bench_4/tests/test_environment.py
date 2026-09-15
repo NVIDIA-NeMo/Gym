@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +12,7 @@ import yaml
 from resources_servers.terminal_bench_4 import environment as module
 from resources_servers.terminal_bench_4.environment import Environment, EnvironmentConfig, HealthcheckError
 from resources_servers.terminal_bench_4.task import TaskSettings
+from responses_api_agents.harbor_agent_general.compose_config import resolve_compose
 
 
 def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
@@ -119,6 +122,65 @@ async def test_compose_specs_startup_metadata_sidecar_operations(tmp_path, monke
     await env.stop_main()
     await env.stop()
     assert env.closed and env.resources[-1]["compose_project"] == "project"
+
+
+@pytest.mark.parametrize(
+    "task_name,service,user,extension",
+    [
+        (
+            "medical-claims-processing",
+            "playwright-mcp",
+            "pwuser",
+            {"hosts": [], "resolve_environment": ["BROWSER_URL"]},
+        ),
+        ("payments-pipeline-fix", "kafka", "appuser", {"hosts": []}),
+    ],
+)
+@pytest.mark.parametrize("scope", ["agent", "verifier", "other-task"])
+async def test_nonroot_compose_adaptations_are_scoped_to_agent_tasks(
+    tmp_path, monkeypatch, task_name, service, user, extension, scope
+):
+    env, _, _, create = make_environment(tmp_path, monkeypatch, compose=True)
+    env.task.name = "terminal-bench/" + (task_name if scope != "other-task" else "unrelated")
+    if scope == "verifier":
+        env.log_role = "verifier"
+        env.environment_dir = env.task.path / "tests"
+    document = {
+        "services": {
+            "main": {"depends_on": {service: {"condition": "service_healthy"}}},
+            service: {
+                "image": "nonroot",
+                "environment": {"BROWSER_URL": "http://workspace:18073"},
+                "healthcheck": {"test": ["CMD", "true"]},
+            },
+            "workspace": {"image": "public/agent"},
+        }
+    }
+    source = env.environment_dir / "docker-compose.yaml"
+    source.write_text(yaml.safe_dump(document))
+    original = source.read_bytes()
+    images = {
+        image: {
+            "image": image,
+            "os": "linux",
+            "architecture": "amd64",
+            "config": {"User": image_user, "Cmd": ["sleep", "infinity"]},
+        }
+        for image, image_user in [("public/agent", "root"), ("nonroot", user)]
+    }
+    env.config.compose_image_configs.write_text(json.dumps(images))
+    monkeypatch.setattr(module, "resolve_compose", resolve_compose)
+    expected = resolve_compose(deepcopy(document), "public/agent", images)
+    if scope == "agent":
+        expected["services"][service]["x-sandbox"] = extension
+        expected["services"][service].pop("user")
+
+    await env.start()
+
+    generated = yaml.safe_load(create.call_args.args[1].read_text())
+    assert generated == expected
+    assert generated["services"][service].get("user") == (None if scope == "agent" else user)
+    assert source.read_bytes() == original
 
 
 async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
