@@ -339,31 +339,35 @@ Compiles all 100 reference statements **unmodified**. Each still contains its `s
 
 ```bash
 gym eval prepare --benchmark leancat
-gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
-gym eval submit --config examples/slurm_leancat_goedel_prover.yaml
+gym eval run --benchmark leancat
 ```
 
 `benchmarks/leancat/` is registered, so `gym list benchmarks` shows it and `--benchmark leancat` works.
 `num_repeats: 4` is the generalist budget of Table 1, and one of upstream's `recommended_k_values`. For Table 3's
 specialized provers, raise it to 32 with `--num-repeats`.
 
-The submit config cannot start the sandbox — `services:` accepts only `type: vllm` and `type: ray`, so the sandbox
-must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
-`srun --overlap`.
+The sandbox must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT` before either command — nothing in this
+server starts it. On Slurm that means launching it into the same allocation with `srun --overlap`.
+
+**No Slurm submit config ships with this server.** Every run behind the numbers above was driven by `sbatch`
+scripts kept outside the repo, so `gym eval submit` has never been exercised end to end for this benchmark. A
+config for it would be an untested recipe, which is the same reason the second verification backend was dropped
+(below). Writing one is straightforward — `services:` a `type: vllm` entry for the policy model, and set
+`NEMO_SKILLS_SANDBOX_HOST`/`PORT` in `driver.env` — but dry-run it before trusting it.
 
 ## Verification backend
 
 Verification goes through a NeMo-Skills HTTP sandbox at `sandbox_host:sandbox_port`, the same backend
 `math_formal_lean` uses. You start it out of band; on Slurm that is a second `srun --overlap` into the same
-allocation, as `benchmarks/leancat.sub` does.
+allocation.
 
 This server deliberately ships **one** backend. An earlier revision also routed verification through
 `nemo_gym.sandbox` (the enroot/apptainer/docker providers that `swebench`, `deepswe` and `litmus_agent` use), so that
 `gym eval submit` could start its own sandbox — `ServiceConfig` is a closed union of `vllm` and `ray`, with no
 generic container service, so that is the only way to make a one-command Slurm run work. It was dropped because it
 was never exercised end to end: every run of this benchmark, including the reproduction of Table 3, used the HTTP
-path, and shipping a second, untested way to compute the score is worse than not offering it. The cost is that
-`gym eval submit` needs the sandbox launched separately; `examples/slurm_leancat_goedel_prover.yaml` documents that.
+path, and shipping a second, untested way to compute the score is worse than not offering it. The cost is that the
+sandbox has to be launched separately, as **Running it** describes.
 
 The Lean file is sent to the sandbox as the `generated_code` field of a JSON body, never interpolated into a shell
 command, so quotes, backslashes and unicode in a proof need no escaping.
