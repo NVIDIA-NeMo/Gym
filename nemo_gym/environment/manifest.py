@@ -199,9 +199,7 @@ class EnvironmentManifest(_ManifestModel):
     )
     experimental: bool = Field(
         default=True,
-        description=(
-            "Whether the workload is experimental; false means it is officially maintained by the NeMo Gym team."
-        ),
+        description="Manual experimental flag; false does not imply certificate-backed validation.",
     )
     kind: EnvironmentKind
     integration_profile: IntegrationProfile

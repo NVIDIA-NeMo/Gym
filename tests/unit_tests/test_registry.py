@@ -228,7 +228,7 @@ class TestEnvironmentCatalog:
             ("benchmark", "legacy_benchmark"),
         }
         manifest_entry = entries[("environment", "manifest_env")]
-        assert manifest_entry.status == "maintained"
+        assert manifest_entry.status is None
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"

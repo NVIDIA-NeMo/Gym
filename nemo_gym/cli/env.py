@@ -1339,9 +1339,10 @@ def publish_environment_manifest() -> None:
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps(report.to_dict()))
         return
+    annotation = f"catalog status={report.status} " if report.status else ""
     rich.print(
         f"[green]✓[/green] Publication checks passed for {report.kind} {report.name} {report.version}; "
-        f"catalog status={report.status} ({report.verifier_cases} verifier cases)."
+        f"{annotation}({report.verifier_cases} verifier cases)."
     )
 
 
@@ -1429,7 +1430,9 @@ def _inspect_environment(
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
-    details = {"config": str(entry.config_path.resolve()), "status": entry.status}
+    details = {"config": str(entry.config_path.resolve())}
+    if entry.status is not None:
+        details["status"] = entry.status
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
     for label, value in (
@@ -1468,7 +1471,7 @@ def _inspect_environment(
 
 
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    return {
+    payload = {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1480,6 +1483,9 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
     }
+    if entry.status is None:
+        payload.pop("status")
+    return payload
 
 
 @exit_cleanly_on_config_error
@@ -1507,7 +1513,7 @@ def list_environments() -> None:
             continue
         attribute = "kind" if field == "catalog_kind" else field
         missing = sum(getattr(entry, attribute) is None for entry in entries)
-        if missing:
+        if missing and field != "status":
             noun = "entry" if missing == 1 else "entries"
             print(
                 f"Warning: {missing} catalog {noun} {'has' if missing == 1 else 'have'} no "
@@ -1541,7 +1547,7 @@ def list_environments() -> None:
         table.add_row(
             entry.name,
             entry.kind,
-            entry.status,
+            entry.status or "",
             entry.lifecycle or "",
             entry.domain or "",
             entry.description or "",

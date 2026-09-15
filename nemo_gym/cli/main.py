@@ -675,7 +675,7 @@ COMMANDS = {
                 "status",
                 "status",
                 "Filter by manifest status.",
-                choices=("experimental", "maintained", "no-manifest"),
+                choices=("experimental", "no-manifest"),
             ),
             _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
             JSON,

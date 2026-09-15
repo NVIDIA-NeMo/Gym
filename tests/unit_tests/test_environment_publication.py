@@ -53,7 +53,7 @@ def _entry(tmp_path: Path, **manifest_updates: object) -> EnvironmentCatalogEntr
     return EnvironmentCatalogEntry(
         name="sample",
         kind="environment",
-        status="experimental" if manifest.get("experimental", True) else "maintained",
+        status="experimental" if manifest.get("experimental", True) else None,
         path=directory,
         config_path=config_path,
         manifest_path=manifest_path,
@@ -128,13 +128,14 @@ def test_publication_report_serializes() -> None:
     assert report.to_dict()["verifier_cases"] == 3
 
 
-def test_publication_accepts_maintained_workload(tmp_path: Path) -> None:
+def test_publication_omits_status_for_false_experimental_flag(tmp_path: Path) -> None:
     entry = _entry(tmp_path, experimental=False)
     validation, verifier = _reports()
 
     report = finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
 
-    assert report.status == "maintained"
+    assert report.status is None
+    assert "status" not in report.to_dict()
 
 
 @pytest.mark.parametrize(
