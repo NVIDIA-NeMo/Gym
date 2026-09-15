@@ -801,6 +801,7 @@ class TestArenaResourcesServer:
                 "response",
                 "reward",
                 "failure_reason",
+                "env_session_id",
                 "question_id",
                 "question",
                 "baseline_answer",
