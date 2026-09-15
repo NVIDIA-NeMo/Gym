@@ -29,5 +29,8 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Set up dev environment
+        run: source ./scripts/ci/setup_dev.sh
+
       - name: Check lint
         run: ./scripts/ci/lint.sh

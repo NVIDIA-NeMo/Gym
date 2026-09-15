@@ -916,3 +916,17 @@ def test_dockerfile_provides_pre_commit_on_path_via_dev_extra() -> None:
     assert "uv sync --locked --extra vllm --extra telemetry --extra dev" in dockerfile
     assert 'ENV PATH="/opt/nemo_gym_venv/bin:$PATH"' in dockerfile
     assert "uv pip install" not in dockerfile
+
+
+def test_lint_workflow_provisions_pre_commit_before_lint() -> None:
+    # lint.sh resolves pre-commit from PATH (the lockfile dev extra), so the
+    # lint job must provision the dev environment (via scripts/ci/setup_dev.sh,
+    # which runs `uv sync --extra dev`) before invoking lint.sh.
+    steps = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "code-linting.yml").read_text())["jobs"][
+        "lint-check"
+    ]["steps"]
+    run_cmds = [step.get("run", "") for step in steps]
+
+    setup_idx = next(i for i, cmd in enumerate(run_cmds) if "scripts/ci/setup_dev.sh" in cmd)
+    lint_idx = next(i for i, cmd in enumerate(run_cmds) if "scripts/ci/lint.sh" in cmd)
+    assert setup_idx < lint_idx, "setup_dev.sh must run before lint.sh"
