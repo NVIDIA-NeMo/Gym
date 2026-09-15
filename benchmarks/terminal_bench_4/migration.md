@@ -1,18 +1,22 @@
 # TB4 agent/resources migration
 
-## Review baseline
+## Status and review baseline
 
-This branch starts at `flafrance/terminal-bench-4`,
-`66efd1b7a7c0240d998d735e335eef1ed340ca77`. Review the additional change with
-`git diff flafrance/terminal-bench-4...HEAD`.
+The migration is complete. Development uses `flafrance/terminal-bench-4`,
+consolidated from the former split branch and rebased onto remote main on
+2026-09-15. The base snapshot is `609c3d150`; Compose support is already merged
+in main. Review the complete remaining feature with `git diff origin/main...HEAD`.
 
-The plan inspected `53ee40725c0090e1c8fbe64fbe8e92e837bc17f2`.
-The actual base additionally contains `9dc7293d6` (offline verifier egress) and
-`66efd1b7a` (Compose runtime requirements). Those fixes are prerequisites and
-are outside this migration's diff. The inspected `origin/pr-3332` is
-`bb03de6ef5aef3587a7f2334b1fca5471c2dd716`; its merge base with the task branch is
-`4402098b145ee2985e760e33d46f9adc321cc64b`. Comparing against that merge base would
-include inherited Compose infrastructure and unrelated base history.
+The migration implementation is commit `6532053e1` (formerly `6d62ef215`),
+with validation documentation in `55097180e` (formerly `645c2ad15`). The original
+split base was `66efd1b7a`; historical test artifacts retain that provenance.
+The former branch label has been deleted. Local recovery refs are under
+`refs/backup/tb4-consolidation-20260915/`.
+
+The rebase retained main's shared-memory metadata API; the TB4 config now uses
+`shm_size_metadata_key: nemo.nvidia.com/shm`. All 289 targeted rebase regression
+tests passed. Live measurements below predate rebasing. Publication and EFB pin
+updates were not performed as part of consolidation.
 
 The 66 task pins, category membership, dataset digest, and Compose image metadata
 are unchanged. Provider renewal, request/limit mapping, shared memory, offline
