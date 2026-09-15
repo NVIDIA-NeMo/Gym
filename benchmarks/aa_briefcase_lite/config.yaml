@@ -72,7 +72,7 @@ aa_briefcase_lite_resources_server:
           create_params_overrides:
             extra_body: {thinking: {type: adaptive}, output_config: {effort: max}}
             temperature: null
-            max_tokens: 32768
+            max_tokens: 49152
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
       persist_raw_judge_responses: false
 

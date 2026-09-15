@@ -95,7 +95,7 @@ AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase El
 Each judge-panel member uses its own model server because the `openai_model`
 adapter fixes the upstream model. Override the three model names with
 `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
-Claude uses a local 32,768-token output limit in both binary and pairwise judging.
+Claude uses a local 49,152-token output limit in both binary and pairwise judging.
 GPT and Gemini inherit the local 4,096-token binary and 65,535-token pairwise
 limits. AA's judge output budgets are not disclosed.
 
@@ -109,7 +109,7 @@ contain SRT files also include their subtitle text in judge inputs.
 LaTeX source and PDF content are shown separately; the harness does not compile
 the source to verify that it produces the submitted PDF.
 
-The 32,768-token Claude budget is under validation; it is not an AA-prescribed
+The 49,152-token Claude budget is under validation; it is not an AA-prescribed
 limit or a demonstrated reliability fix.
 
 For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
