@@ -66,7 +66,7 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -102,6 +102,8 @@ class BaseVerifyRequest(BaseRunRequest):
 
 
 class BaseVerifyResponse(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+
     reward: float
 
     # Human-readable diagnosis of why `reward` may not reflect policy quality.
