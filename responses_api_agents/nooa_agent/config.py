@@ -43,7 +43,6 @@ class NOOAInvocationConfig(BaseModel):
     invocation_adapter: str
     execution_mode: Literal["embedded", "sandboxed"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
-    model_aliases: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("agent_class")
     @classmethod
@@ -68,13 +67,6 @@ class NOOAInvocationConfig(BaseModel):
         if not module_name or not function_name or "." in function_name:
             raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
         return value
-
-    @field_validator("model_aliases")
-    @classmethod
-    def validate_model_aliases(cls, aliases: dict[str, str]) -> dict[str, str]:
-        if any(not alias.strip() or not server.strip() for alias, server in aliases.items()):
-            raise ValueError("model_aliases must map non-empty NOOA names to non-empty Gym model-server names")
-        return aliases
 
     @field_validator("init_kwargs")
     @classmethod
