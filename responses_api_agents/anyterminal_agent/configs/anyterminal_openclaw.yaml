@@ -6,22 +6,17 @@ anyterminal_openclaw:
       description: Terminal Bench run by OpenClaw natively inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.openclaw_agent.app
-      agent_server_class: OpenClawAgent
-      agent_config_class: OpenClawAgentConfig
+      agent: openclaw
       agent_kwargs:
-        model: model
-        openclaw_version: "2026.6.11"
-        timeout: 3600
-        setup_timeout: 1200
-        thinking: "off"
-        node_bin_dir: "/agent_deps_mount/bin"
-        openclaw_config:
-          agents:
-            defaults:
-              workspace: "."
-          tools:
-            profile: coding
+        model: {model: model, provider: nemo}
+        timeout_seconds: 3600
+        workspace: "."
+        settings:
+          setup_timeout: 1200
+          thinking: "off"
+          node_bin_dir: "/agent_deps_mount/bin"
+          openclaw_config:
+            tools: {profile: coding}
 
       container_formatter: "docker://{docker_image}"
 

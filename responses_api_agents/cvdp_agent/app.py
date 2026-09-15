@@ -61,6 +61,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.agent_registry import resolve_agent
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
@@ -75,12 +76,6 @@ _ARCHES = {
     "arm64": ("arm64", "aarch64-unknown-linux-gnu", "linux-arm64"),
     "aarch64": ("arm64", "aarch64-unknown-linux-gnu", "linux-arm64"),
 }
-
-
-def agent_key(agent_server_module: str) -> str:
-    """responses_api_agents.hermes_agent.app maps to hermes_agent, the deps-script key."""
-    parts = agent_server_module.split(".")
-    return parts[-2] if len(parts) >= 2 else agent_server_module
 
 
 def load_runner_source() -> str:
@@ -202,9 +197,7 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     timeout: int = 1800
 
-    agent_server_module: str = "responses_api_agents.claude_code_agent.app"
-    agent_server_class: str = "ClaudeCodeAgent"
-    agent_config_class: str = "ClaudeCodeAgentConfig"
+    agent: str = "claude_code"
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     image: str = "nvidia/cvdp-sim:v1.0.0"
@@ -418,7 +411,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
     def _provision_deps(self) -> Path:
         """Install the configured agent's portable dependency prefix once."""
-        key = agent_key(self.config.agent_server_module)
+        key = resolve_agent(self.config.agent)[3]
         scripts_dir = Path(__file__).parent / "setup_scripts"
         target, python_arch, node_arch = self._deps_target_arch()
         deps_dir = Path(__file__).parent / "deps" / f"{key}-{target}"
@@ -505,7 +498,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
     async def _provision_deps_in_sandbox(self, image: str) -> Path:
         """Build the portable runtime inside OpenSandbox when host and sandbox arch differ."""
-        key = agent_key(self.config.agent_server_module)
+        key = resolve_agent(self.config.agent)[3]
         script, recipe = self._deps_recipe(key)
         target, _python_arch, _node_arch = self._deps_target_arch()
         deps_root = Path(__file__).parent / "deps"
@@ -612,6 +605,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         metadata = dict(self._sandbox_metadata)
         metadata.update(extra.pop("metadata", {}) or {})
         traj = self._traj_dir()
+        module, agent_class, config_class, _ = resolve_agent(self.config.agent)
         return SandboxSpec(
             image=image,
             workdir=wd,
@@ -622,9 +616,9 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 "NV_AGENT_HOME": f"{wd.rstrip('/')}/.home",
                 "NV_SYSTEM_PROMPT": self.config.system_prompt or "",
                 "NV_TRAJ_DIR": traj,
-                "NV_AGENT_MODULE": self.config.agent_server_module,
-                "NV_AGENT_CLASS": self.config.agent_server_class,
-                "NV_AGENT_CFG_CLASS": self.config.agent_config_class,
+                "NV_AGENT_MODULE": module,
+                "NV_AGENT_CLASS": agent_class,
+                "NV_AGENT_CFG_CLASS": config_class,
                 "NV_AGENT_DEPS_DIR": self._agent_deps_dir(),
             },
             files={

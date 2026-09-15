@@ -6,9 +6,7 @@ anyswe_opencode:
       description: SWE-bench run by OpenCode inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.opencode_agent.app
-      agent_server_class: OpenCodeAgent
-      agent_config_class: OpenCodeAgentConfig
+      agent: opencode
       agent_kwargs:
         model: model
         openai_api_key: EMPTY  # pragma: allowlist secret

@@ -73,16 +73,18 @@ Each rollout row contains `reward` (0.0 or 1.0), the full agent trajectory, and
 
 ## Agent wiring
 
-Swap the agent by changing three fields in the YAML (or overriding on the CLI):
+Swap the agent with `agent` and its normalized `agent_kwargs`:
 
 
 ```yaml
-agent_server_module: responses_api_agents.hermes_agent.app
-agent_server_class: HermesAgent
-agent_config_class: HermesAgentConfig
+agent: hermes
 agent_kwargs:
+  model:
+    model: ${policy_model_name}
+    base_url: __SANDBOX_MODEL_URL__/v1
   max_turns: 30
-  terminal_backend: local
+  settings:
+    terminal_backend: local
 ```
 
 Agent dependencies are installed once at startup into a portable Python prefix

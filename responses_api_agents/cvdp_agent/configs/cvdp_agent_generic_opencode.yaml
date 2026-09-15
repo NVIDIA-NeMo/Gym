@@ -13,9 +13,7 @@ cvdp_agent_generic_opencode:
         type: example
         jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
-      agent_server_module: responses_api_agents.opencode_agent.app
-      agent_server_class: OpenCodeAgent
-      agent_config_class: OpenCodeAgentConfig
+      agent: opencode
       agent_kwargs:
         model: nvinf/${policy_model_name}
         openai_api_key: ${policy_api_key}

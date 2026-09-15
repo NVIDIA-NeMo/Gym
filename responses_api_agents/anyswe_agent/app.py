@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import apply_rollout_prefix
+from responses_api_agents.agent_registry import resolve_agent
 
 
 class SWEBenchMetrics(BaseModel):
@@ -144,11 +145,7 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
-    agent_server_module: str = Field(
-        description="Import path to the agent module, e.g. responses_api_agents.hermes_agent.app"
-    )
-    agent_server_class: str = Field(description="Agent class name, e.g. HermesAgent")
-    agent_config_class: str = Field(description="Agent config class name, e.g. HermesAgentConfig")
+    agent: str
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     container_formatter: str = Field(description="Baked task image containing the AnySWE agent runtime")
@@ -193,7 +190,7 @@ class GymAgentHarnessProcessor(BaseModel):
 
     @property
     def _agent_key(self) -> str:
-        return self.config.agent_server_module.split(".")[-2]
+        return resolve_agent(self.config.agent)[3]
 
     def setup(self) -> Path:
         deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
@@ -345,6 +342,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _sandbox_agent_env(params: AnySweInstanceConfig) -> Dict[str, str]:
+        module, agent_class, config_class, _ = resolve_agent(params.agent)
         sampling = {
             key: getattr(params.body, key)
             for key in ("temperature", "top_p", "max_output_tokens")
@@ -354,9 +352,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return {
             "NGSWE_MODEL_NAME": model_name,
             "NGSWE_MODEL_URL": params.model_server_url,
-            "NGSWE_AGENT_MODULE": params.agent_server_module,
-            "NGSWE_AGENT_CLASS": params.agent_server_class,
-            "NGSWE_AGENT_CONFIG_CLASS": params.agent_config_class,
+            "NGSWE_AGENT_MODULE": module,
+            "NGSWE_AGENT_CLASS": agent_class,
+            "NGSWE_AGENT_CONFIG_CLASS": config_class,
             "NGSWE_AGENT_KWARGS_B64": base64.b64encode(json.dumps(params.agent_kwargs).encode()).decode(),
             "NGSWE_SAMPLING_B64": base64.b64encode(json.dumps(sampling).encode()).decode(),
         }

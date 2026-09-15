@@ -6,22 +6,17 @@ anyswe_openclaw:
       description: SWE-bench run by OpenClaw natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.openclaw_agent.app
-      agent_server_class: OpenClawAgent
-      agent_config_class: OpenClawAgentConfig
+      agent: openclaw
       agent_kwargs:
-        model: model
-        openclaw_version: 2026.6.11
-        timeout: 1800
-        setup_timeout: 300
-        thinking: "off"
+        model: {model: model, provider: nemo}
+        timeout_seconds: 1800
         system_prompt: "You are fixing a bug in the repository at /testbed. Use your tools to inspect and edit the source files. Make the minimal correct code change, run relevant checks if practical, and leave the final fix applied in /testbed."
-        openclaw_config:
-          agents:
-            defaults:
-              workspace: /testbed
-          tools:
-            profile: coding
+        workspace: /testbed
+        settings:
+          setup_timeout: 300
+          thinking: "off"
+          openclaw_config:
+            tools: {profile: coding}
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox

@@ -86,32 +86,11 @@ def main() -> None:
     agent_kwargs = _json_env("NGSWE_AGENT_KWARGS")
     sampling = _json_env("NGSWE_SAMPLING")
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
     from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
 
     module = importlib.import_module(os.environ["NGSWE_AGENT_MODULE"])
     agent_class = getattr(module, os.environ["NGSWE_AGENT_CLASS"])
     config_class = getattr(module, os.environ["NGSWE_AGENT_CONFIG_CLASS"])
-
-    server_name = "policy_model"
-    global_config = (
-        {server_name: {"responses_api_models": {"model": {"host": "0.0.0.0", "port": 0}}}} if model_url else {}
-    )
-    client = ServerClient.model_construct(global_config_dict=global_config)
-    client._build_server_base_url = lambda config: model_url
-    config_sampling = {key: value for key, value in sampling.items() if key in config_class.model_fields}
-    model_server = ModelServerRef(name=server_name, type="responses_api_models") if model_url else None
-    config = config_class(
-        host="0.0.0.0",
-        port=0,
-        name=agent_class.__name__.lower(),
-        entrypoint="app.py",
-        model_server=model_server,
-        resources_server=ResourcesServerRef(name="anyswe", type="resources_servers"),
-        **{**agent_kwargs, **config_sampling},
-    )
-    agent = agent_class(config=config, server_client=client)
 
     # Some published task images contain pre-existing working-tree changes. Snapshot that exact
     # state through an alternate index so the submitted patch contains only the agent's edits and
@@ -125,8 +104,34 @@ def main() -> None:
         model=model_name,
         **sampling,
     )
-    request = Request({"type": "http", "path_params": {}})
-    response = asyncio.run(agent.responses(request=request, body=body))
+    if config_class.__name__ == "AgentHarnessConfig":
+        agent = agent_class(config=config_class(**agent_kwargs))
+        base_url = model_url if not model_url or model_url.endswith("/v1") else f"{model_url}/v1"
+        response = asyncio.run(agent.run(body, model_base_url=base_url or None))
+    else:
+        from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+        from nemo_gym.server_utils import ServerClient
+
+        server_name = "policy_model"
+        global_config = (
+            {server_name: {"responses_api_models": {"model": {"host": "0.0.0.0", "port": 0}}}} if model_url else {}
+        )
+        client = ServerClient.model_construct(global_config_dict=global_config)
+        client._build_server_base_url = lambda config: model_url
+        config_sampling = {key: value for key, value in sampling.items() if key in config_class.model_fields}
+        model_server = ModelServerRef(name=server_name, type="responses_api_models") if model_url else None
+        config = config_class(
+            host="0.0.0.0",
+            port=0,
+            name=agent_class.__name__.lower(),
+            entrypoint="app.py",
+            model_server=model_server,
+            resources_server=ResourcesServerRef(name="anyswe", type="resources_servers"),
+            **{**agent_kwargs, **config_sampling},
+        )
+        agent = agent_class(config=config, server_client=client)
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
     Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
 

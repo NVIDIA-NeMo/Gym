@@ -13,11 +13,14 @@ cvdp_agent_generic_hermes:
         type: example
         jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
-      # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
-      agent_server_module: responses_api_agents.hermes_agent.app
-      agent_server_class: HermesAgent
-      agent_config_class: HermesAgentConfig
-      agent_kwargs: {max_turns: 60, terminal_backend: local}
+      agent: hermes
+      agent_kwargs:
+        model:
+          model: ${policy_model_name}
+        max_turns: 60
+        timeout_seconds: 900
+        workspace: /code
+        settings: {terminal_backend: local}
 
       # Apptainer default. Override sandbox_provider for another backend.
       image: ${cvdp_sim_image}

@@ -6,13 +6,12 @@ anyterminal_terminus_2:
       description: Terminal Bench run by Terminus-2 natively inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.terminus_2_agent.app
-      agent_server_class: Terminus2Agent
-      agent_config_class: Terminus2AgentConfig
+      agent: terminus_2
       agent_kwargs:
-        model: ${policy_model_name}
-        timeout: 12500
-        workspace_root: "."
+        model:
+          model: ${policy_model_name}
+        timeout_seconds: 12500
+        workspace: "."
 
       container_formatter: "docker://{docker_image}"
       concurrency: 6

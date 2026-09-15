@@ -27,6 +27,5 @@ echo "Installing openclaw ($OPENCLAW_SPEC)"
 npm install -g --prefix "$DEPS_DIR" "$OPENCLAW_SPEC"
 
 "$DEPS_DIR/bin/openclaw" --version
-"$DEPS_DIR/bin/python3" -c "from responses_api_agents.openclaw_agent.app import OpenClawAgent; print('openclaw_agent OK')"
 
 echo "openclaw_agent deps ready at $DEPS_DIR"
