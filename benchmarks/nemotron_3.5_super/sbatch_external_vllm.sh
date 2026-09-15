@@ -131,7 +131,7 @@ export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
 
-# vLLM recipes recommended env vars
+# vLLM recipes recommended env vars not enabled on OCI-HSG by default
 export NCCL_NVLS_ENABLE=1
 
 # OCI-HSG has these parameters enabled by default:
