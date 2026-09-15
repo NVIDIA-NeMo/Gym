@@ -70,7 +70,7 @@ aa_briefcase_lite_resources_server:
             name: aa_briefcase_lite_claude_judge_model
           media_mode: native_pdf
           create_params_overrides:
-            extra_body: {thinking: {type: adaptive}, output_config: {effort: max}}
+            extra_body: {thinking: {type: adaptive}, output_config: {effort: medium}}
             temperature: null
             max_tokens: 49152
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}

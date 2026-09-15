@@ -9,12 +9,12 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from openai import AsyncOpenAI
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
+    _BinaryJudgeHttpClient,
 )
 from resources_servers.gdpval.judge_panel import ResolvedJudge
 
@@ -49,6 +49,7 @@ async def test_binary_request_preserves_valid_and_malformed_subtitles(
         media_mode=media_mode,
     )
     check = {
+        "check_id": "test-subtitles",
         "check_description": "Are the subtitles valid SRT?",
         "score_1_criteria": "All cue timestamps use valid SRT syntax.",
         "score_0_criteria": "A cue timestamp has invalid syntax.",
@@ -79,14 +80,14 @@ async def test_binary_request_preserves_valid_and_malformed_subtitles(
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(capture)) as transport:
-        monkeypatch.setattr(
-            "resources_servers.aa_briefcase_lite.app.AsyncOpenAI", partial(AsyncOpenAI, http_client=transport)
-        )
-        for content in subtitles:
-            (tmp_path / "captions.srt").write_text(content, encoding="utf-8")
-            section = await server._section(tmp_path, judge, [])
-            await server._binary_call(judge, "Provide a clip and captions.", check, section)
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
+        partial(_BinaryJudgeHttpClient, transport=httpx.MockTransport(capture)),
+    )
+    for content in subtitles:
+        (tmp_path / "captions.srt").write_text(content, encoding="utf-8")
+        section = await server._section(tmp_path, judge, [])
+        await server._binary_call(judge, "Provide a clip and captions.", check, section)
 
     assert len(requests) == 2
     assert requests[0] != requests[1]

@@ -30,7 +30,12 @@ async def test_binary_inserts_artifacts_inside_released_template(server, monkeyp
     template = (Path(__file__).parent / "fixtures" / "judge_user.txt").read_text()
     server._aa_binary_user = template
     server._aa_binary_system = "Judge the artifact."
-    check = {"check_description": "Check", "score_1_criteria": "Pass", "score_0_criteria": "Fail"}
+    check = {
+        "check_id": "test-check",
+        "check_description": "Check",
+        "score_1_criteria": "Pass",
+        "score_0_criteria": "Fail",
+    }
     artifact = {"type": "image_url", "image_url": {"url": "data:application/pdf;base64,cGRm"}}
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content='{"passed":true,"reasoning":"Observed"}'))]

@@ -20,11 +20,13 @@ import json
 import logging
 import re
 import tempfile
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from openai import AsyncOpenAI, OpenAI
+import httpx
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, OpenAI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
@@ -54,6 +56,46 @@ from resources_servers.gdpval.preconvert import preconvert_dir_async, sidecar_pd
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
+
+
+_BINARY_TRANSPORT_LOGGER = logging.getLogger(__name__ + ".binary_transport")
+_BINARY_TRANSPORT_LOGGER.setLevel(logging.INFO)
+
+
+class _BinaryJudgeHttpClient(DefaultAsyncHttpxClient):
+    """Observe each SDK transport attempt without changing its retry policy."""
+
+    def __init__(self, *, check_id: str, model: str, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.check_id = check_id
+        self.model = model
+        self.format_attempt = 0
+        self.transport_attempt = 0
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        self.transport_attempt += 1
+        started = time.monotonic()
+        status = None
+        error_type = None
+        try:
+            response = await super().send(request, **kwargs)
+            status = response.status_code
+            return response
+        except Exception as error:
+            error_type = type(error).__name__
+            raise
+        finally:
+            _BINARY_TRANSPORT_LOGGER.info(
+                "Binary judge transport: check_id=%s model=%s format_attempt=%d "
+                "transport_attempt=%d status=%s error=%s duration_seconds=%.3f",
+                self.check_id,
+                self.model,
+                self.format_attempt,
+                self.transport_attempt,
+                status,
+                error_type,
+                time.monotonic() - started,
+            )
 
 
 class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
@@ -266,45 +308,52 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 ],
             },
         ]
-        client = AsyncOpenAI(
-            base_url=judge.base_url,
-            api_key=judge.api_key,
-            timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-            max_retries=2,
-        )
-        raw = ""
-        for _attempt in range(self.config.binary_formatting_retries + 1):
-            kwargs = merge_create_kwargs(
-                {
-                    "model": judge.model,
-                    "messages": messages,
-                    "temperature": 0.0,
-                    "max_tokens": 4096,
-                },
-                judge.create_overrides,
+        async with _BinaryJudgeHttpClient(check_id=check["check_id"], model=judge.model) as http_client:
+            client = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=2,
+                http_client=http_client,
             )
-            response = await client.chat.completions.create(**kwargs)
-            raw = (response.choices[0].message.content or "").strip()
-            parsed = _parse_binary_judgement(raw)
-            if parsed is not None:
-                return parsed, raw
-            if getattr(response.choices[0], "finish_reason", None) == "length":
-                logging.getLogger(__name__).warning(
-                    "Invalid binary judge answer reached its token limit: model=%s completion_tokens=%s",
-                    judge.model,
-                    getattr(getattr(response, "usage", None), "completion_tokens", None),
+            raw = ""
+            for _attempt in range(self.config.binary_formatting_retries + 1):
+                http_client.format_attempt = _attempt + 1
+                http_client.transport_attempt = 0
+                kwargs = merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": messages,
+                        "temperature": 0.0,
+                        "max_tokens": 4096,
+                    },
+                    judge.create_overrides,
                 )
-            # Empty generations have nothing to repair: retry the same check without
-            # adding empty assistant turns or rerunning already completed checks.
-            if not raw:
-                continue
-            messages.extend(
-                [
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": _BINARY_JSON_INSTRUCTION},
-                ]
-            )
-        return None, raw
+                response = await client.chat.completions.create(**kwargs)
+                raw = (response.choices[0].message.content or "").strip()
+                parsed = _parse_binary_judgement(raw)
+                if parsed is not None:
+                    return parsed, raw
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    logging.getLogger(__name__).warning(
+                        "Invalid binary judge answer reached its token limit: check_id=%s model=%s "
+                        "format_attempt=%d completion_tokens=%s",
+                        check["check_id"],
+                        judge.model,
+                        _attempt + 1,
+                        getattr(getattr(response, "usage", None), "completion_tokens", None),
+                    )
+                # Empty generations have nothing to repair: retry the same check without
+                # adding empty assistant turns or rerunning already completed checks.
+                if not raw:
+                    continue
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": _BINARY_JSON_INSTRUCTION},
+                    ]
+                )
+            return None, raw
 
     async def _verify_binary(
         self,

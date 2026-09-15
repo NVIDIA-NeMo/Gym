@@ -95,7 +95,9 @@ AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase El
 Each judge-panel member uses its own model server because the `openai_model`
 adapter fixes the upstream model. Override the three model names with
 `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
-Claude uses a local 49,152-token output limit in both binary and pairwise judging.
+Claude uses adaptive thinking with medium effort and a local 49,152-token output
+limit in both binary and pairwise judging. Medium effort is a local deviation
+from AA's published maximum-effort setting and is under validation.
 GPT and Gemini inherit the local 4,096-token binary and 65,535-token pairwise
 limits. AA's judge output budgets are not disclosed.
 

@@ -29,8 +29,10 @@ candidate artifacts are themselves the public reference.
 Use the pinned [public dataset](https://huggingface.co/datasets/ArtificialAnalysis/AA-Briefcase-Lite/tree/4dec557b47d43867a1648c0974db1d8208c8b677), including hydrated LFS files, at
 `/opt/aa-briefcase-lite`. Stage each `submissions/gpt-5-5/<task>/submission/`
 under `/opt/aa-briefcase-lite-demo/task_<task>/repeat_0/`; also stage the video
-submission under `task_w1_t4/repeat_1/`. The example configuration reuses the
-benchmark's three-judge panel, 32,768-token Claude limit, and transport retries.
+submission under `task_w1_t4/repeat_1/`. The example configuration inherits the
+current benchmark judge settings. The stored responses were generated with
+Claude at maximum effort and a 32,768-token limit; they do not validate the
+current medium-effort, 49,152-token configuration.
 Set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` for the example run.
 
 The stored responses come from independent executions of this public example;

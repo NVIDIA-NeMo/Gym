@@ -10,12 +10,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from openai import APIStatusError, AsyncOpenAI
+from openai import APIStatusError, APITimeoutError
 
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
     AABriefcaseLiteVerifyRequest,
+    _BinaryJudgeHttpClient,
     _pairwise_task_prompt,
     _parse_binary_judgement,
     _requested_filenames,
@@ -37,6 +38,7 @@ async def test_binary_call_requests_json_without_changing_grading_input(monkeypa
     )
     judge = ResolvedJudge(name="judge", model="model", base_url="http://upstream.invalid/v1", api_key="dummy")
     check = {
+        "check_id": "test-check",
         "check_description": "Check totals.",
         "score_1_criteria": "Totals agree.",
         "score_0_criteria": "Totals differ.",
@@ -130,7 +132,8 @@ def test_pairwise_prompt_is_criterion_specific_and_source_blind() -> None:
 
 
 @pytest.mark.parametrize("recover", [True, False])
-async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover):
+@pytest.mark.parametrize("transport_timeout", [False, True])
+async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, caplog, recover, transport_timeout):
     monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
     server = AABriefcaseLiteResourcesServer.model_construct(
         config=AABriefcaseLiteResourcesServerConfig.model_construct(dataset_dir="unused")
@@ -145,7 +148,9 @@ async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover
     def respond(request):
         requests.append(json.loads(request.content))
         if not recover or len(requests) < 3:
-            return httpx.Response(408, json={"error": {"message": "Request timed out"}})
+            if transport_timeout:
+                raise httpx.ReadTimeout("private-error-body", request=request)
+            return httpx.Response(408, json={"error": {"message": "private-error-body"}})
         return httpx.Response(
             200,
             json={
@@ -162,29 +167,51 @@ async def test_binary_transport_timeout_retries_are_bounded(monkeypatch, recover
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
-        monkeypatch.setattr(
-            "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
-            lambda **kwargs: AsyncOpenAI(http_client=transport, **kwargs),
-        )
-        call = server._binary_call(
-            judge,
-            "Task",
-            {
-                "check_description": "Check",
-                "score_1_criteria": "Pass",
-                "score_0_criteria": "Fail",
-            },
-            [{"type": "text", "text": "Artifact"}],
-        )
-        if recover:
-            parsed, _ = await call
-            assert parsed == {"passed": False, "reasoning": "Verdict"}
-        else:
-            with pytest.raises(APIStatusError):
-                await call
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
+        lambda **kwargs: _BinaryJudgeHttpClient(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    call = server._binary_call(
+        judge,
+        "private-prompt-text",
+        {
+            "check_id": "test-check",
+            "check_description": "Check",
+            "score_1_criteria": "Pass",
+            "score_0_criteria": "Fail",
+        },
+        [{"type": "text", "text": "private-artifact-text"}],
+    )
+    if recover:
+        parsed, _ = await call
+        assert parsed == {"passed": False, "reasoning": "Verdict"}
+    else:
+        with pytest.raises(APITimeoutError if transport_timeout else APIStatusError):
+            await call
     assert len(requests) == 3
     assert requests[0] == requests[1] == requests[2]
+    records = [record.getMessage() for record in caplog.records if record.name.endswith(".binary_transport")]
+    assert len(records) == 3
+    for attempt, record in enumerate(records, 1):
+        assert f"check_id=test-check model=model format_attempt=1 transport_attempt={attempt}" in record
+        expected = (
+            "status=200 error=None"
+            if recover and attempt == 3
+            else ("status=None error=ReadTimeout" if transport_timeout else "status=408 error=None")
+        )
+        assert expected in record
+        assert float(record.split("duration_seconds=")[1]) >= 0
+    assert all(
+        value not in " ".join(records)
+        for value in (
+            "private-error-body",
+            "private-prompt-text",
+            "private-artifact-text",
+            "dummy",
+            "Authorization",
+            "upstream.invalid",
+        )
+    )
 
 
 @pytest.mark.parametrize("empty_answers", [0, 2, 3])
@@ -242,16 +269,15 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
-        monkeypatch.setattr(
-            "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
-            lambda **kwargs: AsyncOpenAI(http_client=transport, **kwargs),
-        )
-        reward, results, invalid = await server._verify_binary(
-            AABriefcaseLiteVerifyRequest.model_construct(task_id="task", deliverables_dir=str(tmp_path)),
-            "Task",
-            [judge],
-        )
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
+        lambda **kwargs: _BinaryJudgeHttpClient(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    reward, results, invalid = await server._verify_binary(
+        AABriefcaseLiteVerifyRequest.model_construct(task_id="task", deliverables_dir=str(tmp_path)),
+        "Task",
+        [judge],
+    )
 
     assert reward == 0.5
     assert results[0]["passed"] is True
@@ -262,3 +288,8 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
     assert all(request == requests[1] for request in requests[1:])
     assert caplog.text.count("completion_tokens=32768") == empty_answers
     assert "Submitted artifact" not in caplog.text
+    records = [record.getMessage() for record in caplog.records if record.name.endswith(".binary_transport")]
+    assert len(records) == len(requests)
+    assert all("transport_attempt=1 status=200" in record for record in records)
+    for attempt, record in enumerate(records[1:], 1):
+        assert f"format_attempt={attempt} " in record

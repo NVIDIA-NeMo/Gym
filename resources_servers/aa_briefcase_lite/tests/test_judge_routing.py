@@ -8,12 +8,13 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from openai import AsyncOpenAI, OpenAI
+from openai import OpenAI
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
+    _BinaryJudgeHttpClient,
 )
 from resources_servers.gdpval.comparison import send_judge_request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
@@ -27,7 +28,7 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
         (
             "claude-opus-4.8",
             "aws/anthropic/bedrock-claude-opus-4-8",
-            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}, "max_tokens": 32768},
+            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}, "max_tokens": 49152},
             {},
         ),
         (
@@ -128,21 +129,23 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
         else:
             resource._aa_binary_system = "Judge the submitted artifact."
             resource._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.setup_webserver())) as http_client:
-                monkeypatch.setattr(
-                    "resources_servers.aa_briefcase_lite.app.AsyncOpenAI",
-                    lambda **kwargs: AsyncOpenAI(http_client=http_client, **kwargs),
-                )
-                parsed, _ = await resource._binary_call(
-                    judge,
-                    "Produce the requested artifact.",
-                    {
-                        "check_description": "Check it.",
-                        "score_1_criteria": "Correct.",
-                        "score_0_criteria": "Incorrect.",
-                    },
-                    [{"type": "text", "text": "Submitted artifact"}],
-                )
+            monkeypatch.setattr(
+                "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
+                lambda **kwargs: _BinaryJudgeHttpClient(
+                    transport=httpx.ASGITransport(app=server.setup_webserver()), **kwargs
+                ),
+            )
+            parsed, _ = await resource._binary_call(
+                judge,
+                "Produce the requested artifact.",
+                {
+                    "check_id": "test-routing",
+                    "check_description": "Check it.",
+                    "score_1_criteria": "Correct.",
+                    "score_0_criteria": "Incorrect.",
+                },
+                [{"type": "text", "text": "Submitted artifact"}],
+            )
             assert parsed == {"passed": True, "reasoning": "test verdict"}
     server._client.create_chat_completion.assert_awaited_once()
     forwarded = server._client.create_chat_completion.await_args.kwargs
