@@ -1686,3 +1686,27 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+def test_tool_message_carries_an_image_part() -> None:
+    """A harness shows the model an image by returning it from a tool.
+
+    The OpenAI type allows text parts only, so a text-only annotation rejects the whole
+    conversation the first time a vision tool returns a picture.
+    """
+    body = {
+        "model": "policy_model",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc",
+                "content": [
+                    {"type": "text", "text": "Image loaded into your context"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+                ],
+            }
+        ],
+    }
+    message = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body).messages[0]
+    assert [part["type"] for part in message["content"]] == ["text", "image_url"]
+    assert message["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
