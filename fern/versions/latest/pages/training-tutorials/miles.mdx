@@ -1,0 +1,100 @@
+---
+title: "Training with Miles"
+description: "Train on NeMo Gym environments using the Miles RL framework."
+position: 4
+---
+
+[Miles](https://github.com/radixark/miles) is an open-source RL framework for large-scale LLM
+post-training. It pairs [SGLang](https://github.com/sgl-project/sglang) for high-throughput
+rollout with [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) for scalable training, and
+ships support for GRPO, GSPO, PPO, REINFORCE++, SFT, and on-policy distillation.
+
+Miles integrates NeMo Gym as an agentic environment: per sample, Miles POSTs each task to a
+NeMo Gym agent server's `/run` endpoint with `policy_base_url` set to the session's
+OpenAI-compatible URL. NeMo Gym runs its agent harness against that URL and grades the episode;
+the reward enters training through a custom reward hook. Because Miles uses
+[Token-In-Token-Out (TITO)](https://miles.radixark.com/docs/user-guide/agentic-rollout), token
+IDs, logprobs, and loss masks are captured losslessly across every turn.
+
+## Prerequisites
+
+- **Miles**: clone from [github.com/radixark/miles](https://github.com/radixark/miles) and follow its [installation guide](https://miles.radixark.com/docs/getting-started/installation)
+- **NeMo Gym**: `main` branch (`fcca3a8` or newer) — `pip install nemo-gym` or `pip install -e .` from the repo root
+- **Docker**: required on the NeMo Gym host to run per-task SWE-bench containers
+
+## Getting Started
+
+The maintained recipe is **SWE-bench GRPO with mini-swe-agent**, located at
+[`examples/experimental/nemo-gym`](https://github.com/radixark/miles/tree/main/examples/experimental/nemo-gym)
+in the Miles repository. Follow the [recipe README](https://github.com/radixark/miles/blob/main/examples/experimental/nemo-gym/README.md)
+for the full walkthrough. The high-level steps are:
+
+### 1. Start the NeMo Gym agent server
+
+Clone NeMo Gym `main` on any docker-capable host and create the required `env.yaml`:
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync --extra dev
+
+echo "policy_base_url: http://localhost:9/v1
+policy_api_key: dummy
+policy_model_name: model
+default_host: 0.0.0.0" > env.yaml
+```
+
+Then start the server, composing the agent config, the Docker sandbox provider config, and a
+model server config:
+
+```bash
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+    --model-type vllm_model \
+    '++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.port=12000' \
+    '++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.concurrency=16'
+```
+
+The server is ready when the startup table lists `mini_swe_agent_2` on port 12000.
+
+<Note>
+Do not install the agent's `requirements.txt` into the NeMo Gym venv. `gym env start` builds a
+per-server venv from it automatically; installing it manually can cause dependency conflicts.
+</Note>
+
+### 2. Prepare training data
+
+On the trainer, download SWE-bench Verified and convert it to Miles prompt format:
+
+```bash
+cd miles/examples/experimental/nemo-gym
+python download_and_process_data.py \
+    --input princeton-nlp/SWE-bench_Verified \
+    --split test \
+    --subset verified \
+    --output /root/swe_verified.jsonl
+```
+
+### 3. Launch training
+
+Point `NEMO_GYM_URL` at the running agent server and launch the recipe:
+
+```bash
+export NEMO_GYM_URL="http://<nemo-gym-host>:12000"
+python examples/experimental/nemo-gym/run.py
+```
+
+The recipe defaults to Qwen3-4B-Instruct-2507 on 4 GPUs at smoke scale (3 GRPO steps). Pass
+`--skip-prepare` on subsequent runs to skip the checkpoint conversion step.
+
+The recipe has been validated end-to-end: offline contract tests, a golden scan, an API-policy
+scan, and a 4-GPU GRPO training smoke with episodes running in real SWE-bench containers.
+
+---
+
+For additional details, see the [Miles NeMo Gym integration guide](https://miles.radixark.com/docs/user-guide/nemo-gym) and the [recipe README](https://github.com/radixark/miles/blob/main/examples/experimental/nemo-gym/README.md).
