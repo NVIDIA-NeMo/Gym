@@ -1,0 +1,25 @@
+# swemer_v1's CI "example" data-validation config -- separate from swemer_v1.yaml so starting
+# the base/golden-patch servers for golden-patch validation never needs to pull in an
+# agent+model config (mirrors the *_opencode.yaml split, same reasoning).
+config_paths:
+  - resources_servers/swemer_v1/configs/swemer_v1.yaml
+
+# CI's "example" data-validation gate (gym env test +should_validate_data=true): grades the
+# dataset's own golden patch for 5 rows via a plain simple_agent (not opencode_sandboxed_agent --
+# this only needs a real verify() round-trip to exercise data/example.jsonl's shape, not an agent
+# that can actually solve the task). See resources_servers/swebench_pro/configs/swebench_pro.yaml
+# for the same pattern.
+swemer_v1_example_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swemer_v1_golden_patch_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/swemer_v1/data/example.jsonl
