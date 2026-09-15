@@ -50,8 +50,10 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
 
     config = yaml.safe_load(Path("benchmarks/terminal_bench_4/resources.yaml").read_text())
-    kwargs = config["terminal_bench_4"]["resources_servers"]["terminal_bench_4"]["environment"]["kwargs"]
-    provider = opensandbox_provider.OpenSandboxProvider(create=kwargs["sandbox_provider"]["opensandbox"]["create"])
+    environment = config["terminal_bench_4"]["resources_servers"]["terminal_bench_4"]["environment"]
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create=environment["sandbox_provider"]["opensandbox"]["create"]
+    )
     errors = {
         "client": opensandbox_provider.OpenSandboxCreateTimeoutError("create timeout"),
         "server": SandboxApiException("POD_READY_TIMEOUT: BATCHSANDBOX_PENDING", status_code=504),

@@ -1,4 +1,7 @@
-# TB4 agent/resources migration
+# TB4 agent/resources migration (historical reference)
+
+This document records the earlier Harbor-backed split. See [native lifecycle notes](native-lifecycle.md)
+for the current implementation and validation.
 
 ## Status and review baseline
 

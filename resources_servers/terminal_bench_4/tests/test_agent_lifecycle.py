@@ -11,7 +11,6 @@ from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.sandbox import agent as lifecycle
 from nemo_gym.sandbox.handoff import AgentTermination
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.terminal_bench_4.runtime import ExternalAgent, ExternalEpisode
 
 
 @pytest.mark.parametrize("reason", ["completed", "timeout", "nonzero_exit", "infrastructure_error", "cancelled"])
@@ -75,19 +74,6 @@ async def test_borrowed_agent_always_verifies_and_releases(monkeypatch, reason):
     assert verify["json"]["termination"]["reason"] == reason
     assert verify["json"]["session_id"] == "test"
     sandbox.release.assert_awaited_once()
-
-
-async def test_resources_timeout_stops_process_group_before_grading(tmp_path):
-    episode = ExternalEpisode()
-    agent = ExternalAgent(logs_dir=tmp_path)
-    agent.episode = episode
-    agent.session_id = "trial"
-    env = SimpleNamespace(quiesce_agent=AsyncMock())
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(agent.run("instruction", env, None), timeout=0.01)
-    assert episode.termination.reason == "timeout"
-    assert episode.phase == "verifying"
-    env.quiesce_agent.assert_awaited_once_with("trial")
 
 
 @pytest.mark.parametrize("failure", ["alias", "connect", "setup", "cancel"])
