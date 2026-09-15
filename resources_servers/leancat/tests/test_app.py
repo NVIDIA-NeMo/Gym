@@ -79,7 +79,6 @@ UPSTREAM_PROMPT_CONFIG_FPATH = REPO_ROOT / UPSTREAM_PROMPT_CONFIG_PATH
 # gitignored, so a test reading them would skip on every CI checkout and report green.
 
 
-
 @pytest.fixture
 def config() -> LeanCatResourcesServerConfig:
     return LeanCatResourcesServerConfig(
