@@ -55,3 +55,17 @@ gym eval run --no-serve "+config_paths=[$configs]" +agent_name=aa_briefcase_lite
 
 The policy adapter is unused in judge-only mode. Dataset collation generates
 `example_metrics.json`; it contains dataset statistics, not evaluation scores.
+
+### Judge recovery and usage
+
+Binary and pairwise judge requests use two SDK transport retries (three attempts
+in total), separately from invalid-answer retries. Pairwise calls disable the
+shared helper's outer transport retries to avoid multiplying attempts. An
+exhausted transport failure leaves verification unscored.
+
+The resource-server log records usage for every returned judge response,
+including answers that later fail parsing. `Judge usage` entries contain the
+model, judging mode, input/output/total tokens, optional reasoning and cached
+input tokens, and finish reason. Missing provider usage is logged as `None`, not
+zero. These entries contain no prompts, answer text, or credentials. Transport
+failures without a response have no token-usage measurement.

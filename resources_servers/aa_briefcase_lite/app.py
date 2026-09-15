@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient, OpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
@@ -62,6 +62,69 @@ _BINARY_TRANSPORT_LOGGER = logging.getLogger(__name__ + ".binary_transport")
 _BINARY_TRANSPORT_LOGGER.setLevel(logging.INFO)
 
 
+_JUDGE_USAGE_LOGGER = logging.getLogger(__name__ + ".judge_usage")
+_JUDGE_USAGE_LOGGER.setLevel(logging.INFO)
+_PAIRWISE_TRANSPORT_LOGGER = logging.getLogger(__name__ + ".pairwise_transport")
+_PAIRWISE_TRANSPORT_LOGGER.setLevel(logging.INFO)
+
+
+def _log_judge_usage(response: httpx.Response, *, mode: str, model: str) -> None:
+    """Retain usage for each returned attempt, without logging submitted content."""
+    if not response.is_success:
+        return
+    try:
+        body = response.json()
+    except ValueError:
+        return
+    usage = body.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    choices = body.get("choices") or []
+    _JUDGE_USAGE_LOGGER.info(
+        "Judge usage: mode=%s model=%s prompt_tokens=%s completion_tokens=%s "
+        "total_tokens=%s reasoning_tokens=%s cached_tokens=%s finish_reason=%s",
+        mode,
+        model,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+        details.get("reasoning_tokens"),
+        prompt_details.get("cached_tokens"),
+        choices[0].get("finish_reason") if choices else None,
+    )
+
+
+class _PairwiseJudgeHttpClient(DefaultHttpxClient):
+    """Capture usage before the shared pairwise helper reduces responses to text."""
+
+    def __init__(self, *, model: str, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.model = model
+
+    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        started = time.monotonic()
+        status = None
+        error_type = None
+        try:
+            response = super().send(request, **kwargs)
+            status = response.status_code
+            response.read()
+            _log_judge_usage(response, mode="pairwise", model=self.model)
+            return response
+        except Exception as error:
+            error_type = type(error).__name__
+            raise
+        finally:
+            _PAIRWISE_TRANSPORT_LOGGER.info(
+                "Pairwise judge transport: model=%s retry_count=%s status=%s error=%s duration_seconds=%.3f",
+                self.model,
+                request.headers.get("x-stainless-retry-count"),
+                status,
+                error_type,
+                time.monotonic() - started,
+            )
+
+
 class _BinaryJudgeHttpClient(DefaultAsyncHttpxClient):
     """Observe each SDK transport attempt without changing its retry policy."""
 
@@ -80,6 +143,8 @@ class _BinaryJudgeHttpClient(DefaultAsyncHttpxClient):
         try:
             response = await super().send(request, **kwargs)
             status = response.status_code
+            await response.aread()
+            _log_judge_usage(response, mode="binary", model=self.model)
             return response
         except Exception as error:
             error_type = type(error).__name__
@@ -107,6 +172,7 @@ class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     pairwise_reference_ids: List[str] = ["gpt-5-5"]
     pairwise_num_trials: int = Field(default=2, ge=1)
     binary_formatting_retries: int = Field(default=2, ge=0, le=3)
+    binary_max_tokens_by_judge: Dict[str, int] = Field(default_factory=dict)
 
 
 class AABriefcaseLiteVerifyRequest(BaseVerifyRequest):
@@ -329,6 +395,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     },
                     judge.create_overrides,
                 )
+                # Binary budgets are independent of the larger pairwise comparison budget.
+                if judge.name in self.config.binary_max_tokens_by_judge:
+                    kwargs["max_tokens"] = self.config.binary_max_tokens_by_judge[judge.name]
                 response = await client.chat.completions.create(**kwargs)
                 raw = (response.choices[0].message.content or "").strip()
                 parsed = _parse_binary_judgement(raw)
@@ -410,17 +479,18 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
 
     @staticmethod
     def _pairwise_judges(resolved: list[ResolvedJudge]) -> list[Judge]:
-        clients: dict[tuple[str, str], OpenAI] = {}
+        clients: dict[tuple[str, str, str], OpenAI] = {}
         output: list[Judge] = []
         for item in resolved:
-            key = (item.base_url, item.api_key)
+            key = (item.base_url, item.api_key, item.model)
             clients.setdefault(
                 key,
                 OpenAI(
                     base_url=item.base_url,
                     api_key=item.api_key,
                     timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-                    max_retries=0,
+                    max_retries=2,
+                    http_client=_PairwiseJudgeHttpClient(model=item.model),
                 ),
             )
             output.append(
@@ -498,6 +568,8 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     submission_b=ref_sections[judges[0].name],
                     sections_by_judge=sections_by_judge,
                     num_trials=self.config.pairwise_num_trials,
+                    # The SDK owns transport retries, matching the binary caller.
+                    request_attempts=1,
                     invalid_response_retries=2,
                     return_raw_responses=self.config.persist_raw_judge_responses,
                     rng=rng,
