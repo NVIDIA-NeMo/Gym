@@ -165,7 +165,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -201,19 +201,11 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
 
-# Seed the runtime uv cache with the full dependency set (including the dev
-# extra and the project itself) so that CI scripts can run offline: setup_dev.sh
-# resolves `uv sync --extra dev --offline` from this cache in a fresh venv.
-# The runtime cache is separate from the root-owned build cache (/opt/uv/cache)
-# that backs the symlinked project environment.
+# Keep runtime uv and XDG caches separate from the root-owned build cache that
+# backs the symlinked project environment.
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
-RUN uv venv /opt/nemo-gym/cache/seed-venv && \
-    UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
-        uv sync --locked --extra vllm --extra telemetry --extra dev && \
-    rm -rf /opt/nemo-gym/cache/seed-venv && \
-    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg

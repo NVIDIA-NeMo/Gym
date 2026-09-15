@@ -32,8 +32,4 @@ jobs:
           submodules: 'recursive'
 
       - name: Check lint
-        # setup_dev.sh activates the dev venv (pre-commit) in the current shell, so it
-        # must run in the SAME step as lint.sh for the PATH change to be visible.
-        run: |
-          source ./scripts/ci/setup_dev.sh
-          ./scripts/ci/lint.sh
+        run: ./scripts/ci/lint.sh
