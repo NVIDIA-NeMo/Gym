@@ -190,6 +190,43 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
 
 
+def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
+    cicd_workflow = CICD_MAIN_WORKFLOW.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    assert (
+        "concurrency:\n"
+        "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
+    )
+    assert "concurrency:" not in unit_workflow
+
+
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
+
+
+def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
+    # The full test suite measures coverage against the repo-wide gate
+    # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
+    # nemo-lens (requires_lens), which only the telemetry extra installs. If the
+    # full-test-suite install omits that extra, those tests skip, the telemetry
+    # modules count as uncovered, and the gate fails below its threshold.
+    workflow = FULL_TEST_WORKFLOW.read_text()
+
+    assert "uv sync" in workflow, "full test suite must install dependencies with uv sync"
+    sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
+    assert any("--extra telemetry" in line for line in sync_lines), (
+        "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
+    )
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
@@ -224,7 +261,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "if: false" not in workflow
     assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "matrix:" in workflow
     assert "script: ${{ matrix.script }}" in workflow
     assert "test-type: ${{ matrix.test_type }}" in workflow
@@ -241,7 +283,12 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "name: Build Gym container" in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
     assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
     assert "build-contexts: nemo-gym=." in workflow
