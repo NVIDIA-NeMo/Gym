@@ -1,0 +1,10 @@
+# NVIDIA Inference API Gemini contract used by the maintained WebVoyager recipe.
+# Credentials remain operator-provided and are never stored in this repository.
+webvoyager_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:webvoyager_judge_base_url,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.select:webvoyager_judge_api_key,unset}
+      openai_model: ${oc.select:webvoyager_judge_model_name,gcp/google/gemini-3-flash-preview}
+      openai_default_headers: {}
