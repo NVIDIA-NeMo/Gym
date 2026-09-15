@@ -1956,3 +1956,12 @@ def test_scheme_in_domain_reaches_sdk_and_pty_protocol(fake_opensandbox_sdk: Non
     assert kwargs["protocol"] == "https"
     # The PTY WebSocket URL is built from the provider's own protocol, not the SDK's base URL.
     assert provider._connection.protocol == "https"
+
+
+@pytest.mark.parametrize("size", ["true", "8Gi", "67108864"])
+async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, size):
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
+    await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
+    assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
