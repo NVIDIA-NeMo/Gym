@@ -55,6 +55,7 @@ from nemo_gym.token_id_capture import (
     NG_COMMIT_COORDS_FIELD,
     current_capture_context,
     mark_external_staging_committed,
+    mark_external_staging_failed,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
@@ -1106,6 +1107,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.model_call_id,
                     WORKER_MISSING_COMMIT_COORDS_REASON,
                 )
+                mark_external_staging_failed(
+                    rollout_id=context.rollout_id,
+                    model_call_id=context.model_call_id,
+                )
                 return
             coords = CommitCoords.model_validate(coords_payload)
             if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
@@ -1118,6 +1123,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.rollout_id,
                     context.model_call_id,
                     WORKER_CAPTURE_FAILED_REASON,
+                )
+                mark_external_staging_failed(
+                    rollout_id=context.rollout_id,
+                    model_call_id=context.model_call_id,
                 )
                 return
             if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
@@ -1168,6 +1177,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                 rollout_id=context.rollout_id,
                 record=record,
                 staging_chain=tuple(child_staging_chain),
+                parent_manifest=(
+                    tuple(context.parent_resolution.match.parent_manifest)
+                    if context.source_capture_key is not None
+                    and context.parent_resolution is not None
+                    and context.parent_resolution.match is not None
+                    else ()
+                ),
                 request_items=list(context.request_items or []),
                 response_items=response_items,
             )
@@ -1190,6 +1206,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.rollout_id,
                     context.model_call_id,
                     INVALID_COMMIT_COORDS_REASON,
+                )
+                mark_external_staging_failed(
+                    rollout_id=context.rollout_id,
+                    model_call_id=context.model_call_id,
                 )
             except Exception:
                 LOG.exception(
