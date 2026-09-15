@@ -39,6 +39,30 @@ class FakeSandbox:
         self.stopped += 1
 
 
+def test_opensandbox_pool_skips_local_docker_vm_resolution() -> None:
+    assert (
+        osworld_sandbox._resolve_pool_vm_path(
+            {"opensandbox": {"connection": {}}},
+            None,
+        )
+        == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
+    )
+
+
+def test_explicit_vm_path_is_preserved_for_opensandbox() -> None:
+    assert (
+        osworld_sandbox._resolve_pool_vm_path(
+            {"opensandbox": {"connection": {}}},
+            "caller-supplied-path",
+        )
+        == "caller-supplied-path"
+    )
+
+
+def test_docker_sandbox_does_not_receive_pool_sentinel() -> None:
+    assert osworld_sandbox._resolve_pool_vm_path({"docker": {}}, None) is None
+
+
 def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "smoke-run")
     vm_path = tmp_path / "Ubuntu.qcow2"
@@ -47,6 +71,7 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         {"docker": {}},
         {
             "image": "docker://osworld@sha256:abc",
+            "metadata": {osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"},
             "ports": None,
             "resources": {"cpu": 4, "memory_mib": 16384},
             "provider_options": {"run_args": ["--security-opt", "label=disable"]},
@@ -73,6 +98,11 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         spec.provider_options["run_args"],
         "--label",
         "nemo-gym.run-id=smoke-run",
+    )
+    assert osworld_sandbox._has_option(
+        spec.provider_options["run_args"],
+        "--label",
+        f"{osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY}=execution-test-001",
     )
 
 
@@ -117,6 +147,56 @@ def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
 
 
+def test_build_spec_skips_local_vm_and_kvm_checks_on_remote_docker_host(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "ssh://remote-docker")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    spec = provider._build_spec(
+        "/srv/osworld-assets/Ubuntu.qcow2",
+        headless=True,
+        os_type="Ubuntu",
+    )
+
+    assert "/srv/osworld-assets/Ubuntu.qcow2:/System.qcow2:ro" in spec.provider_options["volumes"]
+    assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+
+
+def test_build_spec_honors_explicit_remote_daemon_behind_unix_proxy(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "unix:///run/osworld-docker.sock")
+    monkeypatch.setenv("OSWORLD_DOCKER_REMOTE", "true")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    spec = provider._build_spec(
+        "/srv/osworld-assets/Ubuntu.qcow2",
+        headless=True,
+        os_type="Ubuntu",
+    )
+
+    assert "/srv/osworld-assets/Ubuntu.qcow2:/System.qcow2:ro" in spec.provider_options["volumes"]
+    assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+
+
+def test_build_spec_rejects_invalid_remote_daemon_override(monkeypatch) -> None:
+    monkeypatch.setenv("OSWORLD_DOCKER_REMOTE", "remote")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    with pytest.raises(ValueError, match="OSWORLD_DOCKER_REMOTE"):
+        provider._build_spec(
+            "/srv/osworld-assets/Ubuntu.qcow2",
+            headless=True,
+            os_type="Ubuntu",
+        )
+
+
 def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "opensandbox-run")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
@@ -131,6 +211,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
         {
             "ttl_s": 1800,
             "image": "busybox:1.36",
+            "metadata": {osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"},
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
@@ -156,6 +237,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
     }
     assert spec.metadata["osworld-provider"] == "gym-opensandbox-sandbox"
     assert spec.metadata["run-id"] == "opensandbox-run"
+    assert spec.metadata[osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY] == ("execution-test-001")
     assert spec.entrypoint is None
     assert spec.env == {}
     assert spec.resources.cpu is None
@@ -189,11 +271,189 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
 
 
 def test_provider_rejects_non_docker_config() -> None:
-    with pytest.raises(ValueError, match="Docker or OpenSandbox provider"):
+    with pytest.raises(ValueError, match="Docker, OpenSandbox or E2B provider"):
         osworld_sandbox.GymSandboxDesktopProvider(
             {"apptainer": {}},
             {"image": "osworld:fixed"},
         )
+
+
+def test_build_spec_uses_template_and_slim_vnc_port_for_agentenv(monkeypatch) -> None:
+    """AgentENV boots a template snapshot: no qcow2, no entrypoint, noVNC on 6901."""
+    monkeypatch.setenv("OSWORLD_RUN_ID", "agentenv-run")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {"connection": {"api_url": "http://agentenv.example"}}},
+        {
+            "image": "osworld-slim",
+            "ttl_s": 7200,
+            # Docker-profile leftovers that do not apply to a prebuilt template.
+            "entrypoint": ["/usr/bin/tini", "-s", "/run/entry.sh"],
+            "env": {"KVM": "Y", "RAM_SIZE": "4G"},
+            "resources": {"cpu": 4, "memory_mib": 16384},
+        },
+    )
+
+    # No local qcow2 exists; AgentENV restores a snapshot instead of booting one.
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+
+    assert spec.image == "osworld-slim"
+    assert spec.ttl_s == 7200
+    # 6901, not the Docker image's 8006.
+    assert spec.ports == (5000, 9222, 6901, 8080)
+    assert osworld_sandbox.OSWORLD_DOCKER_VNC_PORT not in spec.ports
+    assert spec.metadata["osworld-provider"] == "gym-e2b-sandbox"
+    assert spec.metadata["run-id"] == "agentenv-run"
+    # E2B rejects entrypoint outright and the template fixes the machine shape.
+    assert spec.entrypoint is None
+    assert spec.env == {}
+    assert spec.resources.cpu is None
+
+
+def test_agentenv_vnc_guest_port_is_overridable() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"image": "osworld-slim"},
+        vnc_guest_port=5901,
+    )
+    assert provider._service_ports == (5000, 9222, 5901, 8080)
+
+
+def test_vnc_guest_port_must_not_collide_with_another_service() -> None:
+    with pytest.raises(ValueError, match="collides with another OSWorld service port"):
+        osworld_sandbox.GymSandboxDesktopProvider(
+            {"e2b": {}},
+            {"image": "osworld-slim"},
+            vnc_guest_port=5000,
+        )
+
+
+def test_agentenv_drops_provider_options_e2b_does_not_accept() -> None:
+    """OmegaConf merges, so the base config's OpenSandbox options survive.
+
+    Writing `provider_options: {}` into the generated env.yaml does not clear
+    `skip_health_check` and `extensions.poolRef`; they arrive anyway and E2B
+    rejects every option it does not know, failing all 361 rollouts.
+    """
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {
+            "image": "osworld-slim",
+            "provider_options": {
+                "skip_health_check": True,
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
+        },
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {}
+
+
+def test_agentenv_keeps_an_explicit_template_option() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"provider_options": {"template": "tpl-123", "skip_health_check": True}},
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {"template": "tpl-123"}
+
+
+def test_agentenv_gets_a_sentinel_vm_path_not_an_empty_one() -> None:
+    """An empty path sends DesktopEnv to DockerVMManager, which downloads.
+
+    The template already holds the guest, so resolving a local qcow2 is pure
+    waste -- ~11 GB per task, 361 times over. The sentinel exists only to stop
+    DesktopEnv reaching for the manager.
+    """
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "") == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, None) == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
+    # An explicit path still wins, and the other backends are unchanged.
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "/tmp/x.qcow2") == "/tmp/x.qcow2"
+    assert osworld_sandbox._resolve_pool_vm_path({"opensandbox": {}}, "") == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
+    assert osworld_sandbox._resolve_pool_vm_path({"docker": {}}, "") == ""
+
+
+def test_generated_env_yaml_never_gives_agentenv_an_empty_vm_path(tmp_path) -> None:
+    from benchmarks.osworld import prepare
+
+    env_path = tmp_path / "env.yaml"
+    prepare.write_env(
+        env_path=env_path,
+        config_paths=prepare.PROFILE_CONFIGS["nano_omni"] + (prepare.AGENTENV_CONFIG,),
+        input_jsonl=tmp_path / "in.jsonl",
+        output_jsonl=tmp_path / "out.jsonl",
+        policy_base_url="http://127.0.0.1:8000/v1",
+        policy_api_key="EMPTY",  # pragma: allowlist secret
+        policy_model_name="m",
+        setup_cache_dir=tmp_path,
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_agentenv",
+        max_steps=200,
+        force=True,
+    )
+    text = env_path.read_text()
+    assert f'vm_path: "{osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH}"' in text
+    assert 'vm_path: ""' not in text
+
+
+def test_vnc_guest_port_reaches_every_hop() -> None:
+    """The port is configured in yaml and consumed five modules away.
+
+    It travelled prepare.py -> app.py -> sandbox_desktop_env.py -> the adapter
+    but not into run_osworld_task, so every rollout died with
+    `unexpected keyword argument 'sandbox_vnc_guest_port'` -- after the servers
+    were up, which reads as a backend fault rather than a plumbing gap.
+
+    Checked statically so the assertion holds without OSWorld's runtime, which
+    only the managed agent environment installs.
+    """
+    import ast
+    from pathlib import Path
+
+    agent_dir = Path(__file__).resolve().parents[1]
+    hops = {
+        "client.py": "run_osworld_task",
+        "sandbox_desktop_env.py": "__init__",
+    }
+    for filename, function in hops.items():
+        tree = ast.parse((agent_dir / filename).read_text())
+        found = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function
+        ]
+        assert found, f"{filename} has no {function}"
+        assert any("sandbox_vnc_guest_port" in [a.arg for a in n.args.args + n.args.kwonlyargs] for n in found), (
+            f"{filename}:{function} does not accept sandbox_vnc_guest_port"
+        )
+
+    # And the value has to be forwarded, not merely accepted.
+    assert '"sandbox_vnc_guest_port": sandbox_vnc_guest_port' in (agent_dir / "client.py").read_text()
+
+
+def test_docker_keeps_its_own_vnc_port() -> None:
+    """The AgentENV default must not move the Docker image's noVNC port."""
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+    assert provider._service_ports == (5000, 9222, 8006, 8080)
+
+
+def test_build_spec_rejects_agentenv_spec_without_a_template() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"e2b": {}}, {})
+    with pytest.raises(ValueError, match="prebuilt template"):
+        provider._build_spec("", headless=True, os_type="Ubuntu")
+
+
+def test_build_spec_accepts_agentenv_template_via_provider_options() -> None:
+    """A tagged name or template ID is ambiguous in `image`, so it goes here."""
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"provider_options": {"template": "01a04eb6-dcca-73c3-ac7b-f1988d17be60"}},
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {"template": "01a04eb6-dcca-73c3-ac7b-f1988d17be60"}
+    assert spec.image is None
 
 
 def test_build_spec_rejects_non_string_docker_options(tmp_path) -> None:

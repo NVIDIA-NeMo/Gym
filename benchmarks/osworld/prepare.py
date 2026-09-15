@@ -29,6 +29,7 @@ from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
 from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
+from responses_api_agents.osworld_agent.sandbox_provider import AGENTENV_TEMPLATE_VM_PATH
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -47,6 +48,7 @@ POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
+AGENTENV_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agentenv.yaml"
 OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
 OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
@@ -65,6 +67,9 @@ BACKEND_CONFIGS: dict[str, Path | None] = {
     # env.yaml activates it for this backend.
     "gym_sandbox": None,
     "gym_opensandbox": OPENSANDBOX_CONFIG,
+    # AgentENV speaks the E2B control-plane API, so it is driven through Gym's
+    # e2b provider rather than one of its own.
+    "gym_agentenv": AGENTENV_CONFIG,
     "osworld_provider": OSWORLD_PROVIDER_CONFIG,
 }
 
@@ -320,6 +325,7 @@ def write_env(
     head_port: int = 11000,
     server_venv_root: Path | None = None,
     max_steps: int | None = None,
+    task_timeout: int | None = None,
     force: bool = False,
 ) -> bool:
     """Create a private env.yaml; return False when an existing file is kept."""
@@ -348,9 +354,12 @@ def write_env(
         raise ValueError("gym_sandbox execution requires an explicit vm_path")
     if execution_backend == "gym_opensandbox" and resolved_vm_path is not None:
         raise ValueError("gym_opensandbox uses the server-side Pool image and does not accept vm_path")
+    if execution_backend == "gym_agentenv" and resolved_vm_path is not None:
+        raise ValueError("gym_agentenv restores a prebuilt AgentENV template and does not accept vm_path")
     sandbox_provider_name = {
         "gym_sandbox": "osworld_sandbox",
         "gym_opensandbox": "osworld_opensandbox",
+        "gym_agentenv": "osworld_agentenv",
     }.get(execution_backend)
     emitted_vm_path: str | Path | None = (
         OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
@@ -409,7 +418,39 @@ def write_env(
                     "            poolRef: ${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}",
                 ]
             ),
+            *(
+                []
+                if execution_backend != "gym_agentenv"
+                else [
+                    # No qcow2 to mount and no inner QEMU: the sandbox restores a
+                    # template snapshot. osworld-slim serves noVNC on 6901, not
+                    # the Docker image's 8006.
+                    "      sandbox_require_kvm: false",
+                    "      sandbox_ready_timeout_s: 900.0",
+                    "      sandbox_vnc_guest_port: 6901",
+                    # A sentinel, not a file: DesktopEnv would otherwise ask
+                    # DockerVMManager to resolve an empty path, which downloads
+                    # OSWorld's ~11 GB qcow2 once per task. The template already
+                    # holds the guest.
+                    f"      vm_path: {_yaml_string(AGENTENV_TEMPLATE_VM_PATH)}",
+                    "      sandbox_spec:",
+                    "        # An AgentENV template name or ID, not an OCI reference.",
+                    "        image: ${oc.env:AGENTENV_TEMPLATE}",
+                    "        ttl_s: 14400",
+                    "        ready_timeout_s: 900",
+                    "        entrypoint: null",
+                    "        env: {}",
+                    "        resources: {}",
+                    "        provider_options: {}",
+                ]
+            ),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
+            # The end-to-end attempt deadline covers VM create/setup, every agent
+            # step and the evaluation, so it has to grow with max_steps and with any
+            # per-step cost the backend adds -- a remote sandbox pays a round trip
+            # per screenshot. Tripping it masks the rollout and retries it, so a
+            # merely tight value burns environments rather than failing honestly.
+            *([] if task_timeout is None else [f"      task_timeout: {task_timeout}"]),
             "",
         ]
     )
@@ -457,6 +498,12 @@ def main() -> None:
         choices=tuple(PROFILE_CONFIGS),
         default="default",
         help="Model/agent composition written to env.yaml",
+    )
+    parser.add_argument(
+        "--task-timeout",
+        type=int,
+        default=None,
+        help="End-to-end per-attempt deadline in seconds; defaults to the agent config value",
     )
     parser.add_argument(
         "--execution-backend",
@@ -602,6 +649,7 @@ def main() -> None:
             head_port=args.head_port,
             server_venv_root=args.server_venv_root,
             max_steps=args.max_steps,
+            task_timeout=args.task_timeout,
             force=args.force_env,
         )
 

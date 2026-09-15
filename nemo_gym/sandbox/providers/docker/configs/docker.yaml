@@ -25,6 +25,8 @@ sandbox:
       keepalive_shell: /bin/sh
       keepalive_cmd: "while :; do sleep 2147483647; done"
       start_timeout_s: 600
+      transport_retries: 2
+      transport_retry_delay_s: 1.0
       use_init: true
       apply_resource_limits: true
       publish_host: 127.0.0.1
