@@ -561,7 +561,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if len(rewards) != len(sorted_indices):
                 raise RuntimeError(f"GenRM returned {len(rewards)} rewards for {len(sorted_indices)} cohort members")
             reward_by_index = dict(zip(sorted_indices, rewards))
-            await self._publish_verify_cohort(cohort, reward_by_index)
+            await self._publish_verify_cohort(prompt_key, cohort, reward_by_index)
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_verify_cohort(
@@ -579,9 +579,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 expected_phase="evaluating",
             )
 
-    @staticmethod
-    async def _publish_verify_cohort(cohort: _CohortState, reward_by_index: Dict[int, float]) -> None:
-        """Atomically publish a complete reward map and compact the tombstone."""
+    async def _publish_verify_cohort(
+        self,
+        prompt_key: str,
+        cohort: _CohortState,
+        reward_by_index: Dict[int, float],
+    ) -> None:
+        """Publish rewards, retiring legacy cohorts and compacting explicit-ID tombstones."""
         async with cohort.lock:
             if cohort.phase != "evaluating":
                 raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
@@ -597,6 +601,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 # full response payloads for every completed training cohort.
                 member.body = None
                 member.waiters.clear()
+            if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
+                self._verify_cohorts.pop(prompt_key, None)
 
     @staticmethod
     async def _fail_verify_cohort(

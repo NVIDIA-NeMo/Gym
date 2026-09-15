@@ -511,7 +511,7 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in results] == [1.0, 1.0, 2.0]
         run_compare.assert_awaited_once()
-        assert len(next(iter(server._verify_cohorts.values())).members) == 2
+        assert server._verify_cohorts == {}
 
     async def test_conflicting_duplicate_is_rejected_without_growing_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -545,10 +545,11 @@ class TestGenRMCompareResourcesServer:
             await server.verify(request(0, "replacement"))
 
         assert error.value.status_code == 409
+        assert len(next(iter(server._verify_cohorts.values())).members) == 1
         second = asyncio.create_task(server.verify(request(1, "sibling")))
         results = await asyncio.gather(original, second)
         assert [result.reward for result in results] == [1.0, 2.0]
-        assert len(next(iter(server._verify_cohorts.values())).members) == 2
+        assert server._verify_cohorts == {}
 
     async def test_verify_supports_legacy_prompt_only_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -563,6 +564,36 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in results] == [1.0, 2.0]
         run_compare.assert_awaited_once()
+        assert server._verify_cohorts == {}
+
+    async def test_completed_legacy_cohort_does_not_block_sequential_rerun(
+        self,
+        config,
+        monkeypatch: MonkeyPatch,
+    ):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        run_compare = AsyncMock(
+            side_effect=[
+                ([1.0, 2.0], None, None, None),
+                ([3.0, 4.0], None, None, None),
+            ]
+        )
+        monkeypatch.setattr(server, "_run_compare", run_compare)
+
+        first = await asyncio.gather(
+            server.verify(self._verify_request(0, response_id="first-0")),
+            server.verify(self._verify_request(1, response_id="first-1")),
+        )
+        second = await asyncio.gather(
+            server.verify(self._verify_request(0, response_id="second-0")),
+            server.verify(self._verify_request(1, response_id="second-1")),
+        )
+
+        assert [result.reward for result in first] == [1.0, 2.0]
+        assert [result.reward for result in second] == [3.0, 4.0]
+        assert run_compare.await_count == 2
+        assert server._verify_cohorts == {}
 
     async def test_verify_rejects_invalid_logical_coordinates(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -607,12 +638,28 @@ class TestGenRMCompareResourcesServer:
         monkeypatch.setattr(server, "_run_compare", run_compare)
 
         first_attempt = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=21, response_id="old-0")),
-            server.verify(self._verify_request(1, task_index=21, response_id="old-1")),
+            server.verify(self._verify_request(0, task_index=None, group_id="completed-group", response_id="old-0")),
+            server.verify(self._verify_request(1, task_index=None, group_id="completed-group", response_id="old-1")),
         )
         replacement_attempt = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=21, group_attempt=1, response_id="replacement-0")),
-            server.verify(self._verify_request(1, task_index=21, group_attempt=1, response_id="replacement-1")),
+            server.verify(
+                self._verify_request(
+                    0,
+                    task_index=None,
+                    group_id="completed-group",
+                    group_attempt=1,
+                    response_id="replacement-0",
+                )
+            ),
+            server.verify(
+                self._verify_request(
+                    1,
+                    task_index=None,
+                    group_id="completed-group",
+                    group_attempt=1,
+                    response_id="replacement-1",
+                )
+            ),
         )
 
         assert [result.reward for result in first_attempt] == [1.0, 2.0]
@@ -933,8 +980,8 @@ class TestGenRMCompareResourcesServer:
 
         for task_index in (30, 31, 32):
             await asyncio.gather(
-                server.verify(self._verify_request(0, task_index=task_index)),
-                server.verify(self._verify_request(1, task_index=task_index)),
+                server.verify(self._verify_request(0, task_index=None, group_id=f"group-{task_index}")),
+                server.verify(self._verify_request(1, task_index=None, group_id=f"group-{task_index}")),
             )
 
         server._prune_terminal_cohorts()
