@@ -39,8 +39,10 @@ health checks, declared main/sidecar artifact transfer, separate verification,
 and cleanup. A separate 360-second setup handshake prevents installer time from
 consuming the task's agent budget.
 
-Sessions are isolated by the caller identity and rollout ID. Duplicate seed and
-verify calls share one attempt and its first submitted response. Completed
+Sessions are isolated by the caller identity and rollout ID. Resources HTTP
+retries retain a worker execution nonce; another worker cannot start the same
+active rollout. Duplicate seed and verify calls share one attempt and its first
+submitted response. Completed
 verification can be replayed from disk. Restarted active episodes reject resume;
 provider TTL remains the fallback after abrupt owner death. Use one resources
 worker per artifact directory. Phase and termination records are persisted before
@@ -105,6 +107,14 @@ optional default `/logs/artifacts` copy fails and remains recorded in the artifa
 manifest; the task-declared CUDA file is present. A read-only hardware probe in a
 running GPU verifier reports **NVIDIA H100 80GB HBM3**.
 
+mini-SWE also finishes at **3 healthy / 3 attempted** in
+`split-resources-gpu-miniswe`. Its math-eval run executes a long PyTorch action,
+submits normally, preserves trajectory/usage, and completes official grading.
+The final OpenCode sweep is **61/66 healthy**, up from the 57/66 baseline;
+mini-SWE is **16/19 healthy** across its representative CPU sample and all Compose
+and GPU tasks. The remaining five blockers are the two non-root CPU images and
+the three Compose deployment requirements described above.
+
 The deterministic parity run in `split-resources-parity/comparison.json` submits
 the same six official ks-solver-cpp solution files through the new resources path
 and Harbor's Oracle path. Both receive **1.0**, with task pin
@@ -121,6 +131,11 @@ healthy model matrix.
 Early runs before the `setsid --wait` and export-download fixes are retained for
 diagnosis and excluded from accepted results. Valid official grades from runs
 without captured model output do not count as healthy model smoke checks.
+
+The final provider audit at **2026-09-15 00:07 UTC** finds **zero remaining CPU
+and GPU sandboxes** for all smoke/canary labels and the explicit parity sessions.
+The audit is saved as `../artifacts/split-resources-audit.json`. A credential scan
+of the captured artifacts also found no provider/model credential values.
 
 ### Automated checks
 
