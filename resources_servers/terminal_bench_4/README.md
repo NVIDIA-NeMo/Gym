@@ -47,6 +47,25 @@ infrastructure failure adds `infrastructure_error` and `_ng_failure_class`, even
 when a reward was retrieved. Artifacts include the compatible trial directory and
 worker trajectory references. Failure diagnostics are written before teardown.
 
+## Non-root Compose services
+
+When loading agent Compose YAML, two task-specific adaptations use the
+[Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
+
+- `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
+  injection with `x-sandbox.hosts: []`, and resolves `BROWSER_URL` to the workspace
+  sandbox IP via `x-sandbox.resolve_environment`.
+- `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
+  Its single-broker controller uses localhost; clients retain the `kafka` alias
+  needed by the advertised listener.
+
+Both services use their image's default user, omitting the redundant explicit
+`user` value copied from image metadata. This avoids the provider attempting
+`su` from a non-root process to the same user.
+
+These changes apply only to the generated runtime YAML. Pinned task packages,
+other services, and verifier environments retain their original configuration.
+
 ## Shared EFS logs
 
 The benchmark profile sets `environment.efs_logs_host_path` to
