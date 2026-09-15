@@ -842,7 +842,17 @@ class ResponsesConverter(BaseModel):
             prompt=responses_create_params.prompt,
             reasoning=responses_create_params.reasoning,
             service_tier=responses_create_params.service_tier,
-            text=responses_create_params.text,
+            # Do NOT echo the request's text-format param into the response.
+            # The Responses API response `text` field is an OUTPUT-side format
+            # description, but NeMoGymResponse validates it against the strict
+            # union ({'type':'text'} | {'type':'json_object'} |
+            # {'type':'json_schema', schema=<required>}). Echoing a request
+            # that used litellm's strict text_format produces a json_schema
+            # shape whose schema member is stripped in serialization, which
+            # matches no union variant — every summarize retried 10x against
+            # the identical broken envelope and the policy budget paid for it
+            # (navidrome: 16/16 calls, budget kill; ansible#1: 22/23).
+            text=None,
             top_logprobs=responses_create_params.top_logprobs,
             truncation=responses_create_params.truncation,
             metadata=responses_create_params.metadata,

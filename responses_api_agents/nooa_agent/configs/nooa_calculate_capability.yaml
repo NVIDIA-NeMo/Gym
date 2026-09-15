@@ -1,0 +1,34 @@
+nooa_calculate_capability:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: nooa_capability
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: responses_api_agents.nooa_agent.capabilities.calculate:CalculateSingleAgent
+        entrypoint: calculate
+        init_kwargs: {}
+        allowed_tools: []
+        tool_namespace: calculator
+        arguments:
+          a:
+            source: a
+            transform: identity
+          b:
+            source: b
+            transform: identity
+          calculation:
+            source: calculation
+            transform: identity
+      max_steps: 4
+      concurrency: 8
+      run_timeout_secs: 600
+      datasets:
+        - name: calculate
+          type: validation
+          jsonl_fpath: responses_api_agents/nooa_agent/data/capability_calculate.jsonl
+          license: Apache 2.0

@@ -150,6 +150,8 @@ class SWEBenchProInstanceRequest(BaseModel):
     selected_test_files_to_run: str | list[str]
     dockerhub_tag: str
     image_digest: str = ""
+    # When set, use this image (e.g. a native-arch rebuild) instead of digest/tag.
+    image_override: str = ""
     run_script: str
     parser_script: str
     base_dockerfile: str = ""
@@ -165,7 +167,9 @@ class SWEBenchProSeedSessionRequest(SWEBenchProInstanceRequest, BaseSeedSessionR
 class SWEBenchProSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
     # The agent attaches to this session; without it, it builds its own sandbox instead.
-    pty_session_id: str
+    # None when the sandbox provider has no PTY support (e.g. docker); exec-only agents
+    # (like nooa_agent) do not use it.
+    pty_session_id: str | None = None
 
 
 class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
@@ -236,6 +240,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 print("Failed to stop abandoned SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
 
     def _image(self, body: SWEBenchProInstanceRequest) -> str:
+        if body.image_override:
+            return body.image_override
         if body.image_digest:
             return f"{self.config.image_repository}@{body.image_digest}"
         return f"{self.config.image_repository}:{body.dockerhub_tag}"
@@ -301,7 +307,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 print("Failed to stop previous SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
 
         sandbox = await self._create_sandbox(body)
-        pty_session = await sandbox.pty.create()
+        try:
+            pty_session = await sandbox.pty.create()
+        except NotImplementedError:
+            # Providers without PTY support (e.g. docker) still serve exec-based agents;
+            # opencode-style agents require a PTY-capable provider.
+            print(f"PTY sessions unavailable for this sandbox provider; serving exec-only.", file=sys.stderr)
+            pty_session = None
         if self.config.apply_anti_cheating:
             anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"
             await sandbox.upload(anti_cheat_setup_fpath, "/app/anti_cheat_setup.sh")
@@ -319,7 +331,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox[session_id] = sandbox
         self._session_id_to_pty[session_id] = pty_session
         return SWEBenchProSeedSessionResponse(
-            sandbox_handle=sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
+            sandbox_handle=sandbox._handle.sandbox_id,
+            pty_session_id=pty_session.session_id if pty_session is not None else None,
         )
 
     async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:

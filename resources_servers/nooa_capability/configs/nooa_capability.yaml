@@ -1,0 +1,8 @@
+nooa_capability:
+  resources_servers:
+    nooa_capability:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Exact-value verification for NOOA framework capability evaluations
+      value: Preserve NOOA eval_pipeline ExactMatchScorer semantics in Gym
