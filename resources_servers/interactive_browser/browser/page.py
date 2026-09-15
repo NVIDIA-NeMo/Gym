@@ -33,6 +33,11 @@ LOGGER = logging.getLogger(__name__)
 
 _INTERACTIVE = "a, button, input:not([type=hidden]), textarea, select, [role=button], [role=link]"
 
+# Body text budget per observation. Large enough for the prose a task answer
+# hides in, small enough that a content-heavy page does not dominate the context
+# the policy spends on deciding what to click.
+_MAX_TEXT_CHARS = 2000
+
 
 class PlaywrightPageDriver:
     """Drives one Playwright `Page` and owns the element ids handed to the policy.
@@ -78,12 +83,30 @@ class PlaywrightPageDriver:
             eid = len(elements)
             self._handles[eid] = node
             elements.append(Element(id=eid, role=role, name=name))
+        body_text, text_truncated = await self._visible_text()
         return Observation(
             url=self._page.url,
             title=await self._page.title(),
             elements=elements,
+            text=body_text,
             truncated=truncated,
+            text_truncated=text_truncated,
         )
+
+    async def _visible_text(self, max_chars: int = _MAX_TEXT_CHARS) -> tuple[str, bool]:
+        """Body text, collapsed to one line and capped.
+
+        One `inner_text` call rather than per-node reads: the element loop above
+        already pays several CDP round-trips per candidate, and this has to stay
+        cheap enough to run on every observation.
+        """
+        raw = await self.text()
+        if not raw:
+            return "", False
+        collapsed = " ".join(raw.split())
+        if len(collapsed) <= max_chars:
+            return collapsed, False
+        return collapsed[:max_chars], True
 
     async def click(self, element_id: int) -> None:
         node = self._require(element_id)

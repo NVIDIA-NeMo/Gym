@@ -49,6 +49,11 @@ LOGGER = logging.getLogger(__name__)
 # How long teardown may spend on one blocking SDK call before we give up on it.
 _RELEASE_TIMEOUT_S = 30.0
 
+# Grace on top of the SDK's own `poll_timeout_sec` before we stop waiting. The SDK
+# bound is the real one; this only covers the gap between it giving up and the
+# thread returning, so a create that overruns both is treated as abandoned.
+_CREATE_SLACK_S = 15.0
+
 
 class LexmountSessionProvider:
     """One isolated Lexmount cloud browser per rollout.
@@ -97,21 +102,57 @@ class LexmountSessionProvider:
         # server — stalling every other rollout's tool calls, not just this one.
         # The thread cannot be cancelled, so `poll_timeout_sec` above (not the
         # wait_for) is the real bound; wait_for only caps what *we* wait for.
-        session = await asyncio.wait_for(
-            asyncio.to_thread(client.sessions.create, **create_kwargs),
-            timeout=self._create_timeout_s + 15,
-        )
-        cdp_url = getattr(session, "connect_url", None)
-        session_id = getattr(session, "session_id", None) or getattr(session, "id", None)
-        if not cdp_url:
-            # Hand the session back through the normal path rather than
-            # dropping it: it exists cloud-side even though it is unusable here.
-            handle = BrowserSessionHandle(cdp_url="", session_id=session_id, provider_name=self.name, raw=session)
+        creating = asyncio.ensure_future(asyncio.to_thread(client.sessions.create, **create_kwargs))
+        try:
+            # Shielded so the timeout below stops *us* waiting without cancelling
+            # the thread, which cannot be cancelled anyway.
+            session = await asyncio.wait_for(
+                asyncio.shield(creating), timeout=self._create_timeout_s + _CREATE_SLACK_S
+            )
+        except asyncio.TimeoutError:
+            # The create may still land after we gave up, and its handle would
+            # arrive nowhere: this rollout has already failed and nothing else
+            # knows the session exists. Release whatever it produces instead of
+            # leaving it to occupy a quota slot until the service expires it.
+            creating.add_done_callback(self._release_abandoned_create)
+            raise BrowserSessionError(
+                f"Lexmount session creation did not complete within {self._create_timeout_s + _CREATE_SLACK_S:.0f}s"
+            ) from None
+
+        handle = self._handle_from(session)
+        if not handle.cdp_url:
+            # Hand it back through the normal path rather than dropping it: it
+            # exists cloud-side even though it is unusable here.
             await self.release(handle)
             raise BrowserSessionError("Lexmount session did not return a connect_url")
+        return handle
+
+    def _release_abandoned_create(self, task: "asyncio.Future[Any]") -> None:
+        """Release a session that finished creating after its rollout gave up."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Creation failed on its own; there is nothing holding a quota slot.
+            LOGGER.debug("Abandoned Lexmount create failed on its own: %r", exc)
+            return
+        handle = self._handle_from(task.result())
+        LOGGER.warning(
+            "Lexmount session %s finished creating after its rollout timed out; releasing it",
+            handle.session_id or "?",
+        )
+        asyncio.ensure_future(self.release(handle))
+
+    def _handle_from(self, session: Any) -> BrowserSessionHandle:
+        """Wrap whatever the SDK returned, usable or not.
+
+        A session with no ``connect_url`` still exists cloud-side and still holds
+        a quota slot, so it gets a handle too -- the caller decides whether to
+        drive it or release it.
+        """
         return BrowserSessionHandle(
-            cdp_url=cdp_url,
-            session_id=session_id,
+            cdp_url=getattr(session, "connect_url", None) or "",
+            session_id=getattr(session, "session_id", None) or getattr(session, "id", None),
             provider_name=self.name,
             raw=session,
         )
