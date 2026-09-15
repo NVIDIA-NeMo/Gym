@@ -1,0 +1,35 @@
+# vllm_model with thinking turned on per request.
+#
+# For hybrid-reasoning models (DeepSeek-V3.2, Qwen3, ...) whose chat template gates the
+# reasoning trace on a `thinking` kwarg. Serve with a matching `--reasoning-parser` so the
+# trace comes back as `reasoning_content` rather than inline `<think>` text.
+#
+# Why per request and not `vllm serve --default-chat-template-kwargs '{"thinking": true}'`:
+# on vLLM 0.19.1 that server-side default does not reach the template. Probed against a live
+# DeepSeek-V3.2 server, a request with no `chat_template_kwargs` came back with an empty
+# reasoning field while the same request carrying `{"thinking": true}` returned a trace, so
+# the flag parses and is then ignored. `vllm_model` sends the kwarg on every request, which
+# is the path that was observed to work.
+#
+# Requires the non-native Responses path (`is_responses_native: false`, the default): it
+# converts /v1/responses to /v1/chat/completions, and only the chat endpoint honors
+# `chat_template_kwargs`. The same probe found /v1/responses ignoring the kwarg outright.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        thinking: true
+      sampling_overrides: null
+      extra_body: null
+      default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0

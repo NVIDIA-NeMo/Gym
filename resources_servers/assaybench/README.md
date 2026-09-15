@@ -149,6 +149,38 @@ The table's "Precision@100" is the package's `normalized_precision@100`: the pap
 (a GPT-OSS-120B rerun gave 0.184 normalized vs 0.119 raw against the printed 0.1757). "dFDR@100" is the raw
 `fdr@100`. Read `pass@1[avg-of-5]/<metric>` and divide by 100.
 
+### Measured with this server
+
+Three models, three cohorts, the paper's protocol (5 runs per screen, per-screen mean then mean over screens).
+AnDCG@100 / Precision@100 / dFDR@100; the paper's number in parentheses. `±` is the standard deviation of AnDCG
+across the 5 runs.
+
+| Model | test (334) | val (218) | LaTest (19) |
+|---|---|---|---|
+| GPT-OSS-120B, vLLM, 1 node | 0.1204 ±0.003 / 0.1839 / 0.0222 (0.1211 / 0.1757 / 0.0223) | 0.1243 / 0.2257 / 0.0167 (0.1268 / 0.2292 / 0.0164) | 0.0851 / 0.2111 / 0 (0.0826 / 0.2497 / NA) |
+| DeepSeek-V3.2 thinking, vLLM, 2 nodes | 0.1127 ±0.002 / 0.1648 / 0.0226 (0.1076 / 0.1617 / 0.0211) | DEEPSEEK_VAL | DEEPSEEK_LATEST |
+| Gemini 3 Flash, hosted API | 0.1524 ±0.002 / 0.1996 / 0.0185 (0.1446 / 0.2009 / 0.0180) | 0.1599 / 0.2788 / 0.0140 (0.1556 / 0.2495 / 0.0260) | 0.1078 / 0.2272 / 0 (0.0908 / 0.2351 / NA) |
+
+The two open-weight rows land within 0.005 AnDCG of the published values on the test split, with the paper's
+ordering (Gemini 3 Flash > GPT-OSS-120B > DeepSeek-V3.2) preserved. Gemini sits about 5% above its published
+test number; the paper's proprietary rows are single-run, the `gemini-3-flash-preview` alias has moved since
+the paper, and the thinking budget behind a hosted endpoint is not the paper's to specify -- none of which
+this server controls. Over all 8,565 rollouts: 0 truncations, 0 empty replies, 4 DSPy parse failures, and a
+hallucination rate below 1% for every model. DeepSeek's published rows come from the upstream leaderboard
+(`docs/assets/data/leaderboard.json`), which prints every model the paper ran; Table 3 has only a subset.
+
+Two operational notes from those runs:
+
+- **Hosted endpoints with a per-request timeout** (the run above went through a LiteLLM gateway with a 360 s
+  cap) will occasionally lose a long thinking reply. By default one failed `/run` ends the whole collection;
+  pass `+route_failures_to_sidecar=true` so it is recorded in `rollouts_failures.jsonl` instead, and rerun
+  with `--resume` to fill the gap. The gateway also does not return Gemini's reasoning as `reasoning_content`,
+  so `mean/output_tokens` there includes it (about 12k per reply) while the scored text is the final answer.
+- **Serve hybrid thinkers with their thinking flag and a reasoning parser** (DeepSeek-V3.2:
+  `--tokenizer-mode deepseek_v32 --reasoning-parser deepseek_v3` plus `chat_template_kwargs: {thinking: true}`
+  per request). Without the parser the trace lands in the reply; without the flag the model answers shorter and
+  worse and every number still looks plausible. Check that the rollouts carry reasoning items before comparing.
+
 ### Sampling settings (upstream `benchmarking/configs/collect-*.yaml`)
 
 The paper does not print them; they are in the reference harness's configs. Pass them to `gym eval run`:

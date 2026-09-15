@@ -438,3 +438,39 @@ class TestPrompt:
     def test_a_reply_in_the_requested_format_round_trips(self) -> None:
         genes = _ranked_hits(ROWS_BY_NAME["example_2"])
         assert extract_predicted_genes(_dspy_reply(genes))[0] == genes
+
+
+class TestRawFallbackStrategies:
+    """The vendored whole-reply scan, strategy by strategy (upstream's Biomni path included)."""
+
+    GENES = ["TP53", "MYC", "KRAS", "EGFR", "BRCA1", "PTEN"]
+
+    def test_solution_block_json_answer_wins(self) -> None:
+        text = (
+            "tool output...\n\\begin{solution}\n" + json.dumps({"answer": ", ".join(self.GENES)}) + "\n\\end{solution}"
+        )
+        assert extract_genes_from_raw_response(text) == self.GENES
+
+    def test_truncated_solution_block_falls_back_to_regex_on_the_answer_field(self) -> None:
+        text = '\\begin{solution}\n{"answer": "' + ", ".join(self.GENES) + "\n\\end{solution}"
+        assert extract_genes_from_raw_response(text) == self.GENES
+
+    def test_short_solution_block_is_ignored_in_favour_of_a_gene_line(self) -> None:
+        text = '\\begin{solution}\n{"answer": "TP53, MYC"}\n\\end{solution}\n' + ", ".join(self.GENES)
+        assert extract_genes_from_raw_response(text) == self.GENES
+
+    def test_prose_without_separators_uses_the_token_sweep(self) -> None:
+        text = "I would look at TP53 then MYC then KRAS then EGFR then BRCA1 for this screen."
+        assert extract_genes_from_raw_response(text) == ["TP53", "MYC", "KRAS", "EGFR", "BRCA1"]
+
+    def test_too_few_tokens_everywhere_yields_nothing(self) -> None:
+        assert extract_genes_from_raw_response("Maybe TP53 or MYC, hard to say.") == []
+
+
+class TestAggregateEdgeCases:
+    def test_no_tasks_no_metrics(self) -> None:
+        config = AssayBenchResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="assaybench")
+        server = AssayBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server.compute_metrics([]) == {}
+        key = server.get_key_metrics({"mean/input_tokens": 700.0, "pass@1[avg-of-1]/adjusted_ndcg@100": 12.0})
+        assert key == {"mean/input_tokens": 700.0, "pass@1[avg-of-1]/adjusted_ndcg@100": 12.0}
