@@ -252,19 +252,6 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
             elif termination.reason == "infrastructure_error":
                 failure = termination.detail or "Agent infrastructure failure"
-            provenance = {
-                "dataset_ref": session.request.dataset_ref,
-                "task_ref": session.request.task_ref,
-                "task_name": session.request.task_name,
-            }
-            if result.get("runtime") == "gym-tb4-native":
-                provenance.update(
-                    runtime="gym-tb4-native",
-                    runtime_version=result["runtime_version"],
-                    reference_harbor_version="0.23.0",
-                )
-            else:
-                provenance["harbor_version"] = "0.23.0"
             session.verified_response = SandboxedVerifyResponse(
                 **session.verify_body.model_dump(exclude={"termination"}),
                 reward=float(rewards.get("reward", 0)),
@@ -276,7 +263,6 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 timings={
                     key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
                 },
-                provenance=provenance,
                 **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
             )
             session.persist()

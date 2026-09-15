@@ -15,6 +15,32 @@ from resources_servers.terminal_bench_4.environment import Environment, Environm
 from resources_servers.terminal_bench_4.task import TaskSettings
 
 
+def environment_config(**overrides):
+    return EnvironmentConfig.model_validate(
+        {
+            "cpu_enforcement_policy": "limit",
+            "memory_enforcement_policy": "limit",
+            "sandbox_provider": {"opensandbox": {"connection": {"domain": "example.invalid"}}},
+            "sandbox_metadata": {},
+            "sandbox_provider_options": {},
+            "sandbox_env": {},
+            "sandbox_env_by_task": {},
+            "sandbox_request_gpu_type": True,
+            "sandbox_split_endpoints": False,
+            "compose_image_configs": None,
+            "sandbox_ttl_s": 21600,
+            "sandbox_ready_timeout_s": 900,
+            "default_exec_timeout_s": 1800,
+            "exec_shell": "bash -c",
+            "image_rewrites": [],
+            "workdir": None,
+            "efs_logs_host_path": None,
+            "efs_logs_init_image": "python:3.13-slim",
+        }
+        | overrides
+    )
+
+
 def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
     raw = {
         "environment": {
@@ -36,8 +62,7 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
     (task.path / "tests").mkdir(exist_ok=True)
     (task.path / "environment/Dockerfile").write_text("FROM public")
     (task.path / "tests/Dockerfile").write_text("FROM public")
-    provider = {"opensandbox": {"connection": {"domain": "example.invalid"}}}
-    cfg = EnvironmentConfig(sandbox_provider=provider, **(config or {}))
+    cfg = environment_config(**(config or {}))
     if compose:
         (task.path / "environment/docker-compose.yaml").write_text(
             "services: {main: {image: public}, db: {image: db}}"
@@ -259,7 +284,7 @@ def test_offline_policy_and_unsupported_config(tmp_path, monkeypatch):
     assert env.build_spec().provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
     with pytest.raises(ValueError, match="Split endpoints"):
         Environment(
-            env.task, EnvironmentConfig(sandbox_provider={"local": {}}, sandbox_split_endpoints=True), "id", tmp_path
+            env.task, environment_config(sandbox_provider={"local": {}}, sandbox_split_endpoints=True), "id", tmp_path
         )
     with pytest.raises(ValueError, match="Missing environment"):
         make_environment(tmp_path, monkeypatch, config={"sandbox_split_endpoints": True})

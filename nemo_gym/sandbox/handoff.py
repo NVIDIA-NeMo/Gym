@@ -52,4 +52,3 @@ class SandboxedVerifyResponse(BaseVerifyResponse):
     infrastructure_error: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, Any] = Field(default_factory=dict)
-    provenance: dict[str, Any] = Field(default_factory=dict)
