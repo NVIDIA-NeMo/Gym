@@ -28,10 +28,9 @@ permissions:
 
 jobs:
   validate-codeowners-membership:
-    # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#571 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@3f52a5f3e40e001cba5f386b7f7e5d072a7181c1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@055534323643bfbb0406bbd4303e1bc51c182bee # v1.10.0
     with:
-      workflow_ref: 3f52a5f3e40e001cba5f386b7f7e5d072a7181c1  # pragma: allowlist secret
+      workflow_ref: 055534323643bfbb0406bbd4303e1bc51c182bee  # pragma: allowlist secret
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
