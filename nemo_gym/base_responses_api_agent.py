@@ -27,6 +27,12 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.episode import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+)
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -98,8 +104,26 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.post("/v1/agent_sessions")(self.seed_agent_session)
+        app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        """Create agent-owned session state."""
+        raise NotImplementedError("This agent does not implement episode sessions")
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Close agent-owned session state."""
+        raise NotImplementedError("This agent does not implement episode sessions")
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
