@@ -8,7 +8,7 @@ This is an environment that trains a policy model to abstain from answering when
 
 Correctness is verified by an LLM judge using the OMNISCIENCE_GRADER template instead of string matching. The judge grades the model's extracted answer against the gold target as one of CORRECT, INCORRECT, or NOT_ATTEMPTED.
 
-The default dataset is [NVIDIA Nemotron-RL-QA-Abstention-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-QA-Abstention-v1), with 3,150 training examples spanning HotPotQA, Go documentation, health, and law. Its public release contains one `train` split; no validation split is configured. The released JSONL already contains the questions, gold answers, agent routing, and boxed-answer/`[IDK]` prompt required by this environment, so no preprocessing is needed.
+The default dataset is [NVIDIA Nemotron-RL-QA-Abstention-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-QA-Abstention-v1), with 3,150 training examples spanning HotPotQA, Go documentation, health, and law. Its public release contains one `train` split; no validation split is configured. The released JSONL already contains the questions, gold answers, agent routing, and boxed-answer/`[IDK]` prompt required by this environment, so no preprocessing is needed. The bundled examples retain only `id`, `question`, `answer`, `agent_ref`, and `responses_create_params` to match the task schema.
 
 # Example usage
 
@@ -65,7 +65,7 @@ gym eval run --no-serve \
 
 Code: Apache 2.0
 Data:
-- Nemotron-RL-QA-Abstention-v1: Creative Commons Attribution 4.0 International, as declared by the dataset card. Released rows also retain their source license metadata (`CC BY-SA 4.0`).
+- Nemotron-RL-QA-Abstention-v1: Creative Commons Attribution 4.0 International, as declared by the dataset card. Downloaded rows retain their source license metadata (`CC BY-SA 4.0`) and provenance. Bundled examples retain the original task IDs for tracing them to the release.
 
 Dependencies:
 - nemo_gym: Apache 2.0

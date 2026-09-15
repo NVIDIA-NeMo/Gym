@@ -10,7 +10,7 @@ Correctness is verified by an LLM judge using the OMNISCIENCE_GRADER template in
 
 The default dataset is [NVIDIA Nemotron-RL-QA-Abstention-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-QA-Abstention-v1). Its public `train` split contains 3,150 examples: 450 HotPotQA questions and 900 each from Go documentation, health, and law. The release has no validation split.
 
-The published JSONL already includes the question, gold answer, `abstention_simple_agent` reference, and answer/abstention prompt in Gym format. No preprocessing is required. Five examples covering all four sources are included for smoke testing.
+The published JSONL already includes the question, gold answer, `abstention_simple_agent` reference, and answer/abstention prompt in Gym format. No preprocessing is required. Five examples covering all four sources are included for smoke testing, normalized to the environment's task schema by retaining `id`, `question`, `answer`, `agent_ref`, and `responses_create_params`.
 
 # Example usage
 
@@ -67,7 +67,7 @@ For already-running servers, use `gym eval run --no-serve` with `--input resourc
 
 Code: Apache 2.0
 Data:
-- Nemotron-RL-QA-Abstention-v1: Creative Commons Attribution 4.0 International, as declared by the dataset card. Published row-level license and provenance fields are preserved in the examples and downloaded data.
+- Nemotron-RL-QA-Abstention-v1: Creative Commons Attribution 4.0 International, as declared by the dataset card. Downloaded rows retain their source license metadata (`CC BY-SA 4.0`) and provenance. Bundled examples retain the original task IDs for tracing them to the release.
 
 Dependencies:
 - nemo_gym: Apache 2.0
