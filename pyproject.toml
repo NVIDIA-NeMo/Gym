@@ -72,7 +72,7 @@ dependencies = [
     # 3. The license of the dependencies.
     #
     # If you are adding or removing dependencies, please do your due diligence to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
-    # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
+    # The licenses of the below dependencies include: Apache 2.0, MIT, BSD 3-Clause, and PSF-2.0
     #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
     #
@@ -101,6 +101,13 @@ dependencies = [
     # Updated Tue Jun 16, 2026 with anthropic<=0.109.2
     # License: MIT https://github.com/anthropics/anthropic-sdk-python/blob/v0.109.2/LICENSE
     "anthropic<=0.109.2",
+
+    # Zstandard: streaming compressed JSONL with complete-frame/truncation checks.
+    # Python 3.14 provides compression.zstd; use its backport on Python 3.13.
+    # Updated Tue Sep 15, 2026 with backports.zstd==1.7.0.
+    # License: PSF-2.0 (Apache-2.0 compatible), bundled zstd BSD-3-Clause.
+    # https://github.com/Rogdham/backports.zstd/blob/v1.7.0/LICENSE.txt
+    "backports.zstd>=1.7.0; python_version < '3.14'",
 
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
