@@ -2,7 +2,6 @@
 
 GYM_MODEL_PARAMS=()
 
-# @bxyu-nvidia: Running into KV cache issues with dlfash enabled
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
