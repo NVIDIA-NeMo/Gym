@@ -217,12 +217,10 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
 
 # Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
 # path needs no network: lint.sh reuses the baked pre-commit executable, but a
-# bare `pre-commit run` still clones the remote hook repositories declared in
+# bare `pre-commit run` still clones the hook repositories declared in
 # .pre-commit-config.yaml and pip-installs the local hooks' dependencies on
-# first run. Every fetched coordinate is immutable and committed in the repo:
-# the hook repositories are pinned to full commit SHAs and pyyaml to the
-# uv.lock-locked version. Resolving every hook environment here, while the
-# build has network, keeps the runtime lint hermetic.
+# first run. Resolving every hook environment here, while the build has
+# network, keeps the runtime lint hermetic.
 ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
 RUN pre-commit install-hooks && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"
