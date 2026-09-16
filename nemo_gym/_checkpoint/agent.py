@@ -145,6 +145,16 @@ class AgentCompletionReceipt(AgentExecutionIdentity):
     execution_generation: int = Field(ge=1)
     result_identity: str = Field(min_length=1, max_length=512)
     result_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    manifest_capture_key: Optional[str] = Field(default=None, pattern=ROLLOUT_ID_PATTERN.pattern)
+    terminal_model_call_id: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_model_lineage_coordinate(self) -> "AgentCompletionReceipt":
+        if (self.manifest_capture_key is None) != (self.terminal_model_call_id is None):
+            raise ValueError(
+                "completion receipt model-lineage capture key and terminal call id must be supplied together"
+            )
+        return self
 
 
 class AgentAcknowledgeRequest(AgentCompletionReceipt):
@@ -209,6 +219,7 @@ class AgentBoundaryRecord(BaseModel):
     pending_model: Optional[PendingModelPayload] = None
     output_items: list[dict[str, Any]]
     usage: Optional[dict[str, Any]] = None
+    last_committed_model_capture_key: Optional[str] = Field(default=None, pattern=ROLLOUT_ID_PATTERN.pattern)
     last_committed_model_call_id: Optional[str] = None
     resource_state_revisions: dict[str, int] = Field(default_factory=dict)
     agent_state: dict[str, Any] = Field(default_factory=dict)
@@ -222,6 +233,12 @@ class AgentBoundaryRecord(BaseModel):
             raise ValueError("pending_model boundaries require a pending_model payload")
         if self.boundary_kind == AgentBoundaryKind.TURN_COMPLETE and self.pending_model is not None:
             raise ValueError("turn_complete boundaries cannot carry a pending_model payload")
+        if self.last_committed_model_call_id is not None and self.last_committed_model_capture_key is None:
+            # Boundaries written before lineage ownership was explicit always
+            # owned their last model call in the boundary's physical attempt.
+            self.last_committed_model_capture_key = capture_key_for(self.rollout_id, self.attempt_index)
+        if (self.last_committed_model_capture_key is None) != (self.last_committed_model_call_id is None):
+            raise ValueError("last committed model capture key and call id must be supplied together")
         return self
 
 
@@ -247,6 +264,8 @@ class AgentExecution:
         self.terminal_result: Any = None
         self.result_identity: Optional[str] = None
         self.result_digest: Optional[str] = None
+        self.manifest_capture_key: Optional[str] = None
+        self.terminal_model_call_id: Optional[str] = None
         self.started_at = time.time()
         self.external_wait_depth = 0
         self.resume_event = asyncio.Event()
@@ -297,7 +316,10 @@ class AgentCheckpointParticipant:
         # They cannot be bounded safely until the wire protocol supplies a
         # coordinated epoch/high-watermark after which old identities cannot recur.
         self._tombstones: set[tuple[str, int]] = set()
-        self._acknowledged: dict[tuple[str, int], tuple[int, str, str]] = {}
+        self._acknowledged: dict[
+            tuple[str, int],
+            tuple[int, str, str, Optional[str], Optional[str]],
+        ] = {}
         self._accepting = True
         self._changed = asyncio.Condition()
 
@@ -382,6 +404,8 @@ class AgentCheckpointParticipant:
             execution_generation=execution.generation,
             result_identity=execution.result_identity,
             result_digest=execution.result_digest,
+            manifest_capture_key=execution.manifest_capture_key,
+            terminal_model_call_id=execution.terminal_model_call_id,
         )
 
     async def finish(
@@ -408,6 +432,12 @@ class AgentCheckpointParticipant:
                 execution.state = AgentExecutionState.COMPLETED
                 execution.terminal_result = result
                 execution.result_identity, execution.result_digest = _result_receipt(result)
+                for boundary in (execution.boundary, execution.continuation):
+                    if boundary is None or boundary.last_committed_model_call_id is None:
+                        continue
+                    execution.manifest_capture_key = boundary.last_committed_model_capture_key
+                    execution.terminal_model_call_id = boundary.last_committed_model_call_id
+                    break
                 execution.continuation = None
                 execution.outer_task = None
             else:
@@ -615,6 +645,8 @@ class AgentCheckpointParticipant:
                 receipt.execution_generation,
                 receipt.result_identity,
                 receipt.result_digest,
+                receipt.manifest_capture_key,
+                receipt.terminal_model_call_id,
             )
             acknowledged = self._acknowledged.get(key)
             if acknowledged is not None:
@@ -636,6 +668,8 @@ class AgentCheckpointParticipant:
                 execution.generation,
                 execution.result_identity,
                 execution.result_digest,
+                execution.manifest_capture_key,
+                execution.terminal_model_call_id,
             )
             if actual != expected:
                 raise AgentCompletedExecutionAcknowledgementError(
@@ -652,6 +686,8 @@ class AgentCheckpointParticipant:
                 receipt.execution_generation,
                 receipt.result_identity,
                 receipt.result_digest,
+                receipt.manifest_capture_key,
+                receipt.terminal_model_call_id,
             )
             self._generations.pop(key, None)
         await self._notify()
@@ -793,6 +829,8 @@ class AgentCheckpointParticipant:
                         "execution_generation": execution.generation,
                         "result_identity": execution.result_identity,
                         "result_digest": execution.result_digest,
+                        "manifest_capture_key": execution.manifest_capture_key,
+                        "terminal_model_call_id": execution.terminal_model_call_id,
                     }
                 }
                 if execution.state == AgentExecutionState.COMPLETED
@@ -1074,7 +1112,7 @@ def _commit_agent_records(
             AgentContinuationRoot(
                 rollout_id=record.rollout_id,
                 attempt_index=record.attempt_index,
-                capture_key=capture_key_for(record.rollout_id, record.attempt_index),
+                capture_key=record.last_committed_model_capture_key,
                 last_committed_model_call_id=record.last_committed_model_call_id,
                 resource_state_revisions=dict(record.resource_state_revisions),
             )
@@ -1197,7 +1235,7 @@ def _validate_continuation_index(
         (
             record.rollout_id,
             record.attempt_index,
-            capture_key_for(record.rollout_id, record.attempt_index),
+            record.last_committed_model_capture_key,
             record.last_committed_model_call_id,
         ): record.resource_state_revisions
         for record in records

@@ -46,7 +46,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER, current_attempt_index, current_logical_rollout_id
+from nemo_gym.rollout_correlation import (
+    MODEL_CALL_ID_HEADER,
+    current_attempt_index,
+    current_logical_rollout_id,
+    current_rollout_id,
+)
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
@@ -259,10 +264,12 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         boundary_index = 0
         resource_revision = initial_resource_revision
         model_call_id: Optional[str] = None
+        model_capture_key: Optional[str] = None
         pending_cursor = 0
         resource_request_id: Optional[str] = None
         pending_response_usage: Optional[dict[str, Any]] = None
         if continuation is not None:
+            model_capture_key = continuation.last_committed_model_capture_key
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             total_reward = float(continuation.agent_state.get("total_reward", 0.0))
             usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
@@ -324,6 +331,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                     pending_model=pending_model,
                     output_items=[item.model_dump(mode="json") for item in new_outputs],
                     usage=usage.model_dump(mode="json") if usage is not None else None,
+                    last_committed_model_capture_key=model_capture_key,
                     last_committed_model_call_id=model_call_id,
                     resource_state_revisions={self.config.resources_server.name: resource_revision},
                     agent_state={
@@ -372,6 +380,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 last_model_response = model_response
                 new_outputs.extend(model_response.output)
                 model_call_id = model_call_id or model_response.id or f"turn-{turn_index}"
+                model_capture_key = current_rollout_id()
                 pending_cursor = 0
                 resource_request_id = uuid.uuid4().hex
                 boundary_index += 1
