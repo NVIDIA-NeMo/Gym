@@ -5,39 +5,6 @@ GYM_MODEL_PARAMS=(
     "++model_endpoint_readiness_timeout_seconds=1200"
 )
 
-export MOONCAKE_CONFIG_PATH=/etc/mooncake/mooncake_vllm_config.json
-
-uv pip install --system 'mooncake-transfer-engine>=0.3.10'
-
-if (( SLURM_PROCID == 0 )); then
-mkdir -p /etc/mooncake
-cat > $MOONCAKE_CONFIG_PATH <<EOF
-{
-  "mode": "embedded",
-  "metadata_server": "P2PHANDSHAKE",
-  "master_server_address": "$(hostname):50051",
-  "global_segment_size": "100GB",
-  "local_buffer_size": "4GB",
-  "protocol": "rdma",
-  "device_name": "",
-  "enable_offload": false
-}
-EOF
-
-    mooncake_master \
-        -rpc_port=50051 \
-        -rpc_thread_num=4 \
-        -default_kv_lease_ttl=30000 \
-        -eviction_high_watermark_ratio=0.95 \
-        -eviction_ratio=0.1 \
-        -logtostderr
-else
-    until [ -f $MOONCAKE_CONFIG_PATH ]
-    do
-        sleep 1
-    done
-fi
-
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
