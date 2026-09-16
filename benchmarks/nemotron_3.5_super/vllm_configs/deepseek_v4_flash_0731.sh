@@ -3,6 +3,7 @@
 # DS v4 Flash takes a super long time to start.
 GYM_MODEL_PARAMS=(
     "++model_endpoint_readiness_timeout_seconds=1200"
+    "++policy_model.responses_api_models.vllm_model.chat_template_kwargs.reasoning_effort=max"
 )
 
 VLLM_COMMON_ARGS=(
