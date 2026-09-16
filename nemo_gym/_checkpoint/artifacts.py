@@ -23,7 +23,7 @@ from typing import Any, Iterable, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
+from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
 
 
 CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
@@ -76,11 +76,21 @@ class AgentContinuationRoot(BaseModel):
 
     @model_validator(mode="after")
     def validate_capture_key(self) -> "AgentContinuationRoot":
-        expected = capture_key_for(self.rollout_id, self.attempt_index)
-        if self.capture_key != expected:
+        if self.capture_key == self.rollout_id:
+            source_attempt = 0
+        else:
+            prefix = f"{self.rollout_id}-a"
+            suffix = self.capture_key.removeprefix(prefix)
+            if not self.capture_key.startswith(prefix) or not suffix.isdigit():
+                raise ValueError(
+                    "continuation capture_key does not belong to its logical rollout: "
+                    f"rollout_id={self.rollout_id!r}, capture_key={self.capture_key!r}"
+                )
+            source_attempt = int(suffix)
+        if source_attempt > self.attempt_index:
             raise ValueError(
-                "continuation capture_key does not match rollout identity: "
-                f"expected={expected!r}, actual={self.capture_key!r}"
+                "continuation capture_key cannot name a future rollout attempt: "
+                f"source_attempt={source_attempt}, boundary_attempt={self.attempt_index}"
             )
         return self
 

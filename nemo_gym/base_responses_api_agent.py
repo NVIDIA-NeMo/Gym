@@ -58,7 +58,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import (
     RolloutContextMiddleware,
-    capture_key_for,
     checkpoint_parent_context,
     current_attempt_index,
     current_logical_rollout_id,
@@ -216,10 +215,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 continuation = self._checkpoint_participant.continuation(execution)
                 parent_context = (
                     checkpoint_parent_context(
-                        capture_key_for(continuation.rollout_id, continuation.attempt_index),
+                        continuation.last_committed_model_capture_key,
                         continuation.last_committed_model_call_id,
                     )
-                    if continuation is not None and continuation.last_committed_model_call_id is not None
+                    if (
+                        continuation is not None
+                        and continuation.last_committed_model_capture_key is not None
+                        and continuation.last_committed_model_call_id is not None
+                    )
                     else nullcontext()
                 )
                 try:

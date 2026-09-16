@@ -505,6 +505,15 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert result.status_code == 200, result.text
         assert result.json()["reward"] == 1.0
+        receipt_response = await restored_clients["agent.test"].get(
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/completion-receipt",
+            params={"rollout_id": ROLLOUT_ID, "attempt_index": 1},
+            headers=AUTH_HEADERS,
+        )
+        assert receipt_response.status_code == 200
+        completion_receipt = receipt_response.json()
+        assert completion_receipt["manifest_capture_key"] == f"{ROLLOUT_ID}-a1"
+        assert completion_receipt["terminal_model_call_id"] == restored_model_requests[0]["call_id"]
         restored_manifest = RolloutManifest.model_validate(
             await FileLineageStore(tmp_path / "restored-lineage").manifest(f"{ROLLOUT_ID}-a1")
         )

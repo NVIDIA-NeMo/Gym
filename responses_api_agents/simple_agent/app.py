@@ -148,10 +148,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         resource_revision = initial_resource_revision
         model_response: Optional[NeMoGymResponse] = None
         model_call_id: Optional[str] = None
+        model_capture_key: Optional[str] = None
         pending_cursor = 0
         resource_request_id: Optional[str] = None
         pending_response_usage: Optional[dict[str, Any]] = None
         if continuation is not None:
+            model_capture_key = continuation.last_committed_model_capture_key
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
             turn_index = continuation.turn_index
@@ -211,6 +213,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     output_items=[item.model_dump(mode="json") for item in new_outputs],
                     usage=usage.model_dump(mode="json") if usage is not None else None,
                     last_committed_model_call_id=model_call_id,
+                    last_committed_model_capture_key=model_capture_key,
                     resource_state_revisions={self.config.resources_server.name: resource_revision},
                     agent_state={
                         "model_server_cookies": _cookie_values(model_server_cookies),
@@ -302,6 +305,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 usage = accumulate_response_usage(usage, model_response.usage)
                 model_response.usage = None
                 model_call_id = model_call_id or model_response.id or f"turn-{turn_index}"
+                model_capture_key = current_rollout_id()
                 pending_cursor = 0
                 resource_request_id = uuid.uuid4().hex
                 boundary_index += 1

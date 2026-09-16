@@ -209,6 +209,43 @@ async def test_completed_attempt_replays_retained_terminal_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restored_completion_receipt_preserves_source_model_lineage() -> None:
+    participant = AgentCheckpointParticipant()
+    participant.install_restored([_boundary(attempt_index=0)])
+    await participant.resume()
+
+    execution = await participant.begin("rollout-a", 1, task=None)
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+
+    receipt = participant.completion_receipt("rollout-a", 1)
+    assert receipt.manifest_capture_key == "rollout-a"
+    assert receipt.terminal_model_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_new_model_boundary_replaces_restored_lineage_coordinate() -> None:
+    participant = AgentCheckpointParticipant()
+    participant.install_restored([_boundary(attempt_index=0)])
+    await participant.resume()
+
+    execution = await participant.begin("rollout-a", 1, task=None)
+    await participant.commit_boundary(
+        execution,
+        _boundary(attempt_index=1, boundary_index=2).model_copy(
+            update={
+                "last_committed_model_capture_key": "rollout-a-a1",
+                "last_committed_model_call_id": "call-2",
+            }
+        ),
+    )
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+
+    receipt = participant.completion_receipt("rollout-a", 1)
+    assert receipt.manifest_capture_key == "rollout-a-a1"
+    assert receipt.terminal_model_call_id == "call-2"
+
+
+@pytest.mark.asyncio
 async def test_retire_tombstones_attempt_without_execution() -> None:
     participant = AgentCheckpointParticipant()
 
@@ -765,7 +802,16 @@ async def test_durable_agent_commit_retry_returns_original_result(tmp_path) -> N
 def test_commit_uses_bounded_deterministic_agent_archives(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(agent_checkpoint, "_AGENT_ARCHIVE_MAX_MEMBERS", 2)
     records = [
-        _boundary().model_copy(update={"rollout_id": f"rollout-{index}", "attempt_index": index}) for index in range(5)
+        _boundary().model_copy(
+            update={
+                "rollout_id": f"rollout-{index}",
+                "attempt_index": index,
+                "last_committed_model_capture_key": (
+                    f"rollout-{index}" if index == 0 else f"rollout-{index}-a{index}"
+                ),
+            }
+        )
+        for index in range(5)
     ]
 
     summary = agent_checkpoint._commit_agent_records(records, tmp_path, checkpoint_id="checkpoint-1")
