@@ -514,13 +514,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             model_response = model_response.model_copy(
                 update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
             )
-        if self.checkpoint_execution(request) is not None:
+        execution = self.checkpoint_execution(request)
+        if execution is not None:
+            boundary = execution.boundary or execution.continuation
+            resource_revision = initial_resource_revision
+            if boundary is not None:
+                resource_revision = boundary.resource_state_revisions.get(
+                    self.config.resources_server.name,
+                    resource_revision,
+                )
             model_response = model_response.model_copy(
                 update={
                     _INTERNAL_RESOURCE_REVISIONS_KEY: {
-                        self.config.resources_server.name: self.checkpoint_execution(
-                            request
-                        ).boundary.resource_state_revisions[self.config.resources_server.name]
+                        self.config.resources_server.name: resource_revision
                     }
                 }
             )

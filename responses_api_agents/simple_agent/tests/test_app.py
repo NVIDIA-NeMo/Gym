@@ -52,6 +52,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    _INTERNAL_RESOURCE_REVISIONS_KEY,
     _cookie_values,
 )
 
@@ -1080,6 +1081,50 @@ class TestApp:
         )
 
         assert response.id == "call-2"
+        client.post.assert_not_awaited()
+
+    async def test_responses_uses_restored_revision_before_first_new_boundary(
+        self,
+    ) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        server.config.max_steps = 1
+        participant = server.checkpoint_participant()
+        continuation = AgentBoundaryRecord(
+            rollout_id="4-1",
+            attempt_index=0,
+            boundary_index=1,
+            turn_index=1,
+            output_items=[],
+            resource_state_revisions={"resources": 7},
+            agent_state={
+                "model_server_cookies": {"model": "saved"},
+                "resources_server_cookies": {"resources": "saved"},
+            },
+        )
+        execution = await participant.begin("4-1", 1, task=asyncio.current_task())
+        execution.continuation = continuation
+        token = participant.bind(execution)
+        request = MagicMock(
+            cookies={},
+            headers={RESOURCE_STATE_REVISION_HEADER: "3"},
+            path_params={"rollout_id": "4-1-a1"},
+        )
+        request.url.path = "/ng-rollout/4-1-a1/v1/responses"
+        try:
+            response = await server.responses(
+                request,
+                Response(),
+                NeMoGymResponseCreateParamsNonStreaming(
+                    input=[{"role": "user", "content": "hello"}]
+                ),
+            )
+        finally:
+            participant.unbind(token)
+
+        assert execution.boundary is None
+        assert response.model_extra[_INTERNAL_RESOURCE_REVISIONS_KEY] == {
+            "resources": 7
+        }
         client.post.assert_not_awaited()
 
     async def test_multiturn_boundaries_track_current_model_call_and_merge_cookies(
