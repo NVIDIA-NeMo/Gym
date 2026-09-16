@@ -129,4 +129,3 @@ async def test_missing_assistant_text_is_a_wrong_answer(empty_message: bool) -> 
     )
     assert result.reward == 0
     assert result.actual_result is None
-
