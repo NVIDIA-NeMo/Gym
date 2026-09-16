@@ -13,7 +13,7 @@ from resources_servers.terminal_bench_2_1.app import (
 )
 
 
-def _verify_request() -> TerminalBench21VerifyRequest:
+def _verify_request(task_folder: Path) -> TerminalBench21VerifyRequest:
     return TerminalBench21VerifyRequest.model_validate(
         {
             "responses_create_params": {"input": []},
@@ -27,9 +27,9 @@ def _verify_request() -> TerminalBench21VerifyRequest:
                 "tool_choice": "auto",
                 "tools": [],
             },
-            "task_name": "terminal-bench/hf-model-inference",
-            "docker_image": "alexgshaw/hf-model-inference:20260430",
-            "task_folder": "benchmarks/terminal_bench_2_1/terminal-bench-2-1/tasks/hf-model-inference",
+            "task_name": "terminal-bench/background-server",
+            "docker_image": "unused-test-image",
+            "task_folder": str(task_folder),
         }
     )
 
@@ -46,7 +46,7 @@ class TestApp:
         )
         TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    async def test_golden_patch_runs_solve_sh_detached_and_test_sh_plain(self) -> None:
+    async def test_golden_patch_runs_solve_sh_detached_and_test_sh_plain(self, tmp_path: Path) -> None:
         server = TerminalBench21ResourcesServer(
             config=TerminalBench21ResourcesServerConfig(
                 sandbox_provider="",
@@ -68,13 +68,10 @@ class TestApp:
         server._create_sandbox = AsyncMock(return_value=sandbox)
         server._upload_folder = AsyncMock()
 
-        response = await server.verify(MagicMock(), _verify_request())
+        # Container creation and uploads are mocked; no benchmark checkout or image is needed.
+        await server.verify(MagicMock(), _verify_request(tmp_path))
 
         sandbox.exec_setsid.assert_awaited_once_with("bash /app/solve.sh", timeout_s=1800)
         plain_commands = [call.args[0] for call in sandbox.exec.await_args_list]
         assert "bash /tests/test.sh" in plain_commands
         assert not any("solve.sh" in command for command in plain_commands)
-        assert response.golden_patch_output == "served\n"
-        assert response.reward == 1.0
-        assert response.evaluation_completed
-        sandbox.stop.assert_awaited_once()

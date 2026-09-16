@@ -723,7 +723,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            # Servers the agent leaves running must survive into verify(); a plain exec kills them on return.
+            # OpenSandbox cleans up the process group when the exec command finishes.
+            # Detach it so task servers remain available to the verifier.
             result = await sandbox.exec_setsid(
                 command,
                 timeout_s=self.config.sandbox_timeout,

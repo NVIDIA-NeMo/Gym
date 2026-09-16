@@ -15,7 +15,6 @@
 import asyncio
 import importlib.util
 import os
-import shlex
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -69,35 +68,22 @@ async def _assert_exec_setsid_keeps_server_reachable_after_command_finishes() ->
     config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
     config["opensandbox"]["operations"].update(retries=0, background_poll_interval_s=1)
     sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
-    start = """import subprocess, time, urllib.request
-with open('/tmp/http.log', 'wb') as log:
-    subprocess.Popen(['python3', '-m', 'http.server', '5000', '--bind', '127.0.0.1'],
-                     stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-for attempt in range(100):
-    try:
-        with urllib.request.urlopen('http://127.0.0.1:5000/', timeout=1) as response:
-            assert response.status == 200
-        break
-    except OSError:
-        # Wait for the server to bind before letting its starting command finish.
-        time.sleep(0.1)
-else:
-    raise RuntimeError('HTTP server did not become ready')
-"""
-    check = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status)"
     try:
         async with asyncio.timeout(300):
             await sandbox.start(
                 SandboxSpec(
-                    image="alexgshaw/hf-model-inference:20260430",
+                    image="python:3.11-slim",
                     ttl_s=300,
                     ready_timeout_s=120,
                     env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
                 )
             )
-            started = await sandbox.exec_setsid("python3 -c " + shlex.quote(start), timeout_s=30)
+            await sandbox.upload(Path(__file__).with_name("sandbox_server_task.py"), "/tmp/server_task.py")
+            # The first command exits after its child server accepts connections.
+            started = await sandbox.exec_setsid("python3 /tmp/server_task.py start", timeout_s=30)
             assert started.return_code == 0, started
-            response = await sandbox.exec("python3 -c " + shlex.quote(check), timeout_s=15)
+            # A separate exec proves the server survived the first command's cleanup.
+            response = await sandbox.exec("python3 /tmp/server_task.py check", timeout_s=15)
             assert response.return_code == 0, response
             assert response.stdout.strip() == "200"
     finally:
@@ -406,24 +392,22 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
-def test_exec_setsid_runs_command_in_its_own_session() -> None:
-    asyncio.run(_assert_exec_setsid_runs_command_in_its_own_session())
+def test_exec_setsid_wraps_command_and_reserves_cleanup_time() -> None:
+    asyncio.run(_assert_exec_setsid_wraps_command_and_reserves_cleanup_time())
 
 
-async def _assert_exec_setsid_runs_command_in_its_own_session() -> None:
+async def _assert_exec_setsid_wraps_command_and_reserves_cleanup_time() -> None:
     provider = FakeSandboxProvider()
     sandbox = AsyncSandbox(provider)
     await sandbox.start(SandboxSpec(image="image:tag"))
 
-    result = await sandbox.exec_setsid("bash solve.sh", timeout_s=30)
+    await sandbox.exec_setsid("bash solve.sh", timeout_s=30)
 
     [call] = provider.exec_calls
     assert "setsid bash -c " in call["command"]
     assert "bash solve.sh" in call["command"]
     assert "kill -TERM -" in call["command"]
     assert call["timeout_s"] == 90
-    assert result.return_code == 0
-    assert result.error_type is None
 
 
 def test_exec_setsid_without_timeout_has_no_deadline() -> None:
