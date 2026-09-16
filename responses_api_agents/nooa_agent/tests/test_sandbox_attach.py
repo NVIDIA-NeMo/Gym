@@ -73,3 +73,43 @@ async def test_attached_seeded_docker_sandbox_executes_edits_without_owning_life
         assert verifier_view.stdout == "changed through NOOA\n"
     finally:
         _docker("rm", "--force", container, check=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _docker_ready(), reason="Docker daemon is unavailable")
+async def test_cd_persists_across_exec_calls_in_seeded_container() -> None:
+    if _docker("image", "inspect", _DOCKER_TEST_IMAGE, check=False).returncode != 0:
+        pytest.skip(f"seeded test image is not available locally: {_DOCKER_TEST_IMAGE}")
+
+    container = f"nooa-seeded-cd-{uuid4().hex[:10]}"
+    started = _docker(
+        "run",
+        "--rm",
+        "--detach",
+        "--name",
+        container,
+        _DOCKER_TEST_IMAGE,
+        "bash",
+        "-lc",
+        "mkdir -p /app && printf seeded >/app/source.txt && exec sleep infinity",
+    )
+    assert started.stdout.strip()
+    try:
+        shell = SandboxShellTools(attach_docker_sandbox(container), cwd="/app")
+
+        stdout, stderr, code = await shell._session.run("cd /tmp")
+        assert (code, stderr, stdout) == (0, "", "")
+
+        stdout, _, code = await shell._session.run("pwd")
+        assert code == 0
+        assert stdout.strip() == "/tmp"
+
+        # Relative file operations follow the tracked directory, not the
+        # construction directory.
+        await shell.write_file("cd-probe.txt", "followed\n")
+        stored = await shell.read("cd-probe.txt")
+        assert stored.text == "followed\n"
+        assert _docker("exec", container, "cat", "/tmp/cd-probe.txt").stdout == "followed\n"
+        assert _docker("exec", container, "cat", "/app/source.txt").stdout == "seeded"
+    finally:
+        _docker("rm", "--force", container, check=False)

@@ -11,9 +11,11 @@ container.
 
 Design constraints honored here:
 
-- ``cd`` persists across ``exec`` calls because every call passes ``cwd=`` and
-  the session refreshes its tracked working directory from ``pwd`` after each
-  command. Environment exports do NOT persist (fresh shell per exec).
+- ``cd`` persists across ``exec`` calls: each command runs in a fresh process,
+  so the process reports its own final working directory on a one-line stderr
+  marker that the session strips and adopts. Commands that replace the process
+  (``exec``, ``exit``) skip the marker and leave the session directory
+  unchanged. Environment exports do NOT persist (fresh shell per exec).
 - File IO travels as base64 payloads through ``tee`` so only the base64
   alphabet crosses the process boundary.
 - The sandbox lifecycle belongs to the resources server; ``close()`` is a no-op.
@@ -29,6 +31,33 @@ import shlex
 from typing import Any
 
 from nooa.tools.shell_tools import FileWrite, Match, ShellTools
+
+
+_CWD_MARKER = "__nooa_cwd__"
+
+
+def _wrap_with_cwd_capture(command: str) -> str:
+    """Run *command* and report its final working directory on stderr.
+
+    ``docker exec`` starts a fresh process for every call, so a ``cd`` inside
+    the command dies with that process. Capture the directory in the SAME
+    process that ran the command: a group preserves the command's exit status,
+    one marker line with ``$PWD`` is appended to stderr (never stdout, so
+    command output stays clean), and the script exits with the command's
+    status. The session strips the marker and resumes the next call from the
+    reported directory.
+    """
+    return f"{{\n{command}\n}}\n__nooa_rc=$?\nprintf '{_CWD_MARKER}%s\\n' \"$PWD\" >&2\nexit $__nooa_rc\n"
+
+
+def _extract_cwd_marker(stderr: str) -> tuple[str | None, str]:
+    """Return the reported directory and stderr without the marker line."""
+    lines = stderr.split("\n")
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith(_CWD_MARKER):
+            reported = lines.pop(index)[len(_CWD_MARKER) :].strip()
+            return (reported or None), "\n".join(lines)
+    return None, stderr
 
 
 class SandboxBashSession:
@@ -49,28 +78,42 @@ class SandboxBashSession:
     async def start(self) -> None:
         if self._started:
             return
-        pwd = await self._sandbox.exec("pwd", timeout_s=5)
-        if pwd.return_code == 0 and pwd.stdout and pwd.stdout.strip():
-            self._cwd = pwd.stdout.strip()
+        if not posixpath.isabs(self._cwd):
+            # A relative cwd (the "." default) means "wherever the container
+            # starts". An absolute cwd was chosen by the caller (e.g. the repo
+            # root) and is trusted rather than reset to the image workdir.
+            pwd = await self._sandbox.exec("pwd", timeout_s=5)
+            if pwd.return_code == 0 and pwd.stdout and pwd.stdout.strip():
+                self._cwd = pwd.stdout.strip()
         base64_probe = await self._sandbox.exec("command -v base64", timeout_s=5)
         if base64_probe.return_code != 0:
             raise RuntimeError("sandbox does not provide base64; sandbox file IO is unavailable")
         rg_probe = await self._sandbox.exec("command -v rg", timeout_s=5)
         self._has_rg = rg_probe.return_code == 0
         if self._init_command:
-            await self._sandbox.exec(self._init_command, cwd=self._cwd, timeout_s=60)
+            init_result = await self._sandbox.exec(
+                _wrap_with_cwd_capture(self._init_command), cwd=self._cwd, timeout_s=60
+            )
+            init_cwd, _ = _extract_cwd_marker(init_result.stderr or "")
+            if init_cwd:
+                self._cwd = init_cwd
         self._started = True
 
     async def run_with_timeout_flag(self, command: str, timeout: float = 30.0) -> tuple[str, str, int, bool]:
         if not self._started:
             await self.start()
-        result = await self._sandbox.exec(command, cwd=self._cwd, timeout_s=timeout)
+        result = await self._sandbox.exec(_wrap_with_cwd_capture(command), cwd=self._cwd, timeout_s=timeout)
         timed_out = getattr(result, "error_type", None) == "timeout"
         stdout = result.stdout if result.stdout is not None else ""
         stderr = result.stderr if result.stderr is not None else ""
-        pwd = await self._sandbox.exec("pwd", timeout_s=5)
-        if pwd.return_code == 0 and pwd.stdout and pwd.stdout.strip():
-            self._cwd = pwd.stdout.strip()
+        reported_cwd, stderr = _extract_cwd_marker(stderr)
+        # A timeout can leave a partial marker line; never adopt a directory
+        # from a process whose outcome is unknown.
+        if reported_cwd and not timed_out:
+            self._cwd = reported_cwd
+        # No marker: the command replaced its process (`exec`, `exit`) or was
+        # killed. The tracked directory is unchanged; a naive `pwd` probe here
+        # would report the image workdir and silently undo every `cd`.
         return stdout, stderr, int(result.return_code), timed_out
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
@@ -110,8 +153,12 @@ class SandboxShellTools(ShellTools):
         from nooa.skill import Skill
 
         Skill.__init__(self, **kwargs)
-        self.cwd = cwd  # container-side path string
         self._session = SandboxBashSession(sandbox, cwd=cwd, init_command=init_command)
+
+    @property
+    def cwd(self) -> str:
+        """Container-side working directory, following ``cd`` across calls."""
+        return self._session._cwd
 
     def _resolve_path(self, path: str) -> str:
         if not posixpath.isabs(path):
