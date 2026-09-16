@@ -102,16 +102,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 
 # External contributors: clone your fork, then add the upstream repository.
-git clone git@github.com:YOUR-USERNAME/Gym.git
+git clone https://github.com/YOUR-USERNAME/Gym.git
 cd Gym
-git remote add upstream git@github.com:NVIDIA-NeMo/Gym.git
+git remote add upstream https://github.com/NVIDIA-NeMo/Gym.git
 
-# With write access, use git@github.com:NVIDIA-NeMo/Gym.git as the clone URL
+# With write access, use https://github.com/NVIDIA-NeMo/Gym.git as the clone URL
 # and omit the `git remote add upstream` step.
 uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev
 pre-commit install
 ```
+
+Cloning a public repository over HTTPS needs no GitHub credentials. If you have
+an SSH key registered with GitHub, you can use `git@github.com:OWNER/Gym.git`
+instead, replacing `OWNER` with your username or `NVIDIA-NeMo` as appropriate.
 
 **Important:** All commits must be signed off under the DCO (`-s`).
 Cryptographic signing (`-S`) is optional:
