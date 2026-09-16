@@ -49,8 +49,12 @@ class ExternalCaptureHandler(Protocol):
         """Attach capture instructions to an admitted engine request."""
         ...
 
-    async def finalize_response(self, response_payload: dict[str, Any]) -> None:
-        """Commit lineage and remove capture-only response fields."""
+    def prepare_response(self, response_payload: dict[str, Any]) -> None:
+        """Retain the worker acknowledgement and remove capture-only response fields."""
+        ...
+
+    async def finalize_response(self, served_payload: dict[str, Any]) -> None:
+        """Commit lineage from the final API representation served to the client."""
         ...
 
 
@@ -99,54 +103,73 @@ class _BaseExternalCaptureHandler(ABC):
     ) -> dict[str, Any]:
         """Attach backend-specific fields after shared admission checks."""
 
-    async def finalize_response(self, response_payload: dict[str, Any]) -> None:
+    def prepare_response(self, response_payload: dict[str, Any]) -> None:
+        """Strip transport fields and retain the acknowledgement until API conversion finishes.
+
+        Lineage is published from the final Chat, Responses, or Messages
+        representation (see ``finalize_response``), so the worker coordinates
+        are parked on the request-scoped capture context and the internal
+        engine response is scrubbed of token data immediately.
+        """
+        context = current_capture_context()
+        if context is None or not context.external_staging:
+            return
+        context.external_commit_coords = response_payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        _strip_capture_transport_fields(response_payload)
+
+    async def finalize_response(self, served_payload: dict[str, Any]) -> None:
+        """Validate the retained acknowledgement and record the served response.
+
+        ``served_payload`` is the JSON form of the response returned to the
+        client, after conversion succeeded. Fingerprints are computed from that
+        representation so the next turn's echoed history resolves its parent.
+        """
         context = current_capture_context()
         if context is None or not context.external_staging or context.lineage_store is None:
             return
         ledger = context.lineage_store
         if not isinstance(ledger, CaptureLedger):
             raise ValueError("external staging requires a CaptureLedger on the capture context")
+        admission = context.capture_admission
+        if admission is None:
+            # UNRESOLVED — the ledger already carries this call's poison row.
+            return
         try:
-            admission = context.capture_admission
-            if admission is None:
-                # UNRESOLVED — the ledger already carries this call's poison row.
-                return
+            await self._finalize_admitted_response(
+                served_payload,
+                coords_payload=context.external_commit_coords,
+                context=context,
+                ledger=ledger,
+                admission=admission,
+            )
+        except Exception:
+            # Backend/framework payloads are an external integrity boundary.
+            # Poison capture without turning a valid model completion into a
+            # harness failure.
+            LOGGER.exception(
+                self._CAPTURE_ERROR_MESSAGE,
+                context.rollout_id,
+                context.model_call_id,
+            )
             try:
-                await self._finalize_admitted_response(
-                    response_payload,
-                    context=context,
-                    ledger=ledger,
-                    admission=admission,
+                await ledger.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    self._INVALID_CAPTURE_REASON,
                 )
             except Exception:
-                # Backend/framework payloads are an external integrity boundary.
-                # Poison capture without turning a valid model completion into a
-                # harness failure.
                 LOGGER.exception(
-                    self._CAPTURE_ERROR_MESSAGE,
+                    self._POISON_ERROR_MESSAGE,
                     context.rollout_id,
                     context.model_call_id,
                 )
-                try:
-                    await ledger.record_failure(
-                        context.rollout_id,
-                        context.model_call_id,
-                        self._INVALID_CAPTURE_REASON,
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        self._POISON_ERROR_MESSAGE,
-                        context.rollout_id,
-                        context.model_call_id,
-                    )
-        finally:
-            _strip_capture_transport_fields(response_payload)
 
     @abstractmethod
     async def _finalize_admitted_response(
         self,
-        response_payload: dict[str, Any],
+        served_payload: dict[str, Any],
         *,
+        coords_payload: dict[str, Any] | None,
         context: CaptureContext,
         ledger: CaptureLedger,
         admission: CaptureAdmission,
@@ -178,8 +201,9 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
 
     async def _finalize_admitted_response(
         self,
-        response_payload: dict[str, Any],
+        served_payload: dict[str, Any],
         *,
+        coords_payload: dict[str, Any] | None,
         context: CaptureContext,
         ledger: CaptureLedger,
         admission: CaptureAdmission,
@@ -190,10 +214,9 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         become a lineage parent until its staged record is durable — holds
         structurally: the worker stages before acknowledging, so the ledger
         row (which is what makes the call resolvable) is written only after
-        the coordinates arrive. The shared lifecycle strips custody fields
-        after this method returns.
+        the coordinates arrive. Custody fields were already stripped from the
+        engine response by ``prepare_response``.
         """
-        coords_payload = response_payload.pop(NG_COMMIT_COORDS_FIELD, None)
         if coords_payload is None:
             await ledger.record_failure(
                 context.rollout_id,
@@ -220,11 +243,11 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         # agent proves which response it kept by possessing it. Observe the
         # payload's own id; never mint one. A served completion without an
         # id is a stamping bug and fails closed (poisons the call below).
-        response_id = str(response_payload.get("id") or "")
+        response_id = str(served_payload.get("id") or "")
         if not response_id:
             raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
         child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
-        response_items, _ = strip_token_fields(response_to_output_items(response_payload))
+        response_items, _ = strip_token_fields(response_to_output_items(served_payload))
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)

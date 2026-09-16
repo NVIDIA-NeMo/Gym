@@ -64,6 +64,7 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
@@ -929,6 +930,12 @@ class TestApp:
                     messages=[{"role": "user", "content": "go"}],
                 ),
             )
+            # The worker acknowledgement is parked on the context until the
+            # final API representation is known; lineage is not yet published.
+            assert context.external_commit_coords is not None
+            assert context.external_commit_coords["staging_key"] == "rollout-1/c1"
+            assert context.committed is False
+            await server._finalize_served_response(response)
         finally:
             reset_token_sink(token)
 
@@ -6031,7 +6038,7 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
 
     def test_uncaptured_request_on_external_staging_server_mints_resp_id(self) -> None:
         model = TestPrefixSupplyReachesTokenize._model()
-        model._external_capture_enabled = True
+        model._external_capture_handler = VLLMWorkerCaptureHandler()
 
         assert model._preserve_envelope_id() is False
 

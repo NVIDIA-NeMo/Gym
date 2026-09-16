@@ -975,7 +975,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self._external_capture_handler is not None:
-            await self._external_capture_handler.finalize_response(chat_completion_dict)
+            self._external_capture_handler.prepare_response(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1042,6 +1042,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Publish lineage using the final Chat, Responses, or Messages representation."""
+        if self._external_capture_handler is not None:
+            await self._external_capture_handler.finalize_response(_jsonable(response))
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:

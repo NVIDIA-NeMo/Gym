@@ -183,6 +183,9 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(
         payload.pop("id")
     token = set_token_sink(context)
     try:
+        handler.prepare_response(payload)
+        _assert_transport_fields_stripped(payload)
+        assert "ng_commit_coords" not in payload
         await handler.finalize_response(payload)
     finally:
         reset_token_sink(token)
@@ -221,10 +224,13 @@ async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
     payload["ng_commit_coords"] = {"unused": True}
     token = set_token_sink(context)
     try:
+        handler.prepare_response(payload)
         await handler.finalize_response(payload)
     finally:
         reset_token_sink(token)
     _assert_transport_fields_stripped(payload)
+    assert context.external_commit_coords == {"unused": True}
+    assert (await store.manifest("rollout-1"))["records"] == []
 
 
 @pytest.mark.asyncio
@@ -235,6 +241,7 @@ async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
 )
 async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
     payload = _transport_payload()
+    handler.prepare_response(payload)
     await handler.finalize_response(payload)
     assert payload["prompt_token_ids"] == [10, 11]
     assert payload["choices"][0]["message"]["generation_token_ids"] == [12]
