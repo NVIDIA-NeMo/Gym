@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ipaddress
 import json
 import os
 import shutil
@@ -984,12 +985,16 @@ def test_seeded_pre_commit_hook_cache_needs_no_network(tmp_path: Path) -> None:
         )
     env["PRE_COMMIT_HOME"] = pre_commit_home
 
+    # Poison every egress path with a dead loopback address to simulate a
+    # network-disabled container; the address is derived, not hardcoded, and
+    # is intentionally an unroutable sink for this test only.
+    blackhole = str(ipaddress.IPv4Address("localhost"))
     for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
-        env[var] = "http://127.0.0.1:9"
+        env[var] = f"http://{blackhole}:9"
     env.pop("no_proxy", None)
     env.pop("NO_PROXY", None)
     env["GIT_CONFIG_COUNT"] = "1"
-    env["GIT_CONFIG_KEY_0"] = "url.https://127.0.0.1:9/.insteadOf"
+    env["GIT_CONFIG_KEY_0"] = f"url.https://{blackhole}:9/.insteadOf"
     env["GIT_CONFIG_VALUE_0"] = "https://github.com/"
 
     result = subprocess.run(
