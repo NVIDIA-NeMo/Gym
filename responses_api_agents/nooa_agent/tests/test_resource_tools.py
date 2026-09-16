@@ -24,6 +24,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from nooa import Agent
 
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -77,6 +78,65 @@ def weather_tool() -> dict[str, Any]:
             "additionalProperties": False,
         },
     }
+
+
+@pytest.mark.parametrize(
+    "schema_type,annotation,value",
+    [
+        ("integer", int, 1),
+        ("number", float, 1.5),
+        ("boolean", bool, True),
+        ("array", list, [1]),
+        ("object", dict, {"x": 1}),
+        (None, Any, "untyped"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resource_signature_and_dispatch_for_json_types(schema_type: str, annotation: Any, value: Any) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=FakeResponse({"ok": True}))
+    dispatcher = ResourceToolDispatcher(server_client=client, resources_server_name="resources", cookies={})
+    tool = weather_tool()
+    tool["name"] = "typed"
+    tool["parameters"]["properties"] = {"value": {"type": schema_type} if schema_type else {}}
+    tool["parameters"]["required"] = ["value"]
+    agent = create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=[tool])()
+    assert inspect.signature(agent.typed).parameters["value"].annotation is annotation
+    assert await agent.typed(value) == {"ok": True}
+    assert client.post.await_args.kwargs["json"] == {"value": value}
+
+
+@pytest.mark.asyncio
+async def test_invalid_resource_arguments_are_observed_without_http() -> None:
+    client = MagicMock()
+    client.post = AsyncMock()
+    trace = GymTraceHooks()
+    dispatcher = ResourceToolDispatcher(
+        server_client=client,
+        resources_server_name="resources",
+        cookies={},
+        trace_hooks=trace,
+    )
+    agent = create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=[weather_tool()])()
+    result = await agent.get_weather(city=123)
+    assert "Invalid arguments" in result["error"]
+    client.post.assert_not_awaited()
+    event = trace._events[0].observation
+    assert event.status == "failed"
+    assert event.error_type == "invalid_arguments"
+    assert event.output == result
+
+
+def test_invalid_tool_json_schema_rejected_before_execution() -> None:
+    dispatcher = ResourceToolDispatcher(
+        server_client=MagicMock(),
+        resources_server_name="resources",
+        cookies={},
+    )
+    tool = weather_tool()
+    tool["parameters"]["properties"]["city"] = {"type": "not-a-json-type"}
+    with pytest.raises(ValueError, match="invalid JSON Schema"):
+        create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=[tool])
 
 
 def make_agent(

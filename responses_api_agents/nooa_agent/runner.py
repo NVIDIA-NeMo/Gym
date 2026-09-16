@@ -15,19 +15,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, Protocol
+from uuid import uuid4
 
-from nooa.atif import atif_scope
+from nooa.runtime.hooks import hooks_scope
 
-from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymResponsesLLM,
+    InvalidPolicyOutputError,
+    PolicyCallBudgetExceeded,
+    RolloutLLMState,
+)
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
-from responses_api_agents.nooa_agent.observability import project_nooa_episode
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -41,6 +46,8 @@ class NOOARunRequest:
     model_url_path: str
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
+    task_id: str = "unknown"
+    rollout_id: str = field(default_factory=lambda: uuid4().hex)
 
 
 @dataclass(slots=True)
@@ -51,6 +58,15 @@ class NOOARunResult:
     resource_cookies: dict[str, str]
     termination_reason: str | None = None
     termination_error: str | None = None
+    trajectory: TrajectoryRecord | None = None
+
+
+class NOOARunFailure(RuntimeError):
+    """A failure carrying the same episode representation as a successful run."""
+
+    def __init__(self, error: BaseException, result: NOOARunResult) -> None:
+        super().__init__(str(error))
+        self.result = result
 
 
 class NOOARunner(Protocol):
@@ -81,19 +97,21 @@ class EmbeddedNOOARunner:
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        model_calls: list[ModelCallRef] = []
+        state = RolloutLLMState(max_steps=self._max_steps)
+        trace = GymTraceHooks()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
-            max_steps=self._max_steps,
-            model_call_collector=model_calls,
+            state=state,
             cookies=request.model_cookies,
+            on_call=trace.on_model_call,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             cookies=request.resource_cookies,
+            trace_hooks=trace,
         )
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
@@ -111,33 +129,48 @@ class EmbeddedNOOARunner:
         termination_reason = None
         termination_error = None
         return_value = None
-        with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
-            path = Path(directory) / "trajectory.json"
-            async with atif_scope(agent, path=path) as exporter:
-                try:
-                    return_value = await entrypoint(**arguments)
-                except PolicyCallBudgetExceeded as error:
-                    termination_reason = "policy_budget_exceeded"
-                    termination_error = str(error)
-                except ValueError as error:
-                    message = str(error)
-                    if "Gym model returned invalid" in message:
-                        termination_reason = "invalid_policy_output"
-                        termination_error = message
-                    else:
-                        raise
-            trajectory = exporter.get_trajectory()
+        failure: BaseException | None = None
+        try:
+            with hooks_scope(trace):
+                return_value = await entrypoint(**arguments)
+        except BaseException as error:
+            failure = error
+            # NOOA may wrap a model error after its strategy retry loop.
+            cause: BaseException | None = error
+            seen: set[int] = set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                if isinstance(cause, (PolicyCallBudgetExceeded, InvalidPolicyOutputError)):
+                    termination_reason = (
+                        "policy_budget_exceeded"
+                        if isinstance(cause, PolicyCallBudgetExceeded)
+                        else "invalid_policy_output"
+                    )
+                    termination_error = str(cause)
+                    break
+                cause = cause.__cause__ or cause.__context__
 
-        episode = project_nooa_episode(
+        episode, trajectory = trace.project(
             create_params=request.row.responses_create_params,
-            trajectory=trajectory,
-            model_calls=model_calls,
+            state=state,
+            task_id=request.task_id,
+            rollout_id=request.rollout_id,
         )
-        return NOOARunResult(
+        result = NOOARunResult(
             episode=episode,
             return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
             termination_reason=termination_reason,
             termination_error=termination_error,
+            trajectory=trajectory,
         )
+        if failure is not None and termination_reason is None:
+            if isinstance(failure, asyncio.CancelledError):
+                # Preserve asyncio.timeout's conversion of the original cancellation.
+                failure.nooa_result = result
+                raise failure
+            if not isinstance(failure, Exception):
+                raise failure
+            raise NOOARunFailure(failure, result) from failure
+        return result

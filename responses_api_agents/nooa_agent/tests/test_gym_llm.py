@@ -27,10 +27,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import ModelCallRef
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     PolicyCallBudgetExceeded,
+    RolloutLLMState,
     _finish_reason,
     _tool_schema,
 )
@@ -79,19 +79,18 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
     ).model_dump(mode="json")
 
 
-def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, list[ModelCallRef]]:
+def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
-    collected: list[ModelCallRef] = []
+    state = RolloutLLMState(max_steps=max_steps)
     llm = GymResponsesLLM(
         server_client=server_client,
         model_server_name="policy_model",
         model_url_path="/ng-rollout/rollout-1/v1/responses",
-        max_steps=max_steps,
-        model_call_collector=collected,
+        state=state,
         cookies={},
     )
-    return llm, server_client, collected
+    return llm, server_client, state
 
 
 @pytest.mark.parametrize(
@@ -185,9 +184,11 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert request["json"].max_output_tokens == 128
     assert request["json"].tools[0]["name"] == "weather"
     assert result.content == "Cold"
-    assert collected[0].response_id == "resp-1"
-    assert collected[0].model_ref is not None
-    assert collected[0].model_ref.name == "policy_model"
+    assert collected.model_calls[0].response_id == "resp-1"
+    assert collected.model_calls[0].model_ref is not None
+    assert collected.model_calls[0].model_ref.name == "policy_model"
+    assert collected.calls[0].request == request["json"]
+    assert collected.calls[0].request is not request["json"]
 
 
 @pytest.mark.asyncio
