@@ -22,11 +22,11 @@ Pass ``include_vision=True`` to include image questions and materialize each row
 
 from __future__ import annotations
 
-import importlib.util
 import json
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Union
+
+from nemo_gym.vision_input import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -85,21 +85,6 @@ def keep_row(row: dict, subset: str, include_vision: bool = False) -> bool:
     return verified_class == VERIFIED_CLASSES_REVERSE_MAP[subset]
 
 
-@lru_cache(maxsize=1)
-def _hle_build_input():
-    """Load the shared HLE input builder from this checkout.
-
-    Loading by path avoids importing another installation's benchmarks package.
-    """
-    path = BENCHMARK_DIR.parent / "hle" / "prepare.py"
-    spec = importlib.util.spec_from_file_location("_hle_prepare_for_hle_verified", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load benchmarks/hle's prepare.py from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module._build_input
-
-
 def format_entry(row: dict, prompt_config: Any = None) -> dict:
     """Convert an unpacked dataset row to Gym JSONL format.
 
@@ -117,11 +102,9 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),
     }
     if prompt_config is not None:
-        build_input = _hle_build_input()
-
         entry["has_image"] = bool(row.get("image"))
         entry["responses_create_params"] = {
-            "input": build_input(prompt_config, row["question"], row.get("image") or "")
+            "input": build_image_input(prompt_config, row["question"], row.get("image") or "")
         }
     return entry
 
