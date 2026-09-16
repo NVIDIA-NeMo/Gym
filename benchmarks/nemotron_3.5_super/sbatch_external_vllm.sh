@@ -142,6 +142,7 @@ if (( SLURM_PROCID == 0 )); then
 
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
+    # Set a longer worker startup timeout since some models e.g. DSv4 take > 10 mins to load.
     router_args=( \
         --prefill-policy $ROUTER_PREFILL_POLICY \
         --decode-policy $ROUTER_DECODE_POLICY \
@@ -150,6 +151,7 @@ if (( SLURM_PROCID == 0 )); then
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
         --request-timeout-secs 86400 \
+        --worker-startup-timeout-secs 1200 \
         --log-level error
     )
 
