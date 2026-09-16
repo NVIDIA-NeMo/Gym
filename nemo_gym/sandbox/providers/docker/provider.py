@@ -40,6 +40,11 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.docker._compose import (
+    DockerComposeSupport,
+    DockerNetworkingConfig,
+    DockerSharedStorageConfig,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +54,7 @@ SANDBOX_LABEL = "nemo-gym.sandbox"
 READY_PROBE_COMMAND = "printf docker-sandbox-ready"
 READY_PROBE_EXPECTED = "docker-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
+_DEFAULT_TIMEOUT = object()
 DEFAULT_KEEPALIVE_SHELL = "/bin/sh"
 DEFAULT_KEEPALIVE_CMD = "while :; do sleep 2147483647; done"
 DOCKER_RUNTIME_ERROR_MARKERS = (
@@ -250,7 +256,7 @@ def _is_missing_container(stderr: str) -> bool:
     return any(marker in low for marker in DOCKER_MISSING_CONTAINER_MARKERS)
 
 
-class DockerProvider:
+class DockerProvider(DockerComposeSupport):
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
     name = "docker"
@@ -261,18 +267,22 @@ class DockerProvider:
         exec: DockerExecConfig | Mapping[str, Any] | None = None,
         create: DockerCreateConfig | Mapping[str, Any] | None = None,
         probe: DockerProbeConfig | Mapping[str, Any] | None = None,
+        networking: DockerNetworkingConfig | Mapping[str, Any] | None = None,
+        shared_storage: DockerSharedStorageConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._exec_config = _coerce_config(exec, DockerExecConfig)
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
+        self._networking = _coerce_config(networking, DockerNetworkingConfig)
+        self._shared_storage = _coerce_config(shared_storage, DockerSharedStorageConfig)
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
 
     async def _run(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None, bounded: bool = True
     ) -> tuple[int, str, str]:
         """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
-        async with self._semaphore:
+        async with self._semaphore if bounded else contextlib.nullcontext():
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE if stdin is not None else None,
@@ -282,11 +292,13 @@ class DockerProvider:
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
-            except asyncio.TimeoutError as e:
+            except (asyncio.TimeoutError, asyncio.CancelledError) as e:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 with contextlib.suppress(Exception):
                     await proc.wait()
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
@@ -332,6 +344,7 @@ class DockerProvider:
             argv += ["--publish", _publish_arg(cfg.publish_host, port)]
         for vol in volumes:
             argv += ["-v", vol]
+        argv += self._runtime_flags(spec)
         argv += list(cfg.extra_run_args) + per_sandbox_args
         # ttl_s (no custom entrypoint): keep-alive sleeps ttl_s, --rm self-removes when it exits.
         enforce_ttl = spec.ttl_s is not None and not spec.entrypoint
@@ -350,6 +363,9 @@ class DockerProvider:
         except TimeoutError as e:
             await self._force_remove(name)
             raise DockerCreateError(f"docker run timed out for image={image!r}: {e}") from e
+        except asyncio.CancelledError:
+            await self._force_remove(name)
+            raise
         if code != 0:
             await self._force_remove(name)
             raise DockerCreateError(f"docker run failed (code={code}) for image={image!r}: {err.strip()}")
@@ -367,7 +383,7 @@ class DockerProvider:
         try:
             await self._verify_created_handle(handle)  # readiness via default sh (printf works there)
             handle.raw.shell = await self._resolve_shell(name)  # resolve real shell once exec is confirmed live
-        except Exception:
+        except BaseException:
             await self._cleanup_failed_create_handle(handle)
             raise
         return handle
@@ -474,7 +490,7 @@ class DockerProvider:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        timeout_s: int | float | None = None,
+        timeout_s: int | float | None | object = _DEFAULT_TIMEOUT,
         user: str | int | None = None,
         stdin: bytes | None = None,
     ) -> SandboxExecResult:
@@ -499,9 +515,12 @@ class DockerProvider:
         flags += list(self._exec_config.extra_exec_args)
 
         argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
-        effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
+        effective_timeout = self._exec_config.default_timeout_s if timeout_s is _DEFAULT_TIMEOUT else timeout_s
+        # Explicitly unbounded service processes must leave slots available for
+        # health checks and cleanup, even when command concurrency is one.
+        run_options = {"bounded": False} if effective_timeout is None else {}
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin, **run_options)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"
@@ -537,6 +556,35 @@ class DockerProvider:
         )
         if code != 0:
             raise RuntimeError(f"docker cp download from {source_path!r} failed: {err.strip()}")
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        name = str(descriptor["sandbox_id"])
+        info = await self._inspect_container(name)
+        config = info.get("Config") or {}
+        if (config.get("Labels") or {}).get(SANDBOX_LABEL) != "1":
+            raise ValueError("Docker container is not a Gym sandbox")
+        if not (info.get("State") or {}).get("Running"):
+            raise ValueError("Docker sandbox is not running")
+        ports = (info.get("NetworkSettings") or {}).get("Ports") or {}
+        env = dict(item.split("=", 1) for item in config.get("Env") or [] if "=" in item)
+        return SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_DockerContainer(
+                name=name,
+                image=config["Image"],
+                shell=await self._resolve_shell(name),
+                env=env,
+                published_ports=tuple(
+                    int(port.removesuffix("/tcp"))
+                    for port, bindings in ports.items()
+                    if port.endswith("/tcp") and bindings
+                ),
+            ),
+        )
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Container status via ``docker inspect`` (missing -> STOPPED; error/timeout -> UNKNOWN)."""
