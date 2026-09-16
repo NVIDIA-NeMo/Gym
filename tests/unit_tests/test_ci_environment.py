@@ -897,7 +897,6 @@ def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
     assert "setup_uv_sync_args=()" in setup_dev
 
 
-
 def test_lint_reuses_pre_commit_on_path() -> None:
     # lint.sh reuses a pre-commit already on PATH (the offline/container dev
     # environment); otherwise it installs the pinned pre-commit (version from
@@ -908,7 +907,6 @@ def test_lint_reuses_pre_commit_on_path() -> None:
     assert "uv.lock" in lint
     assert "uv sync" not in lint
     assert "setup_dev.sh" not in lint
-
 
 
 def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
