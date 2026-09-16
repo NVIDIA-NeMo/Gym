@@ -14,6 +14,8 @@
 
 import asyncio
 import importlib.util
+import os
+import shlex
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -48,6 +50,58 @@ from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESan
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
+)
+def test_exec_setsid_keeps_server_reachable_after_command_finishes() -> None:
+    """A server remains reachable after the command that started it finishes."""
+    asyncio.run(_assert_exec_setsid_keeps_server_reachable_after_command_finishes())
+
+
+async def _assert_exec_setsid_keeps_server_reachable_after_command_finishes() -> None:
+    from omegaconf import OmegaConf
+
+    config_path = Path(__file__).parents[2] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)["sandbox"]
+    config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
+    config["opensandbox"]["operations"].update(retries=0, background_poll_interval_s=1)
+    sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
+    start = """import subprocess, time, urllib.request
+with open('/tmp/http.log', 'wb') as log:
+    subprocess.Popen(['python3', '-m', 'http.server', '5000', '--bind', '127.0.0.1'],
+                     stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+for attempt in range(100):
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:5000/', timeout=1) as response:
+            assert response.status == 200
+        break
+    except OSError:
+        # Wait for the server to bind before letting its starting command finish.
+        time.sleep(0.1)
+else:
+    raise RuntimeError('HTTP server did not become ready')
+"""
+    check = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status)"
+    try:
+        async with asyncio.timeout(300):
+            await sandbox.start(
+                SandboxSpec(
+                    image="alexgshaw/hf-model-inference:20260430",
+                    ttl_s=300,
+                    ready_timeout_s=120,
+                    env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
+                )
+            )
+            started = await sandbox.exec_setsid("python3 -c " + shlex.quote(start), timeout_s=30)
+            assert started.return_code == 0, started
+            response = await sandbox.exec("python3 -c " + shlex.quote(check), timeout_s=15)
+            assert response.return_code == 0, response
+            assert response.stdout.strip() == "200"
+    finally:
+        await sandbox.stop()
 
 
 def _has_module(module_name: str) -> bool:
