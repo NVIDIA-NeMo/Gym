@@ -156,26 +156,40 @@ async def run(services, index, *, group="group", attempt=0):
     return result.status, await result.json()
 
 
-@pytest.mark.parametrize("judge_failure", [False, True])
-async def test_run_fails_without_reward_and_preserves_reason(services, judge_failure):
-    if judge_failure:
-        services.judge_status = 500
-    else:
-        services.resource.config.cohort_collection_timeout_s = 0.05
-    results = await asyncio.gather(*(run(services, i) for i in range(4 if judge_failure else 1)))
-    assert all(status == 500 and "reward" not in body for status, body in results)
-    reason = "judge offline" if judge_failure else "did not collect 4 unique rollout indices"
-    if judge_failure:
-        assert all("500" in body for _, body in results)
-    else:
-        assert all(reason in body for _, body in results)
+async def test_incomplete_run_fails_without_reward(services):
+    services.resource.config.cohort_collection_timeout_s = 0.05
+    status, body = await run(services, 0)
+    assert status == 500 and "reward" not in body
+    assert "did not collect 4 unique rollout indices" in body
+    assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
+
+
+def assert_judge_failure(status, body, reason):
+    assert status == 200
+    assert body["_ng_failure_class"] == "judge_failed"
+    assert reason in body["_ng_failure_judge_error"]
+    assert body["response"]["id"].startswith("policy-")
+    assert body["response"]["output"][0]["content"][0]["text"] == "4"
+    assert body["instance_config"]["mask_sample"] is True
+    assert body["reward"] == 0  # Failsafe placeholder; never a scored result.
+
+
+async def test_judge_failure_preserves_answer_and_diagnostics_through_run(services):
+    services.judge_status = 500
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    for status, body in results:
+        assert_judge_failure(status, body, "judge unavailable")
+        error = body["_ng_failure_judge_error"]
+        assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
+    assert len({body["response"]["id"] for _, body in results}) == 4
     assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):
     services.judge_empty = True
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
-    assert all(status == 500 and "no completed answer after 4 attempts" in body for status, body in results)
+    for status, body in results:
+        assert_judge_failure(status, body, "no completed answer after 4 attempts")
     assert services.judge_calls == 16
 
 
@@ -233,19 +247,25 @@ async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
         started = time.monotonic()
         results = await asyncio.gather(*(run(services, i) for i in range(4)))
         assert time.monotonic() - started < 2
-        assert all(status == 500 and "TimeoutError" in body for status, body in results)
+        for status, body in results:
+            assert_judge_failure(status, body, "TimeoutError")
+            assert "deadline=0.2s" in body["_ng_failure_judge_error"]
     finally:
         sock.close()
 
 
 async def test_production_graceful_shutdown_releases_active_state(services):
+    services.resource.config.judge_request_timeout_s = 10
+    services.resource.config.cohort_evaluation_timeout_s = 10
     services.judge_release.clear()
     requests = [asyncio.create_task(run(services, i)) for i in range(4)]
     await until(lambda: services.judge_calls > 0)
+    cohort = next(iter(services.resource._verify_cohorts.values()))
     services.resource_http_server.should_exit = True
     await asyncio.wait_for(services.resource_http_task, 3)
     results = await asyncio.wait_for(asyncio.gather(*requests, return_exceptions=True), 3)
     assert all(isinstance(result, Exception) or result[0] >= 500 for result in results)
+    assert cohort.failure == "GenRM server is shutting down"
     assert not services.resource._verify_cohorts and not services.resource._cohort_tasks
 
 
@@ -282,16 +302,15 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(services, 
     failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
     assert len(failures) == (4 if judge_failure else 1)
     for row in failures:
-        assert row["_ng_failure_class"] == "agent_run_error"
-        assert row["_ng_failure_http_status"] == 500
-        assert "reward" not in row and "response" not in row
+        if judge_failure:
+            assert_judge_failure(200, row, "judge unavailable")
+        else:
+            assert row["_ng_failure_class"] == "agent_run_error"
+            assert row["_ng_failure_http_status"] == 500
+            assert "reward" not in row and "response" not in row
+            assert "did not collect" in row["_ng_failure_response_body"]
         assert row["_ng_task_index"] == 0
         assert 0 <= row["_ng_rollout_index"] < config.num_repeats
-        assert (
-            "evaluation failed" in row["_ng_failure_response_body"]
-            if judge_failure
-            else "did not collect" in row["_ng_failure_response_body"]
-        )
     inputs = [json.loads(line) for line in (tmp_path / "output_materialized_inputs.jsonl").read_text().splitlines()]
     assert all(row["_ng_group_id"] == "group" for row in inputs)
     assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in failures} == {
@@ -333,3 +352,49 @@ async def test_collector_can_repeat_legacy_task_on_same_live_server(services, tm
         assert not services.resource._verify_cohorts
     assert response_ids[0].isdisjoint(response_ids[1])
     assert services.policy_calls == services.judge_calls == 8
+
+
+async def test_collector_resumes_failed_legacy_group_on_live_server(services, tmp_path, monkeypatch):
+    import nemo_gym.rollout_collection as collection
+
+    monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
+    input_path, output_path = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "2+2?"}]},
+                "agent_ref": {"name": "agent"},
+            }
+        )
+        + "\n"
+    )
+    config = collection.RolloutCollectionConfig(
+        input_jsonl_fpath=str(input_path),
+        output_jsonl_fpath=str(output_path),
+        num_repeats=4,
+        num_samples_in_parallel=4,
+        disable_health_check=True,
+    )
+    services.judge_status = 500
+    with pytest.raises(RuntimeError, match="produced a result"):
+        await collection.RolloutCollectionHelper().run_from_config(config)
+    failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    assert len(failures) == 4
+    for row in failures:
+        assert_judge_failure(200, row, "judge unavailable")
+    assert not services.resource._verify_cohorts
+
+    services.judge_status = 200
+    config.resume_from_cache = True
+    await collection.RolloutCollectionHelper().run_from_config(config)
+    rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert len(rows) == 4 and all(row["reward"] == 3.0 for row in rows)
+    assert {r["response"]["id"] for r in rows}.isdisjoint(r["response"]["id"] for r in failures)
+    assert all("_ng_failure_class" not in row for row in rows)
+    assert not services.resource._verify_cohorts
+    assert services.policy_calls == 8
+    judge_calls = services.judge_calls
+    await collection.RolloutCollectionHelper().run_from_config(config)
+    assert services.policy_calls == 8 and services.judge_calls == judge_calls
+    assert [json.loads(line) for line in output_path.read_text().splitlines()] == rows

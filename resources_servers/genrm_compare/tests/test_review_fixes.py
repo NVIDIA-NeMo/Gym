@@ -45,12 +45,12 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
     response = failing_judge(status)
     server.server_client.post = AsyncMock(return_value=response)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
-    assert all(isinstance(result, HTTPException) and result.status_code == 503 for result in results)
+    assert all(isinstance(result, genrm.JudgeError) and "judge offline" in str(result) for result in results)
     cohort = next(iter(server._verify_cohorts.values()))
     assert cohort.phase == "failed" and not cohort.rewards
     response.json.assert_not_awaited()
-    with pytest.raises(HTTPException):
-        await server.verify(member(0))
+    with pytest.raises(genrm.JudgeError, match="judge offline"):
+        await server.verify(member(0, response_id="regenerated-answer"))
     assert server.server_client.post.await_count <= 2  # no parse retries on failed HTTP
 
 
@@ -58,7 +58,7 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
 async def test_judge_transport_failure_never_defaults(server, error):
     server.server_client.post = AsyncMock(side_effect=error)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
-    assert all(isinstance(result, HTTPException) for result in results)
+    assert all(isinstance(result, genrm.JudgeError) for result in results)
     assert not next(iter(server._verify_cohorts.values())).rewards
 
 
@@ -70,8 +70,8 @@ async def test_unsuccessful_http_200_judge_is_failure(server, payload):
     response.json = AsyncMock(return_value=payload)
     server.server_client.post = AsyncMock(return_value=response)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
-    assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
-    with pytest.raises(genrm.JudgeError):
+    assert all(isinstance(r, genrm.JudgeError) for r in results)
+    with pytest.raises(HTTPException, match="503"):
         await server.compare(genrm.GenRMCompareRequest(conversation_history=[], response_objs=[{}, {}]))
 
 
@@ -102,7 +102,8 @@ async def test_group_attempt_metadata_is_not_a_reward_metric(server):
     for result in results:
         data = result.model_dump(by_alias=True) | {"_ng_task_index": 0}
         metrics = RewardProfiler().rollout_info_from_result(data)
-        assert "_ng_group_member_index" not in metrics and "_ng_group_attempt" not in metrics
+        assert "_ng_group_attempt" not in metrics
+        assert metrics["_ng_rollout_index"] == result.rollout_index
 
 
 @pytest.mark.parametrize(
@@ -245,14 +246,47 @@ async def test_parse_fallback_does_not_depend_on_retry_order(server, malformed_f
     assert server.server_client.post.await_count == 2
 
 
-async def test_late_missing_member_receives_original_timeout_failure(server):
+@pytest.mark.parametrize("index", [0, 1])
+async def test_late_member_receives_original_timeout_failure(server, index):
     server.config.cohort_collection_timeout_s = 0.01
     server._run_single_comparison = AsyncMock()
     with pytest.raises(HTTPException) as first:
         await server.verify(member(0))
     with pytest.raises(HTTPException) as late:
-        await server.verify(member(1))
+        await server.verify(member(index, response_id="new-answer"))
     assert first.value.status_code == late.value.status_code == 503
     assert late.value.detail == first.value.detail
     assert "did not collect" in late.value.detail
     server._run_single_comparison.assert_not_awaited()
+
+
+async def test_judge_failure_preserves_existing_instance_config_and_masks_all_members(server):
+    server._run_compare = AsyncMock(side_effect=genrm.JudgeError("judge offline"))
+    bodies = [member(i) for i in range(2)]
+    bodies[0].instance_config = {"task": "keep", "mask_sample": False}
+    results = await asyncio.gather(*(server.verify(body) for body in bodies), return_exceptions=True)
+    assert all(isinstance(result, genrm.JudgeError) for result in results)
+    assert bodies[0].instance_config == {"task": "keep", "mask_sample": True}
+    assert bodies[1].instance_config == {"mask_sample": True}
+
+
+async def test_empty_batch_has_no_rewards(server):
+    result = await server.compare(genrm.GenRMCompareRequest(conversation_history=[], response_objs=[]))
+    assert result.rewards == []
+
+
+async def test_null_text_is_retried_as_unusable_judge_output(server):
+    server.config.genrm_parse_retries = 1
+    response = MagicMock(ok=True)
+    response.json = AsyncMock(
+        return_value={
+            "output": [
+                {"type": "reasoning", "summary": [{"text": None}]},
+                {"type": "message", "content": [{"type": "output_text", "text": None}]},
+            ]
+        }
+    )
+    server.server_client.post = AsyncMock(return_value=response)
+    with pytest.raises(genrm.JudgeError, match="no completed answer after 2 attempts"):
+        await server._run_single_comparison([], {}, {})
+    assert server.server_client.post.await_count == 2

@@ -844,11 +844,14 @@ class TestGenRMCompareResourcesServer:
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
+        waiter = asyncio.create_task(server.verify(self._verify_request(0, task_index=22)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
         with pytest.raises(HTTPException, match="did not collect 2 unique rollout indices") as error:
-            await asyncio.wait_for(server.verify(self._verify_request(0, task_index=22)), timeout=1.0)
+            await asyncio.wait_for(waiter, timeout=1.0)
 
         assert error.value.status_code == 503
-        cohort = next(iter(server._verify_cohorts.values()))
+        assert not server._verify_cohorts
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
         assert all(member.body is None and not member.waiters for member in cohort.members.values())
@@ -889,9 +892,7 @@ class TestGenRMCompareResourcesServer:
             isinstance(result, HTTPException) and result.status_code == 503 and "judge failed" in str(result.detail)
             for result in results
         )
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert not server._verify_cohorts
 
     async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -917,9 +918,7 @@ class TestGenRMCompareResourcesServer:
             for result in results
         )
         run_compare.assert_not_awaited()
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert not server._verify_cohorts
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})

@@ -28,6 +28,7 @@ genrm_compare_resources_server:
       # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
       # For isolated retries/replay, share a fresh _ng_group_id across exactly this many members.
       # Use local _ng_rollout_index slots 0..15 and enough concurrency to admit the whole group.
+      # File collector: --num-repeats 16 --concurrency 16 (one task, one agent).
       num_rollouts_per_prompt: 16
 
       # Separate finite deadlines: collection starts at first arrival; evaluation

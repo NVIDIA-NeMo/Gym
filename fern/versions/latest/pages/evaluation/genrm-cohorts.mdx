@@ -23,13 +23,13 @@ whether to replace a failed attempt. The server does not generate answers or sch
 | `_ng_rollout_index` | Required member slot from zero through `num_rollouts_per_prompt - 1`. |
 
 All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
-numbers are excluded from reward metrics. Shared judge calls run outside any individual member's token
-capture context.
+numbers and other private metadata are excluded from reward metrics. Shared judge calls run outside any
+individual member's token capture context. This also drops the arriving member's OpenTelemetry parent;
+judge spans are separate traces until cohort-level tracing is implemented.
 
-Legacy requests without `_ng_group_id` keep task/prompt-based grouping. Successfully completed legacy
-groups are removed after rewards are published, so another sequential run on the same server can be
-judged again. Legacy grouping cannot reliably distinguish overlapping runs or late requests from previous
-runs, and it does not provide completed reward replay. Failed legacy groups remain subject to retention.
+Legacy requests without `_ng_group_id` keep task/prompt-based grouping. Completed and failed legacy
+groups are removed, so another complete sequential run on the same server can be judged again. Legacy grouping cannot reliably distinguish overlapping runs or late requests from previous
+runs, and it does not provide completed reward replay.
 Use explicit group IDs for isolated retries and replay.
 
 <Warning>
@@ -78,20 +78,31 @@ If any retry produces a completed, nonempty answer but none can be parsed, the c
 existing default-score fallback. If every reply is empty or unsuccessful, the comparison fails. An omitted
 or null response status is treated as completed for compatibility with Gym model adapters.
 
-At `/verify`, failed waiters and a late member of a retained failed group receive HTTP 503. Superseding a group also releases its existing waiters with
-503; subsequent requests from an older attempt receive 409. Invalid coordinates receive 422.
+At `/verify`, incomplete membership, cancellation, and supersession release waiters with HTTP 503.
+Subsequent requests from a superseded attempt receive 409. Invalid coordinates receive 422.
+The simple agent converts upstream HTTP errors to HTTP 500 from `/run`. With
+`route_failures_to_sidecar` enabled, the collector records these as `agent_run_error` without a reward.
+By default an HTTP error aborts collection.
 
-The simple agent uses its standard upstream error handling: a failed verification becomes HTTP 500 from
-`/run`, with the upstream reason preserved. With `route_failures_to_sidecar` enabled, the collector records
-`agent_run_error` without a reward in the failures sidecar. By default an HTTP error aborts collection.
-Even with routing enabled, a run with no successful results raises rather than reporting an ordinary score.
-Failure rows can be joined to materialized inputs by task/rollout index to recover caller-supplied group
-coordinates; the collector does not echo group coordinates into failure rows.
-This path does not preserve generated answers in a judge-failure row or support judge-only reverification.
+Judge failures (including judge deadlines) use Gym's standard `JudgeError` failsafe instead. Each member
+receives HTTP 200 with its original generated `response`, `_ng_failure_class: judge_failed`, and
+`_ng_failure_judge_error`. The failsafe's `reward: 0.0` is a placeholder, not a valid GenRM score.
+The collector automatically saves these rows in the failures sidecar and excludes them from reward
+metrics. They are not counted by an `agent_run_error` zero-fill policy. A run without any successful
+results still raises. GenRM also sets `instance_config.mask_sample: true`, which NeMo-RL uses to mask
+unusable training samples; other consumers must honor this mask or the failure tag.
 
-Failure and server shutdown discard response bodies and release waiters. Owned judge tasks are cancelled
-and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their connection;
-shutdown does not guarantee delivery of a 503 response. Each terminal transition logs a bounded disposition message without prompt or answer content.
+A late request to a retained failed explicit-ID group receives its original failure, even if it contains a
+regenerated answer. To judge again, advance the group attempt for every member. Preserving answers does
+not enable individual judge-only reverification: reconstructing and retrying a full group remains the
+caller's responsibility. The batch `/compare` endpoint returns HTTP 503 for judge failures.
+
+Failure and server shutdown release waiters and discard stored response bodies. Owned judge tasks are
+cancelled and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their
+connection; shutdown does not guarantee delivery of a 503 response. Each terminal transition logs a
+bounded group key, attempt, member count, and disposition; failures include a bounded reason. Judge
+transport diagnostics include the model server, path, pair, deadline, and bounded HTTP error content.
+Connection retries retain the existing HTTP-client policy; there is no additional cohort transport retry loop.
 
 ## Replacement attempts and retention
 
@@ -143,4 +154,6 @@ Durable answer reuse and training checkpoint recovery require caller-side coordi
 Gym's forced-unsafe reverification override does not add group recovery: depending on retained state and
 response identity, it can return cached rewards, reject conflicting responses, or time out waiting for
 missing group members. The collector's individual rollout resume counter does not coordinate a group
-attempt; resume after a group failure requires caller coordination.
+attempt. A legacy run with no saved successes can regenerate the whole failed group on the same live
+server. This does not make partial resume safe: if only some rewards reached disk, the missing members
+cannot form a full group by themselves. Use caller-coordinated complete attempts for general recovery.

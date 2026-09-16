@@ -187,7 +187,7 @@ class RewardProfiler:
                 rollout_info[k] = v
 
         for k, v in result.items():
-            if k in {TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, "_ng_group_attempt", "reward", "response"}:
+            if k.startswith("_") or k in {"reward", "response"}:
                 continue
             if isinstance(v, bool):
                 rollout_info[k] = int(v)
@@ -425,7 +425,7 @@ class RewardProfiler:
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
-                if k == "_ng_group_attempt":
+                if k.startswith("_"):
                     continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)

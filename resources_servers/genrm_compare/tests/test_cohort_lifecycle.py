@@ -113,7 +113,7 @@ async def test_judge_has_separate_deadline_and_drains_comparisons(server):
     await asyncio.sleep(0.08)
     assert all(not task.done() for task in tasks)
     results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1)
-    assert all(isinstance(r, HTTPException) and "evaluation deadline" in r.detail for r in results)
+    assert all(isinstance(r, genrm.JudgeError) and "evaluation deadline" in str(r) for r in results)
     assert started == cancelled == {(0, 1), (1, 0)}
     assert all(m.body is None and not m.waiters for c in server._verify_cohorts.values() for m in c.members.values())
 
@@ -196,3 +196,25 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
     assert [r.reward for r in new] == [1.0, 2.0]
     retired = next(c for c in server._verify_cohorts.values() if c.group_attempt == 0)
     assert retired.phase == "failed" and not retired.rewards
+
+
+async def test_failed_legacy_group_restarts_and_ignores_late_completion(server):
+    server.config.cohort_collection_timeout_s = 0.02
+    first = asyncio.create_task(server.verify(member(0, group=None)))
+    await asyncio.sleep(0)
+    old = next(iter(server._verify_cohorts.values()))
+    with pytest.raises(HTTPException, match="did not collect"):
+        await first
+    assert not server._verify_cohorts
+    assert all(m.body is None and not m.waiters for m in old.members.values())
+
+    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    retry = asyncio.create_task(server.verify(member(0, group=None, response_id="new-answer")))
+    await asyncio.sleep(0)
+    replacement = next(iter(server._verify_cohorts.values()))
+    await server._publish_verify_cohort(old.key, old, {0: 99.0, 1: 99.0})
+    assert replacement.phase == "collecting" and not replacement.rewards
+    assert next(iter(server._verify_cohorts.values())) is replacement
+    second = await server.verify(member(1, group=None))
+    assert second.reward == (await retry).reward == 3.0
+    assert not server._verify_cohorts

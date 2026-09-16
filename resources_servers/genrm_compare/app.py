@@ -53,7 +53,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.judge import JudgeError, reraise_judge_errors
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -99,12 +99,14 @@ class _CohortState:
     """Process-local state for one prompt cohort."""
 
     prompt_digest: str
+    key: str
     group_id: Optional[str] = None
     group_attempt: int = 0
     members: Dict[int, _CohortMember] = field(default_factory=dict)
     phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
     rewards: Dict[int, float] = field(default_factory=dict)
     failure: Optional[str] = None
+    failure_kind: Literal["cohort", "judge"] = "cohort"
     terminal_at: Optional[float] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     collection_timeout_task: Optional[asyncio.Task[None]] = None
@@ -347,6 +349,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     status_code=409,
                     detail=(f"GenRM cohort {prompt_key!r} received inconsistent prompt or principle content"),
                 )
+            if cohort.phase == "failed":
+                self._raise_cohort_failure(body, cohort)
             member = cohort.members.get(rollout_index)
             if member is not None:
                 if member.response_digest != response_digest:
@@ -360,12 +364,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 if cohort.phase == "completed":
                     reward = cohort.rewards[rollout_index]
                     return self._verify_response(body, reward)
-                if cohort.phase == "failed":
-                    raise HTTPException(status_code=503, detail=cohort.failure or "GenRM cohort evaluation failed")
                 member.waiters.append(future)
             else:
-                if cohort.phase == "failed":
-                    raise HTTPException(status_code=503, detail=cohort.failure or "GenRM cohort evaluation failed")
                 if cohort.phase != "collecting":
                     raise HTTPException(
                         status_code=409,
@@ -403,8 +403,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         # A disconnected request must not cancel the shared cohort result.
         try:
             reward = await asyncio.shield(future)
-        except CohortEvaluationError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
+        except CohortEvaluationError:
+            self._raise_cohort_failure(body, cohort)
         except asyncio.CancelledError:
             # The logical member remains registered, but this HTTP request no
             # longer needs a result. Mark its waiter consumed so a later cohort
@@ -415,6 +415,20 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             await asyncio.shield(self._remove_waiter(cohort, rollout_index, future))
             raise
         return self._verify_response(body, reward)
+
+    @staticmethod
+    def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
+        message = cohort.failure or "GenRM cohort evaluation failed"
+        if cohort.failure_kind == "judge":
+            # judge_failsafe serializes this request with its original answer.
+            # NeMo-RL consumes the nested mask; the collector consumes judge_failed.
+            instance_config = (body.model_extra or {}).get("instance_config")
+            body.instance_config = {
+                **(instance_config if isinstance(instance_config, dict) else {}),
+                "mask_sample": True,
+            }
+            raise JudgeError(message)
+        raise HTTPException(status_code=503, detail=message)
 
     @staticmethod
     def _verify_response(body: GenRMCompareVerifyRequest, reward: float) -> GenRMCompareVerifyResponse:
@@ -450,7 +464,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             self._prune_terminal_cohorts()
             cohort = self._verify_cohorts.get(prompt_key)
             if cohort is None:
-                cohort = _CohortState(prompt_digest=prompt_digest)
+                cohort = _CohortState(prompt_digest=prompt_digest, key=prompt_key)
                 self._verify_cohorts[prompt_key] = cohort
             return cohort
 
@@ -491,6 +505,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if cohort is None:
                 cohort = _CohortState(
                     prompt_digest=prompt_digest,
+                    key=prompt_key,
                     group_id=body.group_id,
                     group_attempt=body.group_attempt,
                 )
@@ -609,9 +624,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 )
             )
             raise
+        except JudgeError as error:
+            await self._fail_verify_cohort(cohort, str(error), expected_phase="evaluating", failure_kind="judge")
         except TimeoutError:
             await self._fail_verify_cohort(
-                cohort, "GenRM cohort evaluation deadline exceeded", expected_phase="evaluating"
+                cohort,
+                f"GenRM cohort evaluation deadline exceeded after {self.config.cohort_evaluation_timeout_s}s",
+                expected_phase="evaluating",
+                failure_kind="judge",
             )
         except Exception as error:
             logger.exception("GenRM cohort evaluation failed for %s", prompt_key)
@@ -629,6 +649,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> None:
         """Publish rewards, retiring legacy cohorts and compacting explicit-ID tombstones."""
         async with cohort.lock:
+            if cohort.phase == "failed":
+                logger.debug("Discarding late GenRM completion for key=%r", cohort.key[:160])
+                return
             if cohort.phase != "evaluating":
                 raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
             cohort.rewards = reward_by_index
@@ -646,21 +669,26 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
                 self._verify_cohorts.pop(prompt_key, None)
             logger.info(
-                "GenRM cohort disposition=completed attempt=%s members=%s", cohort.group_attempt, len(cohort.members)
+                "GenRM cohort disposition=completed key=%r attempt=%s members=%s",
+                cohort.key[:160],
+                cohort.group_attempt,
+                len(cohort.members),
             )
 
-    @staticmethod
     async def _fail_verify_cohort(
+        self,
         cohort: _CohortState,
         message: str,
         *,
         expected_phase: Literal["collecting", "evaluating"],
+        failure_kind: Literal["cohort", "judge"] = "cohort",
     ) -> bool:
         async with cohort.lock:
             if cohort.phase != expected_phase:
                 return False
             cohort.phase = "failed"
             cohort.failure = message
+            cohort.failure_kind = failure_kind
             cohort.terminal_at = time.monotonic()
             timeout_task = cohort.collection_timeout_task
             cohort.collection_timeout_task = None
@@ -674,8 +702,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         waiter.set_exception(CohortEvaluationError(message))
                 member.body = None
                 member.waiters.clear()
+            # Legacy callers regenerate answers without a new group identity.
+            # Retire this failed instance without removing a replacement cohort.
+            if cohort.group_id is None and self._verify_cohorts.get(cohort.key) is cohort:
+                self._verify_cohorts.pop(cohort.key, None)
             logger.warning(
-                "GenRM cohort disposition=failed attempt=%s members=%s", cohort.group_attempt, len(cohort.members)
+                "GenRM cohort disposition=failed key=%r attempt=%s members=%s kind=%s reason=%r",
+                cohort.key[:160],
+                cohort.group_attempt,
+                len(cohort.members),
+                failure_kind,
+                message[:500],
             )
             return True
 
@@ -738,7 +775,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         """Fail active cohorts and drain all tasks owned by this server."""
         async with self._cohort_registry_lock:
             self._closed = True
-            for cohort in self._verify_cohorts.values():
+            for cohort in list(self._verify_cohorts.values()):
                 if cohort.phase in ("collecting", "evaluating"):
                     await self._fail_verify_cohort(
                         cohort, "GenRM server is shutting down", expected_phase=cohort.phase
@@ -829,13 +866,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             logger.info(f"[GenRM] Compare request: {num_responses} responses")
         if num_responses < 2:
             return GenRMCompareResponse(
-                rewards=[cfg.default_score],
+                rewards=[cfg.default_score] * num_responses,
                 comparison_results=None,
                 metrics=None,
             )
-        rewards, metrics, comparison_results, comparison_metadata = await self._run_compare(
-            conversation_history, response_objs, principle=body.principle
-        )
+        try:
+            rewards, metrics, comparison_results, comparison_metadata = await self._run_compare(
+                conversation_history, response_objs, principle=body.principle
+            )
+        except JudgeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         detailed_results = [
             {
                 "response_i": i,
@@ -914,10 +954,25 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 await raise_for_status(response)
                 return await response.json()
 
+        call_context = (
+            f"GenRM judge {cfg.genrm_model_server.name} /v1/responses pair={pair_idx} "
+            f"deadline={cfg.judge_request_timeout_s}s"
+        )
+
+        async def call_with_diagnostics():
+            try:
+                return await call()
+            except Exception as error:
+                content = getattr(error, "response_content", b"")
+                if isinstance(content, bytes):
+                    content = content[:1000].decode("utf-8", errors="replace")
+                detail = f"; response={str(content)[:1000]}" if content else ""
+                raise JudgeError(f"{call_context}: {type(error).__name__}: {str(error)[:1000]}{detail}") from error
+
         max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
         saw_completed_answer = False
         for attempt_idx in range(max_attempts):
-            raw_response = await reraise_judge_errors(call())
+            raw_response = await call_with_diagnostics()
             _, answer = extract_from_response_obj(raw_response)
             usable = (
                 isinstance(raw_response, dict)

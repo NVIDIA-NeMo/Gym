@@ -350,7 +350,7 @@ def extract_from_response_obj(response_obj: Dict[str, Any]) -> Tuple[str, str]:
             summary = item.get("summary", [])
             if isinstance(summary, list):
                 for s in summary:
-                    if isinstance(s, dict) and "text" in s:
+                    if isinstance(s, dict) and isinstance(s.get("text"), str):
                         reasoning_content += s.get("text", "")
 
         elif item_type == "message":
@@ -358,7 +358,7 @@ def extract_from_response_obj(response_obj: Dict[str, Any]) -> Tuple[str, str]:
             content = item.get("content", [])
             if isinstance(content, list):
                 for c in content:
-                    if isinstance(c, dict) and c.get("type") == "output_text":
+                    if isinstance(c, dict) and c.get("type") == "output_text" and isinstance(c.get("text"), str):
                         output_text += c.get("text", "")
 
     return reasoning_content, output_text
