@@ -40,17 +40,3 @@ VLLM_DECODE_ARGS=(
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
-
-# This checkpoint contains eight trained MTP prediction layers. Keep speculative
-# decoding opt-in so non-MTP and MTP runs remain directly comparable. Default to
-# all eight layers while allowing controlled draft-width experiments. Prefill and
-# decode must use the same setting because NIXL transfers their KV-cache state.
-if [[ "${INKLING_ENABLE_MTP:-0}" == "1" ]]; then
-    INKLING_MTP_NUM_SPECULATIVE_TOKENS="${INKLING_MTP_NUM_SPECULATIVE_TOKENS:-8}"
-    VLLM_PREFILL_ARGS+=(
-        --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${INKLING_MTP_NUM_SPECULATIVE_TOKENS}}"
-    )
-    VLLM_DECODE_ARGS+=(
-        --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${INKLING_MTP_NUM_SPECULATIVE_TOKENS}}"
-    )
-fi
