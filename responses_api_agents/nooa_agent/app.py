@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 from fastapi import Body, HTTPException, Request, Response
@@ -31,11 +32,17 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest, NOOARunResult
+from responses_api_agents.nooa_agent.runner import (
+    EmbeddedNOOARunner,
+    NOOARunFailure,
+    NOOARunRequest,
+    NOOARunResult,
+)
 
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
@@ -44,6 +51,35 @@ NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
 
 class _EpisodeTimeoutExceeded(TimeoutError):
     """Marks expiration of the configured NOOA episode budget."""
+
+    def __init__(self, result: NOOARunResult | None = None) -> None:
+        super().__init__("NOOA episode timed out")
+        self.result = result
+
+
+def _identity(body: NOOAAgentRunRequest, rollout_id: str | None = None) -> dict[str, str]:
+    row = body.model_dump()
+    task_id = next(
+        (
+            str(row[key])
+            for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
+            if row.get(key) is not None
+        ),
+        "unknown",
+    )
+    rollout_id = rollout_id or maybe_rollout_id_from_run_body(body)
+    if rollout_id is None and row.get("_ng_task_index") is not None and row.get("_ng_rollout_index") is not None:
+        rollout_id = f"{row['_ng_task_index']}-{row['_ng_rollout_index']}"
+    return {"task_id": task_id, "rollout_id": rollout_id or uuid4().hex}
+
+
+def _evidence(result: NOOARunResult, observations: AgentObservationBundle) -> dict[str, Any]:
+    fields: dict[str, Any] = {"ng_agent_observations": observations.model_dump(mode="json")}
+    if result.trajectory is not None:
+        fields["ng_trajectory"] = result.trajectory.model_copy(update={"gaps": observations.gaps}).model_dump(
+            mode="json"
+        )
+    return fields
 
 
 def _is_transient_infrastructure_error(error: BaseException) -> bool:
@@ -127,6 +163,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         model_url_path=self.url_path_for_request("/v1/responses", request),
                         model_cookies=dict(cookies),
                         resource_cookies=dict(cookies),
+                        **_identity(run_body, request.path_params.get("rollout_id")),
                     )
                 )
         for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
@@ -145,12 +182,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 result = await self._execute_rollout(request, body, record)
         # Preserve the terminal episode timeout: the generic classifier treats its
         # TimeoutError base class as transient.
-        except _EpisodeTimeoutExceeded:
+        except _EpisodeTimeoutExceeded as error:
             result = self._failure_response(
                 record,
                 f"NOOA episode exceeded run_timeout_secs={self.config.run_timeout_secs}s",
                 failure_class="timeout_exceeded",
                 terminal=True,
+                partial=error.result,
             )
         except Exception as error:  # noqa: BLE001 -- isolate one rollout from the batch
             failure_class = "transient" if _is_transient_infrastructure_error(error) else "legitimate"
@@ -158,6 +196,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 record,
                 f"{type(error).__name__}: {error}",
                 failure_class=failure_class,
+                partial=error.result if isinstance(error, NOOARunFailure) else None,
             )
 
         for name, value in (result.model_extra or {}).pop("_response_cookies", {}).items():
@@ -188,37 +227,41 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         model_url_path=self.url_path_for_run("/v1/responses", body),
                         model_cookies=dict(request.cookies),
                         resource_cookies=resource_cookies,
+                        **_identity(body),
                     )
                 )
         except TimeoutError as error:
             if not episode_timeout.expired():
                 raise
-            raise _EpisodeTimeoutExceeded from error
+            raise _EpisodeTimeoutExceeded(getattr(error.__cause__, "nooa_result", None)) from error
 
-        projected, observations = self._finalize_run_result(run_result)
-        response_json = projected.model_dump(mode="json")
-        if self.config.skip_verification:
-            result: dict[str, Any] = record | {
-                "response": response_json,
-                "reward": float(self.config.skip_verification_reward),
-                "verification_skipped": True,
-            }
-        else:
-            verify = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=record | {"response": response_json},
-                cookies=resource_cookies,
-            )
-            await raise_for_status(verify)
-            _merge_cookies(resource_cookies, verify)
-            result = await get_response_json(verify)
-        if run_result.termination_reason is not None:
-            result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
-            result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
-        result["ng_agent_observations"] = observations.model_dump(mode="json")
-        result["_response_cookies"] = run_result.model_cookies | run_result.resource_cookies
-        return NOOAAgentVerifyResponse.model_validate(result)
+        try:
+            projected, observations = self._finalize_run_result(run_result)
+            response_json = projected.model_dump(mode="json")
+            if self.config.skip_verification:
+                result: dict[str, Any] = record | {
+                    "response": response_json,
+                    "reward": float(self.config.skip_verification_reward),
+                    "verification_skipped": True,
+                }
+            else:
+                verify = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=record | {"response": response_json},
+                    cookies=resource_cookies,
+                )
+                await raise_for_status(verify)
+                _merge_cookies(resource_cookies, verify)
+                result = record | await get_response_json(verify)
+            if run_result.termination_reason is not None:
+                result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
+                result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
+            result.update(_evidence(run_result, observations))
+            result["_response_cookies"] = run_result.model_cookies | run_result.resource_cookies
+            return NOOAAgentVerifyResponse.model_validate(result)
+        except Exception as error:
+            raise NOOARunFailure(error, run_result) from error
 
     def _failure_response(
         self,
@@ -227,6 +270,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         *,
         failure_class: str,
         terminal: bool = False,
+        partial: NOOARunResult | None = None,
     ) -> NOOAAgentVerifyResponse:
         response = NeMoGymResponse(
             id="nooa_agent_failure",
@@ -252,6 +296,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         }
         if terminal:
             routing[NG_TERMINAL_KEY] = True
+        if partial is not None:
+            response = partial.episode.response
+            observations = finalize_observation_gaps(
+                partial.episode.observations, termination_reason=failure_class, termination_error=error
+            )
+            routing.update(_evidence(partial, observations))
+            routing["_response_cookies"] = partial.model_cookies | partial.resource_cookies
         return NOOAAgentVerifyResponse.model_validate(
             record | {"response": response.model_dump(mode="json"), "reward": 0.0} | routing
         )
