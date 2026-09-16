@@ -6,7 +6,7 @@
 # client API. Stirrup 0.2 makes context_window_tokens a required constructor
 # argument and needs a separately reviewed migration.
 stirrup>=0.1.12,<0.2
-transformers>=5.8.1
+transformers>=5.15.1  # CVE mitigation
 # Deliverable-processing deps for file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see
 # prompts/gdpval_user_prompt.txt). The subprocess venv created by ng_run

@@ -25,10 +25,12 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote
 
 
 logger = logging.getLogger(__name__)
@@ -65,9 +67,42 @@ METADATA_COLUMNS = (
     "url",
 )
 
+# Not mirrored into the sidecar, so dump path lookups always read documents.
+DUMP_PATH_COLUMNS = ("canonical_url_key", "source_path")
+
+# Keeps the IN clause below SQLite's bound-parameter limit on any build.
+DUMP_PATH_CHUNK_SIZE = 500
+
+SEC_ARCHIVES_URL_RE = re.compile(r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)")
+
 
 def default_sidecar_path(index_path: str | Path) -> Path:
     return Path(str(index_path) + SIDECAR_SUFFIX)
+
+
+def canonical_url_key(url: str) -> str | None:
+    """Return the index's document key for an SEC Archives URL, or None.
+
+    Must stay byte-identical to the key the index builder writes: unpadded CIK,
+    dashless accession, lowercased filename.
+    """
+    match = SEC_ARCHIVES_URL_RE.search(url)
+    if not match:
+        return None
+    filename = unquote(match.group(3)).strip("/").rsplit("/", 1)[-1].lower()
+    if not filename:
+        return None
+    return f"{int(match.group(1))}:{match.group(2)}:{filename}"
+
+
+def _relative_source_path(source_path: str) -> str | None:
+    """Return the part of an indexed path below the download's data directory.
+
+    Indexed paths are container-absolute, so only the fragment below data/ is
+    portable to whatever the reader has mounted.
+    """
+    _, separator, relative = source_path.replace("\\", "/").partition("/data/")
+    return relative if separator and relative else None
 
 
 def fingerprint_source_index(connection: sqlite3.Connection) -> str:
@@ -476,6 +511,40 @@ class LocalEdgarSearch:
 
     async def search_async(self, **arguments: Any) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.search, **arguments)
+
+    @property
+    def supports_dump_paths(self) -> bool:
+        return all(column in self._document_columns for column in DUMP_PATH_COLUMNS)
+
+    def dump_paths_for_urls(self, urls: Iterable[str]) -> dict[str, str]:
+        """Map SEC URLs to where the index recorded each document on disk.
+
+        Returned keys are canonical document keys, so callers look up with
+        canonical_url_key() rather than the URL itself.
+        """
+        if not self.supports_dump_paths:
+            return {}
+        keys = sorted({key for key in (canonical_url_key(url) for url in urls) if key})
+        if not keys:
+            return {}
+
+        connection = self._session()
+        resolved: dict[str, str] = {}
+        for start in range(0, len(keys), DUMP_PATH_CHUNK_SIZE):
+            chunk = keys[start : start + DUMP_PATH_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"SELECT canonical_url_key, source_path FROM documents WHERE canonical_url_key IN ({placeholders})",
+                chunk,
+            )
+            for row in rows:
+                relative = _relative_source_path(str(row["source_path"]))
+                if relative:
+                    resolved[str(row["canonical_url_key"])] = relative
+        return resolved
+
+    async def dump_paths_for_urls_async(self, urls: Iterable[str]) -> dict[str, str]:
+        return await asyncio.to_thread(self.dump_paths_for_urls, list(urls))
 
     @staticmethod
     def _assert_invariants(

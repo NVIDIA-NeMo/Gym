@@ -18,7 +18,7 @@ import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp.client_exceptions import ClientResponseError
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -762,7 +762,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(self, monkeypatch: MonkeyPatch, *, propagate_context_overflow_errors: bool = False):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -773,6 +773,7 @@ class TestApp:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
+            propagate_context_overflow_errors=propagate_context_overflow_errors,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -782,7 +783,49 @@ class TestApp:
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        self._setup_server(monkeypatch)
+        assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
+
+    @mark.parametrize("propagate", [False, True])
+    @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+    @mark.parametrize(
+        "error_content",
+        [
+            b'{"error":{"message":"maximum context length","code":400}}',
+            b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+        ],
+        ids=["vllm", "llamacpp"],
+    )
+    def test_context_overflow_propagation_flag(
+        self, monkeypatch: MonkeyPatch, propagate: bool, use_completions_api: bool, error_content: bytes
+    ) -> None:
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        server.config.use_completions_api = use_completions_api
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = error_content
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        if propagate:
+            assert response.status_code == 400
+            assert response.json() == json.loads(error_content)
+        else:
+            assert response.status_code == 200
+            assert '"finish_reason": "length"' in response.text
+
+        used_method = mock_client.create_completion if use_completions_api else mock_client.create_chat_completion
+        unused_method = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
+        used_method.assert_awaited_once()
+        unused_method.assert_not_awaited()
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -3844,6 +3887,7 @@ def _make_completions_backend_model(
     )
 
 
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
 @mark.parametrize(
     ("status", "error_content", "expect_length"),
@@ -3899,6 +3943,7 @@ def _make_completions_backend_model(
 )
 async def test_backend_context_overflow_handling(
     monkeypatch: MonkeyPatch,
+    propagate: bool,
     use_completions_api: bool,
     status: int,
     error_content: str,
@@ -3906,6 +3951,7 @@ async def test_backend_context_overflow_handling(
 ) -> None:
     monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
     error = ClientResponseError(MagicMock(), (), status=status, message="backend request failed")
     error.response_content = error_content.encode()
     client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -3919,7 +3965,7 @@ async def test_backend_context_overflow_handling(
         messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")],
     )
 
-    if expect_length:
+    if expect_length and not propagate:
         result = await model.chat_completions(request, body)
         assert result.object == "chat.completion"
         assert result.model == model.config.model
@@ -3932,6 +3978,8 @@ async def test_backend_context_overflow_handling(
         with raises(ClientResponseError) as exc_info:
             await model.chat_completions(request, body)
         assert exc_info.value is error
+        assert exc_info.value.status == status
+        assert exc_info.value.response_content == error_content.encode()
 
     used_method = client.create_completion if use_completions_api else client.create_chat_completion
     unused_method = client.create_chat_completion if use_completions_api else client.create_completion
@@ -5957,3 +6005,39 @@ class TestPrefixSupplyRejectsResponsesNative:
                 supply_prefix_token_ids=True,
                 is_responses_native=True,
             )
+
+
+class TestPreserveEnvelopeIdFollowsCaptureContext:
+    """The served envelope id is kept per request, not per server."""
+
+    def test_uncaptured_request_on_external_staging_server_mints_resp_id(self) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        model._external_capture_enabled = True
+
+        assert model._preserve_envelope_id() is False
+
+        captured = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-a",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=True,
+        )
+        token = set_token_sink(captured)
+        try:
+            assert model._preserve_envelope_id() is True
+        finally:
+            reset_token_sink(token)
+
+        local = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-b",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=False,
+        )
+        token = set_token_sink(local)
+        try:
+            assert model._preserve_envelope_id() is False
+        finally:
+            reset_token_sink(token)

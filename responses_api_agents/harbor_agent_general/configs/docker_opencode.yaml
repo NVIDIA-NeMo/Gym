@@ -1,0 +1,40 @@
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses with Docker environments.
+
+      harbor_jobs_dir: ${harbor_jobs_dir}
+
+      ##
+      # Follows harbor.models.job.config:DatasetConfig spec.
+      #
+      harbor_dataset:
+        path: ${harbor_dataset_path}
+
+      ##
+      # Follows harbor.models.trial.config:EnvironmentConfig spec.
+      #
+      harbor_environment:
+        type: docker
+
+      ##
+      # Follows harbor.models.trial.config:AgentConfig spec.
+      #
+      harbor_agent:
+        name: opencode
+        ## TIP: Directly use Gym's native expected variable name.
+        model_name: ${policy_model_name}
+        ##
+        # TIP: Escape $ so that secret variables are not exposed in the written Harbor configuration, and resolved directly within Harbor.
+        # If the variables are unlikely to change and exposure is not a concern, use immediate resolution via Hydra. e.g. ${oc.env:NVINF_API_KEY}
+        #
+        # env:
+          # MY_ENV: \${MY_ENV}
+
+      ##
+      # Follows harbor.models.trial.config:VerifierConfig spec.
+      #
+      # harbor_verifier:
+      #   disable: false

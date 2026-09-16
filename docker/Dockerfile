@@ -43,7 +43,8 @@ apt-get install -y --no-install-recommends \
     git \
     wget \
     less \
-    vim
+    vim \
+    gnupg
 
 apt-get purge -y \
     ffmpeg \
@@ -67,6 +68,25 @@ curl -fSsL -o /tmp/enroot.deb \
     "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
 apt-get install -y /tmp/enroot.deb
 rm /tmp/enroot.deb
+
+# Drop the --ldconfig arg from enroot's NVIDIA hook so nvidia-container-cli
+# reuses the sandbox's existing ld.so.cache instead of regenerating it.
+sed -i 's/cli_args=("--no-cgroups" "--ldconfig=@$(command -v ldconfig.real || command -v ldconfig)")/cli_args=("--no-cgroups")/' \
+    /etc/enroot/hooks.d/98-nvidia.sh
+grep -q '^cli_args=("--no-cgroups")$' /etc/enroot/hooks.d/98-nvidia.sh
+
+# Install nvidia-container-toolkit so enroot's NVIDIA hook
+# (/etc/enroot/hooks.d/98-nvidia.sh) can find nvidia-container-cli to inject
+# GPUs into enroot sandboxes. Without this, enroot sandboxes that request a
+# GPU fail at the hook step even though the outer container has GPU access.
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt-get update
+apt-get install -y nvidia-container-toolkit
+rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -164,10 +184,18 @@ ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 
-# Copy full source as root while the package build introspects the preserved
-# Git checkout. Exclude pyproject.toml and uv.lock since they are already
-# present from the hermetic stage. Runtime ownership is applied after install.
-COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+# Copy full source while the package build introspects the preserved Git
+# checkout. Exclude pyproject.toml and uv.lock since they are already present
+# from the hermetic stage.
+#
+# --chown matches the hermetic-stage copies above and makes the source readable
+# by the runtime UID regardless of the build context's file modes. Without it
+# the image only works when the context happens to be world-readable: a builder
+# with a restrictive umask (NeMo CI uses 0007) yields mode 0660 root-owned
+# files, and the later chown pass only covers directories, so `gym --help`
+# fails with PermissionError on nemo_gym/__init__.py once USER is switched.
+COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
+    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm and telemetry extras. The
 # worktree was created for the runtime UID in the base stage, so restore build ownership

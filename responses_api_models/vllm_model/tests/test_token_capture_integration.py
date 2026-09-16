@@ -14,7 +14,7 @@ from nemo_gym.token_id_capture import (
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
-    LineageStore,
+    LineageResolver,
     ParentResolutionStatus,
     TokenCaptureSnapshot,
     TokenCaptureStore,
@@ -151,7 +151,7 @@ class _ExternalSource:
 
 def _simulate_two_workers(
     sink_factory: Callable[[], TokenSink],
-    lineage_factory: Callable[[], LineageStore],
+    lineage_factory: Callable[[], LineageResolver],
     source: TokenSource,
     read_entries: Callable[[], list[TokenEntry]],
 ) -> None:

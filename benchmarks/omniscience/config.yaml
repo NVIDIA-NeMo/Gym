@@ -11,6 +11,7 @@ omniscience_omniscience_simple_agent:
   _inherit_from: omniscience_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: omniscience_omniscience_resources_server
       datasets:

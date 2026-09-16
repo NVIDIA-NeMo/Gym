@@ -107,6 +107,14 @@ class TestOpenCodeSandboxedAgent:
         assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
         assert (await created_spec({"resources": {"memory_mib": 8192}})).env == {}
 
+        # Explicit sandbox_config.env is passed through and wins over the derived caps.
+        spec = await created_spec(
+            {"resources": {"cpu": 2}, "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "OMP_NUM_THREADS": "4"}}
+        )
+        assert spec.env["EXECD_API_GRACE_SHUTDOWN"] == "50ms"
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+        assert all(spec.env[name] == "2" for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS")
+
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"
@@ -549,8 +557,10 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
-        assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
-        assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
+        gap_codes = {gap.code for gap in result.ng_agent_observations.gaps}
+        assert "model_call_ownership_unavailable" not in gap_codes
+        assert "sandbox_lifecycle_timing_unavailable" in gap_codes
+        assert "sandbox_cleanup_failed" not in gap_codes
         session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
         export_env = sandbox.exec.await_args_list[2].kwargs["env"]
         remote_data_home = session_list_env["XDG_DATA_HOME"]
