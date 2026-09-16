@@ -21,10 +21,18 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
@@ -39,6 +47,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    SimpleAgentVerifyRequest,
 )
 
 
@@ -401,6 +410,105 @@ class TestApp:
             "/verify",
         ]
         assert "ng_trajectory" not in result.model_dump(mode="json")
+
+    async def test_run_sends_legacy_equivalent_verify_payload(self) -> None:
+        server, server_client = _make_agent(True)
+        response_payload = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "answer", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10, 11],
+                        "generation_token_ids": [12, 13],
+                        "generation_log_probs": [-0.1, -0.2],
+                        "routed_experts": [[[0, 1]], [[1, 0]]],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        ).model_dump(mode="json")
+        response_with_trajectory = response_payload | {
+            "_ng_trajectory": TrajectoryRecord(task_id="unscoped", rollout_id="unscoped").model_dump(mode="json")
+        }
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(response_with_trajectory)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0, "resolved": True})
+
+        server_client.post = AsyncMock(side_effect=post)
+        run_payload = {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "question"}],
+                "max_output_tokens": 128,
+                "metadata": {"extra_body": '{"seed": 7}'},
+                "temperature": 0.25,
+            },
+            "verifier_metadata": {"expected_answer": "answer", "weight": 2},
+            "task_id": "task-7",
+            "dataset_field": {"nested": ["value"]},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: 2,
+            ROLLOUT_ID_KEY_NAME: "explicit-rollout",
+            AGENT_REF_KEY_NAME: {"type": "responses_api_agents", "name": "simple"},
+            TASK_SOURCE_KEY_NAME: "resources",
+        }
+        body = SimpleAgentRunRequest.model_validate(run_payload)
+        body_before = body.model_dump()
+
+        result = await server.run(MagicMock(cookies={}), body)
+
+        verify_payload = server_client.post.await_args_list[-1].kwargs["json"]
+        legacy_payload = SimpleAgentVerifyRequest.model_validate(
+            body_before | {"response": response_payload}
+        ).model_dump()
+        assert verify_payload == legacy_payload
+        assert verify_payload["responses_create_params"] == body_before["responses_create_params"]
+        assert verify_payload["verifier_metadata"] == run_payload["verifier_metadata"]
+        assert verify_payload["task_id"] == "task-7"
+        assert verify_payload["dataset_field"] == {"nested": ["value"]}
+        assert verify_payload["response"] == response_payload
+        assert verify_payload["response"]["output"][0]["generation_token_ids"] == [12, 13]
+        assert {
+            key: verify_payload[key]
+            for key in (
+                TASK_INDEX_KEY_NAME,
+                ROLLOUT_INDEX_KEY_NAME,
+                ATTEMPT_INDEX_KEY_NAME,
+                ROLLOUT_ID_KEY_NAME,
+                AGENT_REF_KEY_NAME,
+                TASK_SOURCE_KEY_NAME,
+            )
+        } == {
+            key: body_before[key]
+            for key in (
+                TASK_INDEX_KEY_NAME,
+                ROLLOUT_INDEX_KEY_NAME,
+                ATTEMPT_INDEX_KEY_NAME,
+                ROLLOUT_ID_KEY_NAME,
+                AGENT_REF_KEY_NAME,
+                TASK_SOURCE_KEY_NAME,
+            )
+        }
+        assert "_ng_trajectory" not in verify_payload["response"]
+        assert "ng_trajectory" not in verify_payload
+        assert result.ng_trajectory is not None
+        assert result.ng_trajectory["rollout_id"] == "explicit-rollout-a2"
+        assert body.model_dump() == body_before
 
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
