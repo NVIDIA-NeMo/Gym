@@ -12,9 +12,9 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from nemo_gym.sandbox.handoff import AgentTermination, SandboxedSeedResponse
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
+from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedSeedResponse
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.transfers import download_dir
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier

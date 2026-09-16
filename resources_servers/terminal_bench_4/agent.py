@@ -22,8 +22,8 @@ from uuid import uuid4
 
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.sandbox.handoff import AgentTermination, SandboxedSeedResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, get_global_config_dict, get_response_json, raise_for_status
+from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedSeedResponse
 
 
 def empty_response(body, model):

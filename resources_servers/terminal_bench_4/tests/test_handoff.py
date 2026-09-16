@@ -11,15 +11,15 @@ from fastapi import HTTPException
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxHandle
-from nemo_gym.sandbox.agent import empty_response
-from nemo_gym.sandbox.handoff import AgentTermination, SandboxedVerifyRequest, SessionRequest
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import lifecycle
+from resources_servers.terminal_bench_4.agent import empty_response
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
     TerminalBench4ResourcesServer,
     TerminalBench4SeedRequest,
 )
+from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedVerifyRequest, SessionRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
 

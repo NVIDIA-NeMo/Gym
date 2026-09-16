@@ -20,9 +20,9 @@ from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.sandbox.agent import artifact_directory, empty_response, run_borrowed
-from nemo_gym.sandbox.handoff import AgentTermination, SandboxedVerifyResponse
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from resources_servers.terminal_bench_4.agent import artifact_directory, empty_response, run_borrowed
+from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedVerifyResponse
 
 
 SYSTEM = """You are an assistant operating a task environment. Respond with exactly one bash action in a

@@ -57,8 +57,8 @@ async def main(args):
         source_root / path
         for path in [
             "nemo_gym/sandbox/api.py",
-            "nemo_gym/sandbox/agent.py",
-            "nemo_gym/sandbox/handoff.py",
+            "resources_servers/terminal_bench_4/agent.py",
+            "resources_servers/terminal_bench_4/handoff.py",
             "nemo_gym/sandbox/adapters/docker_compose.py",
             "nemo_gym/sandbox/providers/opensandbox/provider.py",
             "benchmarks/terminal_bench_4/resources.yaml",

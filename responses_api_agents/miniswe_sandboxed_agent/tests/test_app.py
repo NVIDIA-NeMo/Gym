@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.sandbox.handoff import SandboxedSeedResponse
 from nemo_gym.server_utils import ServerClient
+from resources_servers.terminal_bench_4.handoff import SandboxedSeedResponse
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 
 

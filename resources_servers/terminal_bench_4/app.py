@@ -16,16 +16,16 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
-from nemo_gym.sandbox.handoff import (
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from resources_servers.terminal_bench_4 import lifecycle
+from resources_servers.terminal_bench_4.environment import EnvironmentConfig
+from resources_servers.terminal_bench_4.handoff import (
     AgentTermination,
     SandboxedSeedResponse,
     SandboxedVerifyRequest,
     SandboxedVerifyResponse,
     SessionRequest,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
-from resources_servers.terminal_bench_4 import lifecycle
-from resources_servers.terminal_bench_4.environment import EnvironmentConfig
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.task import PackageLoader
 

@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.sandbox import agent as lifecycle
-from nemo_gym.sandbox.handoff import AgentTermination
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.terminal_bench_4 import agent as lifecycle
+from resources_servers.terminal_bench_4.handoff import AgentTermination
 
 
 @pytest.mark.parametrize("reason", ["completed", "timeout", "nonzero_exit", "infrastructure_error", "cancelled"])
