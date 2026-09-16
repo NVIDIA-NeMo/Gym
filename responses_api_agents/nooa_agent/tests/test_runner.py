@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 from http.cookies import SimpleCookie
 from typing import Any
@@ -21,10 +22,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from nooa import Agent
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import (
+    EmbeddedNOOARunner,
+    NOOARunFailure,
+    NOOARunRequest,
+)
+from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
 
 class ValidAgent(Agent):
@@ -33,6 +39,44 @@ class ValidAgent(Agent):
         self.label = label
 
     async def analyze(self, text: str, customer_id: str) -> str: ...
+
+
+class PolicyAgent(Agent):
+    async def analyze(self, text: str) -> str:
+        return await self.primary(text)
+
+    async def primary(self, text: str) -> str:
+        """Answer the question."""
+        ...
+
+
+class BudgetAgent(PolicyAgent):
+    async def analyze(self, text: str) -> str:
+        await self.primary(text)
+        await self.primary(text)
+        return await self.primary(text)
+
+
+class FailingAgent(PolicyAgent):
+    async def analyze(self, text: str) -> str:
+        await self.primary(text)
+        raise RuntimeError("failed after a model call")
+
+
+class WaitingAgent(PolicyAgent):
+    ready: Any = None
+
+    async def analyze(self, text: str) -> str:
+        await self.primary(text)
+        self.ready.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+
+class ResourceUsingAgent(Agent):
+    async def analyze(self, text: str) -> str:
+        """Answer the question using the available resource methods."""
+        ...
 
 
 class FakeAgent:
@@ -135,6 +179,7 @@ async def test_embedded_runner_invokes_adapter_and_attaches_resource_methods() -
     )
 
     assert [item.type for item in result.episode.response.output] == ["function_call", "function_call_output"]
+    assert json.loads(result.episode.response.output[-1].output) == {"weather": "cold"}
     assert result.return_value == "Check delivery: cold"
     assert result.episode.observations.source == "nooa"
     assert result.episode.observations.gaps == []
@@ -172,3 +217,147 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
 def test_sandboxed_execution_mode_fails_during_runner_construction() -> None:
     with pytest.raises(NotImplementedError, match="sandboxed execution is not implemented"):
         make_runner(execution_mode="sandboxed")
+
+
+async def invoke_policy(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+    assert isinstance(request.input, str)
+    return await agent.analyze(request.input)
+
+
+def policy_runner(agent_class: type[Agent] = PolicyAgent) -> tuple[EmbeddedNOOARunner, list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+
+    async def post(*, json: dict[str, Any], **_: Any) -> FakeHTTPResponse:
+        calls.append(json)
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"fc-{len(calls)}",
+            call_id=f"call-{len(calls)}",
+            name="return_result",
+            arguments='{"result":"done"}',
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(calls)}"))
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    invocation = NOOAInvocationConfig(
+        agent_class=f"{__name__}:{agent_class.__name__}",
+        invocation_adapter=f"{__name__}:invoke_policy",
+    )
+    return EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=client,
+        model_server_name="primary_model",
+        resources_server_name="resources",
+        max_policy_calls=3,
+    ), calls
+
+
+@pytest.mark.asyncio
+async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
+    runner, calls = policy_runner(BudgetAgent)
+    runner._max_policy_calls = 2
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.termination_reason == "policy_budget_exceeded"
+    assert len(calls) == len(result.trajectory.turns) == 2
+    assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_agent_failure_carries_the_partial_episode() -> None:
+    runner, calls = policy_runner(FailingAgent)
+    with pytest.raises(NOOARunFailure, match="failed after a model call") as error:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert len(calls) == len(error.value.result.trajectory.turns) == 1
+    assert error.value.result.episode.response.output
+
+
+@pytest.mark.asyncio
+async def test_cancellation_preserves_evidence_without_swallowing_cancellation() -> None:
+    runner, _ = policy_runner(WaitingAgent)
+    WaitingAgent.ready = asyncio.Event()
+    task = asyncio.create_task(
+        runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    )
+    try:
+        await asyncio.wait_for(WaitingAgent.ready.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as error:
+            await task
+        assert len(error.value.nooa_result.trajectory.turns) == 1
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        WaitingAgent.ready = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 503])
+async def test_real_code_and_resource_outputs_join_to_their_own_invocations(status: int) -> None:
+    runner, _ = policy_runner(ResourceUsingAgent)
+    model_requests = []
+    code_arguments = json.dumps({"code": "print(await self.get_weather(city='Paris'))"})
+
+    async def post(*, server_name: str, json: Any, **kwargs: Any) -> FakeHTTPResponse:
+        if server_name == "resources":
+            response = FakeHTTPResponse({"weather": "cold"} if status == 200 else {"error": "unavailable"})
+            response.status = status
+            return response
+        model_requests.append(json)
+        first = len(model_requests) == 1
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"fc-{len(model_requests)}",
+            call_id=f"call-{len(model_requests)}",
+            name="execute_python" if first else "return_result",
+            arguments=code_arguments if first else '{"result":"done"}',
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(model_requests)}"))
+
+    runner._server_client.post = AsyncMock(side_effect=post)
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=responses_create_params("Paris"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.return_value == "done"
+    assert len(model_requests) == 2
+    code = next(tool for tool in result.trajectory.tool_calls if tool.tool_call_id == "call-1")
+    resource = next(tool for tool in result.trajectory.tool_calls if tool.tool_name == "get_weather")
+    assert code.tool_call_id == "call-1"
+    assert resource.status == ("completed" if status == 200 else "failed")
+    observed = next(
+        item.output
+        for item in model_requests[1].input
+        if item.type == "function_call_output" and item.call_id == "call-1"
+    )
+    assert code.output == observed
+    assert resource.output == ({"weather": "cold"} if status == 200 else {"error": "unavailable"})
+    assert all(tool.tool_name != "return_result" for tool in result.trajectory.tool_calls)
+    model_owner = next(inv for inv in result.trajectory.invocations if inv.invocation_id == code.invocation_id)
+    assert model_owner.conversation[0].role == "system"
+    for tool in (code, resource):
+        owner = next(
+            invocation
+            for invocation in result.trajectory.invocations
+            if invocation.invocation_id == tool.invocation_id
+        )
+        assert any(
+            getattr(item, "call_id", None) == tool.tool_call_id and item.type == "function_call_output"
+            for item in owner.conversation
+        )

@@ -40,6 +40,10 @@ class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
 
 
+class InvalidPolicyOutputError(ValueError):
+    """A successful model request whose output does not satisfy the method contract."""
+
+
 @dataclass(slots=True)
 class GymModelCall:
     """Exact Gym request/response evidence for one NOOA policy call."""
@@ -52,7 +56,7 @@ class GymModelCall:
 
 @dataclass(slots=True)
 class RolloutLLMState:
-    """Gym-owned policy budget and model evidence for one rollout."""
+    """Gym-owned budget and exact model evidence shared by this rollout's clients."""
 
     max_policy_calls: int
     used: int = 0
@@ -60,6 +64,7 @@ class RolloutLLMState:
     gaps: list[ObservationGap] = field(default_factory=list)
 
     def charge(self) -> None:
+        # No await between check and increment: atomic for the async rollout task tree.
         if self.used >= self.max_policy_calls:
             raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_policy_calls} calls")
         self.used += 1
@@ -309,7 +314,7 @@ class GymResponsesLLM(UnifiedLLM):
             try:
                 content = output_model.model_validate(json.loads(content))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
-                raise ValueError(f"Gym model returned invalid {output_model.__name__} JSON") from error
+                raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
         reasoning = [
             item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"

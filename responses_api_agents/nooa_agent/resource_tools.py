@@ -117,6 +117,9 @@ class ResourceToolDispatcher:
                 output = {"error": f"Could not serialize arguments for {name}: {error}"}
                 return output
             self._cookies.update({key: morsel.value for key, morsel in response.cookies.items()})
+            if observation is not None and response.status >= 400:
+                observation.status = "failed"
+                observation.error_type = f"http_{response.status}"
             body = (await response.content.read()).decode(errors="replace")
             try:
                 output = json.loads(body)

@@ -190,6 +190,8 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert state.model_calls[0].response_id == "resp-1"
     assert state.model_calls[0].model_ref is not None
     assert state.model_calls[0].model_ref.name == "policy_model"
+    assert state.calls[0].request == request["json"]
+    assert state.calls[0].request is not request["json"]
 
 
 @pytest.mark.asyncio
