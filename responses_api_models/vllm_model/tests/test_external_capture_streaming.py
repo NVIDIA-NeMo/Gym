@@ -6,16 +6,20 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym import chat_streaming, responses_streaming
+from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
 from nemo_gym.token_id_capture.lineage import FileLineageStore
+from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.sink import current_capture_context
+from nemo_gym.token_id_capture.staging import resolve_terminal
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
 from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
 from nemo_gym.token_id_capture.staging.records import (
@@ -40,6 +44,7 @@ class _Worker:
         self.context = None
         self.tool_call = False
         self.reasoning = False
+        self.refusal = False
         self.capture = RolloutTokenCapture(sink=self, weight_version_fn=lambda: 7, adapter=VLLMCaptureAdapter())
 
     def stage(self, record):
@@ -74,6 +79,8 @@ class _Worker:
         }
         if self.reasoning:
             payload["choices"][0]["message"]["reasoning_content"] = "Check the requested calculation."
+        if self.refusal:
+            payload["choices"][0]["message"].update(content=None, refusal="I cannot help with that.")
         if self.tool_call and turn == 1:
             payload["choices"][0]["finish_reason"] = "tool_calls"
             payload["choices"][0]["message"].update(
@@ -139,6 +146,7 @@ def make_harness(tmp_path, monkeypatch):
         worker = _Worker()
         worker.reasoning = reasoning
         model._clients = [worker]
+        monkeypatch.setattr(model, "_finalize_external_capture", AsyncMock(wraps=model._finalize_external_capture))
         return SimpleNamespace(model=model, worker=worker, app=model.setup_webserver(), ledger=FileLineageStore(root))
 
     return make
@@ -211,6 +219,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
         assert h.worker.context.committed
 
     messages = await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
+    assert h.model._finalize_external_capture.await_count == 1
     assert messages[0]["status"] == 200
     raw = b"".join(message.get("body", b"") for message in messages).decode()
     assert "answer 1" in raw and "completion-1" in raw
@@ -252,27 +261,45 @@ def test_static_streaming_override_rejected(make_harness, override):
         make_harness(**{override: {"stream": True}})
 
 
-async def test_runtime_override_is_scoped_to_captured_calls(make_harness):
-    h = make_harness()
-    body = _body("responses") | {"metadata": {"extra_body": json.dumps({"stream": True})}}
-    messages = await _request(h.app, _path("responses"), body)
+@pytest.mark.parametrize("dialect", ["responses", "compaction"])
+@pytest.mark.parametrize("evaluation", [False, True])
+async def test_runtime_override_is_scoped_to_captured_calls(make_harness, dialect, evaluation):
+    h = make_harness(dialect, evaluation)
+    body = _body(dialect) | {"metadata": {"extra_body": json.dumps({"stream": True})}}
+    failures_at_send = []
+
+    async def check_send(message):
+        if b"event: response.failed" in message.get("body", b""):
+            manifest = await h.ledger.manifest("r1")
+            assert not manifest["records"]
+            assert len(manifest["failures"]) == len(failures_at_send) + 1
+            failures_at_send.append(manifest["failures"])
+
+    messages = await _request(h.app, _path(dialect), body, check_send)
     assert not h.worker.requests
     assert _events(messages)[-1]["type"] == "response.failed"
     # Existing ledger rows make this unresolvable continuation unadmitted.
     body["input"] += [{"role": "assistant", "content": "unrecorded"}, {"role": "user", "content": "continue"}]
-    messages = await _request(h.app, _path("responses"), body)
+    messages = await _request(h.app, _path(dialect), body, check_send)
     assert not h.worker.requests
     assert _events(messages)[-1]["type"] == "response.failed"
     assert len((await h.ledger.manifest("r1"))["failures"]) == 2
+    assert len(failures_at_send) == 2
     await _request(h.app, "/v1/responses", body)
     assert h.worker.requests[0]["stream"] is True
 
 
-@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize(
+    "dialect,content_kind",
+    [(dialect, "reasoning") for dialect in DIALECTS]
+    + [(dialect, "refusal") for dialect in ("responses", "messages", "compaction")],
+)
 @pytest.mark.parametrize("tool_call", [False, True])
-async def test_two_call_continuation_from_served_sse(make_harness, dialect, tool_call):
-    h = make_harness(dialect, reasoning=True)
+@pytest.mark.parametrize("evaluation", [False, True])
+async def test_two_call_continuation_from_served_sse(make_harness, dialect, content_kind, tool_call, evaluation):
+    h = make_harness(dialect, evaluation, reasoning=content_kind == "reasoning")
     h.worker.tool_call = tool_call
+    h.worker.refusal = content_kind == "refusal"
     body = _body(dialect)
     if tool_call:
         function = {
@@ -290,7 +317,8 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, tool
     async def complete():
         messages = await _request(h.app, _path(dialect), body)
         raw = b"".join(message.get("body", b"") for message in messages)
-        assert b"Check the requested calculation." in raw
+        expected = b"I cannot help with that." if h.worker.refusal else b"Check the requested calculation."
+        assert expected in raw
         wire_dialect = {"chat/completions": "chat_completions", "compaction": "responses"}.get(dialect, dialect)
         return _reconstruct_streamed_response(raw, wire_dialect)
 
@@ -305,6 +333,19 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, tool
         if tool_call:
             call = next(item for item in first["output"] if item["type"] == "function_call")
             assert call["namespace"] == "functions"
+            assert call["name"] == "weather"
+            assert h.model._finalize_external_capture.await_args.args[0]["output"] == first["output"]
+            manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+            # Neither a declaration nor an envelope ID may bypass content attribution.
+            attribution = resolve_terminal(manifest.records, {**first, "id": ""})
+            assert attribution.attributed and attribution.method == "content"
+            assert attribution.model_call_id == manifest.records[0].model_call_id
+            altered = {
+                **first,
+                "id": "",
+                "output": [{**item, "namespace": "other"} if item is call else item for item in first["output"]],
+            }
+            assert not resolve_terminal(manifest.records, altered).attributed
     else:
         assistant = (
             first["choices"][0]["message"]
@@ -328,6 +369,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, tool
     assert admission["parent_call_id"] == parent.model_call_id
     assert admission["staging_chain"] == [parent.staging_key]
     assert child.response_id == second["id"]
+    assert h.model._finalize_external_capture.await_count == 2
     receipt = RolloutReceipt(
         rollout_id="r1",
         manifest=manifest.records,
@@ -338,3 +380,81 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, tool
     assert row.token_ids == [10, 11, 20, 21]
     assert row.token_mask == [0.0, 1.0, 0.0, 1.0]
     assert row.logprobs == [0.0, -0.25, 0.0, -0.25]
+
+
+@pytest.mark.parametrize("evaluation", [False, True])
+@pytest.mark.parametrize(
+    "dialect,failure,stream",
+    [(dialect, "conversion", True) for dialect in ("responses", "messages", "compaction")]
+    + [(dialect, "serialization", True) for dialect in DIALECTS]
+    + [("compaction", failure, False) for failure in ("conversion", "serialization")],
+)
+async def test_response_preparation_failure_does_not_commit(
+    make_harness, monkeypatch, dialect, failure, stream, evaluation
+):
+    h = make_harness(dialect, evaluation)
+
+    def fail_conversion(*args, **kwargs):
+        raise ValueError(f"injected {failure} failure")
+
+    if failure == "conversion":
+        if dialect == "messages":
+            monkeypatch.setattr(AnthropicConverter, "responses_to_anthropic_response", fail_conversion)
+        else:
+            monkeypatch.setattr(type(h.model._converter), "chat_completion_to_response", fail_conversion)
+    elif not stream:
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model_with_compaction.app._orjson_dispatch_response", fail_conversion
+        )
+    elif dialect in ("responses", "compaction"):
+        original = responses_streaming._sse_event
+
+        def serialize(payload):
+            if payload["type"] == "response.output_item.done":
+                raise ValueError("injected serialization failure")
+            return original(payload)
+
+        monkeypatch.setattr(responses_streaming, "_sse_event", serialize)
+    elif dialect == "chat/completions":
+        original = chat_streaming._sse_data
+
+        def serialize(payload):
+            if any(choice["delta"].get("content") for choice in payload["choices"]):
+                raise ValueError("injected serialization failure")
+            return original(payload)
+
+        monkeypatch.setattr(chat_streaming, "_sse_data", serialize)
+    else:
+        original = AnthropicConverter._sse_event
+
+        def serialize(self, event, payload):
+            if event == "content_block_start":
+                raise ValueError("injected serialization failure")
+            return original(self, event, payload)
+
+        monkeypatch.setattr(AnthropicConverter, "_sse_event", serialize)
+
+    sent = []
+
+    async def check_send(message):
+        sent.append(message)
+        if b"event: response.failed" in message.get("body", b""):
+            manifest = await h.ledger.manifest("r1")
+            assert not manifest["records"]
+            assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
+
+    if stream and dialect in ("responses", "compaction"):
+        await _request(h.app, _path(dialect), _body(dialect), check_send)
+        assert _events(sent)[-1]["type"] == "response.failed"
+        assert all(event["type"] != "response.output_item.done" for event in _events(sent))
+    else:
+        with pytest.raises(ValueError, match=f"injected {failure} failure"):
+            await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
+        assert sent[0]["status"] == 500
+
+    assert len(h.worker.records) == 1, "the failure must occur after worker staging succeeds"
+    h.model._finalize_external_capture.assert_not_awaited()
+    manifest = await h.ledger.manifest("r1")
+    assert not manifest["records"]
+    assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
+    assert b"ng_commit_coords" not in b"".join(message.get("body", b"") for message in sent)

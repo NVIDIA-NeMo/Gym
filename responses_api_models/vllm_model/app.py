@@ -1149,12 +1149,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
-            if context.response_dialect == "responses":
-                # Fingerprint the served items: Responses separates reasoning from assistant text.
-                response_items = [
-                    item.model_dump()
-                    for item in self._converter.chat_completions_messages_to_responses_items(response_items)
-                ]
             # Compute one fingerprint for the response items.
             # Compute another for the request and response items together.
             # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
