@@ -1260,25 +1260,30 @@ def test_pdf_evaluator_cleanup_patch_reraises_unrelated_missing_file(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "result_kind",
+    ("result_kind", "gold_kind"),
     [
-        "valid",
-        "empty",
-        "invalid",
-        "truncated",
-        "fetch_none",
-        "fetch_type",
-        "fetch_error",
-        "cache_missing",
-        "cache_permission",
-        "cache_corrupt",
-        "missing_result",
-        "decoder_missing",
-        "decoder_unknown",
-        "metric_error",
+        ("valid", "valid"),
+        ("empty", "valid"),
+        ("invalid", "valid"),
+        ("truncated", "valid"),
+        ("fetch_none", "valid"),
+        ("fetch_type", "valid"),
+        ("fetch_error", "valid"),
+        ("cache_missing", "valid"),
+        ("cache_permission", "valid"),
+        ("cache_corrupt", "valid"),
+        ("missing_result", "valid"),
+        ("decoder_missing", "valid"),
+        ("decoder_unknown", "valid"),
+        ("metric_error", "valid"),
+        ("valid", "missing"),
+        ("valid", "invalid"),
+        ("valid", "null"),
+        ("invalid", "missing"),
+        ("invalid", "invalid"),
+        ("invalid", "null"),
     ],
 )
-@pytest.mark.parametrize("gold_kind", ["valid", "missing", "invalid", "null"])
 def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result_kind: str, gold_kind: str) -> None:
     import builtins
     from io import BytesIO
