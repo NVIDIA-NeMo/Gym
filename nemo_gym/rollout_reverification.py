@@ -981,7 +981,7 @@ class RolloutReverificationHelper(BaseModel):
                     # The aggregator reads only the main jsonl, so neither path
                     # contaminates the score.
                     failure_class = failure_class or ATIF_NO_PERSIST_FAILURE_CLASS
-                    result.setdefault(NG_FAILURE_CLASS_KEY, failure_class)
+                    result[NG_FAILURE_CLASS_KEY] = failure_class
                     serialized = orjson.dumps(result)
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.

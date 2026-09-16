@@ -2206,11 +2206,24 @@ class TestRolloutReverificationRunFromConfig:
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
         assert returned[0]["reward"] == 1.0
 
+    @pytest.mark.parametrize(
+        ("include_failure_class", "reported_failure_class", "expected_failure_class"),
+        [
+            (False, None, "kill_shaped"),
+            (True, None, "kill_shaped"),
+            (True, "", "kill_shaped"),
+            (True, "worker_lost", "worker_lost"),
+        ],
+        ids=["absent", "null", "blank", "explicit"],
+    )
     async def test_atif_no_persist_result_is_visible_in_failures_and_coverage(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
+        include_failure_class: bool,
+        reported_failure_class: str | None,
+        expected_failure_class: str,
     ) -> None:
         row = self._make_row("agent_a", task=0) | {
             ATIF_PROVENANCE_KEY: {
@@ -2222,6 +2235,8 @@ class TestRolloutReverificationRunFromConfig:
             }
         }
         result = {"reward": 0.0, NG_NO_PERSIST_KEY: True}
+        if include_failure_class:
+            result[NG_FAILURE_CLASS_KEY] = reported_failure_class
         self._patch_common(monkeypatch, [(row, result)])
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._prepare_atif_payloads",
@@ -2246,13 +2261,13 @@ class TestRolloutReverificationRunFromConfig:
         assert self._read_jsonl(tmp_path / "output.jsonl") == []
         [failed] = self._read_jsonl(tmp_path / "output_failures.jsonl")
         assert failed[NG_NO_PERSIST_KEY] is True
-        assert failed[NG_FAILURE_CLASS_KEY] == "kill_shaped"
+        assert failed[NG_FAILURE_CLASS_KEY] == expected_failure_class
         assert failed[TASK_INDEX_KEY_NAME] == 0
         assert failed[ROLLOUT_INDEX_KEY_NAME] == 0
         assert failed[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
         assert failed[ATIF_PROVENANCE_KEY] == row[ATIF_PROVENANCE_KEY]
         output = capsys.readouterr().out
-        assert "1 kill_shaped routed this run" in output
+        assert f"1 {expected_failure_class} routed this run" in output
         assert "Metrics cover: 0 of 1 rollouts" in output
 
     async def test_results_sorted_by_task_and_rollout_index_before_aggregate_metrics(
