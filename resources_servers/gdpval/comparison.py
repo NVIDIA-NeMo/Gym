@@ -425,6 +425,7 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "pptx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "xlsx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "txt": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
+    "srt": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "csv": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "json": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "xml": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
@@ -1362,6 +1363,7 @@ def send_judge_request(
     messages: list[dict],
     max_output_tokens: int = 65535,
     create_overrides: Optional[dict] = None,
+    request_attempts: int = REQUEST_MAX_ATTEMPTS,
 ) -> str:
     """Send a judge request with exponential-backoff retry.  Returns response text.
 
@@ -1369,6 +1371,7 @@ def send_judge_request(
     over the default create kwargs; a ``None`` value removes the matching
     default (e.g. to drop ``temperature`` for a reasoning model that rejects it).
     """
+    # SDK-retrying callers use one outer attempt to avoid multiplying retries.
     backoff = REQUEST_INITIAL_BACKOFF_SECONDS
     create_kwargs = merge_create_kwargs(
         {
@@ -1380,17 +1383,17 @@ def send_judge_request(
         create_overrides,
     )
 
-    for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+    for attempt in range(1, request_attempts + 1):
         try:
             response = client.chat.completions.create(**create_kwargs)
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
             retryable = _is_retryable(error)
-            is_last = attempt == REQUEST_MAX_ATTEMPTS
+            is_last = attempt == request_attempts
             if not retryable or is_last:
                 raise
             print(
-                f"  Judge request attempt {attempt}/{REQUEST_MAX_ATTEMPTS} failed "
+                f"  Judge request attempt {attempt}/{request_attempts} failed "
                 f"(retryable={retryable}), retrying in {backoff:.1f}s...",
                 flush=True,
             )
@@ -1855,6 +1858,8 @@ def run_trials(
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
     rng: Optional[random.Random] = None,
+    invalid_response_retries: int = 0,
+    request_attempts: int = REQUEST_MAX_ATTEMPTS,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
@@ -1866,7 +1871,9 @@ def run_trials(
 
     Invalid responses without a boxed verdict are excluded rather than scored
     as ties. If every response is invalid, the matchup fails so its caller can
-    retry or drop it explicitly.
+    retry or drop it explicitly. ``invalid_response_retries`` repeats only the
+    invalid trial with the same judge and submission positions, adding a format
+    reminder for nonempty malformed answers.
 
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
     ``tie_count``, ``task_count`` (valid votes only), ``invalid_count``,
@@ -1879,8 +1886,12 @@ def run_trials(
     ``raw_responses`` (per-trial judge completion strings, same ordering as
     ``trial_judges`` — trial ``i`` was swapped iff ``i % 2 != 0``).
     """
+    if request_attempts < 1:
+        raise ValueError("request_attempts must be positive")
     if not judges:
         raise ValueError("run_trials requires a non-empty judge panel")
+    if invalid_response_retries < 0:
+        raise ValueError("invalid_response_retries must be non-negative")
     rng = rng or random.Random()
 
     win_count_a = 0
@@ -1911,12 +1922,27 @@ def run_trials(
             submission_a=current_a,
             submission_b=current_b,
         )
-        response_text = send_judge_request(
-            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
-        )
+        format_reminder_added = False
+        for _attempt in range(invalid_response_retries + 1):
+            response_text = send_judge_request(
+                judge.client,
+                judge.model,
+                messages,
+                max_output_tokens,
+                judge.create_overrides,
+                request_attempts=request_attempts,
+            )
+            judgement = parse_judgement(response_text)
+            if judgement is not None:
+                break
+            if response_text and not format_reminder_added and _attempt < invalid_response_retries:
+                messages = [
+                    *messages,
+                    {"role": "user", "content": "End with exactly one verdict: BOXED[A], BOXED[B], or BOXED[TIE]."},
+                ]
+                format_reminder_added = True
         if return_raw_responses:
             raw_responses.append(response_text)
-        judgement = parse_judgement(response_text)
 
         # Per-judge tally (same A=submission_a / B=submission_b convention as the
         # global counts) so the panel's per-member balance is auditable.
