@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Benchmark composition for the Nemotron 3.5 Super core-text batch. Model,
+# checkpoint, judge, credential, and release-policy overrides are supplied by
+# the caller (Eval Factory in production).
+config_paths:
+  - benchmarks/tau2/configs/tau2.yaml
+  - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+  - benchmarks/scicode/config.yaml
+  - benchmarks/hle/config.yaml
+  - benchmarks/gpqa/config.yaml
+  - benchmarks/omniscience/config.yaml
+  - benchmarks/aalcr/config.yaml
+  - benchmarks/apex_shortlist/config.yaml
+  - benchmarks/lmarena_v2/config.yaml
+  - benchmarks/livecodebench/v6_2408_2505/cascade.yaml
+  - benchmarks/ifbench/config.yaml
+
+# Conservative starting point for the four-node pilot. A CLI/Eval Factory
+# override may tune this without changing the suite's benchmark membership.
+num_samples_in_parallel: 512

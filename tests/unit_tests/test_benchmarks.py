@@ -239,6 +239,78 @@ class TestDiscoverBenchmarksInDir:
         err = capsys.readouterr().err
         assert "2 benchmark datasets" in err and "eval suite" in err
 
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_config_paths", "expected_concurrency"),
+        [
+            pytest.param(
+                "core_text.yaml",
+                [
+                    "benchmarks/tau2/configs/tau2.yaml",
+                    "benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml",
+                    "benchmarks/scicode/config.yaml",
+                    "benchmarks/hle/config.yaml",
+                    "benchmarks/gpqa/config.yaml",
+                    "benchmarks/omniscience/config.yaml",
+                    "benchmarks/aalcr/config.yaml",
+                    "benchmarks/apex_shortlist/config.yaml",
+                    "benchmarks/lmarena_v2/config.yaml",
+                    "benchmarks/livecodebench/v6_2408_2505/cascade.yaml",
+                    "benchmarks/ifbench/config.yaml",
+                ],
+                512,
+                id="core_text",
+            ),
+            pytest.param(
+                "swebench_verified_multilingual.yaml",
+                [
+                    "benchmarks/swebench/verified/opencode.yaml",
+                    "benchmarks/swebench/multilingual/opencode.yaml",
+                ],
+                1024,
+                id="swebench_verified_multilingual",
+            ),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_membership_and_defaults(
+        self,
+        suite_name: str,
+        expected_config_paths: list[str],
+        expected_concurrency: int,
+    ) -> None:
+        repo_root = Path(__file__).parents[2]
+        suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super/suites" / suite_name).read_text())
+
+        assert suite == {
+            "config_paths": expected_config_paths,
+            "num_samples_in_parallel": expected_concurrency,
+        }
+        assert "benchmarks/swebench/pro/opencode.yaml" not in suite["config_paths"]
+
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_benchmark_count"),
+        [
+            pytest.param("core_text.yaml", 11, id="core_text"),
+            pytest.param("swebench_verified_multilingual.yaml", 2, id="swebench_verified_multilingual"),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_resolves_every_member(
+        self, suite_name: str, expected_benchmark_count: int, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_nemo_gym_openai_requirement",
+            lambda: f"openai=={nemo_gym.global_config.openai_version}",
+        )
+        repo_root = Path(__file__).parents[2]
+        suite_path = repo_root / "benchmarks/nemotron_3.5_super/suites" / suite_name
+
+        assert BenchmarkConfig.from_config_path(suite_path, strict=False) is None
+        err = capsys.readouterr().err
+        assert f"{expected_benchmark_count} benchmark datasets" in err
+        assert "eval suite" in err
+
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve

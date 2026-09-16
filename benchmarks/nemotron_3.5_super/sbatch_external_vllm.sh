@@ -11,6 +11,7 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
@@ -293,7 +294,7 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time=04:00:00 \
+        --time="$SBATCH_TIME" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
