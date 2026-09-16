@@ -187,6 +187,8 @@ MOONCAKE_CONFIG
             -default_kv_lease_ttl=30000 \
             -eviction_high_watermark_ratio=0.95 \
             -eviction_ratio=0.1 \
+            -minloglevel=1 \
+            -enable_metric_reporting=false \
             -logtostderr &
         mooncake_pid=\$!
     fi
