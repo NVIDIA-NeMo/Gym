@@ -98,6 +98,9 @@ class EmbeddedNOOARunner:
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
         trace = GymTraceHooks()
+        sampling_overrides = request.row.responses_create_params.model_dump(
+            include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
+        )
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -105,6 +108,7 @@ class EmbeddedNOOARunner:
             state=state,
             cookies=request.model_cookies,
             on_call=trace.on_model_call,
+            sampling_overrides=sampling_overrides,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
