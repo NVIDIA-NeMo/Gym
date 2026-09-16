@@ -77,8 +77,7 @@ class _BaseExternalCaptureHandler(ABC):
     """Own the lifecycle shared by external capture backends."""
 
     _INVALID_CAPTURE_REASON: str
-    _CAPTURE_ERROR_MESSAGE: str
-    _POISON_ERROR_MESSAGE: str
+    _BACKEND_LABEL: str
 
     def prepare_request(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         """Attach capture instructions to an engine-bound request.
@@ -147,7 +146,7 @@ class _BaseExternalCaptureHandler(ABC):
             # Poison capture without turning a valid model completion into a
             # harness failure.
             LOGGER.exception(
-                self._CAPTURE_ERROR_MESSAGE,
+                f"{self._BACKEND_LABEL} worker capture acknowledgement failed for rollout %s call %s",
                 context.rollout_id,
                 context.model_call_id,
             )
@@ -159,12 +158,11 @@ class _BaseExternalCaptureHandler(ABC):
                 )
             except Exception:
                 LOGGER.exception(
-                    self._POISON_ERROR_MESSAGE,
+                    f"Could not poison rollout %s call %s after a failed {self._BACKEND_LABEL} worker acknowledgement",
                     context.rollout_id,
                     context.model_call_id,
                 )
 
-    @abstractmethod
     async def _finalize_admitted_response(
         self,
         served_payload: dict[str, Any],
@@ -174,41 +172,11 @@ class _BaseExternalCaptureHandler(ABC):
         ledger: CaptureLedger,
         admission: CaptureAdmission,
     ) -> None:
-        """Publish backend-specific custody for an admitted response."""
+        """Validate the worker acknowledgement and commit lineage for an admitted response.
 
-
-class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
-    """Commit lineage after a vLLM worker durably stages the token delta."""
-
-    _INVALID_CAPTURE_REASON = INVALID_COMMIT_COORDS_REASON
-    _CAPTURE_ERROR_MESSAGE = "Worker capture acknowledgement failed for rollout %s call %s"
-    _POISON_ERROR_MESSAGE = "Could not poison rollout %s call %s after a failed acknowledgement"
-
-    def _prepare_admitted_request(
-        self,
-        request_payload: dict[str, Any],
-        admission: CaptureAdmission,
-    ) -> dict[str, Any]:
-        request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
-        request_payload.update(
-            logprobs=True,
-            top_logprobs=0,
-            return_tokens_as_token_ids=True,
-        )
-        if admission.mode == "token_in":
-            request_payload["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
-        return request_payload
-
-    async def _finalize_admitted_response(
-        self,
-        served_payload: dict[str, Any],
-        *,
-        coords_payload: dict[str, Any] | None,
-        context: CaptureContext,
-        ledger: CaptureLedger,
-        admission: CaptureAdmission,
-    ) -> None:
-        """Publish the worker's coordinates as a ledger row.
+        This path operates only on shared Gym contracts (``CommitCoords``,
+        ``CallRecord``, ``CaptureLedgerCommit``); backends differ only in how
+        ``_prepare_admitted_request`` asks the engine to stage tokens.
 
         The ordering invariant the external sink requires — a call must not
         become a lineage parent until its staged record is durable — holds
@@ -295,12 +263,33 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         )
 
 
-class MegatronWorkerCaptureHandler(VLLMWorkerCaptureHandler):
+class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
+    """Commit lineage after a vLLM worker durably stages the token delta."""
+
+    _INVALID_CAPTURE_REASON = INVALID_COMMIT_COORDS_REASON
+    _BACKEND_LABEL = "vLLM"
+
+    def _prepare_admitted_request(
+        self,
+        request_payload: dict[str, Any],
+        admission: CaptureAdmission,
+    ) -> dict[str, Any]:
+        request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
+        request_payload.update(
+            logprobs=True,
+            top_logprobs=0,
+            return_tokens_as_token_ids=True,
+        )
+        if admission.mode == "token_in":
+            request_payload["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
+        return request_payload
+
+
+class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
     """Commit lineage after an MInf worker durably stages a canonical delta."""
 
     _INVALID_CAPTURE_REASON = "invalid_megatron_commit_coordinates"
-    _CAPTURE_ERROR_MESSAGE = "Megatron capture acknowledgement failed for rollout %s call %s"
-    _POISON_ERROR_MESSAGE = "Could not poison rollout %s call %s after a failed MInf acknowledgement"
+    _BACKEND_LABEL = "Megatron"
 
     def _prepare_admitted_request(
         self,
