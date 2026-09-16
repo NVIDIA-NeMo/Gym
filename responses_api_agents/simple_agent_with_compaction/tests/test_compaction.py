@@ -4,8 +4,14 @@
 import subprocess
 import sys
 
+import pytest
+
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.simple_agent_with_compaction.compaction import (
+    ContextCompactionSession,
     ContextGuardConfig,
+    ContextHistoryConfig,
     ContextMeasurements,
     HistoryController,
     HistoryPolicyConfig,
@@ -16,6 +22,7 @@ from responses_api_agents.simple_agent_with_compaction.compaction import (
     RecencyHistoryPolicyConfig,
     SemanticHistory,
     TurnChunkedHistoryController,
+    build_generation_contract,
     build_guard_outcome_records,
     build_history_policy,
     capture_observed_completion,
@@ -793,6 +800,50 @@ def test_guard_evaluation_records_admission_after_compaction():
     ]
     assert all(record.decision == "admit_after_compaction" for record in records)
     assert [record.post_compaction_value for record in records] == [90, 2, 500]
+
+
+@pytest.mark.asyncio
+async def test_session_publishes_final_manifest_only_after_guard_admission():
+    config = ContextHistoryConfig(
+        enabled=True,
+        guards=ContextGuardConfig(max_active_images=0),
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    session = ContextCompactionSession(
+        config=config,
+        rollout_id="rollout-guard-manifest",
+        generation_contract=build_generation_contract(
+            body=body,
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            context_history=config,
+        ),
+        initial_context=[_observation("initial", "data:image/png;base64,A")],
+    )
+
+    async def reject(_call):
+        return ContextMeasurements(
+            prompt_token_count=1,
+            active_image_count=1,
+            vision_token_count=0,
+        )
+
+    with pytest.raises(RuntimeError, match="Context guard rejected model call"):
+        await session.prepare_model_call(turn_id=1, measure_context=reject)
+
+    assert session.final_policy_decision is None
+    assert session.lineage_deltas == []
+
+    async def admit(_call):
+        return ContextMeasurements(
+            prompt_token_count=1,
+            active_image_count=0,
+            vision_token_count=0,
+        )
+
+    admitted = await session.prepare_model_call(turn_id=1, measure_context=admit)
+
+    assert session.final_policy_decision == admitted.prepared_history.view.decision
+    assert session.lineage_deltas[-1].transformation_id == session.final_policy_decision.lineage.transformation_id
 
 
 def test_image_guard_closes_chunk_before_pending_observation_action():
