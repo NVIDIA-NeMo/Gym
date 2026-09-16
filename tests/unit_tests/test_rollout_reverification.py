@@ -442,7 +442,10 @@ class TestAtifPreflight:
                 await _guard_atif_preflight([payload])
         assert [call.kwargs["server_name"] for call in client.get.await_args_list] == ["task-rs"]
 
-    async def test_task_source_can_route_without_agent_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_low_level_preflight_resolver_can_route_without_agent_ref(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shared resolver supports task_source; ATIF materialization requires agent_ref earlier."""
         config = self._config(exposes_tools_over_mcp=False)
         config["task-rs"] = {
             "resources_servers": {"task": {"expose_tools_over_mcp": False}},
@@ -2202,6 +2205,55 @@ class TestRolloutReverificationRunFromConfig:
         assert len(returned) == 1
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
         assert returned[0]["reward"] == 1.0
+
+    async def test_atif_no_persist_result_is_visible_in_failures_and_coverage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        row = self._make_row("agent_a", task=0) | {
+            ATIF_PROVENANCE_KEY: {
+                "trajectory_id": "trajectory-1",
+                "session_id": "session-1",
+                "source_sha256": "0" * 64,
+                "schema_version": "ATIF-v1.7",
+                "projection_status": "complete",
+            }
+        }
+        result = {"reward": 0.0, NG_NO_PERSIST_KEY: True}
+        self._patch_common(monkeypatch, [(row, result)])
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [row],
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._guard_atif_preflight",
+            AsyncMock(return_value=None),
+        )
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath=str(tmp_path / "manifest.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        returned = await RolloutReverificationHelper().run_from_config(config)
+
+        assert returned == []
+        assert self._read_jsonl(tmp_path / "output.jsonl") == []
+        [failed] = self._read_jsonl(tmp_path / "output_failures.jsonl")
+        assert failed[NG_NO_PERSIST_KEY] is True
+        assert failed[NG_FAILURE_CLASS_KEY] == "kill_shaped"
+        assert failed[TASK_INDEX_KEY_NAME] == 0
+        assert failed[ROLLOUT_INDEX_KEY_NAME] == 0
+        assert failed[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
+        assert failed[ATIF_PROVENANCE_KEY] == row[ATIF_PROVENANCE_KEY]
+        output = capsys.readouterr().out
+        assert "1 kill_shaped routed this run" in output
+        assert "Metrics cover: 0 of 1 rollouts" in output
 
     async def test_results_sorted_by_task_and_rollout_index_before_aggregate_metrics(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

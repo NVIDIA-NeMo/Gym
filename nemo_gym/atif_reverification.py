@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -42,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym.atif_json import strict_json_loads
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -167,6 +168,13 @@ def load_atif_manifest(path: Path) -> list[AtifReverifyManifestEntry]:
                 raise AtifProjectionError(f"invalid ATIF manifest row {line_number} in {path}: {exc}") from exc
     if not entries:
         raise AtifProjectionError(f"ATIF manifest {path} contains no entries")
+    unpinned_count = sum(entry.expected_sha256 is None for entry in entries)
+    if unpinned_count:
+        warnings.warn(
+            f"ATIF manifest {path} has {unpinned_count} of {len(entries)} entries without expected_sha256; "
+            "Gym will record each observed source hash but cannot compare those files with a manifest-pinned digest.",
+            stacklevel=2,
+        )
     return entries
 
 
@@ -186,6 +194,12 @@ def index_materialized_inputs(
         if type(rollout_index) is not int or rollout_index < 0:
             raise AtifProjectionError(
                 f"materialized input row {row_number} has invalid {ROLLOUT_INDEX_KEY_NAME}: {rollout_index!r}"
+            )
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        agent_name = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise AtifProjectionError(
+                f"materialized input row {row_number} has invalid {AGENT_REF_KEY_NAME}.name: {agent_name!r}"
             )
         key = (task_index, rollout_index)
         if key in indexed:

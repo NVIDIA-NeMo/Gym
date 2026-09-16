@@ -67,6 +67,7 @@ from nemo_gym.server_utils import (
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
+ATIF_NO_PERSIST_FAILURE_CLASS = "kill_shaped"
 _CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
 # Printed at the start of a `--judge-failed-only` run.
@@ -970,13 +971,18 @@ class RolloutReverificationHelper(BaseModel):
 
                 serialized = orjson.dumps(result)
 
-                if no_persist:
+                if no_persist and config.input_format != "atif":
                     # kill_shaped: don't write anywhere. Set-difference on resume
                     # naturally re-dispatches; per-task timeout bounds wallclock.
                     pass
-                elif failure_class is not None:
-                    # Non-kill_shaped failure → sidecar. The aggregator only reads
-                    # the main jsonl, so this keeps win-rate uncontaminated.
+                elif no_persist or failure_class is not None:
+                    # Ordinary failures go to the sidecar. ATIF also persists
+                    # kill-shaped diagnostics because that mode cannot resume.
+                    # The aggregator reads only the main jsonl, so neither path
+                    # contaminates the score.
+                    failure_class = failure_class or ATIF_NO_PERSIST_FAILURE_CLASS
+                    result.setdefault(NG_FAILURE_CLASS_KEY, failure_class)
+                    serialized = orjson.dumps(result)
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.
                     detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]

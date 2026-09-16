@@ -906,7 +906,7 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | `--input-format gym\|atif` | Select native Gym rollout input or the bounded Relay ATIF v1.7 profile. Defaults to `gym`. |
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | Native Gym `rollouts.jsonl`. Required when `--input-format gym`. |
-| `--atif-manifest PATH` | JSONL manifest mapping each Relay ATIF trajectory to `_ng_task_index` and `_ng_rollout_index`, with an optional source SHA-256. Required when `--input-format atif`. |
+| `--atif-manifest PATH` | JSONL manifest mapping each Relay ATIF trajectory to `_ng_task_index` and `_ng_rollout_index`, with an optional source SHA-256. Missing hashes produce a warning. Required when `--input-format atif`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |

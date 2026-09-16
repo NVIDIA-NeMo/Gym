@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ from nemo_gym.atif_reverification import (
 )
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -109,6 +110,7 @@ def _materialized_input() -> dict[str, Any]:
         },
         TASK_INDEX_KEY_NAME: 7,
         ROLLOUT_INDEX_KEY_NAME: 2,
+        AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
         "expected_answer": "72 and sunny",
     }
 
@@ -401,6 +403,60 @@ def test_manifest_loader_reports_the_invalid_jsonl_row(tmp_path: Path) -> None:
         load_atif_manifest(manifest)
 
 
+def test_manifest_loader_warns_once_for_unpinned_entries(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "trajectory_path": "first.json",
+                        TASK_INDEX_KEY_NAME: 7,
+                        ROLLOUT_INDEX_KEY_NAME: 2,
+                        "expected_sha256": "0" * 64,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "trajectory_path": "second.json",
+                        TASK_INDEX_KEY_NAME: 7,
+                        ROLLOUT_INDEX_KEY_NAME: 3,
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.warns(UserWarning, match="1 of 2 entries without expected_sha256") as recorded:
+        entries = load_atif_manifest(manifest)
+
+    assert len(entries) == 2
+    assert len(recorded) == 1
+
+
+def test_manifest_loader_is_silent_when_every_entry_is_pinned(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "trajectory_path": "first.json",
+                TASK_INDEX_KEY_NAME: 7,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+                "expected_sha256": "0" * 64,
+            }
+        )
+        + "\n"
+    )
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        entries = load_atif_manifest(manifest)
+
+    assert len(entries) == 1
+    assert recorded == []
+
+
 def test_manifest_loader_rejects_empty_input(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text("\n")
@@ -530,6 +586,18 @@ def test_materialized_input_index_rejects_duplicate_rollout_keys() -> None:
 
     with pytest.raises(AtifProjectionError, match="duplicate materialized input key"):
         index_materialized_inputs([row, row])
+
+
+@pytest.mark.parametrize(
+    "agent_ref",
+    [None, [], {}, {"name": None}, {"name": 7}, {"name": " \t"}],
+)
+def test_materialized_input_index_rejects_missing_or_invalid_agent_identity(agent_ref: Any) -> None:
+    row = _materialized_input()
+    row[AGENT_REF_KEY_NAME] = agent_ref
+
+    with pytest.raises(AtifProjectionError, match=r"materialized input row 1 has invalid agent_ref\.name"):
+        index_materialized_inputs([row])
 
 
 @pytest.mark.parametrize("value", ["7", 7.0, True])
