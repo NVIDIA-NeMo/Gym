@@ -284,7 +284,7 @@ if [[ "$VLLM_MODE" == aggregated ]]; then
     if declare -p VLLM_AGGREGATED_ARGS &>/dev/null; then
         worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_AGGREGATED_ARGS[@]}")
     else
-        worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}")
+        worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}")
     fi
     # A complete replica must not wait for KV transfers from a prefill worker.
     # Strip both CLI forms, including connectors set in VLLM_COMMON_ARGS.
