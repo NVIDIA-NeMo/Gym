@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel
 
+from nemo_gym import RESULTS_DIR
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
@@ -700,9 +701,11 @@ def test_model_call_capture_keys_are_reserved_global_config():
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
     from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
 
-    assert make_capture_store(ModelCallCaptureConfig()) is None
+    assert ModelCallCaptureConfig().observability_enabled is True
+    assert ModelCallCaptureConfig().model_call_capture_dir == RESULTS_DIR / "model_calls"
+    assert make_capture_store(ModelCallCaptureConfig(observability_enabled=False)) is None
     with pytest.raises(ValueError, match="required"):
-        ModelCallCaptureConfig(observability_enabled=True)
+        ModelCallCaptureConfig(model_call_capture_dir=None)
     with pytest.raises(ValueError, match="absolute"):
         ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="relative")
 
@@ -713,21 +716,21 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config(global_config) == [store.root]
 
     monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
-    assert model_call_capture_dirs_from_config({}) == []
-    nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
-    assert model_call_capture_dirs_from_config(nested_config) == []
+    assert model_call_capture_dirs_from_config({}) == [RESULTS_DIR / "model_calls"]
+    nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": False}}}}
+    assert model_call_capture_dirs_from_config(nested_config) == [RESULTS_DIR / "model_calls"]
 
 
 def test_observability_enabled_from_config(tmp_path):
     from nemo_gym.base_responses_api_model import observability_enabled_from_config
 
-    assert observability_enabled_from_config({}) is False
+    assert observability_enabled_from_config({}) is True
 
     global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
     assert observability_enabled_from_config(global_config) is True
 
     with pytest.raises(ValueError, match="required"):
-        observability_enabled_from_config({"observability_enabled": True})
+        observability_enabled_from_config({"observability_enabled": True, "model_call_capture_dir": None})
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
@@ -1555,15 +1558,14 @@ def test_aggregate_model_call_records_sums_and_counts():
 
 
 def test_rollout_prefix_stripped_when_capture_disabled():
-    # The /ng-rollout/<id> prefix must be stripped + routed even when capture is OFF (the default),
-    # otherwise a default `gym eval` 404s on every prefixed model call.
+    # The /ng-rollout/<id> prefix must be stripped + routed even when capture is explicitly disabled.
     app = FastAPI()
 
     @app.post("/v1/chat/completions")
     async def _cc() -> dict:
         return {"ok": True}
 
-    install_model_call_capture(app, ModelCallCaptureConfig())
+    install_model_call_capture(app, ModelCallCaptureConfig(observability_enabled=False))
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
