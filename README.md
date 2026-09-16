@@ -102,7 +102,7 @@ Requires Python 3.13.14+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.13.14+.
 
 ```bash
-git clone git@github.com:NVIDIA-NeMo/Gym.git
+git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync

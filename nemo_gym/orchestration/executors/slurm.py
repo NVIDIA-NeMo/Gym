@@ -166,7 +166,7 @@ class SlurmExecutor(BaseExecutor):
                 # Inside the connection, because that is the transport persist()
                 # needs and reopening one would cost a second connection per
                 # submit. Ordering and failure handling live in the base class.
-                self.persist(record, conn.write_text)
+                self.persist(record, config, conn.write_text)
 
         return record
 
