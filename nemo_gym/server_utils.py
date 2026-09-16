@@ -228,6 +228,7 @@ async def request(
     method: str,
     url: str,
     _internal: bool = False,
+    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -237,6 +238,9 @@ async def request(
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
     """
+    if _max_num_tries is not None and _max_num_tries < 1:
+        raise ValueError("_max_num_tries must be at least 1")
+
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
@@ -247,10 +251,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_num_tries=_max_num_tries,
+            _max_connection_retries=_max_connection_retries,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_num_tries=_max_num_tries,
+        _max_connection_retries=_max_connection_retries,
+        **kwargs,
     )
 
 
@@ -258,6 +272,7 @@ async def _traced_request(
     method: str,
     url: str,
     _internal: bool = False,
+    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -294,7 +309,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_num_tries=_max_num_tries,
+            _max_connection_retries=_max_connection_retries,
+            **kwargs,
         )
 
         if span is not None:
@@ -342,20 +362,26 @@ async def _request_with_retries(
     method: str,
     url: str,
     _internal: bool = False,
+    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
+    explicit_tries = 0
     retries = 0
     retry_start = time.monotonic()
     while True:
+        if _max_num_tries is not None:
+            explicit_tries += 1
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
+            if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                raise
             if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -372,6 +398,8 @@ async def _request_with_retries(
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
+            if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                raise
             if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -387,8 +415,11 @@ async def _request_with_retries(
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
+            if _max_num_tries is not None:
+                if explicit_tries >= _max_num_tries:
+                    raise
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-            if not _internal:
+            elif not _internal:
                 print(
                     f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...

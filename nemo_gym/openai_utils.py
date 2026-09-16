@@ -28,6 +28,7 @@ from typing import (
     get_args,
 )
 
+from aiohttp import ClientTimeout
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -139,7 +140,16 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -382,7 +392,23 @@ class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
 
 
 class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
-    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+    """A hosted web-search output item returned by the OpenAI Responses API."""
+
+    # Hosted-tool output is provider-owned bookkeeping. Preserve action
+    # payloads opaquely rather than coupling response validation to today's
+    # provider action vocabulary.
+    model_config = ConfigDict(extra="allow")
+
+    # The live API can emit completed bookkeeping items without an action
+    # object, so retain that valid omission instead of rejecting the response.
+    action: Optional[Dict[str, Any]] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_inventing_action(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if "action" not in self.model_fields_set:
+            payload.pop("action", None)
+        return payload
 
 
 class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
@@ -1252,6 +1278,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    max_num_tries: Optional[Literal[1]] = Field(
+        default=None,
+        description=(
+            "Set to 1 to disable both inner transport and HTTP-status retry "
+            "layers when a caller owns the complete retry schedule. None "
+            "preserves NeMo Gym's default behavior."
+        ),
+    )
+
+    request_timeout_seconds: Optional[float] = Field(default=None, gt=0)
+    connect_timeout_seconds: Optional[float] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_timeout_pair(self) -> "NeMoGymAsyncOpenAI":
+        if self.connect_timeout_seconds is not None and self.request_timeout_seconds is None:
+            raise ValueError("connect_timeout_seconds requires request_timeout_seconds")
+        return self
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
@@ -1261,12 +1305,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 "Authorization": f"Bearer {self.api_key}",
             },
             "_internal": self.internal,
+            "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
         }
+        if self.request_timeout_seconds is not None:
+            request_kwargs["timeout"] = ClientTimeout(
+                total=self.request_timeout_seconds,
+                connect=self.connect_timeout_seconds,
+            )
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = self.max_num_tries or MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:
             tries += 1
@@ -1274,7 +1324,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             if response.status in RETRY_ERROR_CODES:
                 # Internal NeMo Gym servers extend max tries for retryable errors.
-                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+                if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()
@@ -1283,6 +1333,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
+                if self.max_num_tries is not None and tries >= max_num_tries:
+                    # An explicit cap is used when the caller owns the outer
+                    # retry schedule. Surface the exhausted response
+                    # immediately: even a fixed sleep here would add a hidden
+                    # inner-layer delay.
+                    await raise_for_status(response)
                 await sleep(0.5)
                 continue
             else:
