@@ -32,7 +32,8 @@ from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -293,13 +294,15 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class ClaudeCodeAgent(SimpleResponsesAPIAgent):
+class ClaudeCodeAgent(CLIResponsesAPIAgent):
+    observation_source = "claude_code"
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_claude_code(self.config.claude_code_version)
         try:
@@ -651,12 +654,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-    async def responses(
+    async def legacy_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+        rollout_id = request.path_params.get("rollout_id")
+        if self.agent_session_id_from_request(request) is not None:
+            episode = await self._create_episode(body, rollout_id=rollout_id)
+            return episode.response.model_copy(
+                update={"_ng_agent_observations": episode.observations.model_dump(mode="json")}
+            )
+        return await self._create_response(body, rollout_id=rollout_id)
 
     async def _create_episode(
         self,

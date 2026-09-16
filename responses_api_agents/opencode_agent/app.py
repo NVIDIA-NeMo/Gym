@@ -35,8 +35,8 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent, kill_cli_process_group
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -519,14 +519,16 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class OpenCodeAgent(SimpleResponsesAPIAgent):
+class OpenCodeAgent(CLIResponsesAPIAgent):
     """Runs the CLI (opencode run --format=json)"""
 
     config: OpenCodeAgentConfig
+    observation_source = "opencode"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_opencode(self.config.opencode_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
@@ -641,6 +643,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
@@ -649,6 +652,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 _, stderr = await proc.communicate()
                 timed_out = True
                 LOG.warning("opencode timed out after %ds", self.config.timeout)
+            except asyncio.CancelledError:
+                kill_cli_process_group(proc)
+                await proc.communicate()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -769,7 +776,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
         return AgentEpisode(response=response, observations=observations)
 
-    async def responses(
+    async def legacy_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
