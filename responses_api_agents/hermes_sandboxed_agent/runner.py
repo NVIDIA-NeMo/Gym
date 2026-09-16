@@ -14,6 +14,7 @@ import sys
 import traceback
 from pathlib import Path
 from shlex import quote
+from threading import Lock
 
 
 HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"
@@ -158,6 +159,7 @@ def run(params):
     }
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(config))
 
+    from hermes_state import SessionDB
     from run_agent import AIAgent
 
     if Path(sys.modules["run_agent"].__file__).resolve().parent != source.resolve():
@@ -167,6 +169,8 @@ def run(params):
     request_overrides = {"temperature": params["temperature"]}
     if params["chat_template_kwargs"]:
         request_overrides["metadata"] = {"chat_template_kwargs": json.dumps(params["chat_template_kwargs"])}
+    # Hermes saves tool calls before execution only when a session store is supplied.
+    session_db = SessionDB()
     agent = AIAgent(
         base_url=params["base_url"],
         api_key="gym",  # The sandbox talks only to Gym's model proxy, never receives provider credentials.
@@ -185,12 +189,15 @@ def run(params):
         skip_background_review=True,
         save_trajectories=False,
         checkpoints_enabled=False,
+        session_db=session_db,
     )
     n_input = len(history) + 1
     timed_out = False
+    checkpoint_lock = Lock()
 
     def checkpoint(*_):
-        write_json(Path(params["run_dir"]) / "progress.json", progress_result(agent, n_input))
+        with checkpoint_lock:  # Tool-start callbacks can run concurrently.
+            write_json(Path(params["run_dir"]) / "progress.json", progress_result(agent, n_input))
 
     def on_timeout(*_):
         nonlocal timed_out
@@ -201,6 +208,7 @@ def run(params):
         agent.interrupt("sandbox timeout", hard_cancel=True)
 
     agent.step_callback = checkpoint
+    agent.tool_start_callback = checkpoint
     signal.signal(signal.SIGTERM, on_timeout)
     try:
         result = agent.run_conversation(query, params["system_prompt"] or input_system, history)
@@ -211,6 +219,8 @@ def run(params):
             "error_type": type(exc).__name__,
         }
         traceback.print_exc()
+    finally:
+        session_db.close()
     result["budget_exhausted"] = (
         agent.iteration_budget.remaining <= 0 or result.get("api_calls", 0) >= params["max_turns"]
     )
