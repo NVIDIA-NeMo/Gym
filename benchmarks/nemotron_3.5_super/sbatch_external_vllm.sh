@@ -10,6 +10,7 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
@@ -129,6 +130,7 @@ export NCCL_CUMEM_ENABLE=1
 export NCCL_MNNVL_ENABLE=1
 export NCCL_NVLS_ENABLE=1
 
+export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
 
 # Increase the number of file descriptors to 65k
@@ -137,8 +139,77 @@ if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
 fi
 
 this_node_hostname=\$(hostname)
+read -r -a nodes <<< "\$ALL_NODES"
+router_pid=""
+mooncake_pid=""
+
+cleanup_pd() {
+    if [[ -n "\$router_pid" ]]; then
+        kill "\$router_pid" 2>/dev/null || true
+        wait "\$router_pid" 2>/dev/null || true
+    fi
+    if [[ -n "\$mooncake_pid" ]]; then
+        kill "\$mooncake_pid" 2>/dev/null || true
+        wait "\$mooncake_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup_pd EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if (( ENABLE_MOONCAKE )); then
+    export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
+    mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
+    cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "\${nodes[0]}:50051",
+  "global_segment_size": "100GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "",
+  "enable_offload": false
+}
+MOONCAKE_CONFIG
+
+    uv pip install --system mooncake-transfer-engine-cuda13
+
+    # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
+    export WITH_NVIDIA_PEERMEM=0
+
+    if (( SLURM_PROCID == 0 )); then
+        echo "Starting mooncake_master on \${nodes[0]}"
+        mooncake_master \
+            -rpc_port=50051 \
+            -rpc_thread_num=4 \
+            -metrics_port=9003 \
+            -default_kv_lease_ttl=30000 \
+            -eviction_high_watermark_ratio=0.95 \
+            -eviction_ratio=0.1 \
+            -logtostderr &
+        mooncake_pid=\$!
+    fi
+
+    mooncake_health_url="http://\${nodes[0]}:9003/health"
+    mooncake_deadline=\$(( SECONDS + 120 ))
+    echo "Waiting for Mooncake master at \$mooncake_health_url"
+    until curl --fail --silent --noproxy '*' --connect-timeout 2 --max-time 5 \
+        --output /dev/null "\$mooncake_health_url"; do
+        if [[ -n "\$mooncake_pid" ]] && ! kill -0 "\$mooncake_pid" 2>/dev/null; then
+            echo "mooncake_master exited during startup" >&2
+            exit 1
+        fi
+        if (( SECONDS >= mooncake_deadline )); then
+            echo "Timed out waiting for Mooncake master at \$mooncake_health_url" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "Mooncake master is ready"
+fi
+
 if (( SLURM_PROCID == 0 )); then
-    read -r -a nodes <<< "\$ALL_NODES"
 
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
@@ -166,7 +237,6 @@ if (( SLURM_PROCID == 0 )); then
     vllm-router "\${router_args[@]}" &
 
     router_pid=\$!
-    trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
 
     sleep 5
     if ! kill -0 "\$router_pid" 2>/dev/null; then
