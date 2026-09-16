@@ -63,6 +63,16 @@ class InputItem(BaseModel):
     content: str
 
 
+class PositionalOnlyAgent(Agent):
+    async def analyze(self, text: str, /) -> str:
+        return text
+
+
+class OptionalPositionalOnlyAgent(Agent):
+    async def analyze(self, text: str = "default", /) -> str:
+        return text
+
+
 def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     values = {
         "agent_class": f"{__name__}:ExampleAgent",
@@ -179,6 +189,21 @@ def test_validate_invocation_returns_agent_and_entrypoint() -> None:
 
     assert agent_class is ExampleAgent
     assert entrypoint is ExampleAgent.analyze
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_rejects_required_positional_only_entrypoint_even_when_unmapped(mapped: bool) -> None:
+    config = invocation_config(
+        agent_class=f"{__name__}:PositionalOnlyAgent",
+        arguments={"text": {"source": "agent_inputs.text"}} if mapped else {},
+    )
+    with pytest.raises(ValueError, match="must accept keyword arguments.*text"):
+        validate_invocation(config)
+
+
+def test_allows_unmapped_optional_positional_only_entrypoint() -> None:
+    config = invocation_config(agent_class=f"{__name__}:OptionalPositionalOnlyAgent", arguments={})
+    assert validate_invocation(config)[0] is OptionalPositionalOnlyAgent
 
 
 def test_validate_invocation_rejects_missing_required_mapping() -> None:
