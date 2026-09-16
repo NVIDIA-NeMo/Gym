@@ -83,6 +83,14 @@ def test_reasoning_search_deep_agent_config_requires_max_input_tokens():
         )
 
 
+def test_config_rejects_non_none_max_steps():
+    """max_steps (inherited from SimpleAgentConfig) has no effect here — deepagents runs its own internal
+    tool loop, with no per-model-call step counter for it to bound. Silently accepting and ignoring it
+    would let a caller believe it's enforced when it isn't, so config construction must fail loudly."""
+    with pytest.raises(ValidationError, match="max_steps"):
+        _config(max_steps=3)
+
+
 # --- cookie propagation ------------------------------------------------------------------------------
 
 

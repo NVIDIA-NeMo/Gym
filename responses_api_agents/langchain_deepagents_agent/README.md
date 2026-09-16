@@ -114,7 +114,9 @@ reasoning_gym, mcqa, instruction_following, ...) can be used as-is by pointing `
   `SummarizationMiddleware` trigger/keep thresholds via `model.profile`; without it, deepagents falls back to
   a hardcoded, model-agnostic default (170k tokens, keep last 6 messages) that has no relationship to
   whatever model this agent actually talks to
-- `max_steps` (inherited, unused): deepagents runs its own internal tool loop and answers in one call
+- `max_steps` (inherited from `SimpleAgentConfig`): rejected, not merely unused — deepagents runs its own
+  internal tool loop, with no per-model-call step counter for this to bound, so a non-`None` value fails
+  config validation loudly instead of being silently ignored
 
 ## Known limitation: no trajectory/observability capture (yet)
 

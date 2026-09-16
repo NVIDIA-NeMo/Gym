@@ -33,7 +33,7 @@ from typing import Any
 from fastapi import Body, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
@@ -47,9 +47,22 @@ from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 class DeepAgentsAgentConfig(SimpleAgentConfig):
     """No tool-specific fields — those belong on a concrete subclass's config (see reasoning_search_agent.py).
 
-    `max_steps` (inherited from SimpleAgentConfig) is unused: deepagents runs its own internal tool loop
-    and answers in one call
+    `max_steps` (inherited from SimpleAgentConfig) is rejected, not merely unused: deepagents runs its own
+    internal tool loop, so there's no per-model-call step counter here for it to bound (SimpleAgent.max_steps
+    counts internal model round-trips; LangChain's own `recursion_limit` counts LangGraph super-steps —
+    neither is what a caller setting `max_steps` on this agent would actually get). Silently accepting and
+    ignoring it would let a caller believe it's enforced when it isn't.
     """
+
+    @model_validator(mode="after")
+    def reject_max_steps(self) -> "DeepAgentsAgentConfig":
+        if self.max_steps is not None:
+            raise ValueError(
+                "max_steps is not supported by DeepAgentsAgent: deepagents runs its own internal tool loop, "
+                "with no per-model-call step counter for this to bound. Remove max_steps from this agent's "
+                "config."
+            )
+        return self
 
 
 class DeepAgentsAgent(SimpleAgent):
