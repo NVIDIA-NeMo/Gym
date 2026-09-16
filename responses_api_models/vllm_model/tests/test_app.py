@@ -891,13 +891,29 @@ class TestApp:
                     "chain_hash": "2" * 64,
                     "cumulative_hash": "3" * 64,
                 },
+                # Transport-only token data at every location the capture handler
+                # must scrub before the completion leaves the model server.
+                "prompt_token_ids": [10, 11],
                 "choices": [
                     {
                         "index": 0,
                         "finish_reason": "stop",
+                        "token_ids": [12, 13, 14],
+                        "logprobs": {
+                            "content": [
+                                {"token": "token_id:12", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                                {"token": "token_id:13", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                                {"token": "token_id:14", "logprob": -0.3, "bytes": None, "top_logprobs": []},
+                            ]
+                        },
                         "message": {
                             "role": "assistant",
                             "content": "done",
+                            "prompt_token_ids": [10, 11],
+                            # Megatron ``return_tokenized_data`` echo of the exact prompt form.
+                            "compact_prompt_token_ids": [10, 11],
+                            "generation_token_ids": [12, 13, 14],
+                            "generation_log_probs": [-0.1, -0.2, -0.3],
                         },
                     }
                 ],
@@ -948,10 +964,25 @@ class TestApp:
         assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
         assert manifest["records"][0]["weight_version"] == 7
         assert manifest["records"][0]["response_id"] == "minf-17"
+        # ``NeMoGymChatCompletion`` inherits the OpenAI SDK's ``extra="allow"``, so
+        # any transport field left on the dict would be re-admitted verbatim into
+        # the served response. Every injected location must therefore be gone.
         response_payload = response.model_dump()
         assert "prompt_token_ids" not in response_payload
-        assert "prompt_token_ids" not in response_payload["choices"][0]["message"]
-        assert "generation_token_ids" not in response_payload["choices"][0]["message"]
+        assert "ng_commit_coords" not in response_payload
+        served_choice = response_payload["choices"][0]
+        assert "token_ids" not in served_choice
+        # ``logprobs`` is a declared ``Choice`` field: stripping the dict entry
+        # leaves the pydantic default rather than removing the key.
+        assert served_choice["logprobs"] is None
+        served_message = served_choice["message"]
+        for field_name in (
+            "prompt_token_ids",
+            "compact_prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+        ):
+            assert field_name not in served_message, field_name
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

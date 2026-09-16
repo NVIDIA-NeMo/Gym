@@ -3,6 +3,8 @@
 
 """External capture strategy lifecycle tests."""
 
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -14,7 +16,21 @@ from nemo_gym.token_id_capture.external_capture import (
 )
 from nemo_gym.token_id_capture.lineage import InMemoryLineageStore
 from nemo_gym.token_id_capture.sink import CaptureContext, reset_token_sink, set_token_sink
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CommitCoords
+from nemo_gym.token_id_capture.staging.records import (
+    INVALID_COMMIT_COORDS_REASON,
+    WORKER_CAPTURE_FAILED_REASON,
+    WORKER_MISSING_COMMIT_COORDS_REASON,
+    CaptureAdmission,
+    CaptureLedgerCommit,
+    CommitCoords,
+)
+
+
+HANDLER_CLASSES = pytest.mark.parametrize(
+    "handler_cls",
+    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler],
+    ids=["vllm", "megatron"],
+)
 
 
 def _root_context(store: InMemoryLineageStore) -> CaptureContext:
@@ -132,82 +148,211 @@ def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict
         reset_token_sink(token)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("handler", "coords_kwargs", "drop_response_id", "expected_failure"),
-    [
-        (
-            VLLMWorkerCaptureHandler(),
-            {
-                "delta_len": 3,
-                "cum_len": 3,
-                "digest": "0" * 64,
-                "extras_digest": "1" * 64,
-                "staging_key": "r0/c1",
-                "chain_hash": "2" * 64,
-                "cumulative_hash": "3" * 64,
-            },
-            False,
-            None,
-        ),
-        (
-            VLLMWorkerCaptureHandler(),
-            {"delta_len": 0, "cum_len": 0, "disposition": "capture_failed"},
-            False,
-            "worker_capture_failed",
-        ),
-        (
-            MegatronWorkerCaptureHandler(),
-            None,
-            True,
-            "worker_response_missing_commit_coordinates",
-        ),
-    ],
-    ids=["vllm-staged", "vllm-capture-failed", "megatron-missing-coordinates"],
-)
-async def test_handler_finalization_updates_lineage_and_cleans_transport(
-    handler, coords_kwargs, drop_response_id, expected_failure
-) -> None:
-    store = InMemoryLineageStore()
-    context = _root_context(store)
-    payload = _transport_payload()
-    if coords_kwargs is not None:
-        payload["ng_commit_coords"] = CommitCoords(
+def _staged_coords(**overrides: Any) -> dict[str, Any]:
+    """Return a valid ``staged`` acknowledgement for the ``_root_context`` call, with overrides."""
+    kwargs: dict[str, Any] = {
+        "rollout_id": "rollout-1",
+        "model_call_id": "c1",
+        "prev_len": 0,
+        "weight_version": 7,
+        "delta_len": 3,
+        "cum_len": 3,
+        "digest": "0" * 64,
+        "extras_digest": "1" * 64,
+        "staging_key": "r0/c1",
+        "chain_hash": "2" * 64,
+        "cumulative_hash": "3" * 64,
+    }
+    kwargs.update(overrides)
+    return CommitCoords(**kwargs).model_dump(mode="json")
+
+
+@dataclass(frozen=True)
+class _FinalizeCase:
+    """One worker-acknowledgement scenario, run against every handler backend.
+
+    ``coords_payload`` is placed verbatim on ``ng_commit_coords`` (``None``
+    means the worker sent no acknowledgement at all). ``expected_failure`` is
+    the poison reason the ledger must carry, or ``None`` for a committed call.
+    """
+
+    coords_payload: Any
+    expected_failure: str | None
+    drop_response_id: bool = False
+
+
+_FINALIZE_CASES = {
+    "staged": _FinalizeCase(coords_payload=_staged_coords(), expected_failure=None),
+    # ``drop_response_id`` is deliberately False: finalization returns at the
+    # missing-coordinates branch before the envelope id is ever inspected.
+    "missing-coordinates": _FinalizeCase(
+        coords_payload=None,
+        expected_failure=WORKER_MISSING_COMMIT_COORDS_REASON,
+    ),
+    "capture-failed": _FinalizeCase(
+        coords_payload=CommitCoords(
             rollout_id="rollout-1",
             model_call_id="c1",
             prev_len=0,
             weight_version=7,
-            **coords_kwargs,
-        ).model_dump(mode="json")
-    if drop_response_id:
-        payload.pop("id")
+            delta_len=0,
+            cum_len=0,
+            disposition="capture_failed",
+        ).model_dump(mode="json"),
+        expected_failure=WORKER_CAPTURE_FAILED_REASON,
+    ),
+    "malformed-not-a-dict": _FinalizeCase(
+        coords_payload=["not", "a", "mapping"],
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+    ),
+    "malformed-missing-fields": _FinalizeCase(
+        coords_payload={"rollout_id": "rollout-1", "model_call_id": "c1"},
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+    ),
+    "mismatched-rollout-id": _FinalizeCase(
+        coords_payload=_staged_coords(rollout_id="rollout-other"),
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+    ),
+    "mismatched-model-call-id": _FinalizeCase(
+        coords_payload=_staged_coords(model_call_id="c9"),
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+    ),
+    # Self-consistent child coordinates (parent set, prev_len > 0) that
+    # diverge from the parentless text admission on the context.
+    "mismatched-parent-and-prev-len": _FinalizeCase(
+        coords_payload=_staged_coords(parent_call_id="c0", prev_len=2, cum_len=5),
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+    ),
+    "missing-response-id": _FinalizeCase(
+        coords_payload=_staged_coords(),
+        expected_failure=INVALID_COMMIT_COORDS_REASON,
+        drop_response_id=True,
+    ),
+}
+
+
+def _assert_poisoned(
+    manifest: dict[str, Any],
+    context: CaptureContext,
+    payload: dict[str, Any],
+    reason: str,
+) -> None:
+    """Assert a call failed closed: not committed, exactly one poison row, transport scrubbed."""
+    assert context.committed is False
+    assert manifest["records"] == []
+    assert manifest["failures"] == [
+        {
+            "schema_version": 2,
+            "model_call_id": "c1",
+            "reason": reason,
+        }
+    ]
+    _assert_transport_fields_stripped(payload)
+
+
+async def _prepare_and_finalize(handler, context: CaptureContext, payload: dict[str, Any]) -> None:
     token = set_token_sink(context)
     try:
         handler.prepare_response(payload)
         _assert_transport_fields_stripped(payload)
-        assert "ng_commit_coords" not in payload
         await handler.finalize_response(payload)
     finally:
         reset_token_sink(token)
 
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+@pytest.mark.parametrize("case", list(_FINALIZE_CASES.values()), ids=list(_FINALIZE_CASES))
+async def test_handler_finalization_updates_lineage_and_cleans_transport(handler_cls, case: _FinalizeCase) -> None:
+    handler = handler_cls()
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    payload = _transport_payload()
+    if case.coords_payload is not None:
+        payload["ng_commit_coords"] = case.coords_payload
+    if case.drop_response_id:
+        payload.pop("id")
+
+    await _prepare_and_finalize(handler, context, payload)
+
     manifest = await store.manifest("rollout-1")
-    assert context.committed is (expected_failure is None)
-    if expected_failure is None:
+    if case.expected_failure is None:
+        assert context.committed is True
+        assert manifest["failures"] == []
         record = manifest["records"][0]
         assert record["staging_key"] == "r0/c1"
         assert record["weight_version"] == 7
         assert record["chain_hash"] == "2" * 64
         assert record["cumulative_hash"] == "3" * 64
         assert record["response_id"] == "request-1"
+        _assert_transport_fields_stripped(payload)
     else:
-        assert manifest["failures"] == [
-            {
-                "schema_version": 2,
-                "model_call_id": "c1",
-                "reason": expected_failure,
-            }
-        ]
+        _assert_poisoned(manifest, context, payload, case.expected_failure)
+
+
+class _FaultyLedger(InMemoryLineageStore):
+    """Ledger whose writes can be made to raise, to exercise the poison fallback paths."""
+
+    def __init__(self, *, record_fails: bool, record_failure_fails: bool) -> None:
+        super().__init__()
+        self._record_fails = record_fails
+        self._record_failure_fails = record_failure_fails
+        self.record_failure_calls: list[tuple[str, str, str]] = []
+
+    async def record(self, commit: CaptureLedgerCommit) -> None:
+        if self._record_fails:
+            raise RuntimeError("ledger write failed")
+        await super().record(commit)
+
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        self.record_failure_calls.append((rollout_id, model_call_id, reason))
+        if self._record_failure_fails:
+            raise RuntimeError("ledger poison write failed")
+        await super().record_failure(rollout_id, model_call_id, reason)
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+async def test_handler_poisons_call_when_ledger_record_raises(handler_cls) -> None:
+    handler = handler_cls()
+    store = _FaultyLedger(record_fails=True, record_failure_fails=False)
+    context = _root_context(store)
+    payload = _transport_payload()
+    payload["ng_commit_coords"] = _staged_coords()
+
+    await _prepare_and_finalize(handler, context, payload)
+
+    manifest = await store.manifest("rollout-1")
+    _assert_poisoned(manifest, context, payload, INVALID_COMMIT_COORDS_REASON)
+    assert store.record_failure_calls == [("rollout-1", "c1", INVALID_COMMIT_COORDS_REASON)]
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+async def test_handler_logs_and_continues_when_poisoning_also_fails(handler_cls, caplog) -> None:
+    handler = handler_cls()
+    store = _FaultyLedger(record_fails=True, record_failure_fails=True)
+    context = _root_context(store)
+    payload = _transport_payload()
+    payload["ng_commit_coords"] = _staged_coords()
+
+    with caplog.at_level(logging.ERROR, logger="nemo_gym.token_id_capture.external_capture"):
+        # Must return normally: a valid completion is never turned into a harness failure.
+        await _prepare_and_finalize(handler, context, payload)
+
+    assert context.committed is False
     _assert_transport_fields_stripped(payload)
+    assert store.record_failure_calls == [("rollout-1", "c1", INVALID_COMMIT_COORDS_REASON)]
+    manifest = await store.manifest("rollout-1")
+    assert manifest["records"] == []
+    assert manifest["failures"] == []
+    assert (
+        f"{handler._BACKEND_LABEL} worker capture acknowledgement failed for rollout rollout-1 call c1" in caplog.text
+    )
+    assert (
+        f"Could not poison rollout rollout-1 call c1 after a failed {handler._BACKEND_LABEL} worker acknowledgement"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
