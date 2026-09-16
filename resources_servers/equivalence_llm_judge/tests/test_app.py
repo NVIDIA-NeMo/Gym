@@ -35,6 +35,7 @@ from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
     _extract_question_text,
+    _match_verdict_labels,
 )
 
 
@@ -543,6 +544,7 @@ class TestJudgeParsing:
         "text,verdict,issues",
         [
             ("The answer is INCORRECT.", "INCORRECT", []),
+            ("INCORRECT INCORRECT", "INCORRECT", ["repeated_verdict"]),
             ("Initially INCORRECT, finally CORRECT", "CORRECT", ["conflicting_verdicts"]),
             ("Initially CORRECT, finally INCORRECT", "INCORRECT", ["conflicting_verdicts"]),
         ],
@@ -554,6 +556,39 @@ class TestJudgeParsing:
         assert is_equal is (verdict == "CORRECT")
         assert record.verdict_label == verdict
         assert record.judgement_parsing_issues == issues
+
+    @mark.parametrize(
+        "equal_label,not_equal_label,text,verdict,issues",
+        [
+            ("OK", "OKAY", "OKAY", "OKAY", []),
+            ("OKAY", "OK", "OKAY", "OKAY", []),
+            ("AB", "BCD", "ABCD", "AB", []),
+            ("AB", "BCD", "ABCD BCD", "BCD", ["conflicting_verdicts"]),
+        ],
+    )
+    async def test_verdict_uses_same_matches_as_diagnostics(
+        self, server, equal_label, not_equal_label, text, verdict, issues
+    ) -> None:
+        server.config.judge_equal_label = equal_label
+        server.config.judge_not_equal_label = not_equal_label
+        is_equal, record = await self._judge(server, text)
+        assert is_equal is (verdict == equal_label)
+        assert record.verdict_label == verdict
+        assert record.judgement_parsing_issues == issues
+
+    @mark.parametrize(
+        "text,equal_label,not_equal_label,expected",
+        [
+            ("[[A=B]] then [[A!=B]]", "[[A=B]]", "[[A!=B]]", ["[[A=B]]", "[[A!=B]]"]),
+            ("A+B A?B", "A+B", "A?B", ["A+B", "A?B"]),
+            ("AAB", "A+B", "A?B", []),
+            ("anything", "", "", []),
+            ("NO", "", "NO", ["NO"]),
+            ("YES", "YES", "", ["YES"]),
+        ],
+    )
+    def test_literal_and_empty_labels(self, text, equal_label, not_equal_label, expected) -> None:
+        assert _match_verdict_labels(text, equal_label, not_equal_label) == expected
 
     @staticmethod
     def _rollout(*issues: list[str]) -> dict:

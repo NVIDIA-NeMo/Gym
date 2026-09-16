@@ -52,12 +52,12 @@ from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_
 JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
 
 
-def _count_verdict_occurrences(text: str, equal_label: str, not_equal_label: str) -> tuple[int, int]:
-    """Count non-overlapping verdict labels for diagnostics.
+def _match_verdict_labels(text: str, equal_label: str, not_equal_label: str) -> list[str]:
+    """Return non-overlapping verdict labels in text order.
 
     Consume each match so INCORRECT does not also count as CORRECT.
     """
-    counts = {equal_label: 0, not_equal_label: 0}
+    matches = []
     i = 0
     # Search by match position to avoid scanning each character in Python.
     while i < len(text):
@@ -73,9 +73,9 @@ def _count_verdict_occurrences(text: str, equal_label: str, not_equal_label: str
             label, pos = equal_label, eq_at
         else:
             label, pos = not_equal_label, neq_at
-        counts[label] += 1
+        matches.append(label)
         i = pos + len(label)
-    return counts[equal_label], counts[not_equal_label]
+    return matches
 
 
 def _parse_judge_verdict(
@@ -88,7 +88,9 @@ def _parse_judge_verdict(
             issues.insert(0, "truncated_judge_output")
         return None, issues
 
-    eq_count, neq_count = _count_verdict_occurrences(text, equal_label, not_equal_label)
+    matches = _match_verdict_labels(text, equal_label, not_equal_label)
+    counts = Counter(matches)
+    eq_count, neq_count = counts[equal_label], counts[not_equal_label]
     issues = []
     if eq_count == 0 and neq_count == 0:
         if truncated:
@@ -100,17 +102,7 @@ def _parse_judge_verdict(
         if eq_count > 1 or neq_count > 1:
             issues.append("repeated_verdict")
 
-    eq_pos = text.rfind(equal_label)
-    neq_pos = text.rfind(not_equal_label)
-    if eq_pos < 0 and neq_pos < 0:
-        return None, issues
-
-    # Compare match ends, then lengths, so INCORRECT wins over its CORRECT suffix.
-    eq_end = eq_pos + len(equal_label) if eq_pos >= 0 else -1
-    neq_end = neq_pos + len(not_equal_label) if neq_pos >= 0 else -1
-    if eq_end > neq_end or (eq_end == neq_end and len(equal_label) > len(not_equal_label)):
-        return equal_label, issues
-    return not_equal_label, issues
+    return matches[-1] if matches else None, issues
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
