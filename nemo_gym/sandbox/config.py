@@ -166,3 +166,6 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+
+# no-op: touched to test the changed-files env-size fix, round 1 (small diff)

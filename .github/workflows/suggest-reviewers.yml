@@ -39,9 +39,10 @@ permissions:
 
 jobs:
   suggest-reviewers:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@055534323643bfbb0406bbd4303e1bc51c182bee # v1.10.0
+    # TEMPORARY for testing NVIDIA-NeMo/FW-CI-templates#573 before it merges.
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@08c75fd69de7fe56fbc844581126dbb3054e6911
     with:
-      workflow_ref: 055534323643bfbb0406bbd4303e1bc51c182bee  # pragma: allowlist secret
+      workflow_ref: 08c75fd69de7fe56fbc844581126dbb3054e6911  # pragma: allowlist secret
       # nemo-automation-bot -- same App community-bot.yml uses -- confirmed
       # working live for team-reviewer resolution. No PAT needed.
       app-id: ${{ vars.BOT_ID }}
