@@ -397,6 +397,7 @@ jobs:
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`
+            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
             • Pre-flight: ${{ needs.pre-flight.result }}
             • Classify changes: ${{ needs.classify_changes.result }}
             • Unit tests: ${{ needs.unit_tests.result }}
