@@ -427,7 +427,8 @@ class OpenSandboxConnectionConfig:
 
     ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
     timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
-    server has closed them; null falls back to the SDK's default transport.
+    server has closed them; null falls back to the SDK's default transport only
+    when certificate verification is enabled and pooling is not disabled.
     ``transport_backend`` is "httpx" or "aiohttp" (via the optional
     ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
@@ -945,7 +946,11 @@ class OpenSandboxProvider:
             # untrusted code and must never see it.
             if self._connection.api_key is not None:
                 kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
-        if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
+        if (
+            self._connection.keepalive_expiry_s is not None
+            or self._connection.disable_connection_pooling
+            or not self._connection.tls_verify
+        ):
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
 
