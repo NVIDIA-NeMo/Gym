@@ -30,9 +30,9 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
 
 Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
 call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. This path is intended for eval-only
-streaming clients: token ids and logprobs from the backend response are not carried in the
-``chat.completion.chunk`` schema, and a client that does not set ``stream_options.include_usage``
+error-normalization behavior is fully preserved on this path. External staging stores training
+tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
+schema. A client that does not set ``stream_options.include_usage``
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
 """
 
@@ -101,9 +101,9 @@ def _chunk(completion: dict[str, Any], choices: list[dict[str, Any]], usage: Any
 def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Yield the ``chat.completion.chunk`` choice deltas for one completed choice.
 
-    A role delta opens the choice; reasoning, content, and tool-call deltas follow (each emitted
+    A role delta opens the choice; reasoning, content, refusal, and tool-call deltas follow (each emitted
     only when present); a terminal delta carries the ``finish_reason``. Splitting the message this
-    way keeps every field a client tracks (role, reasoning, content, tool-call name/arguments,
+    way keeps every field a client tracks (role, reasoning, content, refusal, tool-call name/arguments,
     finish reason) in the delta position that client expects, even though it is a single logical
     chunk sequence rather than incremental tokens.
     """
@@ -119,6 +119,10 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
     content = message.get("content")
     if content:
         yield {"index": index, "delta": {"content": content}, "finish_reason": None}
+
+    refusal = message.get("refusal")
+    if refusal:
+        yield {"index": index, "delta": {"refusal": refusal}, "finish_reason": None}
 
     tool_calls = message.get("tool_calls")
     if tool_calls:
@@ -141,7 +145,7 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
 def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bool = False) -> Iterator[str]:
     """Re-emit a complete Chat Completion object as a ``chat.completion.chunk`` SSE stream.
 
-    Emits, per choice, a role chunk -> optional reasoning/content/tool-call chunks -> a terminal
+    Emits, per choice, a role chunk -> optional reasoning/content/refusal/tool-call chunks -> a terminal
     chunk carrying ``finish_reason``. When ``include_usage`` is set and the completion reports
     usage, a final ``choices: []`` chunk carries the usage block (OpenAI's contract). The stream
     always ends with the ``data: [DONE]`` sentinel streaming clients treat as terminal.

@@ -367,6 +367,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             capture_config is not None and capture_config.token_id_capture.external_staging
         )
         if self._external_capture_enabled:
+            overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
+            if overrides.get("stream"):
+                raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
@@ -753,6 +756,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         if context is None or not context.external_staging:
             return body_dict
+        if body_dict.get("stream"):
+            raise ValueError("external staging requires non-streaming backend requests")
+        body_dict["stream"] = False
+        body_dict.pop("stream_options", None)
         admission = context.capture_admission
         if admission is None:
             return body_dict
