@@ -268,7 +268,7 @@ class RolloutTokenCapture:
     def complete_call_from_response(
         self,
         call: ActiveCall,
-        response_payload: dict[str, Any],
+        response_payload: Any,
     ) -> CommitCoords:
         """Extract engine-native material and stage it as one atomic lifecycle step."""
         if self._adapter is None:
