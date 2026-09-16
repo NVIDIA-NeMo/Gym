@@ -69,6 +69,78 @@ from disagreeing. Rollouts collected before `ng_trajectory` was introduced can s
 are unobserved instead of being evaluated from inferred historical formats.
 </Note>
 
+### Applicability by Agent Harness
+
+The matrix below maps the evidence reported in the [trajectory capability matrix](/main/reference/trajectory-capabilities) to
+the inputs that the current health runner requires. It reports whether a check can evaluate the documented agent path, not
+whether the check passes or produces a finding.
+
+- `V`: the evaluated path supplies the evidence required by the check when observability is configured as documented.
+- `O`: applicability depends on the rollout, execution path, or repeat configuration. Inspect
+  `run.artifacts.coverage` in `quality_summary.json` and `ng_trajectory.gaps` in the rollout.
+- `X`: the evaluated path does not currently supply the required evidence. The check is unobserved.
+
+The capability basis identifies the observability contract that a check inspects. It does not imply that every rollout passes
+that contract: for example, `model_call_missing_token_counts` cites C2 because a missing C2 token count is the defect it reports.
+The trajectory capability matrix is the source of truth for harness evidence. The rows below are derived from its
+capabilities and documented limitations, using the health runner's input requirements. Only harnesses with at least one
+`V` or `O` in the health columns below are listed. Harnesses with raw capture or aggregate usage but no canonical turns or
+ownership references remain in the capability matrix; their all-`X` health rows are omitted here.
+
+Four checks do not distinguish harness observability and are described once rather than repeated as columns:
+
+- H1 (`check_execution_error`) contains unexpected check exceptions.
+- H2 (`record_unreadable`) checks rollout JSONL records and their canonical trajectory format when present.
+- H3 (`rollout_duplicate_identity`) checks task and rollout identities across input records.
+- H12 (`task_consistently_unhealthy`) requires at least two computable repeat verdicts. Repeated tasks alone do not make it
+  observable; repeats whose verdict is `unobserved` are not computable.
+
+| ID | Health check | Capability basis |
+| --- | --- | --- |
+| H4 | `rollout_missing_agent_turns` | C3. |
+| H5 | `agent_turn_hollow` | C3. |
+| H6 | `trajectory_capture_mismatch` | C10 or C11. |
+| H7 | `model_call_failed` | C1 and either C10 or C11. |
+| H8 | `model_call_missing_token_counts` | C2 and either C10 or C11. |
+| H9 | `model_call_zero_completion_tokens` | C2 and either C10 or C11. |
+| H10 | `model_call_runaway_generation` | C1, C9, and either C10 or C11. |
+| H11 | `rollout_token_count_mismatch` | C2 and C11, plus complete turn-call accounting and top-level rollout token totals. |
+| H13 | `task_no_successful_model_calls` | C11 and complete turn-call accounting for every repeat. |
+
+| Agent | H4 | H5 | H6 | H7 | H8 | H9 | H10 | H11 | H13 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `claude_code_agent` | X | X | V | V | V | V | V | X | X |
+| `hermes_agent` | X | X | V | V | V | V | V | X | X |
+| `labbench2_vlm_agent` | V | V | V | V | V | V | O | V | V |
+| `openclaw_agent` | X | X | V | V | V | V | V | X | X |
+| `opencode_agent` | X | X | V | V | V | V | V | X | X |
+| `opencode_sandboxed_agent` | X | X | V | V | V | V | V | X | X |
+| `pi_agent` | X | X | V | V | V | V | V | X | X |
+| `pinchbench` | X | X | V | V | V | V | V | X | X |
+| `simple_agent` | V | V | V | V | V | V | V | V | V |
+| `simple_agent_with_compaction` | V | V | V | V | V | V | V | V | V |
+| `terminus_2_sandboxed_agent` | V | V | V | V | V | V | V | X | X |
+| `vibench_agent` | X | X | V | V | V | V | V | X | X |
+
+H6 through H10 accept either ownership scope. Claude Code, Hermes, OpenClaw, PinchBench, and Pi provide invocation ownership
+through C10. OpenCode, sandboxed OpenCode, and ViBench provide C10 when their model calls carry the exact OpenCode session
+identity. These agents can therefore run the five per-call checks even though they do not provide C3 or C11.
+The OpenCode rows assume a supported version that sends `X-Session-Id` on model calls routed through the Gym Model Server.
+Without that identity, ownership remains unavailable and C10-dependent checks are unobserved.
+
+H4 and H5 require C3 because invocation histories do not define individual semantic turns. H11 and H13 require C11 because an
+invocation can own support calls that should be inspected individually but must not be counted as trajectory calls in an
+aggregate claim.
+
+`simple_agent`, `simple_agent_with_compaction`, and `labbench2_vlm_agent` provide C3, C10, and C11. LabBench H10 is
+path-dependent because its C9 support is path-dependent: rows carrying the `multimodal_history_redacted` gap omit saved
+response payloads.
+
+`terminus_2_sandboxed_agent` also provides C3, C10, and C11, enabling H4 through H10. It always reports
+`turn_model_call_scope_incomplete` because it cannot assign every transport retry to a decision. H11 and H13 therefore
+remain `X` despite exact references for the selected decision responses. This limitation is recorded in the
+[trajectory capability matrix](/main/reference/trajectory-capabilities#terminus2-decisions-and-invocation-ownership).
+
 ## Findings and Verdicts
 
 A **finding** is evidence emitted by one check. Checks do not emit verdicts. After all enabled rollout-level checks run, the
@@ -154,7 +226,8 @@ evaluate; the gap does not suppress evidence of failed calls or hollow turns.
 `model_call_runaway_generation` needs one provider-independent definition of an empty saved response. The check recognizes
 non-empty text, content, output text, answer, encrypted reasoning content, reasoning, or reasoning summaries in OpenAI Responses,
 Chat Completions, and Messages-style responses. If any supported content is present, a length-limited response is not classified
-as an empty runaway generation.
+as an empty runaway generation. If a length-limited bound call does not retain its response payload, the check is unobserved
+instead of treating the absent payload as an empty response.
 
 ## How Health Checks Interpret Existing Observation Gaps
 
@@ -291,6 +364,10 @@ Each finding contains a stable check ID, an optional locator for the affected tu
 file stores each displayed object on one JSONL line. `unobserved` lists enabled rollout-level checks that lacked required
 evidence. Ignored checks are recorded only in `quality_summary.json`, so consumers must read the summary before interpreting
 verdicts produced with a reduced check set.
+
+For `model_call_failed`, `detail.terminal` is `true` only when all explicit ownership references resolve and the failed call has
+the greatest captured `call_index` among the bound calls. It is `false` when a later bound call exists or terminal position
+cannot be established.
 
 If a rollout line is unreadable, its real identity is unavailable. The report assigns a synthetic `_ng_task_index` such as
 `__unreadable_record__:input-0:line-42`, uses `_ng_rollout_index: 0`, and records the source file and physical line in the finding
