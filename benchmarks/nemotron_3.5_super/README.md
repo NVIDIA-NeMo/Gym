@@ -49,14 +49,14 @@ Several benchmarks can share one model-serving deployment while retaining separa
 
 The SWE batch shares 4 nodes (16 GPUs), compared with 8 nodes (32 GPUs) when running Verified and Multilingual as separate 4-node jobs at the same time.
 
-The suite files define which benchmarks run together and how many evaluation attempts can run at once. Additional configuration supplies the model and checkpoint, serving container, judge or simulated-user settings, credentials, and benchmark-specific settings. This section explains the batching configuration; it is not a complete run recipe. Reproducing our test runs requires the full configuration used for those runs, not just the suite file.
+The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) add the pilot's concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials.
 
 The prepared SWE inputs already include three copies of each task. Use `num_repeats=1` and `num_repeats_add_seed=false` during collection so Gym doesn’t add more repeats or sampling seeds.
 
-The source-controlled launcher is [benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh](sbatch_external_vllm.sh). Its batching controls are:
+Submit either full batch with [benchmarks/nemotron_3.5_super/submit_batch.sh](submit_batch.sh). It checks the configuration, then calls [benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh](sbatch_external_vllm.sh) to submit the job. Serving allocation settings and Gym configuration are separate:
 
-- Set `NUM_PREFILL_NODES=2` and `NUM_DECODE_NODES=2` for the tested shapes.
-- `num_samples_in_parallel_by_agent` limits selected agents within the global ceiling. `num_repeats` and `num_repeats_add_seed` accept per-agent mappings with an `_default` value, preserving each benchmark's repeat and seed policy. For example:
+- Launcher environment variables `NUM_PREFILL_NODES` and `NUM_DECODE_NODES` default to `2` each, matching the tested four-node allocation. Each node has four GPUs.
+- In Gym YAML configuration or Hydra overrides, `num_samples_in_parallel_by_agent` limits selected agents within the global ceiling. `num_repeats` and `num_repeats_add_seed` accept per-agent mappings with an `_default` value, preserving each benchmark's repeat and seed policy. For example:
 
   ```yaml
   num_samples_in_parallel: 512
@@ -70,6 +70,34 @@ The source-controlled launcher is [benchmarks/nemotron_3.5_super/sbatch_external
 - When `batch_manifest_fpath` is supplied, Gym validates the declared members and input fingerprints before dispatch, then writes per-agent progress and aggregation state to `batch_status.json` beside the manifest. A shared metrics file alone does not prove every member is complete; inspect each member's counts and aggregation state. Successful collection also does not replace a review of infrastructure failures and score validity.
 
   Example: set `batch_manifest_fpath: results/swe-batch/batch_manifest.json` to an existing manifest, then inspect `jq '.members' results/swe-batch/batch_status.json`. A member with `completed_rollout_count: 6`, `expected_rollout_count: 6`, and `aggregation_status: "error"` has finished collection but does not have successfully aggregated metrics.
+
+For Gym-only submission, install the checkout with `uv sync --frozen --extra dev` and make the required benchmark data available in that checkout. The checkout is mounted over the container's `/opt/Gym`, so data available only in the image will be hidden. Configure `sandbox.opensandbox.connection` in the untracked `env.yaml`, or export `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`. Core also needs `nv_inference_api_key` in `env.yaml` or an exported `NV_INFERENCE_API_KEY` for the recipe's NVIDIA-hosted judge and simulated-user endpoints. Never commit credentials. The SWE recipe uses the remote OpenCode assets configured in [benchmarks/nemotron_3.5_super/sandbox_utils.yaml](sandbox_utils.yaml); those must be available to your sandboxes.
+
+Replace the paths and account below with your own. The image must provide `/opt/Gym_venv`, `uv`, and vLLM compatible with [benchmarks/nemotron_3.5_super/vllm_configs/batched.sh](vllm_configs/batched.sh). This serving config retains the pilot's flags and requires `config.json`, `chat_template.jinja`, and `ultra_v3_reasoning_parser.py` in the checkpoint directory. A different container/checkpoint combination needs validation. These examples request 20 hours on `batch_long` to allow for setup and the core batch's measured runtime; choose a partition and limit supported by your cluster.
+
+```bash
+# Full core batch
+MODEL=/shared/checkpoints/super35/hf \
+CONTAINER=/shared/containers/super35-gym.sqsh \
+SBATCH_ACCOUNT=my-slurm-account \
+SBATCH_PARTITION=batch_long \
+SBATCH_TIME=20:00:00 \
+bash benchmarks/nemotron_3.5_super/submit_batch.sh core
+
+# Full SWE-bench Verified + Multilingual batch
+MODEL=/shared/checkpoints/super35/hf \
+CONTAINER=/shared/containers/super35-gym.sqsh \
+SBATCH_ACCOUNT=my-slurm-account \
+SBATCH_PARTITION=batch_long \
+SBATCH_TIME=20:00:00 \
+bash benchmarks/nemotron_3.5_super/submit_batch.sh swe
+```
+
+Append `--check` to either command to check local paths and resolve configuration without submitting a job, installing dependencies, or checking live services. Append `--config path/to/overrides.yaml` or Hydra overrides such as `++num_samples_in_parallel=256` to customize the recipe. The same arguments reach dependency setup and evaluation. Keep extra config files in the checkout, or expose their paths through `MOUNTS`. `MODEL_NAME`, `SBATCH_QOS`, and the node counts are optional environment overrides; `GYM_PYTHON` can select a local Python environment instead of `.venv/bin/python`.
+
+The launcher mounts the checkout and checkpoint automatically, creates per-experiment server environments, and installs dependencies before evaluation. It does not depend on any root-level pilot helpers or earlier jobs. Dependency setup uses allocated walltime. `--check` and local regression tests do not establish that a new container or recipe will run successfully on GPUs.
+
+By default, each submission gets a fresh experiment name and timestamped output. To resume, use the same checkpoint and evaluation settings, set `EXPERIMENT_NAME` and `ROLLOUTS_FPATH` to the original name and saved output, and append `++resume_from_cache=true` to the command. For requeue recovery, supply the explicit output path and override on the initial submission. The experiment name alone does not enable resume; without the override, Gym clears existing output at an explicitly selected path. Preserve the materialized inputs and wait for the preceding job and cleanup to finish before manually resubmitting.
 
 ### Open problems
 1. We can't reduce the number of prefill nodes because the TRT LLM kernel isn't large enough to support higher max_num_batched_tokens
