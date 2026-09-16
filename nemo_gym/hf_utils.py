@@ -178,22 +178,16 @@ def upload_jsonl_dataset(
             card = DatasetCard.load(card_path)
         except RemoteEntryNotFoundError:
             card = DatasetCard("")
-        tags = list(card.data.get("tags") or [])
-        for tag in ("rl-environment", "nemo-gym"):
-            if tag not in tags:
-                tags.append(tag)
-        operations = [
-            CommitOperationAdd(
-                path_in_repo=Path(config.input_jsonl_fpath).name,
-                path_or_fileobj=config.input_jsonl_fpath,
-            )
-        ]
-        if tags != card.data.get("tags"):
-            card.data.tags = tags
-            operations.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=str(card).encode("utf-8")))
+        card.data.tags = list(dict.fromkeys([*(card.data.get("tags") or []), "rl-environment", "nemo-gym"]))
         commit_info = client.create_commit(
             repo_id=repo_id,
-            operations=operations,
+            operations=[
+                CommitOperationAdd(
+                    path_in_repo=Path(config.input_jsonl_fpath).name,
+                    path_or_fileobj=config.input_jsonl_fpath,
+                ),
+                CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=str(card).encode("utf-8")),
+            ],
             token=config.hf_token,
             repo_type="dataset",
             create_pr=config.create_pr,
