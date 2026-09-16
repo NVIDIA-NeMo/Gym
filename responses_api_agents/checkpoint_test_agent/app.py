@@ -11,6 +11,7 @@ from nemo_gym._checkpoint.agent import (
     AgentExecution,
     AgentExecutionState,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent.app import SimpleAgent
 
 
@@ -77,3 +78,5 @@ class CheckpointTestAgent(SimpleAgent):
 
 if __name__ == "__main__":
     CheckpointTestAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = CheckpointTestAgent.run_webserver()  # noqa: F401
