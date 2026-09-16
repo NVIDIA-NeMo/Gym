@@ -1,0 +1,146 @@
+---
+title: "GenRM Comparison Groups"
+description: "Bound group scoring while preserving identical-answer retries."
+position: 9
+---
+
+# GenRM Comparison Groups
+
+The `genrm_compare` resources server compares several answers to one prompt using a generative reward
+model. A comparison group (cohort) contains exactly `num_rollouts_per_prompt` members. Each member calls
+`/verify` separately. Judging starts after every member arrives, and rewards are published together after
+all comparisons finish. Circular/all-pairs comparison strategies and reward aggregation are unchanged.
+
+## Caller contract
+
+The caller owns the group identity, admits the whole group with sufficient concurrency, and decides
+whether to replace a failed attempt. The server does not generate answers or schedule retries.
+
+| Field | Meaning |
+| --- | --- |
+| `_ng_group_id` | Recommended for retry isolation and replay. Unique across runs and prompt occurrences. |
+| `_ng_group_attempt` | Nonnegative integer shared by every member of an attempt; defaults to zero. |
+| `_ng_rollout_index` | Required member slot from zero through `num_rollouts_per_prompt - 1`. |
+
+All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
+numbers are excluded from reward metrics. Shared judge calls run outside any individual member's token
+capture context.
+
+Legacy requests without `_ng_group_id` keep task/prompt-based grouping. Successfully completed legacy
+groups are removed after rewards are published, so another sequential run on the same server can be
+judged again. Legacy grouping cannot reliably distinguish overlapping runs or late requests from previous
+runs, and it does not provide completed reward replay. Failed legacy groups remain subject to retention.
+Use explicit group IDs for isolated retries and replay.
+
+<Warning>
+The rollout index must already be a local group slot; the server does not partition global indices,
+multiple repeat groups, or fan-out across agents automatically. Every group needs enough collection
+concurrency for all of its members to arrive.
+</Warning>
+
+## Transport retries and completed replay
+
+For an explicit-ID group of four answers A, B, C, and D, the caller sends four concurrent requests with one group ID, attempt zero,
+and slots 0–3. The first accepted response for each slot is authoritative.
+
+- An identical `/verify` request attaches another waiter while the group is active.
+- A disconnected request removes only its waiter. Its accepted answer stays available until the group
+  completes or fails; an identical retry can reattach.
+- After completion, an identical request returns the cached reward without another judge call.
+- A different response for an occupied slot receives HTTP 409, including after completion.
+
+Replay checks the full response payload, not just its ID or answer text. Retrying `/run` can generate a
+different response and therefore conflict. Cached replay is not a fresh evaluation by the judge.
+
+## Deadlines and failure handling
+
+Configure these fields under `genrm_compare_resources_server.resources_servers.genrm_compare`:
+
+```yaml
+num_rollouts_per_prompt: 16
+cohort_collection_timeout_s: 1800
+cohort_evaluation_timeout_s: 1800
+judge_request_timeout_s: 300
+cohort_result_ttl_s: 21600
+max_terminal_cohorts: 4096
+```
+
+Collection has a finite positive deadline starting at the first member. Duplicates do not extend it.
+Evaluation gets a separate finite deadline after all members arrive. Each judge HTTP request also has a
+deadline that includes connection retries. Increase these limits for your generation and judge latency;
+`null` no longer disables the collection deadline. The supplied YAML uses 16 members, so it requires 16
+slots and enough concurrency to admit them together.
+
+If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
+connection failures, expired deadlines, or exhausted retries for empty/unsuccessful judge responses also
+fail the group. Empty or truncated judge responses use the configured `genrm_parse_retries` before failure.
+If any retry produces a completed, nonempty answer but none can be parsed, the comparison retains the
+existing default-score fallback. If every reply is empty or unsuccessful, the comparison fails. An omitted
+or null response status is treated as completed for compatibility with Gym model adapters.
+
+At `/verify`, failed waiters and a late member of a retained failed group receive HTTP 503. Superseding a group also releases its existing waiters with
+503; subsequent requests from an older attempt receive 409. Invalid coordinates receive 422.
+
+The simple agent uses its standard upstream error handling: a failed verification becomes HTTP 500 from
+`/run`, with the upstream reason preserved. With `route_failures_to_sidecar` enabled, the collector records
+`agent_run_error` without a reward in the failures sidecar. By default an HTTP error aborts collection.
+Even with routing enabled, a run with no successful results raises rather than reporting an ordinary score.
+Failure rows can be joined to materialized inputs by task/rollout index to recover caller-supplied group
+coordinates; the collector does not echo group coordinates into failure rows.
+This path does not preserve generated answers in a judge-failure row or support judge-only reverification.
+
+Failure and server shutdown discard response bodies and release waiters. Owned judge tasks are cancelled
+and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their connection;
+shutdown does not guarantee delivery of a 503 response. Each terminal transition logs a bounded disposition message without prompt or answer content.
+
+## Replacement attempts and retention
+
+To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
+group. Newer attempts retire active older ones. An older judge task cannot publish rewards into a newer
+attempt. An individual rollout's retry counter does not advance this shared group attempt.
+
+Run the resources server with one HTTP worker. State is process-local. Explicit-ID terminal groups retain compact
+response digests, rewards when completed, and failure/attempt information; full answer bodies and waiters
+are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
+
+The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
+are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
+use fresh group IDs for unrelated work. This cache does not provide durable recovery.
+
+## Using the file collector
+
+The file collector does not create group IDs, reserve concurrency for whole groups, or advance group
+attempts on resume. A small supported check uses **one task, one agent, and exactly sixteen repeats**, with
+the sixteen-member configuration above, which matches the shipped YAML. Create a fresh input before each independent run:
+
+```python
+import json
+from pathlib import Path
+from uuid import uuid4
+
+task = {
+    "responses_create_params": {"input": "Explain reinforcement learning in one sentence."},
+    "_ng_group_id": str(uuid4()),
+    "_ng_group_attempt": 0,
+}
+Path("one-task.jsonl").write_text(json.dumps(task) + "\n")
+```
+
+Start the configured policy, judge, and Gym servers first, then run:
+
+```bash
+gym eval run --no-serve --agent genrm_simple_agent \
+    --input one-task.jsonl --output fresh-results.jsonl \
+    --num-repeats 16 --concurrency 16 +route_failures_to_sidecar=true
+```
+
+The collector supplies slots 0–15. Use a fresh output path for each independent check. This example does
+not implement group resume: the caller must coordinate a new complete attempt after failure, including
+when only some completed rewards reached disk. GenRM declares individual `gym eval reverify` unsupported
+because it cannot reconstruct a whole group and an identical completed request would replay cached rewards.
+Durable answer reuse and training checkpoint recovery require caller-side coordination beyond this server.
+
+Gym's forced-unsafe reverification override does not add group recovery: depending on retained state and
+response identity, it can return cached rewards, reject conflicting responses, or time out waiting for
+missing group members. The collector's individual rollout resume counter does not coordinate a group
+attempt; resume after a group failure requires caller coordination.

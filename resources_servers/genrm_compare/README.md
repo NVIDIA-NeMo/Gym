@@ -221,7 +221,8 @@ genrm_compare/
 
 ### POST `/compare`
 
-Compare multiple candidate responses.
+Compare multiple candidate responses. Judge transport failures or exhausted retries without a completed
+answer return an HTTP error instead of ordinary rewards.
 
 **Request Body** (`GenRMCompareRequest`):
 - `conversation_history`: List of `{"role": str, "content": str}` messages
@@ -235,18 +236,16 @@ Compare multiple candidate responses.
 
 ### POST `/verify`
 
-Cohort-based verification endpoint used during rollout collection.
+Cohort verification uses local member indices and finite deadlines. Caller-owned group IDs provide retry isolation
+and completed reward replay; legacy task/prompt grouping remains available for sequential runs.
+Comparisons start after every member arrives; rewards are published only for a complete group. Missing
+members or failed judging end the group with HTTP 503 and no reward. A disconnect detaches its waiter;
+the same answer can reattach. Explicit-ID groups can replay cached rewards after completion; successful
+legacy groups are removed so the next sequential run can start.
+The caller coordinates complete replacement attempts; collector scheduling and resume are unchanged.
 
-- When `num_rollouts_per_prompt <= 1`, returns `default_score`
-- When `num_rollouts_per_prompt > 1`, buffers rollouts by task/prompt identity plus principle, waits for a full cohort, then assigns relative rewards to that cohort
-
-## Error Handling
-
-The server handles failures gracefully:
-
-- **Parse failures**: Retries up to `genrm_parse_retries` times with sleep between attempts
-- **Connection errors**: Falls back to default scores
-- **Single response**: Returns default score (no comparison possible)
+See [GenRM Comparison Groups](https://docs.nvidia.com/nemo/gym/main/evaluation/genrm-cohorts) for
+coordinates, the supported collector example, cancellation behavior, and bounded retention limits.
 
 ## Development
 
@@ -282,7 +281,7 @@ When configured in `rollout_collection.py`, the strategy:
 3. Calls this Resources Server's `/compare` endpoint
 4. Attaches rewards and metrics to results
 
-See `examples/genrm_grpo_example.yaml` for complete configuration.
+See [GenRM Comparison Groups](https://docs.nvidia.com/nemo/gym/main/evaluation/genrm-cohorts) for collector configuration.
 
 ## Related Components
 

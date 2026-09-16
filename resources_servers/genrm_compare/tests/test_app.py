@@ -70,7 +70,7 @@ class TestGenRMCompareConfig:
         # Check defaults
         assert config.comparison_strategy == "circular"
         assert config.num_judges_per_comparison == 1
-        assert config.cohort_collection_timeout_s is None
+        assert config.cohort_collection_timeout_s == 1800.0
         assert config.cohort_result_ttl_s == 3600.0
         assert config.max_terminal_cohorts == 4096
         assert config.use_principle is False
@@ -243,12 +243,13 @@ class TestGenRMCompareResourcesServer:
 
         assert request.group_attempt == 3
 
-    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self):
+    def test_verify_request_defaults_missing_group_attempt_to_zero_with_warning(self, caplog):
         payload = self._verify_request(0, task_index=None, group_id="legacy-group").model_dump(by_alias=True)
         payload.pop(GROUP_ATTEMPT_KEY_NAME)
 
-        with pytest.warns(UserWarning, match="treating this legacy request as group attempt zero"):
-            request = GenRMCompareVerifyRequest.model_validate(payload)
+        resources_servers.genrm_compare.app._warn_legacy_attempt.cache_clear()
+        request = GenRMCompareVerifyRequest.model_validate(payload)
+        assert "group attempt zero" in caplog.text
 
         assert request.group_attempt == 0
 
@@ -856,7 +857,7 @@ class TestGenRMCompareResourcesServer:
         config = config.model_copy(
             update={
                 "num_rollouts_per_prompt": 2,
-                "cohort_collection_timeout_s": None,
+                "cohort_collection_timeout_s": 1.0,
             }
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
@@ -864,7 +865,7 @@ class TestGenRMCompareResourcesServer:
         await asyncio.sleep(0)
         cohort = next(iter(server._verify_cohorts.values()))
 
-        assert cohort.collection_timeout_task is None
+        assert cohort.collection_timeout_task is not None
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
 
@@ -965,7 +966,7 @@ class TestGenRMCompareResourcesServer:
         await asyncio.gather(first_waiter, return_exceptions=True)
         cohort = next(iter(first._verify_cohorts.values()))
         assert cohort.phase == "collecting"
-        assert cohort.collection_timeout_task is None
+        assert cohort.collection_timeout_task is not None
 
     async def test_terminal_tombstones_are_bounded_and_expire(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(
@@ -1013,7 +1014,7 @@ class TestRunSingleComparison:
         )
         mock_server_client = MagicMock()
         # Return a well-formed GenRM score response
-        mock_http_response = AsyncMock()
+        mock_http_response = AsyncMock(ok=True)
         mock_http_response.json = AsyncMock(
             return_value={
                 "output": [
