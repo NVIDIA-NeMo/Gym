@@ -57,7 +57,7 @@ wait_for_url() {
   done
 }
 
-for command in curl timeout; do
+for command in curl; do
   command -v "$command" >/dev/null || { echo "Required command is not installed: $command" >&2; exit 1; }
 done
 [[ -x "$GYM_BIN" ]] || { echo "Gym executable is not available: $GYM_BIN" >&2; exit 1; }
@@ -116,7 +116,7 @@ cd "$E2E_DIR/workspace"
 GYM_PID=$!
 "$ROOT_DIR/scripts/wait_for_servers.sh" "$GYM_PID" "$HEAD_PORT" 180
 
-timeout --signal=INT --kill-after=30s 180 "$GYM_BIN" eval run \
+"$GYM_BIN" eval run \
   --no-serve \
   --agent nooa_calculate_capability \
   --input "$ROOT_DIR/responses_api_agents/nooa_agent/data/capability_calculate.jsonl" \
