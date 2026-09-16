@@ -26,7 +26,7 @@ VLLM_COMMON_ARGS=(
     --api-server-count 1
     --attention_config.use_fp4_indexer_cache True
     --moe-backend deep_gemm_mega_moe
-    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
