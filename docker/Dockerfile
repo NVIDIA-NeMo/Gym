@@ -214,6 +214,17 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
         uv sync --locked --extra vllm --extra telemetry --extra dev && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+
+# Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
+# path needs no network: lint.sh reuses the baked pre-commit executable, but a
+# bare `pre-commit run` still clones the remote hook repositories declared in
+# .pre-commit-config.yaml (pre-commit-hooks, ruff-pre-commit) and pip-installs
+# the local hooks' additional_dependencies (pyyaml) on first run. Resolving
+# every hook environment here, while the build has network, keeps the runtime
+# lint hermetic.
+ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
+RUN pre-commit install-hooks && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg
@@ -257,6 +268,7 @@ RUN export HOME=/home/nemo-runtime \
     test -w "${HOME}" && \
     test -w "${XDG_CACHE_HOME}" && \
     test -w "${UV_CACHE_DIR}" && \
+    test -w "${PRE_COMMIT_HOME}" && \
     test -w /opt/nemo-gym/cache && \
     test -w /opt/nemo-gym/results && \
     test -x /usr/local/bin/uv && \

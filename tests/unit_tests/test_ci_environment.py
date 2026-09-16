@@ -921,3 +921,82 @@ def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
 
     assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
     assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
+    # lint.sh's offline branch reuses the baked pre-commit executable, but
+    # `pre-commit run` also needs the hook repositories and per-hook
+    # environments declared in .pre-commit-config.yaml: without a seeded
+    # PRE_COMMIT_HOME, the first lint run in a clean container still clones
+    # pre-commit-hooks / ruff-pre-commit from GitHub and pip-installs the
+    # local hooks' additional_dependencies (pyyaml) from PyPI. The release
+    # image must seed the hook cache at build time and leave it writable by
+    # the runtime UID (asserted by the non-root smoke test).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit" in dockerfile
+    assert "pre-commit install-hooks" in dockerfile
+    assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
+    assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile
+
+
+def test_seeded_pre_commit_hook_cache_needs_no_network(tmp_path: Path) -> None:
+    # Network-disabled integration test for the container lint path: with a
+    # seeded PRE_COMMIT_HOME, `pre-commit run` must need no network. Seed the
+    # hook cache exactly the way the image build does (pre-commit
+    # install-hooks), then poison every egress path (proxies plus a github.com
+    # insteadOf rewrite to a dead address) and require the run to succeed from
+    # the cache alone. Inside the baked image the build-time PRE_COMMIT_HOME
+    # is reused instead of being re-seeded.
+    pre_commit = shutil.which("pre-commit")
+    if pre_commit is None:
+        pytest.skip("pre-commit is not installed (dev extra)")
+
+    config = (REPO_ROOT / ".pre-commit-config.yaml").read_text()
+    assert "https://github.com/" in config, "config must declare remote hook repos for this test"
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".pre-commit-config.yaml").write_text(config)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=ci", "-c", "user.email=ci@example.com", "commit", "--no-verify", "-m", "seed"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    env = os.environ.copy()
+    baked_home = env.get("PRE_COMMIT_HOME")
+    if baked_home and Path(baked_home).is_dir() and any(Path(baked_home).iterdir()):
+        pre_commit_home = baked_home
+    else:
+        pre_commit_home = str(tmp_path / "pre-commit-home")
+        subprocess.run(
+            [pre_commit, "install-hooks"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**env, "PRE_COMMIT_HOME": pre_commit_home},
+        )
+    env["PRE_COMMIT_HOME"] = pre_commit_home
+
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        env[var] = "http://127.0.0.1:9"
+    env.pop("no_proxy", None)
+    env.pop("NO_PROXY", None)
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "url.https://127.0.0.1:9/.insteadOf"
+    env["GIT_CONFIG_VALUE_0"] = "https://github.com/"
+
+    result = subprocess.run(
+        [pre_commit, "run", "--all-files"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
