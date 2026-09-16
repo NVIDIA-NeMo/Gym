@@ -7,10 +7,6 @@
 export VLLM_USE_V2_MODEL_RUNNER=1
 export FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
 
-# The shared launcher enables Fastokens globally. Keep this first baseline on
-# Inkling's upstream tokenizer path so its effect can be measured separately.
-unset VLLM_USE_FASTOKENS
-
 GYM_MODEL_PARAMS=()
 
 VLLM_COMMON_ARGS=(
@@ -19,7 +15,6 @@ VLLM_COMMON_ARGS=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
     --data-parallel-backend mp
-    --max-model-len 1048576
     --tokenizer-mode inkling
     --kernel-config.enable_flashinfer_autotune=False
     --enable-auto-tool-choice
@@ -28,25 +23,22 @@ VLLM_COMMON_ARGS=(
     --enable-chunked-prefill
     --enable-prefix-caching
     --enable-expert-parallel
-    --no-async-scheduling
-    --max-cudagraph-capture-size 256
+    --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+    --data-parallel-size-local 1
+    --tensor-parallel-size 4
 )
 
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
-    --max-num-batched-tokens 16384
-    --max-num-seqs 256
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --max-num-batched-tokens 33920
+    --max-num-seqs 1024
 )
 
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-num-batched-tokens 8192
-    --max-num-seqs 256
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --max-num-batched-tokens 33920
+    --max-num-seqs 1024
 )
 
 # This checkpoint contains eight trained MTP prediction layers. Keep speculative
