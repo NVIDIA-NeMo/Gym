@@ -70,6 +70,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     debug: bool = False
     model_context_limit: int
     model_output_limit: int | None
+    interleaved_thinking: bool
 
     llm_request_timeout: int
 
@@ -459,6 +460,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 record_terminal_session=False,
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
+                interleaved_thinking=self.config.interleaved_thinking,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
