@@ -25,6 +25,8 @@ sandbox:
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
+      # Adds private roots to the normal system trust store for OpenSandbox only.
+      ca_bundle_path: null
       request_timeout_s: 300
       use_server_proxy: true
       # Must stay below the server's keep-alive idle timeout (uvicorn: ~5s),

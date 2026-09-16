@@ -22,6 +22,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -56,6 +57,17 @@ class FakeVolume:
     name: str
 
 
+class FakeSandboxFiles:
+    def __init__(self) -> None:
+        self.contents: dict[str, bytes] = {}
+
+    async def write_file(self, target_path: str, data: str | bytes) -> None:
+        self.contents[target_path] = data.encode() if isinstance(data, str) else data
+
+    async def read_bytes(self, source_path: str) -> bytes:
+        return self.contents[source_path]
+
+
 class FakeSandbox:
     created_kwargs: dict[str, Any] = {}
     connected_args: tuple[Any, ...] = ()
@@ -63,6 +75,7 @@ class FakeSandbox:
 
     def __init__(self, sandbox_id: str = "sandbox-1") -> None:
         self.id = sandbox_id
+        self.files = FakeSandboxFiles()
 
     @classmethod
     async def create(cls, *_args: Any, **kwargs: Any) -> "FakeSandbox":
@@ -461,6 +474,7 @@ def test_provider_validation_and_retry_helpers() -> None:
         {"operations": {"command_retries": -1}},
         {"operations": {"close_timeout_s": 0}},
         {"operations": {"status_poll_timeout_s": 0}},
+        {"operations": {"background_request_retries": -1}},
         {"create": {"connect_attempt_timeout_s": 0}},
         {"create": {"connect_poll_s": 0}},
         {"create": {"image_pull_policy": "Sometimes"}},
@@ -564,6 +578,13 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
+def test_connection_api_key_environment_reference(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_OPENSANDBOX_API_KEY", "resolved-key")
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"api_key": "${TEST_OPENSANDBOX_API_KEY}"})
+
+    assert provider._connection_config().kwargs["api_key"] == "resolved-key"
+
+
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default backend is httpx, with the configured keepalive expiry on the pool.
     provider = opensandbox_provider.OpenSandboxProvider()
@@ -605,6 +626,45 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     assert isinstance(transport, httpx.AsyncHTTPTransport)
     assert transport._pool._max_connections > 2**32
     assert transport._pool._max_keepalive_connections == 0
+
+
+def test_connection_custom_ca_bundle_is_scoped_to_httpx_transport(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ca_bundle = tmp_path / "opensandbox-ca.pem"
+    ca_bundle.write_text("test CA")
+
+    class FakeSSLContext:
+        loaded_cafile: str | None = None
+
+        def load_verify_locations(self, *, cafile: str) -> None:
+            self.loaded_cafile = cafile
+
+    class FakeTransport:
+        async def aclose(self) -> None:
+            pass
+
+    ssl_context = FakeSSLContext()
+    transport_kwargs: dict[str, Any] = {}
+
+    def make_transport(**kwargs: Any) -> FakeTransport:
+        transport_kwargs.update(kwargs)
+        return FakeTransport()
+
+    monkeypatch.setattr(opensandbox_provider.ssl, "create_default_context", lambda: ssl_context)
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", make_transport)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "ca_bundle_path": str(ca_bundle),
+            "keepalive_expiry_s": None,
+        }
+    )
+    transport = provider._connection_config().kwargs["transport"]
+
+    assert isinstance(transport, FakeTransport)
+    assert transport_kwargs["verify"] is ssl_context
+    assert ssl_context.loaded_cafile == str(ca_bundle)
 
 
 async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensandbox_sdk: None) -> None:
@@ -883,6 +943,146 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     raw.info_calls = 0
     with pytest.raises(Backend502Error, match="Get command status failed"):
         await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
+
+
+@pytest.mark.asyncio
+async def test_exec_background_interrupts_remote_command_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.interrupted = False
+            self.interrupt_calls: list[str] = []
+            self.status_calls: list[str] = []
+            self.poll_started = asyncio.Event()
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-cancelled")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            if self.interrupted:
+                return SimpleNamespace(running=False, exit_code=130, error=None)
+            self.poll_started.set()
+            await asyncio.Future()
+
+        async def interrupt(self, execution_id: str) -> None:
+            self.interrupt_calls.append(execution_id)
+            self.interrupted = True
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, dict, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True},
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-cancelled",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(commands=commands),
+    )
+
+    task = asyncio.create_task(provider.exec(handle, "opencode run", timeout_s=30))
+    await commands.poll_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert commands.interrupt_calls == ["exec-cancelled"]
+    assert commands.status_calls == ["exec-cancelled", "exec-cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_exec_background_does_not_retry_unreachable_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BackendUnavailableError(RuntimeError):
+        status_code = 502
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-unreachable")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls += 1
+            raise BackendUnavailableError("Could not connect to backend sandbox endpoint")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, dict, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 1200},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "retries": 5,
+            "status_poll_timeout_s": 30,
+            "background_request_retries": 0,
+        },
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-unreachable",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(commands=commands),
+    )
+
+    with pytest.raises(BackendUnavailableError, match="backend sandbox endpoint"):
+        await provider.exec(handle, "opencode run", timeout_s=3600)
+
+    assert commands.status_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_background_classifies_missing_command_as_lifecycle_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-lost")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise RuntimeError(f"command not found: {execution_id}")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True},
+    )
+    monkeypatch.setattr(
+        provider,
+        "_collect_lifecycle_diagnostics",
+        AsyncMock(return_value="fingerprint_matches=False; app_dir=missing"),
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-reset",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(commands=FakeCommands()),
+    )
+
+    with pytest.raises(
+        opensandbox_provider.OpenSandboxLifecycleResetError,
+        match="fingerprint_matches=False",
+    ):
+        await provider.exec(handle, "make build", timeout_s=30)
 
 
 @pytest.mark.parametrize(

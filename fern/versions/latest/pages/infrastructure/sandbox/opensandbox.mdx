@@ -80,7 +80,7 @@ The provider constructor accepts four optional config sections:
 
 | Section | Purpose |
 | --- | --- |
-| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
+| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, `tls_verify`, and a provider-scoped `ca_bundle_path`. The CA bundle also applies to PTY connections. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |

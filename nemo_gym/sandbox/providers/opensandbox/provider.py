@@ -18,8 +18,12 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
+import os
 import re
 import shlex
+import ssl
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -84,6 +88,10 @@ class SandboxBackendUnreachableError(RuntimeError):
     """
 
 
+class OpenSandboxLifecycleResetError(RuntimeError):
+    """Raised when a live sandbox loses its provider-side command state."""
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
@@ -123,6 +131,7 @@ RETRYABLE_ERROR_MARKERS = (
     "timeout",
 )
 METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+ENV_REFERENCE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
@@ -132,6 +141,8 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
+SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
+LIFECYCLE_FINGERPRINT_PATH = "/tmp/.nemo-gym-sandbox-instance"
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -449,6 +460,8 @@ class OpenSandboxConnectionConfig:
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    # Additional CA certificates trusted only by this provider's HTTP transport.
+    ca_bundle_path: str | None = None
     # Open a fresh connection per request. Set this behind a load balancer that
     # silently reaps idle pooled connections, where reusing one hangs the SDK.
     # Costs a handshake per request; otherwise harmless.
@@ -584,6 +597,8 @@ class OpenSandboxOperationConfig:
     # unreachable sandbox hangs for the shared request timeout (tuned for long
     # submits) before failing. None falls back to that shared budget.
     status_poll_timeout_s: float | None = 10.0
+    # Retry idempotent background status/log reads separately from command submits.
+    background_request_retries: int | None = None
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -602,6 +617,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_initial_s must be > 0")
         if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
             raise ValueError("operations.status_poll_timeout_s must be > 0")
+        if self.background_request_retries is not None and self.background_request_retries < 0:
+            raise ValueError("operations.background_request_retries must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -719,6 +736,12 @@ class OpenSandboxProvider:
         runtime_requirements: OpenSandboxRuntimeRequirementsConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
+        if self._connection.api_key is not None and (match := ENV_REFERENCE_RE.fullmatch(self._connection.api_key)):
+            variable_name = match.group(1)
+            value = os.environ.get(variable_name)
+            if not value:
+                raise ValueError(f"OpenSandbox API key environment variable {variable_name!r} is not set")
+            self._connection = replace(self._connection, api_key=value)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
@@ -733,6 +756,7 @@ class OpenSandboxProvider:
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
+        self._lifecycle_fingerprints: dict[str, str] = {}
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -945,7 +969,11 @@ class OpenSandboxProvider:
             # untrusted code and must never see it.
             if self._connection.api_key is not None:
                 kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
-        if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
+        if (
+            self._connection.keepalive_expiry_s is not None
+            or self._connection.disable_connection_pooling
+            or self._connection.ca_bundle_path is not None
+        ):
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
 
@@ -967,7 +995,7 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
-        verify = self._connection.tls_verify
+        verify = self._tls_context()
         if self._connection.transport_backend == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
@@ -979,6 +1007,14 @@ class OpenSandboxProvider:
                     "is not installed; falling back to the httpx transport"
                 )
         return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
+
+    def _tls_context(self) -> ssl.SSLContext | bool:
+        """Use the same provider-specific CA trust for SDK and PTY connections."""
+        if self._connection.ca_bundle_path is None:
+            return self._connection.tls_verify
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=self._connection.ca_bundle_path)
+        return context
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -1043,7 +1079,112 @@ class OpenSandboxProvider:
             ),
             timeout=timeout_s,
         )
-        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        await self._remember_existing_lifecycle_fingerprint(handle)
+        return handle
+
+    async def _remember_existing_lifecycle_fingerprint(self, handle: SandboxHandle) -> None:
+        """Record an existing marker when reconnecting without changing its identity."""
+        try:
+            marker = (await self._read_lifecycle_fingerprint(handle)).decode().strip()
+        except Exception as error:  # noqa: BLE001 - absence is useful only during failure diagnosis
+            LOGGER.warning(
+                "Could not read OpenSandbox lifecycle fingerprint while reconnecting; sandbox_id=%s; error=%r",
+                handle.sandbox_id,
+                error,
+            )
+            return
+        if marker:
+            self._lifecycle_fingerprints[handle.sandbox_id] = marker
+            LOGGER.info(
+                "Recorded existing OpenSandbox lifecycle fingerprint; sandbox_id=%s; fingerprint=%s",
+                handle.sandbox_id,
+                marker,
+            )
+
+    async def _read_lifecycle_fingerprint(self, handle: SandboxHandle) -> bytes:
+        """Read the marker with a short diagnostic deadline and no retry loop."""
+        return await self._await_sdk_operation(
+            lambda: handle.raw.files.read_bytes(LIFECYCLE_FINGERPRINT_PATH),
+            operation="read lifecycle fingerprint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=30.0,
+            retries=0,
+        )
+
+    async def _initialize_lifecycle_fingerprint(self, handle: SandboxHandle) -> None:
+        """Persist a provider-generated identity inside the sandbox filesystem."""
+        marker = uuid.uuid4().hex
+        await self._write_file(handle, LIFECYCLE_FINGERPRINT_PATH, f"{marker}\n")
+        self._lifecycle_fingerprints[handle.sandbox_id] = marker
+        LOGGER.info(
+            "Initialized OpenSandbox lifecycle fingerprint; sandbox_id=%s; fingerprint=%s",
+            handle.sandbox_id,
+            marker,
+        )
+
+    @staticmethod
+    def _is_missing_background_command_error(error: BaseException) -> bool:
+        message = str(error).lower()
+        return "command not found" in message
+
+    async def _collect_lifecycle_diagnostics(self, handle: SandboxHandle) -> str:
+        """Collect bounded evidence after execd loses a background command."""
+        diagnostics: list[str] = []
+        expected = self._lifecycle_fingerprints.get(handle.sandbox_id)
+        diagnostics.append(f"expected_fingerprint={expected or '<unrecorded>'}")
+
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is not None:
+            try:
+                info = await self._await_sdk_operation(
+                    get_info,
+                    operation="lifecycle diagnostic get_info",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=30.0,
+                    retries=0,
+                )
+                raw_status = getattr(info, "status", None)
+                diagnostics.append(
+                    "control_plane_state="
+                    + str(getattr(raw_status, "state", None) if raw_status is not None else None)
+                )
+            except Exception as error:  # noqa: BLE001 - preserve the original failure
+                diagnostics.append(f"get_info_error={type(error).__name__}: {error}")
+
+        try:
+            observed = (await self._read_lifecycle_fingerprint(handle)).decode().strip()
+            diagnostics.append(f"observed_fingerprint={observed or '<empty>'}")
+            diagnostics.append(f"fingerprint_matches={observed == expected if expected is not None else 'unknown'}")
+        except Exception as error:  # noqa: BLE001 - a missing marker supports the diagnosis
+            diagnostics.append(f"fingerprint_read_error={type(error).__name__}: {error}")
+
+        try:
+            _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
+            command = (
+                "printf 'hostname='; hostname 2>/dev/null || true; "
+                "printf 'boot_id='; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; "
+                "printf 'pid1_start='; cut -d' ' -f22 /proc/1/stat 2>/dev/null || true; "
+                "printf 'app_dir='; test -d /app && echo present || echo missing; "
+                "printf 'memory_events='; tr '\\n' ',' </sys/fs/cgroup/memory.events 2>/dev/null || true"
+            )
+            execution = await self._await_sdk_operation(
+                lambda: handle.raw.commands.run(
+                    command,
+                    opts=RunCommandOpts(timeout=timedelta(seconds=20)),
+                ),
+                operation="lifecycle diagnostic command",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=30.0,
+                retries=0,
+            )
+            output = "\n".join(message.text for message in execution.logs.stdout).strip()
+            diagnostics.append(f"fresh_exec={output[:1000] or '<no output>'}")
+            if execution.error is not None:
+                diagnostics.append(f"fresh_exec_error={execution.error.name}: {execution.error.value}")
+        except Exception as error:  # noqa: BLE001 - preserve the original failure
+            diagnostics.append(f"fresh_exec_error={type(error).__name__}: {error}")
+        return "; ".join(diagnostics)
 
     async def _await_sdk_call(
         self,
@@ -1381,6 +1522,7 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
+            await self._initialize_lifecycle_fingerprint(handle)
         except Exception:
             await self._cleanup_failed_create_handle(created_handle)
             raise
@@ -1589,6 +1731,84 @@ class OpenSandboxProvider:
             await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
         return None
 
+    async def _interrupt_background_execution(
+        self,
+        handle: SandboxHandle,
+        execution_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Best-effort interrupt and termination confirmation for one execution."""
+        request_timeout_s = min(
+            self._operations.status_poll_timeout_s or self._connection.request_timeout_s or 60.0,
+            self._operations.close_timeout_s or 30.0,
+        )
+        if self._connection.request_timeout_s is not None:
+            request_timeout_s = min(
+                request_timeout_s,
+                float(self._connection.request_timeout_s),
+            )
+
+        try:
+            await self._await_sdk_operation(
+                lambda: handle.raw.commands.interrupt(execution_id),
+                operation="command interrupt",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=request_timeout_s,
+                retries=0,
+            )
+        except Exception as error:  # noqa: BLE001 - preserve the initiating error
+            LOGGER.warning(
+                "Failed to interrupt OpenSandbox background command after %s; "
+                "sandbox_id=%r, execution_id=%r, error=%r",
+                reason,
+                handle.sandbox_id,
+                execution_id,
+                error,
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._operations.close_timeout_s
+        while True:
+            try:
+                status = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_command_status(execution_id),
+                    operation="command status after interrupt",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=request_timeout_s,
+                    retries=0,
+                )
+            except Exception as error:  # noqa: BLE001 - cleanup remains best effort
+                LOGGER.warning(
+                    "Could not confirm interrupted OpenSandbox command termination; "
+                    "sandbox_id=%r, execution_id=%r, error=%r",
+                    handle.sandbox_id,
+                    execution_id,
+                    error,
+                )
+                return
+
+            running = getattr(status, "running", None)
+            if running is False:
+                return
+            if running is None:
+                LOGGER.warning(
+                    "OpenSandbox interrupted-command status has no 'running' field; sandbox_id=%r, execution_id=%r",
+                    handle.sandbox_id,
+                    execution_id,
+                )
+                return
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                LOGGER.warning(
+                    "OpenSandbox background command remained running after interrupt; sandbox_id=%r, execution_id=%r",
+                    handle.sandbox_id,
+                    execution_id,
+                )
+                return
+            await asyncio.sleep(min(0.25, remaining_s))
+
     async def _exec_background(
         self,
         handle: SandboxHandle,
@@ -1620,19 +1840,6 @@ class OpenSandboxProvider:
         if not execution_id:
             raise RuntimeError("OpenSandbox background command did not return an execution id")
 
-        loop = asyncio.get_running_loop()
-        # The server enforces the command timeout; leave the client headroom.
-        deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
-        poll_timeout_s = (
-            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
-        )
-        # Status polls are sub-second GETs; against an unreachable sandbox each
-        # one would otherwise hang for the shared budget above (tuned for long
-        # submits) per retry before the typed failure fires.
-        status_timeout_s = self._operations.status_poll_timeout_s
-        if status_timeout_s is None:
-            status_timeout_s = poll_timeout_s
-
         def _status_poll_is_retryable(exception: BaseException) -> bool:
             # The short budget makes poll timeouts routine rather than fatal:
             # re-polling a status is an idempotent GET, so unlike a submit
@@ -1642,44 +1849,108 @@ class OpenSandboxProvider:
                 return True
             return _is_retryable_sdk_operation_error(exception)
 
-        # Poll fast at first so the many short commands an agent issues are
-        # detected promptly, then back off so long ones do not spam requests.
-        poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
-        while True:
-            status = await self._await_sdk_operation(
-                lambda: handle.raw.commands.get_command_status(execution_id),
-                operation="command status",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=status_timeout_s,
-                retries=self._operations.retries,
-                is_retryable=_status_poll_is_retryable,
-            )
-            # A renamed SDK field must not degrade silently: a missing `running`
-            # would end the poll at once, a missing `exit_code` would score a
-            # failed command as a success.
-            for field in ("running", "exit_code"):
-                if not hasattr(status, field):
-                    raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
-            if not status.running:
-                break
-            if deadline is not None and loop.time() >= deadline:
-                raise TimeoutError(
-                    f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
-                    f"execution_id={execution_id!r}"
-                )
-            await asyncio.sleep(poll_interval)
-            poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
+        execution_running = True
+        poll_retries = self._operations.background_request_retries
+        if poll_retries is None:
+            poll_retries = self._operations.retries
+        try:
+            loop = asyncio.get_running_loop()
+            # The server enforces the command timeout; leave the client headroom.
+            deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
+            poll_timeout_s = self._operations.status_poll_timeout_s or self._connection.request_timeout_s or 60.0
+            if self._connection.request_timeout_s is not None:
+                poll_timeout_s = min(poll_timeout_s, float(self._connection.request_timeout_s))
 
-        # The execution has finished, so one call returns its whole buffer; the
-        # cursor this endpoint reports back is the end offset rather than a
-        # more-data flag, so there is no tail to follow.
-        logs = await self._await_sdk_operation(
-            lambda: handle.raw.commands.get_background_command_logs(execution_id),
-            operation="command logs",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=poll_timeout_s,
-            retries=self._operations.retries,
-        )
+            # Poll fast at first so the many short commands an agent issues are
+            # detected promptly, then back off so long ones do not spam requests.
+            poll_interval = min(
+                self._operations.background_poll_initial_s,
+                self._operations.background_poll_interval_s,
+            )
+            polling_started_at = time.monotonic()
+            while True:
+                try:
+                    status = await self._await_sdk_operation(
+                        lambda: handle.raw.commands.get_command_status(execution_id),
+                        operation="command status",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=poll_timeout_s,
+                        retries=poll_retries,
+                        is_retryable=_status_poll_is_retryable,
+                    )
+                except Exception as error:
+                    if not self._is_missing_background_command_error(error):
+                        raise
+                    diagnostics = await self._collect_lifecycle_diagnostics(handle)
+                    elapsed_s = time.monotonic() - polling_started_at
+                    message = (
+                        "OpenSandbox background command state disappeared; treating the sandbox as "
+                        "restarted or rebound instead of replaying the command in place. "
+                        f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}, "
+                        f"poll_elapsed_s={elapsed_s:.1f}; {diagnostics}"
+                    )
+                    LOGGER.error(message)
+                    raise OpenSandboxLifecycleResetError(message) from error
+                # A renamed SDK field must not degrade silently: a missing `running`
+                # would end the poll at once, a missing `exit_code` would score a
+                # failed command as a success.
+                for field in ("running", "exit_code"):
+                    if not hasattr(status, field):
+                        raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
+                if not status.running:
+                    execution_running = False
+                    break
+                if deadline is not None and loop.time() >= deadline:
+                    raise TimeoutError(
+                        f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
+                        f"execution_id={execution_id!r}"
+                    )
+                await asyncio.sleep(poll_interval)
+                poll_interval = min(
+                    poll_interval * 1.5,
+                    self._operations.background_poll_interval_s,
+                )
+
+            # The execution has finished, so one call returns its whole buffer;
+            # the cursor is the end offset rather than a more-data flag.
+            try:
+                logs = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_background_command_logs(execution_id),
+                    operation="command logs",
+                    sandbox_id=handle.sandbox_id,
+                    # Unlike a status poll, the final log buffer can be large.
+                    timeout_s=self._connection.request_timeout_s or 60.0,
+                    retries=poll_retries,
+                )
+            except Exception as error:
+                if not self._is_missing_background_command_error(error):
+                    raise
+                diagnostics = await self._collect_lifecycle_diagnostics(handle)
+                elapsed_s = time.monotonic() - polling_started_at
+                message = (
+                    "OpenSandbox background command logs disappeared; treating the sandbox as "
+                    "restarted or rebound instead of replaying the command in place. "
+                    f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}, "
+                    f"poll_elapsed_s={elapsed_s:.1f}; {diagnostics}"
+                )
+                LOGGER.error(message)
+                raise OpenSandboxLifecycleResetError(message) from error
+        except asyncio.CancelledError:
+            if execution_running:
+                await self._interrupt_background_execution(
+                    handle,
+                    execution_id,
+                    reason="client cancellation",
+                )
+            raise
+        except Exception as error:
+            if execution_running:
+                await self._interrupt_background_execution(
+                    handle,
+                    execution_id,
+                    reason=type(error).__name__,
+                )
+            raise
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
         stderr = status_error or None
@@ -1719,9 +1990,7 @@ class OpenSandboxProvider:
         """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
 
-        if not self._connection.tls_verify:
-            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
-        return aiohttp.ClientSession()
+        return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self._tls_context()))
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
@@ -1850,6 +2119,7 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
+        self._lifecycle_fingerprints.pop(handle.sandbox_id, None)
 
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
