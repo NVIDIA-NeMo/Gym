@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -79,6 +79,14 @@ class GymTraceHooks:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
+        self._on_update: Callable[[], None] | None = None
+
+    def set_update_callback(self, callback: Callable[[], None]) -> None:
+        self._on_update = callback
+
+    def updated(self) -> None:
+        if self._on_update is not None:
+            self._on_update()
 
     def _invocation(self, identity: str) -> AgentInvocation:
         return self._invocations.setdefault(identity, AgentInvocation(invocation_id=identity))
@@ -87,6 +95,7 @@ class GymTraceHooks:
         call.invocation_id = self._current.get()
         self._invocation(call.invocation_id)
         self._events.append(call)
+        self.updated()
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
         self._invocations[call_id] = AgentInvocation(
@@ -102,6 +111,7 @@ class GymTraceHooks:
         invocation.error_type = type(exception).__name__ if exception is not None else None
         invocation.duration_ms = max(0.0, (perf_counter() - context.started) * 1000)
         self._current.reset(context.token)
+        self.updated()
 
     @contextmanager
     def activate_agent_call(self, context: Any) -> Iterator[None]:
@@ -127,6 +137,7 @@ class GymTraceHooks:
             perf_counter(),
         )
         self._events.append(event)
+        self.updated()
         return event
 
     def _finish_tool(self, event: _ToolCall, exception: BaseException | None) -> None:
@@ -139,6 +150,7 @@ class GymTraceHooks:
             record.output = {"error": str(exception), "error_type": record.error_type}
         elif record.status == "incomplete":
             record.status = "completed"
+        self.updated()
 
     @contextmanager
     def resource_call(self, name: str, arguments: dict[str, Any]) -> Iterator[TrajectoryToolCall]:

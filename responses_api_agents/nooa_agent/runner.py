@@ -16,14 +16,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Awaitable, Protocol
 from uuid import uuid4
 
 from nooa.runtime.hooks import hooks_scope
 
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
@@ -48,6 +48,7 @@ class NOOARunRequest:
     resource_cookies: dict[str, str] = field(default_factory=dict)
     task_id: str = "unknown"
     rollout_id: str = field(default_factory=lambda: uuid4().hex)
+    sandbox_descriptor: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -59,6 +60,12 @@ class NOOARunResult:
     termination_reason: str | None = None
     termination_error: str | None = None
     trajectory: TrajectoryRecord | None = None
+    cleanup: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+
+    async def aclose(self) -> None:
+        cleanup, self.cleanup = self.cleanup, None
+        if cleanup is not None:
+            await cleanup()
 
 
 class NOOARunFailure(RuntimeError):
@@ -84,21 +91,49 @@ class EmbeddedNOOARunner:
         self,
         *,
         invocation: NOOAInvocationConfig,
-        server_client: ServerClient,
+        server_client: Any,
         model_server_name: str,
         resources_server_name: str,
         max_steps: int,
+        on_checkpoint: Callable[[NOOARunResult], None] | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._resources_server_name = resources_server_name
         self._max_steps = max_steps
+        self._on_checkpoint = on_checkpoint
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         state = RolloutLLMState(max_steps=self._max_steps)
         trace = GymTraceHooks()
+        latest_return_value: Any = None
+        latest_termination_reason: str | None = None
+        latest_termination_error: str | None = None
+
+        def checkpoint() -> None:
+            if self._on_checkpoint is None:
+                return
+            episode, trajectory = trace.project(
+                create_params=request.row.responses_create_params,
+                state=state,
+                task_id=request.task_id,
+                rollout_id=request.rollout_id,
+            )
+            self._on_checkpoint(
+                NOOARunResult(
+                    episode=episode,
+                    return_value=latest_return_value,
+                    model_cookies=request.model_cookies,
+                    resource_cookies=request.resource_cookies,
+                    termination_reason=latest_termination_reason,
+                    termination_error=latest_termination_error,
+                    trajectory=trajectory,
+                )
+            )
+
+        trace.set_update_callback(checkpoint)
         sampling_overrides = request.row.responses_create_params.model_dump(
             include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
         )
@@ -109,6 +144,7 @@ class EmbeddedNOOARunner:
             state=state,
             cookies=request.model_cookies,
             on_call=trace.on_model_call,
+            on_call_complete=trace.updated,
             sampling_overrides=sampling_overrides,
         )
         dispatcher = ResourceToolDispatcher(
@@ -137,6 +173,7 @@ class EmbeddedNOOARunner:
         try:
             with hooks_scope(trace):
                 return_value = await entrypoint(**arguments)
+                latest_return_value = return_value
         except BaseException as error:
             failure = error
             # NOOA may wrap a model error after its strategy retry loop.
@@ -151,6 +188,8 @@ class EmbeddedNOOARunner:
                         else "invalid_policy_output"
                     )
                     termination_error = str(cause)
+                    latest_termination_reason = termination_reason
+                    latest_termination_error = termination_error
                     break
                 cause = cause.__cause__ or cause.__context__
 
@@ -169,6 +208,8 @@ class EmbeddedNOOARunner:
             termination_error=termination_error,
             trajectory=trajectory,
         )
+        if self._on_checkpoint is not None:
+            self._on_checkpoint(result)
         if failure is not None and termination_reason is None:
             if isinstance(failure, asyncio.CancelledError):
                 # Preserve asyncio.timeout's conversion of the original cancellation.

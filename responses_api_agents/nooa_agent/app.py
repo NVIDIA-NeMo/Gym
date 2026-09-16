@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import aiohttp
@@ -34,8 +34,8 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.nooa_agent.config import NOOAAgentConfig
+from nemo_gym.server_utils import get_first_server_config_dict, get_response_json, raise_for_status
+from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOASandboxRuntimeConfig
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import (
     ArgumentMappingError,
@@ -44,6 +44,7 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.sandbox_runner import SandboxedNOOARunner
 
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
@@ -127,13 +128,32 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         self.sem = asyncio.Semaphore(self.config.concurrency)
-        self.runner = EmbeddedNOOARunner(
-            invocation=self.config.nooa,
-            server_client=self.server_client,
-            model_server_name=self.config.model_server.name,
-            resources_server_name=self.config.resources_server.name,
-            max_steps=self.config.max_steps,
-        )
+        if self.config.nooa.execution_mode == "sandbox":
+            model_config = get_first_server_config_dict(
+                self.server_client.global_config_dict, self.config.model_server.name
+            )
+            resources_config = get_first_server_config_dict(
+                self.server_client.global_config_dict, self.config.resources_server.name
+            )
+            self.runner = SandboxedNOOARunner(
+                invocation=self.config.nooa,
+                runtime=cast(NOOASandboxRuntimeConfig, self.config.sandbox_runtime),
+                global_config=self.server_client.global_config_dict,
+                model_server_name=self.config.model_server.name,
+                resources_server_name=self.config.resources_server.name,
+                model_base_url=self.server_client._build_server_base_url(model_config),
+                resources_base_url=self.server_client._build_server_base_url(resources_config),
+                max_steps=self.config.max_steps,
+                default_timeout_secs=self.config.run_timeout_secs,
+            )
+        else:
+            self.runner = EmbeddedNOOARunner(
+                invocation=self.config.nooa,
+                server_client=self.server_client,
+                model_server_name=self.config.model_server.name,
+                resources_server_name=self.config.resources_server.name,
+                max_steps=self.config.max_steps,
+            )
         super().model_post_init(context)
 
     def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
@@ -172,9 +192,12 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 status_code=422,
                 detail=f"NOOA argument mapping failed for /v1/responses: {error}",
             ) from error
-        for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
-            response.set_cookie(name, value)
-        return run_result.episode.response
+        try:
+            for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
+                response.set_cookie(name, value)
+            return run_result.episode.response
+        finally:
+            await run_result.aclose()
 
     async def run(
         self,
@@ -224,6 +247,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed)
         _merge_cookies(resource_cookies, seed)
+        seed_payload = await get_response_json(seed)
+        sandbox_descriptor = seed_payload.get("sandbox_descriptor") if isinstance(seed_payload, dict) else None
+        if sandbox_descriptor is None and isinstance(seed_payload, dict) and seed_payload.get("sandbox_handle"):
+            sandbox_descriptor = {"sandbox_id": seed_payload["sandbox_handle"]}
 
         try:
             async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
@@ -233,6 +260,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         model_url_path=self.url_path_for_run("/v1/responses", body),
                         model_cookies=dict(request.cookies),
                         resource_cookies=resource_cookies,
+                        sandbox_descriptor=sandbox_descriptor,
                         **_identity(body),
                     )
                 )
@@ -242,6 +270,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             raise _EpisodeTimeoutExceeded(getattr(error.__cause__, "nooa_result", None)) from error
 
         try:
+            resource_cookies.update(run_result.resource_cookies)
             projected, observations = self._finalize_run_result(run_result)
             response_json = projected.model_dump(mode="json")
             if self.config.skip_verification:
@@ -268,6 +297,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             return NOOAAgentVerifyResponse.model_validate(result)
         except Exception as error:
             raise NOOARunFailure(error, run_result) from error
+        finally:
+            await run_result.aclose()
 
     def _failure_response(
         self,

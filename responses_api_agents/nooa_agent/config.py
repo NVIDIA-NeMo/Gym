@@ -59,7 +59,7 @@ class NOOAInvocationConfig(BaseModel):
 
     agent_class: str
     entrypoint: str
-    execution_mode: Literal["embedded"] = "embedded"
+    execution_mode: Literal["embedded", "sandbox"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
     arguments: dict[str, NOOAArgumentBinding]
 
@@ -88,15 +88,41 @@ class NOOAInvocationConfig(BaseModel):
         return self
 
 
+class NOOASandboxRuntimeConfig(BaseModel):
+    """Strict-isolation runtime for executing a complete NOOA agent in a Gym sandbox."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | dict[str, Any]
+    spec: dict[str, Any] = Field(default_factory=dict)
+    source: Literal["create", "seeded", "seed_or_create"] = "seed_or_create"
+    python_executable: str = "python"
+    runtime_archive: str | None = None
+    runtime_dir: str = "/tmp/nooa-runtime"
+    run_dir: str = "/tmp/nooa-run"
+    model_base_url: str | None = None
+    resources_base_url: str | None = None
+    exec_timeout_secs: float | None = Field(default=None, gt=0)
+
+
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     """Gym server configuration for the NOOA adapter."""
 
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
+    sandbox_runtime: NOOASandboxRuntimeConfig | None = None
     max_steps: int = Field(default=10, gt=0)
     concurrency: int = Field(default=8, gt=0)
     run_timeout_secs: float = Field(default=2100, gt=0)
+
+    @model_validator(mode="after")
+    def validate_execution_mode(self) -> "NOOAAgentConfig":
+        if self.nooa.execution_mode == "sandbox" and self.sandbox_runtime is None:
+            raise ValueError("sandbox_runtime is required when nooa.execution_mode='sandbox'")
+        if self.nooa.execution_mode == "embedded" and self.sandbox_runtime is not None:
+            raise ValueError("sandbox_runtime requires nooa.execution_mode='sandbox'")
+        return self
 
 
 def load_agent_class(path: str) -> type[Agent]:

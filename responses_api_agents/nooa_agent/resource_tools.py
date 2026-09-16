@@ -19,12 +19,14 @@ import asyncio
 import inspect
 import json
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import ServerClient
+
+class NOOAResourceClient(Protocol):
+    async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any: ...
 
 
 if TYPE_CHECKING:
@@ -59,7 +61,7 @@ class ResourceToolDispatcher:
     def __init__(
         self,
         *,
-        server_client: ServerClient,
+        server_client: NOOAResourceClient,
         resources_server_name: str,
         cookies: dict[str, str],
         trace_hooks: GymTraceHooks | None = None,

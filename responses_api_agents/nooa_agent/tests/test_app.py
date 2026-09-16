@@ -206,6 +206,19 @@ async def test_direct_responses_reports_missing_top_level_mapping() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_responses_closes_sandbox_backed_result() -> None:
+    agent, _ = make_agent()
+    result = runner_result(SimpleNamespace(model_cookies={}, resource_cookies={}))
+    cleanup = AsyncMock()
+    result.cleanup = cleanup
+    agent.runner.run = AsyncMock(return_value=result)
+
+    await agent.responses(request(), Response(), body().responses_create_params)
+
+    cleanup.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_direct_responses_propagates_unrelated_value_error() -> None:
     agent, _ = make_agent()
     agent.runner.run = AsyncMock(side_effect=ValueError("agent implementation failed"))

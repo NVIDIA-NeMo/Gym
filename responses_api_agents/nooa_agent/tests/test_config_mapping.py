@@ -20,6 +20,7 @@ from nooa import Agent
 from pydantic import BaseModel, ValidationError
 
 from responses_api_agents.nooa_agent.config import (
+    NOOAAgentConfig,
     NOOAArgumentBinding,
     NOOAInvocationConfig,
     load_agent_class,
@@ -87,6 +88,43 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     }
     values.update(overrides)
     return NOOAInvocationConfig.model_validate(values)
+
+
+def agent_config(**overrides: Any) -> NOOAAgentConfig:
+    values: dict[str, Any] = {
+        "name": "nooa",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "entrypoint": "app.py",
+        "resources_server": {"type": "resources_servers", "name": "resources"},
+        "model_server": {"type": "responses_api_models", "name": "policy"},
+        "nooa": invocation_config().model_dump(),
+    }
+    values.update(overrides)
+    return NOOAAgentConfig.model_validate(values)
+
+
+def test_sandbox_execution_requires_runtime_config() -> None:
+    nooa = invocation_config(execution_mode="sandbox").model_dump()
+    with pytest.raises(ValidationError, match="sandbox_runtime is required"):
+        agent_config(nooa=nooa)
+
+
+def test_embedded_execution_rejects_unused_sandbox_config() -> None:
+    with pytest.raises(ValidationError, match="requires nooa.execution_mode='sandbox'"):
+        agent_config(sandbox_runtime={"provider": {"docker": {}}, "spec": {"image": "example"}})
+
+
+def test_sandbox_execution_does_not_import_agent_during_config_validation() -> None:
+    nooa = invocation_config(
+        execution_mode="sandbox",
+        agent_class="package_that_only_exists_in_the_sandbox:Agent",
+    ).model_dump()
+    parsed = agent_config(
+        nooa=nooa,
+        sandbox_runtime={"provider": {"docker": {}}, "spec": {"image": "example"}},
+    )
+    assert parsed.nooa.agent_class == "package_that_only_exists_in_the_sandbox:Agent"
 
 
 @pytest.mark.parametrize("field,value", [("agent_class", "missing-colon"), ("entrypoint", "_private")])

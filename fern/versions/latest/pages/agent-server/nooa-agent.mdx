@@ -12,9 +12,67 @@ and the authoritative rollout record. The generic adapter has no NOOA Bench depe
 
 <Warning>
 Embedded execution is not an OS sandbox. Agent classes and generated Python execute in the agent
-server process. Tool allowlists and per-rollout objects constrain adapter routing; they do not isolate
-arbitrary Python. Gym's separate agent-sandbox integration is not implemented by this adapter.
+server process. Use the strict sandbox execution mode below when the agent implementation is not trusted.
 </Warning>
+
+## Run the complete agent in a sandbox
+
+Set `nooa.execution_mode` to `sandbox` to import, construct, and execute the complete NOOA runtime in a
+Gym-managed sandbox. This includes user-defined instance methods, dynamically generated resource methods,
+NOOA strategy methods, and generated Python. The agent server only creates or connects the sandbox, launches
+the worker, verifies its serialized result, and tears the sandbox down.
+
+```yaml
+strict_nooa:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: task_environment}
+      model_server: {type: responses_api_models, name: policy_model}
+      nooa:
+        agent_class: my_agents.coding:CodingAgent
+        entrypoint: solve
+        execution_mode: sandbox
+        arguments:
+          task:
+            source: responses_create_params.input
+            transform: latest_user_text
+      sandbox_runtime:
+        provider: sandbox
+        source: seed_or_create
+        spec:
+          image: my-task-image:latest
+          workdir: /workspace
+          ttl_s: 3600
+          ready_timeout_s: 600
+          resources: {cpu: 2, memory_mib: 4096, disk_gib: 20}
+        python_executable: python
+        runtime_archive: /path/to/nooa-runtime.tar.gz
+        runtime_dir: /tmp/nooa-runtime
+      max_steps: 10
+      concurrency: 8
+      run_timeout_secs: 1800
+```
+
+Include a sandbox provider configuration defining the `sandbox` reference. The sandbox image must contain
+Python and either contain the NOOA agent runtime already or accept `runtime_archive`, whose contents are
+extracted into `runtime_dir` and added to `PYTHONPATH`. The archive must include the configured agent module,
+the NOOA adapter, and their Python dependencies.
+
+`source` controls sandbox ownership:
+
+- `create` always creates a sandbox from `spec`.
+- `seeded` requires `/seed_session` to return `sandbox_descriptor` and fails otherwise.
+- `seed_or_create` connects to `sandbox_descriptor` when present and creates from `spec` otherwise.
+
+The legacy `sandbox_handle` seed response is accepted as a connection descriptor. The sandbox stays alive
+through verification and is closed in all success and failure paths. Model and resource calls use explicit
+sandbox-reachable base URLs; set `model_base_url` or `resources_base_url` when the configured server host is
+not reachable from the sandbox network.
+
+The worker writes atomic trajectory checkpoints after model, tool, code-execution, and agent lifecycle events.
+If the worker exits or reaches its command timeout, the agent server recovers the newest checkpoint before
+destroying the sandbox. A complete sandbox loss can still make partial evidence unavailable.
 
 ## Run the calculate example
 

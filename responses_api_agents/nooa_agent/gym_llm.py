@@ -19,7 +19,7 @@ import json
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
@@ -32,7 +32,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+class NOOAServerClient(Protocol):
+    async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any: ...
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
@@ -209,13 +213,14 @@ class GymResponsesLLM(UnifiedLLM):
     def __init__(
         self,
         *,
-        server_client: ServerClient,
+        server_client: NOOAServerClient,
         model_server_name: str,
         model_url_path: str,
         state: RolloutLLMState,
         cookies: dict[str, str],
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
+        on_call_complete: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model=model)
@@ -224,6 +229,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_url_path = model_url_path
         self._state = state
         self._on_call = on_call
+        self._on_call_complete = on_call_complete
         self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
@@ -298,6 +304,8 @@ class GymResponsesLLM(UnifiedLLM):
         response = NeMoGymResponse.model_validate(raw)
         call.response = response
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
+        if self._on_call_complete is not None:
+            self._on_call_complete()
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
