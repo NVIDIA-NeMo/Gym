@@ -1,6 +1,9 @@
 #!/bin/bash
 
-GYM_MODEL_PARAMS=()
+# DS v4 Flash takes a super long time to start.
+GYM_MODEL_PARAMS=(
+    "++model_endpoint_readiness_timeout_seconds=1200"
+)
 
 VLLM_COMMON_ARGS=(
     --trust-remote-code
