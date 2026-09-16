@@ -5,6 +5,32 @@ GYM_MODEL_PARAMS=(
     "++model_endpoint_readiness_timeout_seconds=1200"
 )
 
+export MOONCAKE_CONFIG_PATH=/etc/mooncake/mooncake_vllm_config.json
+cat > $MOONCAKE_CONFIG_PATH <<EOF
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "$MOONCAKE_MASTER_IP:50051",
+  "global_segment_size": "100GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "$MOONCAKE_DEVICE_NAME",
+  "enable_offload": false
+}
+EOF
+
+uv pip install --system 'mooncake-transfer-engine>=0.3.10'
+
+if (( SLURM_PROCID == 0 )); then
+    mooncake_master \
+        -rpc_port=50051 \
+        -rpc_thread_num=4 \
+        -default_kv_lease_ttl=30000 \
+        -eviction_high_watermark_ratio=0.95 \
+        -eviction_ratio=0.1 \
+        -logtostderr
+fi
+
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -32,12 +58,12 @@ VLLM_COMMON_ARGS=(
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
 )
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"load_async":true,"lookup_async":true}}]}}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"load_async":true,"lookup_async":true}}]}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
