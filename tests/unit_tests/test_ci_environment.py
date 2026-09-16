@@ -899,12 +899,16 @@ def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
 
 def test_lint_reuses_pre_commit_on_path() -> None:
     # lint.sh reuses a pre-commit already on PATH (the offline/container dev
-    # environment); otherwise it provisions the pinned pre-commit (version from
-    # uv.lock) into an isolated venv. It does not use uv or setup_dev.sh.
+    # environment); otherwise it provisions pre-commit from the lockfile-pinned
+    # wheel, verifying the recorded SHA-256 before install (no bare
+    # `pip install pre-commit==X`, which would not enforce the lockfile's
+    # artifact hash). It does not use uv or setup_dev.sh.
     lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
 
     assert "command -v pre-commit" in lint
     assert "uv.lock" in lint
+    assert "sha256sum -c -" in lint
+    assert "pre-commit==" not in lint, "pre-commit must come from the pinned+hashed lockfile wheel"
     assert "uv sync" not in lint
     assert "setup_dev.sh" not in lint
 
