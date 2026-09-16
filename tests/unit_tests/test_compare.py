@@ -427,6 +427,16 @@ class TestMetricRows:
             ("num_repeats", False),
             ("pass@1[avg-of-3]/accuracy/std_err_across_runs", False),
             ("pass@1[avg-of-3]/accuracy/avg_sample_std_dev", False),
+            ("score/ci_low_95", False),
+            ("score/ci_high_95", False),
+            ("arena_elo/ci_lower", False),
+            ("arena_elo/ci_upper", False),
+            ("win_rate_ci95_lower", False),
+            ("win_rate_ci95_upper", False),
+            ("response_tokens/median", True),
+            ("response_tokens/p95", True),
+            ("sample_count", True),
+            ("missing_count", True),
         ],
     )
     def test_only_real_metrics_get_a_row(self, name, comparable):
@@ -478,6 +488,29 @@ class TestMetricRows:
         # The repeat-level key is present, so loading does not supplement this file.
         assert row.candidates[0].ci_low is None
         assert row.candidates[0].ci_high is None
+
+    @pytest.mark.parametrize(
+        "repeat_level_metrics",
+        [
+            [{"sample_count": 2, "missing_count": 0}, {"sample_count": 2, "missing_count": 1}],
+            [{"sample_count": 2, "missing_count": 0}, {"sample_count": 1, "missing_count": 0}],
+        ],
+    )
+    def test_warns_once_for_incomplete_or_unequal_repeat_samples(self, tmp_path, repeat_level_metrics):
+        baseline = _load(tmp_path, "base", [_entry(repeat_level_metrics=repeat_level_metrics)])
+
+        with pytest.warns(UserWarning, match="incomplete or unequal task coverage") as caught:
+            build_metric_rows(baseline, [])
+
+        assert len(caught) == 1
+
+    def test_does_not_warn_for_equal_complete_repeat_samples(self, tmp_path):
+        repeats = [{"sample_count": 2, "missing_count": 0}] * 2
+        baseline = _load(tmp_path, "base", [_entry(repeat_level_metrics=repeats)])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            build_metric_rows(baseline, [])
 
     def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
         baseline_values = [0.0, 0.1, 0.2]
@@ -676,7 +709,7 @@ class TestMetricRows:
         assert row.candidates[0].delta_ci_low is None
         assert row.candidates[0].delta_ci_high is None
 
-    def test_constant_repeat_values_produce_a_collapsed_delta_ci_without_warnings(self, tmp_path):
+    def test_constant_repeat_values_produce_a_collapsed_delta_ci(self, tmp_path):
         baseline = _load(
             tmp_path,
             "base",
@@ -698,9 +731,7 @@ class TestMetricRows:
             ],
             role="candidate",
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            (row,) = build_metric_rows(baseline, [candidate])
+        (row,) = build_metric_rows(baseline, [candidate])
         assert row.candidates[0].delta_ci_low == pytest.approx(0.1)
         assert row.candidates[0].delta_ci_high == pytest.approx(0.1)
 

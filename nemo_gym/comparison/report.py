@@ -49,7 +49,8 @@ CI_FOOTNOTE = (
     "the metric value. "
     "Delta CI = two-sided independent-sample 95% Welch t-interval for candidate minus baseline, "
     "computed from the named metric's values in each run's `repeat_level_metrics`. "
-    f"`{MISSING}` means the required interval data was unavailable: delta intervals require at least 2 finite repeat-level values on each side. "
+    f"`{MISSING}` means the required interval data was unavailable: "
+    "delta intervals require at least 2 finite repeat-level values on each side. "
     "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
     "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
 )
