@@ -8,7 +8,10 @@ tie the prompt, the container definition, and the vendored GDPval-AA v2
 manifests to each other.
 """
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,15 +25,15 @@ _DEF = _CONTAINERS / "gdpval.def"
 _ARM64_EXCLUSIONS = _CONTAINERS / "gdpval_aa_v2_arm64_exclusions.txt"
 
 
-def _prompt() -> str:
-    """The GDPval user prompt as this tree defines it.
+@pytest.fixture(params=["gdpval_user_prompt.txt", "user_prompt.j2"])
+def prompt(request) -> str:
+    """Both GDPval user prompt templates as this tree defines them.
 
     Read from disk rather than via ``_build_gdpval_user_prompt`` so the test
     checks *this* checkout: an editable install can resolve the package to a
     different worktree and silently validate the wrong file.
     """
-    template = (_PROMPTS / "gdpval_user_prompt.txt").read_text(encoding="utf-8")
-    return template.format(task="a task", reference_files="- ref.docx")
+    return (_PROMPTS / request.param).read_text(encoding="utf-8")
 
 
 def _pins(path: Path) -> dict[str, str]:
@@ -104,8 +107,7 @@ def test_def_does_not_reintroduce_deep_learning_frameworks():
         assert pkg not in installed, f"{pkg} is not part of GDPval-AA v2; it would add GB for nothing"
 
 
-def test_prompt_does_not_advertise_packages_the_sandbox_lacks():
-    prompt = _prompt()
+def test_prompt_does_not_advertise_packages_the_sandbox_lacks(prompt):
     installed = _pins(_PY_MANIFEST)
     # The stack summary is the part that tells the model what it *has*; the
     # trailing disclaimer deliberately names the frameworks that are absent, so
@@ -121,17 +123,15 @@ def test_prompt_does_not_advertise_packages_the_sandbox_lacks():
         )
 
 
-def test_prompt_tells_the_model_there_is_no_deep_learning_framework():
+def test_prompt_tells_the_model_there_is_no_deep_learning_framework(prompt):
     # Without this the model plans a torch solution, burns turns discovering the
     # gap, and submits nothing.
-    prompt = _prompt()
     disclaimer = next(ln for ln in prompt.splitlines() if ln.startswith("There is no "))
     for framework in ("PyTorch", "TensorFlow", "JAX", "Keras"):
         assert framework in disclaimer, f"{framework} is not covered by the absence disclaimer"
 
 
-def test_prompt_only_advertises_python_packages_that_are_pinned():
-    prompt = _prompt()
+def test_prompt_only_advertises_python_packages_that_are_pinned(prompt):
     installed = _pins(_PY_MANIFEST)
     advertised = [
         "numpy",
@@ -192,8 +192,7 @@ def test_prompt_only_advertises_python_packages_that_are_pinned():
     assert "opencv" in prompt.lower() and "opencv-python" in installed
 
 
-def test_prompt_states_the_real_command_timeout():
-    prompt = _prompt()
+def test_prompt_states_the_real_command_timeout(prompt):
     base = pytest.importorskip("stirrup.tools.code_backends.base")
     SHELL_TIMEOUT = base.SHELL_TIMEOUT
 
@@ -203,44 +202,45 @@ def test_prompt_states_the_real_command_timeout():
     )
 
 
-def test_exec_backend_really_discards_shell_state_between_calls():
-    """The prompt's shell-state claim must match what the backend does.
-
-    An earlier revision told the model that `cd` and environment variables
-    carry over, reasoning from the fact that the provider keeps one long-lived
-    bash process. That was wrong, and a prompt that is wrong about this is
-    expensive: the model `cd`s once and then silently operates in the wrong
-    directory for the rest of the task.
-
-    Assert against the command the provider actually builds, not against the
-    prompt's wording -- wording can be made to agree with itself.
-    """
+@pytest.mark.parametrize("has_timeout", [False, True], ids=["without-timeout", "with-timeout"])
+def test_exec_backend_really_discards_shell_state_between_calls(tmp_path, monkeypatch, has_timeout):
+    """Execute two provider-built commands in one parent bash; only files persist."""
     pytest.importorskip("stirrup", reason="apptainer_provider imports stirrup; runs in the per-server venv")
-    from responses_api_agents.stirrup_agent.apptainer_provider import (
-        ApptainerCodeExecToolProvider,
-    )
+    from responses_api_agents.stirrup_agent import apptainer_provider
 
-    provider = ApptainerCodeExecToolProvider("/nonexistent.sif", working_dir="/workspace")
-    provider._has_timeout_cmd = True  # what the built image gives us; gdpval.def asserts it
-    script, _ = provider._build_command_script("echo hi", 300, ".stderr_x", "MARK")
+    assert Path(apptainer_provider.__file__).resolve() == _CONTAINERS.parent / "apptainer_provider.py"
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    if has_timeout:
+        timeout = shutil.which("timeout")
+        if (
+            timeout is None
+            or "GNU coreutils"
+            not in subprocess.run([timeout, "--version"], capture_output=True, text=True, timeout=5).stdout
+        ):
+            pytest.skip("GNU timeout is unavailable")
 
-    # Three independent reasons state cannot survive, any one of which is fatal
-    # to a `cd` carrying over.
-    assert script.startswith("cd /workspace &&"), (
-        "the working directory is reset before every command; if that ever stops "
-        "being true the prompt must be updated in the same change"
-    )
-    assert "bash -c " in script, "each command runs in its own `bash -c` subshell"
-    assert "( " in script and " )" in script, "and is further wrapped in a subshell"
+    monkeypatch.setattr(apptainer_provider, "IO_MOUNT_DEST", str(tmp_path))
+    monkeypatch.delenv("GDPVAL_SHELL_TEST", raising=False)
+    (tmp_path / "subdir").mkdir()
+    provider = apptainer_provider.ApptainerCodeExecToolProvider("/nonexistent.sif", working_dir=str(tmp_path))
+    provider._has_timeout_cmd = has_timeout
+    commands = [
+        "cd subdir && export GDPVAL_SHELL_TEST=changed && printf 'saved\\n' > saved.txt",
+        'pwd -P; printf "%s\\n" "${GDPVAL_SHELL_TEST-unset}"; cat subdir/saved.txt',
+    ]
+    scripts = [provider._build_command_script(cmd, 5, f".stderr_{i}", f"DONE{i}")[0] for i, cmd in enumerate(commands)]
+    result = subprocess.run([bash], input="".join(scripts), capture_output=True, text=True, check=True, timeout=10)
+    assert result.stdout.splitlines() == ["", "DONE0:0", str(tmp_path.resolve()), "unset", "saved", "", "DONE1:0"]
 
 
-def test_prompt_tells_the_model_state_does_not_carry_over():
+def test_prompt_tells_the_model_state_does_not_carry_over(prompt):
     """Wording check, paired with the behavioural test above.
 
     On its own this proves nothing -- it is the behavioural test that anchors
     it. Together they fail in opposite directions if prompt and backend drift.
     """
-    prompt = _prompt()
     runtime = prompt.split("## Reference Files")[0].lower()
     assert "every command runs independently" in runtime
     assert "does not" in runtime or "no working directory" in runtime
@@ -249,13 +249,50 @@ def test_prompt_tells_the_model_state_does_not_carry_over():
     assert "carry over from one call to the next" not in runtime or "no working directory" in runtime
 
 
+@pytest.mark.integration
+async def test_apptainer_shell_state_and_timeout_recovery():
+    """Exercise the real provider when an existing sandbox image is supplied."""
+    image = os.environ.get("GDPVAL_CONTAINER_PATH")
+    if not image:
+        pytest.skip("set GDPVAL_CONTAINER_PATH to run the real Apptainer check")
+    assert Path(image).is_file(), f"sandbox image does not exist: {image}"
+    assert shutil.which("apptainer"), "apptainer is required for the configured sandbox check"
+    from responses_api_agents.stirrup_agent import apptainer_provider
+
+    assert Path(apptainer_provider.__file__).resolve() == _CONTAINERS.parent / "apptainer_provider.py"
+    provider = apptainer_provider.ApptainerCodeExecToolProvider(image, working_dir="/root", capture_git_diff=False)
+    async with provider:
+        assert provider._has_timeout_cmd, "the sandbox must provide GNU timeout"
+        first = await provider.run_command(
+            "mkdir -p /root/shell_test && cd /root/shell_test && "
+            "export GDPVAL_SHELL_TEST=changed && printf 'saved\\n' > saved.txt"
+        )
+        assert first.exit_code == 0, first.stderr
+        second = await provider.run_command(
+            'pwd; printf "%s\\n" "${GDPVAL_SHELL_TEST-unset}"; cat /root/shell_test/saved.txt'
+        )
+        assert second.exit_code == 0, second.stderr
+        assert second.stdout.strip().splitlines() == ["/root", "unset", "saved"]
+
+        timed_out = await provider.run_command("sleep 10; echo unexpected", timeout=1)
+        assert timed_out.exit_code != 0, timed_out
+        assert "Command timed out after 1 seconds" in timed_out.stderr
+        assert "unexpected" not in timed_out.stdout
+        recovered = await provider.run_command("cat /root/shell_test/saved.txt", timeout=5)
+        assert recovered.exit_code == 0, recovered.stderr
+        assert recovered.stdout.strip() == "saved"
+
+    assert provider._process is None
+    assert provider._temp_dir is None
+
+
 def test_verifier_script_is_staged_into_the_image():
     text = _DEF.read_text(encoding="utf-8")
     assert "verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py" in text
     assert (_CONTAINERS / "verify_gdpval_sandbox.py").exists()
 
 
-def test_prompt_advertises_the_working_dir_the_provider_actually_uses():
+def test_prompt_advertises_the_working_dir_the_provider_actually_uses(prompt):
     """The prompt's example path must be this sandbox's, not the reference one.
 
     The published Artificial Analysis prompt says `/home/user`, because their
@@ -267,11 +304,10 @@ def test_prompt_advertises_the_working_dir_the_provider_actually_uses():
     import re
 
     task_src = (Path(__file__).resolve().parents[1] / "tasks" / "gdpval.py").read_text(encoding="utf-8")
-    m = re.search(r'working_dir\s*=\s*"([^"]+)"', task_src)
+    m = re.search(r'^\s*working_dir\s*=\s*"([^"]+)"', task_src, re.MULTILINE)
     assert m, "could not find the working_dir the GDPval provider is constructed with"
     working_dir = m.group(1)
 
-    prompt = _prompt()
     assert working_dir in prompt, f"prompt never names the real working dir {working_dir}"
     assert "/home/user" not in prompt, (
         f"prompt carries the reference sandbox's /home/user path; this sandbox uses {working_dir}"

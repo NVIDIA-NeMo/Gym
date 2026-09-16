@@ -4,7 +4,7 @@ You are tasked with completing a specific assignment.
 
 You are running in an isolated Linux sandbox. Use the `code_exec` tool to run bash commands, and to read, create, and modify files. It returns the exit code, stdout, and stderr of each command.
 
-The shell is persistent: your working directory, environment variables, and other shell state carry over from one call to the next, so a `cd` in one command still applies to the next one. Absolute paths are still the safer choice whenever you are unsure where you are.
+Every command runs independently: no working directory, environment variable, or other shell state carries over from one call to the next. Files you write do persist. Prefer absolute paths for both files and commands, and do not navigate with `cd` across calls -- a `cd` in one command is gone by the next, so relying on it leaves you silently operating in the wrong place. Your working directory is `/root`, and every command starts there. When a step genuinely needs a different directory, chain it into the same command (e.g. `cd /root/work && python build.py`).
 
 Commands are terminated after 5 minutes. Keep them bounded, persist intermediate results to disk, and split long jobs into smaller steps.
 
