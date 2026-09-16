@@ -36,6 +36,11 @@ from responses_api_agents.nooa_agent.app import (
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.runner import NOOARunResult
+from responses_api_agents.nooa_agent.tests.test_runner import FailingAgent, WaitingAgent, policy_runner
+
+
+async def invoke(agent: object, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+    return agent, request
 
 
 class FakeHTTPResponse:
@@ -66,13 +71,7 @@ def config(**overrides: object) -> NOOAAgentConfig:
         "model_server": {"type": "responses_api_models", "name": "policy"},
         "nooa": {
             "agent_class": "responses_api_agents.nooa_agent.example_agent:GymResourceAgent",
-            "entrypoint": "answer",
-            "arguments": {
-                "task": {
-                    "source": "responses_create_params.input",
-                    "transform": "latest_user_text",
-                }
-            },
+            "invocation_adapter": f"{__name__}:invoke",
         },
         "run_timeout_secs": 1,
     }
@@ -173,7 +172,7 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
     result = await agent.run(request(), outgoing, body(customer_id="customer-42"))
 
     run_request = agent.runner.run.await_args.args[0]
-    assert run_request.row.customer_id == "customer-42"
+    assert run_request.responses_create_params == body().responses_create_params
     assert run_request.resource_cookies == {"session": "tool-cookie", "verified": "yes"}
     assert client.post.await_args_list[0].kwargs["cookies"] == {
         "session": "tool-cookie",
@@ -185,7 +184,7 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
     }
     assert result.reward == 1.0
     assert result.ng_agent_observations is not None
-    assert result.ng_agent_observations.gaps[0].code == "non_trainable_fallback_output"
+    assert result.ng_agent_observations.gaps[0].code == "non_trainable_terminal_output"
     assert "session=tool-cookie" in outgoing.headers.get("set-cookie", "")
 
 
@@ -386,3 +385,61 @@ async def test_skip_verification_and_aggregate_metrics_proxy() -> None:
     # Skip mode uses Gym's local aggregate implementation and must not make another server call.
     await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
     assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [ConnectionError("verifier unavailable"), FakeHTTPResponse({"reward": "invalid"})])
+async def test_verifier_failure_preserves_completed_episode(failure: object) -> None:
+    agent, client = make_agent()
+    agent.runner, _ = policy_runner()
+    object.__setattr__(client, "post", AsyncMock(side_effect=[FakeHTTPResponse({}), failure]))
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == (
+        "transient" if isinstance(failure, ConnectionError) else "legitimate"
+    )
+    assert len(result.model_extra["ng_trajectory"]["turns"]) == 1
+    assert result.response.output
+    assert result.ng_agent_observations.records
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_preserves_completed_call_and_skips_verification() -> None:
+    agent, client = make_agent()
+    agent.runner, _ = policy_runner(FailingAgent)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "legitimate"
+    assert len(result.model_extra["ng_trajectory"]["turns"]) == 1
+    assert result.response.output
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_episode_timeout_preserves_completed_call() -> None:
+    agent, client = make_agent()
+    agent.runner, _ = policy_runner(WaitingAgent)
+    agent.config.run_timeout_secs = 0.2
+    WaitingAgent.ready = asyncio.Event()
+    try:
+        result = await agent.run(request(), Response(), body())
+        assert WaitingAgent.ready.is_set()
+    finally:
+        WaitingAgent.ready = None
+
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert result.model_extra[NG_TERMINAL_KEY] is True
+    assert len(result.model_extra["ng_trajectory"]["turns"]) == 1
+    assert result.response.output
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_verifier_reply_does_not_drop_input_row_fields() -> None:
+    agent, _ = make_agent()
+    result = await agent.run(request(), Response(), body(agent_inputs={"customer": "alice"}))
+    assert result.agent_inputs == {"customer": "alice"}

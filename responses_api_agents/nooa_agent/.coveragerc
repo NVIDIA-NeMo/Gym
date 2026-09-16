@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[run]
+source = responses_api_agents/nooa_agent
+omit = */tests/*
+
+[report]
+show_missing = True
+fail_under = 96
