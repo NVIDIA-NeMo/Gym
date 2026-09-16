@@ -280,6 +280,7 @@ class GymTraceHooks:
                     output=_json_output(record.output),
                     status="completed" if record.status == "completed" else "incomplete",
                 )
+                # Persist the same serialized evidence as the conversation, not NOOA runtime objects.
                 record.output = result_item.output
                 invocation.conversation.append(result_item)
                 output.append(result_item)

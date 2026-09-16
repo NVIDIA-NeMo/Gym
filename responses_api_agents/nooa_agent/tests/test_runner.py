@@ -347,7 +347,7 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
         if item.type == "function_call_output" and item.call_id == "call-1"
     )
     assert code.output == observed
-    assert resource.output == ({"weather": "cold"} if status == 200 else {"error": "unavailable"})
+    assert json.loads(resource.output) == ({"weather": "cold"} if status == 200 else {"error": "unavailable"})
     assert all(tool.tool_name != "return_result" for tool in result.trajectory.tool_calls)
     model_owner = next(inv for inv in result.trajectory.invocations if inv.invocation_id == code.invocation_id)
     assert model_owner.conversation[0].role == "system"
