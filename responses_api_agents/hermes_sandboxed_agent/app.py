@@ -41,6 +41,7 @@ class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     api_timeout: float = Field(default=1800, gt=0)
     max_turns: int = Field(default=90, gt=0)
     max_tokens: int | None = None
+    context_length: int | None = Field(default=None, gt=0)
     temperature: float = 1.0
     terminal_timeout: int = 180
     enabled_toolsets: list[str] | None = None
@@ -169,6 +170,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     "model",
                     "max_turns",
                     "max_tokens",
+                    "context_length",
                     "temperature",
                     "terminal_timeout",
                     "api_timeout",

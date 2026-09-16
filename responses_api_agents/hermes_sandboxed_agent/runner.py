@@ -13,15 +13,19 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
+from shlex import quote
 
 
 HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"
 
 
 def progress_result(agent, n_input):
+    # Hermes persists the assistant's tool call before executing it, but updates
+    # _session_messages only after the tool returns. Keep that in-flight call on timeout.
+    messages = getattr(agent, "_db_flush_scan_prefix", None) or getattr(agent, "_session_messages", [])
     return {
         "completed": False,
-        "messages": getattr(agent, "_session_messages", []),
+        "messages": messages,
         "api_calls": getattr(agent, "_api_call_count", 0),
         "n_input": n_input,
         "usage": {
@@ -107,6 +111,13 @@ def run(params):
 
     home = Path(params["run_dir"]) / "home"
     home.mkdir(parents=True, exist_ok=True)
+    tools_bin = Path(sys.prefix) / "tools" / "bin"
+    ripgrep_version = subprocess.check_output([str(tools_bin / "rg"), "--version"], text=True).splitlines()[0]
+    # Hermes initializes a login shell, whose /etc/profile can discard the image's
+    # toolchain PATH. Restore it after that profile, without adding runtime Python.
+    tool_path = f"{tools_bin}:{os.environ['PATH']}"
+    shell_init = home / "shell-init.sh"
+    shell_init.write_text(f"export PATH={quote(tool_path)}\n")
     # Hermes reads config and caches at import time. These are per process/task.
     os.environ.update(
         HOME=str(home),
@@ -117,6 +128,7 @@ def run(params):
         HERMES_API_TIMEOUT=str(params["api_timeout"]),
         HERMES_API_CALL_STALE_TIMEOUT=str(params["api_timeout"]),
         HERMES_YOLO_MODE="1",
+        PATH=tool_path,
     )
     hermes_home = Path(os.environ["HERMES_HOME"])
     hermes_home.mkdir()
@@ -126,13 +138,22 @@ def run(params):
             "provider": "custom",
             "base_url": params["base_url"],
             "streaming": False,  # Gym's Chat Completions endpoint is non-streaming.
+            "context_length": params.get("context_length"),
         },
         "memory": {"memory_enabled": False, "user_profile_enabled": False},
         "toolsets": ["hermes-cli"],
         "agent": {"max_turns": params["max_turns"]},
         "delegation": {"max_iterations": 50},
         "compression": {"enabled": params["compression_enabled"], "threshold": 0.85},
-        "terminal": {"backend": "local", "cwd": params["workdir"], "timeout": params["terminal_timeout"]},
+        # Summarization uses the same model; its separate metadata lookup must
+        # not lower the main context window back to the catalog fallback.
+        "auxiliary": {"compression": {"context_length": params.get("context_length")}},
+        "terminal": {
+            "backend": "local",
+            "cwd": params["workdir"],
+            "timeout": params["terminal_timeout"],
+            "shell_init_files": [str(shell_init)],
+        },
         "checkpoints": {"enabled": False},
     }
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(config))
@@ -207,6 +228,10 @@ def run(params):
         "sys_path": sys.path,
         "cwd": os.getcwd(),
         "tool_cwd": os.environ["TERMINAL_CWD"],
+        "tool_path": tool_path,
+        "ripgrep_version": ripgrep_version,
+        "context_length": agent.context_compressor.context_length,
+        "compression_threshold": agent.context_compressor.threshold_tokens,
     }
     return classify_stop(result, timed_out)
 

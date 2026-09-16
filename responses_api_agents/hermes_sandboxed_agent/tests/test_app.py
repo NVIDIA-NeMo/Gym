@@ -16,7 +16,7 @@ from responses_api_agents.hermes_sandboxed_agent.app import (
     HermesSandboxedRunRequest,
     trajectory_response,
 )
-from responses_api_agents.hermes_sandboxed_agent.runner import split_input
+from responses_api_agents.hermes_sandboxed_agent.runner import progress_result, split_input
 
 
 @pytest.fixture
@@ -28,6 +28,7 @@ def agent(tmp_path):
             port=8000,
             entrypoint="app.py",
             model="real-model",
+            context_length=262144,
             resources_server={"type": "resources_servers", "name": "benchmark"},
             model_server={"type": "responses_api_models", "name": "policy"},
             results_dir=str(tmp_path),
@@ -135,6 +136,7 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert params["input"] == "fix it"
     assert params["workdir"] == "/app"
     assert params["base_url"] == "http://proxy/ng-rollout/id/v1"
+    assert params["context_length"] == 262144
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
     command = sandbox.exec.call_args.args[0]
     assert " -I " in command
@@ -335,3 +337,18 @@ def test_timeout_before_any_model_reply_is_not_a_scored_budget_stop():
     assert not result.get("budget_exhausted")
     response = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="fix"), "model", "timeout")
     assert response.status == "failed"
+
+
+def test_timeout_preserves_tool_call_while_tool_is_blocked():
+    user = {"role": "user", "content": "fix"}
+    assistant = {"role": "assistant", "tool_calls": [{"id": "in-flight"}]}
+    agent = SimpleNamespace(
+        _session_messages=[user],
+        _db_flush_scan_prefix=[user, assistant],
+        _api_call_count=1,
+        session_input_tokens=20,
+        session_output_tokens=10,
+        session_cache_read_tokens=0,
+        session_reasoning_tokens=0,
+    )
+    assert progress_result(agent, 1)["messages"] == [user, assistant]

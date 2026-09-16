@@ -18,6 +18,19 @@ mkdir -p "$DEPS_DIR/bin"
 install -m 755 "$SCRIPT_DIR/runtime_python.sh" "$DEPS_DIR/bin/hermes-python"
 HERMES_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
 HERMES_REPO_URL="${HERMES_REPO_URL:-https://github.com/NousResearch/hermes-agent.git}"
+# Hermes's grep fallback requires GNU options absent from Alpine's BusyBox.
+# Keep this static binary separate from Python so task tools retain their interpreter.
+if [[ ! -x "$DEPS_DIR/tools/bin/rg" ]]; then
+    rg_tmp=$(mktemp -d "$DEPS_DIR/.ripgrep.XXXXXX")
+    trap 'rm -rf "$rg_tmp"' EXIT
+    curl -fsSL --retry 3 -o "$rg_tmp/rg.tar.gz" \
+        https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz
+    echo "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e  $rg_tmp/rg.tar.gz" | sha256sum -c -
+    tar xzf "$rg_tmp/rg.tar.gz" -C "$rg_tmp" --strip-components=1
+    mkdir -p "$DEPS_DIR/tools/bin"
+    install -m 644 "$rg_tmp/COPYING" "$rg_tmp/LICENSE-MIT" "$rg_tmp/UNLICENSE" "$DEPS_DIR/tools/"
+    install -m 755 "$rg_tmp/rg" "$DEPS_DIR/tools/bin/rg"
+fi
 # A musl build can be prepared with uv on a glibc host; its imports are checked
 # when the runner starts in the target container. Keep the native import check.
 validate_runtime_import() {
