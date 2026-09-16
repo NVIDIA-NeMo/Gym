@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import os
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -22,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 from fastapi import HTTPException, Response
+from opentelemetry import trace
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
@@ -32,6 +34,7 @@ from responses_api_agents.nooa_agent.app import (
     NOOA_TERMINATION_REASON_KEY,
     NOOAAgent,
     NOOAAgentRunRequest,
+    _apply_trace_config,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution
@@ -557,3 +560,48 @@ async def test_verification_failure_preserves_prior_nooa_termination_classificat
         "transient",
         "policy_budget_exceeded",
     ]
+
+
+def test_apply_trace_config_routes_journal_and_tags_experiment(tmp_path, monkeypatch):
+    """The config knobs must override the import-time env-derived journal target."""
+    monkeypatch.setenv("NOOA_TRACE_DIR", "sentinel")
+    monkeypatch.setenv("TRACE_EXPERIMENT", "sentinel")
+    # An unreachable endpoint keeps the test hermetic: only the file exporter is installed.
+    monkeypatch.setenv("OTLP_ENDPOINT", "http://127.0.0.1:1")
+    trace_dir = tmp_path / "traces"
+
+    class Config:
+        nooa_trace_dir = str(trace_dir)
+        trace_experiment = "apply-config-test"
+
+    _apply_trace_config(Config())
+
+    assert os.environ["NOOA_TRACE_DIR"] == str(trace_dir)
+    assert os.environ["TRACE_EXPERIMENT"] == "apply-config-test"
+
+    with trace.get_tracer("apply-config-test").start_as_current_span("probe_span") as span:
+        span.set_attribute("probe", "value")
+
+    from nooa.tracing import _provider
+
+    if _provider is not None:
+        _provider.force_flush()
+
+    files = list(trace_dir.glob("*.nooa.jsonl"))
+    assert files, "journal file was not written to the configured trace dir"
+    provider = trace.get_tracer_provider()
+    assert provider._resource.attributes.get("experiment") == "apply-config-test"
+
+
+def test_apply_trace_config_is_a_noop_without_knobs(monkeypatch):
+    monkeypatch.setenv("NOOA_TRACE_DIR", "sentinel")
+    monkeypatch.setenv("TRACE_EXPERIMENT", "sentinel")
+
+    class Config:
+        nooa_trace_dir = None
+        trace_experiment = None
+
+    _apply_trace_config(Config())
+
+    assert os.environ["NOOA_TRACE_DIR"] == "sentinel"
+    assert os.environ["TRACE_EXPERIMENT"] == "sentinel"

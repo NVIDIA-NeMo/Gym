@@ -227,16 +227,14 @@ async def test_native_and_gym_calculate_results_have_exact_score_parity(row: dic
         scripted_responses=[
             LLMResponse(
                 raw_response=None,
-                content="",
-                tool_calls=[
+                parts=(
                     ToolCall(
                         id=f"native-return-{row['id']}",
                         name="return_result",
                         arguments=json.dumps({"result": expected}),
-                    )
-                ],
+                    ),
+                ),
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": ""},
             )
         ]
     )

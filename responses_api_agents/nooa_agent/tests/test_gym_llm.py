@@ -19,7 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from nooa.unifiedllm import Tool
+from nooa.unifiedllm import CacheBoundary, Tool
 from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
@@ -320,6 +320,26 @@ async def test_replays_encrypted_reasoning_and_native_tool_metadata_on_next_call
     assert replayed_reasoning.summary[0].text == "checking"
     assert replayed_call.call_id == "call-1"
     assert replayed_call.generation_token_ids == [11, 12]
+
+
+@pytest.mark.asyncio
+async def test_cache_boundary_is_not_forwarded_to_the_model_server() -> None:
+    """NOOA's local cache marker is transport metadata; Gym's model server must not see it."""
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, _ = make_llm(model_response(output))
+
+    result = await llm.acall([CacheBoundary(), {"role": "user", "content": "Weather?"}])
+
+    request = client.post.await_args.kwargs["json"]
+    assert len(request.input) == 1
+    assert request.input[0].role == "user"
+    assert result.content == "Cold"
 
 
 @pytest.mark.asyncio
