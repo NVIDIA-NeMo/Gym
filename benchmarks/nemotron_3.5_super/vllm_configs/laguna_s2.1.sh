@@ -3,7 +3,6 @@
 GYM_MODEL_PARAMS=()
 
 # @bxyu-nvidia: Running into KV cache issues with dlfash enabled
-# --speculative-config '{"model":"poolside/Laguna-S-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -25,6 +24,7 @@ VLLM_COMMON_ARGS=(
     --tensor-parallel-size 4
     --api-server-count 1
     --default-chat-template-kwargs '{"enable_thinking": true}'
+    --speculative-config '{"model":"poolside/Laguna-S-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
