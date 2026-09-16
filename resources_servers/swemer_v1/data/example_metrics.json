@@ -17,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 266.4,
-        "Min": 214.0,
-        "Max": 340.0,
-        "Standard deviation": 48.84
+        "Average": 251.8,
+        "Min": 75.0,
+        "Max": 622.0,
+        "Standard deviation": 214.86
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -41,11 +41,11 @@
         "total_count": 5
     },
     "delivery": {
-        "unique_count": 2,
+        "unique_count": 1,
         "total_count": 5
     },
     "language": {
-        "unique_count": 5,
+        "unique_count": 1,
         "total_count": 5
     },
     "workdir": {
@@ -69,7 +69,7 @@
         "total_count": 5
     },
     "test_framework": {
-        "unique_count": 5,
+        "unique_count": 1,
         "total_count": 5
     },
     "test_command": {
@@ -77,11 +77,15 @@
         "total_count": 5
     },
     "FAIL_TO_PASS": {
-        "unique_count": 369,
-        "total_count": 369
+        "unique_count": 5,
+        "total_count": 5
     },
     "PASS_TO_PASS": {
-        "unique_count": 361,
-        "total_count": 361
+        "unique_count": 12,
+        "total_count": 12
+    },
+    "task_source": {
+        "unique_count": 1,
+        "total_count": 5
     }
 }
