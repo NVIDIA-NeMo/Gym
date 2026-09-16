@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import ObservationGap
 from responses_api_agents.nooa_agent.gym_llm import (
@@ -186,7 +187,7 @@ async def test_preserves_function_call_token_metadata() -> None:
 
     assert result.finish_reason == "tool_calls"
     assert result.tool_calls[0].name == "weather"
-    assert result.assistant_message["_batch"][0]["generation_token_ids"] == [11, 12]
+    assert list(result.tool_calls[0].native["generation_token_ids"]) == [11, 12]
 
 
 @pytest.mark.parametrize(
@@ -254,7 +255,8 @@ async def test_structured_output_schema_and_parsing() -> None:
 
     result = await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
 
-    assert result.content == StructuredAnswer(verdict="positive")
+    assert result.content == '{"verdict":"positive"}'
+    assert result.parsed == StructuredAnswer(verdict="positive")
     assert client.post.await_args.kwargs["json"].text["format"]["name"] == "StructuredAnswer"
 
 
@@ -273,6 +275,51 @@ async def test_invalid_structured_output_is_identified_as_policy_output() -> Non
         await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
 
     assert collected[0].output[0].generation_token_ids == [2]
+
+
+@pytest.mark.asyncio
+async def test_replays_encrypted_reasoning_and_native_tool_metadata_on_next_call() -> None:
+    reasoning = NeMoGymResponseReasoningItem(
+        id="reasoning-1",
+        summary=[{"type": "summary_text", "text": "checking"}],
+        encrypted_content="provider-ciphertext",
+    )
+    tool = NeMoGymResponseFunctionToolCallForTraining(
+        id="fc-1",
+        call_id="call-1",
+        name="weather",
+        arguments='{"city":"Paris"}',
+        prompt_token_ids=[10],
+        generation_token_ids=[11, 12],
+        generation_log_probs=[-0.1, -0.2],
+    )
+    final = NeMoGymResponseOutputMessageForTraining(
+        id="msg-2",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold")],
+        prompt_token_ids=[20],
+        generation_token_ids=[21],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, _ = make_llm(model_response(reasoning, tool), max_steps=2)
+    client.post.side_effect = [
+        FakeHTTPResponse(model_response(reasoning, tool)),
+        FakeHTTPResponse(model_response(final, response_id="resp-2")),
+    ]
+
+    first = await llm.acall([{"role": "user", "content": "Weather?"}])
+    assert first.replay_scope == llm._replay_scope
+    assert "provider-ciphertext" not in json.dumps(dict(first))
+    await llm.acall(
+        [{"role": "user", "content": "Weather?"}, first, {"role": "tool", "tool_call_id": "call-1", "content": "cold"}]
+    )
+
+    replayed = client.post.await_args_list[1].kwargs["json"].input
+    replayed_reasoning = next(item for item in replayed if item.type == "reasoning")
+    replayed_call = next(item for item in replayed if item.type == "function_call")
+    assert replayed_reasoning.encrypted_content == "provider-ciphertext"
+    assert replayed_reasoning.summary[0].text == "checking"
+    assert replayed_call.call_id == "call-1"
+    assert replayed_call.generation_token_ids == [11, 12]
 
 
 @pytest.mark.asyncio

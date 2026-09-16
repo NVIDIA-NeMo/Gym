@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -22,7 +23,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Iterator
 
-from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, UnifiedLLM
+from nooa.unifiedllm.response_parts import capture_parts, project_turn
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
@@ -202,10 +204,19 @@ def _dump(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True) if isinstance(value, BaseModel) else value
 
 
-def _responses_input(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+def _responses_input(
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary], replay_scope: str
+) -> tuple[list[dict[str, Any]], str | None]:
     instructions: list[str] = []
     result: list[dict[str, Any]] = []
     for message in messages:
+        if isinstance(message, LLMResponse):
+            result.extend(project_turn(message, replay_scope))
+            continue
+        if isinstance(message, CacheBoundary):
+            # Gym model servers do not consume NOOA's local cache marker. The
+            # model-visible prefix is unchanged and upstream caching remains valid.
+            continue
         if message.get("role") == "system":
             if content := message.get("content"):
                 instructions.append(str(content))
@@ -317,6 +328,10 @@ class GymResponsesLLM(UnifiedLLM):
         # items.
         self._prior_outputs: list[dict[str, Any]] = prior_outputs if prior_outputs is not None else []
         self._reported_unrestored_outputs: set[int] = set()
+        digest = hashlib.sha256(f"gym:{model_server_name}".encode()).hexdigest()
+        # Gym's model server speaks the OpenAI Responses wire format. Scope native
+        # replay by the exact Gym server so opaque reasoning never crosses aliases.
+        self._replay_scope = f"responses:openai:sha256:{digest}"
         self._calls = 0
 
     @property
@@ -325,7 +340,7 @@ class GymResponsesLLM(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -334,7 +349,7 @@ class GymResponsesLLM(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -344,8 +359,10 @@ class GymResponsesLLM(UnifiedLLM):
         self._budget.charge()
         self._calls += 1
 
-        input_items, instructions = _responses_input(messages)
-        self._restore_prior_output_metadata(input_items)
+        replay_managed = any(isinstance(message, LLMResponse) for message in messages)
+        input_items, instructions = _responses_input(messages, self._replay_scope)
+        if not replay_managed:
+            self._restore_prior_output_metadata(input_items)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,
@@ -444,38 +461,25 @@ class GymResponsesLLM(UnifiedLLM):
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         self._prior_outputs.extend(dumped_output)
-        function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
-        usage = response.usage.model_dump(mode="json") if response.usage is not None else None
-        if function_calls:
-            return LLMResponse(
-                raw_response=response,
-                content="",
-                tool_calls=[
-                    ToolCall(id=item.call_id, name=item.name, arguments=item.arguments) for item in function_calls
-                ],
-                finish_reason="tool_calls",
-                assistant_message={"_batch": dumped_output},
-                usage=usage,
-            )
-
-        content: str | BaseModel = _output_text(response)
+        parts = capture_parts(dumped_output, self._replay_scope)
+        parsed: BaseModel | None = None
         if output_model is not None:
             try:
-                content = output_model.model_validate(json.loads(content))
+                parsed = output_model.model_validate(json.loads(_output_text(response)))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
                 raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
-        reasoning = [
-            item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"
-        ]
+        finish_reason = "length" if response.incomplete_details else "stop"
+        if any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in response.output):
+            finish_reason = "tool_calls"
         return LLMResponse(
             raw_response=response,
-            content=content,
-            tool_calls=[],
-            finish_reason="length" if response.incomplete_details else "stop",
-            assistant_message={"role": "assistant", "content": _output_text(response)},
-            reasoning=json.dumps(reasoning) if reasoning else None,
-            usage=usage,
+            parts=parts,
+            replay_scope=self._replay_scope if any(part.native is not None for part in parts) else None,
+            parsed=parsed,
+            finish_reason=finish_reason,
+            usage=response.usage,
+            model_name=response.model or self.model,
         )
 
     def _restore_prior_output_metadata(self, input_items: list[dict[str, Any]]) -> None:

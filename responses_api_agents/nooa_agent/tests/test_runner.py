@@ -25,13 +25,13 @@ from nooa.runtime.hooks import get_hooks, set_hooks
 from nooa.tracing import get_session
 from pydantic import BaseModel, ConfigDict
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCallForTraining,
 )
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from nemo_gym.config_types import ModelServerRef
 from responses_api_agents.nooa_agent.gym_llm import (
     InvalidPolicyOutputError,
     PolicyCallBudgetExceeded,
@@ -360,7 +360,7 @@ async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
         for item in client.model_requests[1].input
         if item.type == "function_call_output" and item.call_id == "code-1"
     )
-    assert code_output.output == "status: complete"
+    assert code_output.output == "status: accepted"
     python_output = next(
         item
         for item in result.model_requests[1].input

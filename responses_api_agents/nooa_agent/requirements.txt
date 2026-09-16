@@ -1,3 +1,3 @@
 -e nemo-gym[dev] @ ../../
 # Main includes scoped lifecycle hooks and per-method model aliases (NOOA #315).
-nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@ee61c9012f2e4135eabba1e5db80c8e991a88184
+nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@b160b53910a3e3e3329ef86cfc7a5d15feb41d00

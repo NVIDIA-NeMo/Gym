@@ -103,6 +103,13 @@ The local equivalents were run over every file in the PR stack: Ruff check, Ruff
 trailing whitespace, EOF, and Markdown filename policy. The config-changing local hooks do not apply
 to this stack's changed files. Full pre-commit remains an external-environment gate.
 
+
+## Current NOOA main compatibility
+
+Verified against NOOA main commit `b160b53910a3e3e3329ef86cfc7a5d15feb41d00` (117 commits after the previous pin). The Gym bridge now returns the parts-based `LLMResponse`, uses scoped native Responses replay, preserves encrypted reasoning and tool metadata across calls, uses `parsed` for structured output, and accepts the current `status: accepted` execution receipt. The full focused suite passed **385 tests** against that main worktree. A real GLM-5.3 calculate rollout also passed with reward `1.0` and health `1 healthy / 0 unhealthy / 0 unobserved`.
+
+Encrypted reasoning remains opaque: Gym stores and replays the provider blob only within the same model-server scope; it is absent from the public response mapping. To ask OpenAI to return the blob, configure the Gym OpenAI model server with `extra_body.include: [reasoning.encrypted_content]`.
+
 ## PR completion checklist
 
 - [x] C3/C8 canonical turn fields implemented and persisted round-trip test added.
