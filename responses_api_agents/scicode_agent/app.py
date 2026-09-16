@@ -152,7 +152,9 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            # Carry the inbound /ng-rollout/<id>[/training-token-capture] prefix onto the
+            # model call so training token capture can attribute this step's tokens.
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body.model_dump(exclude_unset=True, exclude_none=True),
             cookies=request.cookies,
         )
@@ -197,7 +199,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             try:
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
-                    url_path="/v1/responses",
+                    url_path=self.url_path_for_run("/v1/responses", body),
                     json={
                         **response_create_params,
                         "input": [{"role": "user", "content": user_content}],
