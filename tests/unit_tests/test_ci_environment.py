@@ -947,7 +947,8 @@ def test_seeded_pre_commit_hook_cache_needs_no_network(tmp_path: Path) -> None:
     # install-hooks), then poison every egress path (proxies plus a github.com
     # insteadOf rewrite to a dead address) and require the run to succeed from
     # the cache alone. Inside the baked image the build-time PRE_COMMIT_HOME
-    # is reused instead of being re-seeded.
+    # is reused instead of being re-seeded. The seeded hooks are the
+    # SHA-pinned revisions committed in .pre-commit-config.yaml.
     pre_commit = shutil.which("pre-commit")
     if pre_commit is None:
         pytest.skip("pre-commit is not installed (dev extra)")
@@ -1000,3 +1001,24 @@ def test_seeded_pre_commit_hook_cache_needs_no_network(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_pre_commit_config_pins_immutable_hook_coordinates() -> None:
+    # The Docker build and the offline-lint integration test run
+    # `pre-commit install-hooks`, which clones the remote hook repositories
+    # and pip-installs the local hooks' additional_dependencies. Every remote
+    # hook repo must be pinned to a full commit SHA (an immutable Git
+    # checkout; keep the human-readable tag in a trailing comment) and every
+    # additional dependency must carry an exact == pin, so install-hooks
+    # fetches only admitted, immutable coordinates.
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+
+    for repo in config["repos"]:
+        if repo["repo"] == "local":
+            for hook in repo["hooks"]:
+                for dependency in hook.get("additional_dependencies", []):
+                    assert "==" in dependency, dependency
+            continue
+        rev = repo["rev"]
+        is_full_sha = len(rev) == 40 and all(c in "0123456789abcdef" for c in rev)
+        assert is_full_sha, (repo["repo"], rev)

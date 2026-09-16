@@ -15,7 +15,7 @@
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: f71fa2c1f9cf5cb705f73dffe4b21f7c61470ba9  # v4.4.0
     hooks:
     - id: end-of-file-fixer
       # only include python files
@@ -25,7 +25,7 @@ repos:
       files: \.py$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.9.9" # Use the appropriate version
+    rev: 2c8dce6094fa2b4b668e74f694ca63ceffd38614  # v0.9.9
     hooks:
     - id: ruff
       args: ["--fix"]
@@ -54,12 +54,12 @@ repos:
         name: Add verified flag to resources server configs
         language: python
         entry: python scripts/add_verified_flag.py
-        additional_dependencies: [pyyaml]
+        additional_dependencies: [pyyaml==6.0.2]
         files: ^resources_servers/.*/configs/.*\.yaml$
         pass_filenames: true
       - id: update-readme-table
         name: Update environment list in README
         language: python
         entry: python scripts/update_env_list.py
-        additional_dependencies: [pyyaml]
+        additional_dependencies: [pyyaml==6.0.2]
         files: ^README\.md$|^benchmarks/.*/config\.yaml$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
