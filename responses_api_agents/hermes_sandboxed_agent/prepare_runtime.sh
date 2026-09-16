@@ -32,8 +32,8 @@ root = pathlib.Path(sys.argv[1]).resolve()
 assert pathlib.Path(run_agent.__file__).resolve().is_relative_to(root / "hermes-src")
 PY
 }
-if [[ -f "$DEPS_DIR/hermes-runtime.json" && -x "$DEPS_DIR/bin/python3" ]] &&
-    [[ "$(git -C "$DEPS_DIR/hermes-src" rev-parse HEAD)" == "$HERMES_COMMIT" ]] &&
+if [[ -f "$DEPS_DIR/hermes-runtime.json" && -x "$DEPS_DIR/bin/python3" && -d "$DEPS_DIR/hermes-src/.git" ]] &&
+    [[ "$(git -c safe.directory="$DEPS_DIR/hermes-src" -C "$DEPS_DIR/hermes-src" rev-parse HEAD)" == "$HERMES_COMMIT" ]] &&
     python3 -I - "$DEPS_DIR" "$HERMES_COMMIT" "$HERMES_REPO_URL" "$ARCH" "$PYTHON_VERSION" <<'PY'
 import json
 import pathlib

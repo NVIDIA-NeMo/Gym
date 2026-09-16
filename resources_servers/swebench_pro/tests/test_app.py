@@ -115,15 +115,16 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "tests",
+    "tests,completed",
     [
-        [{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}],
-        [{"name": "old_test", "status": "PASSED"}],
-        [],  # A bad patch can fail compilation before any named test runs.
+        ([{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}], True),
+        ([{"name": "new_test", "status": "FAILED"}], True),
+        ([{"name": "old_test", "status": "PASSED"}], False),
+        ([], False),  # Missing tests do not establish whether the patch or environment failed.
     ],
 )
-def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict]) -> None:
-    server = make_server(golden=False)
+def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict], completed: bool) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
     sandbox = SimpleNamespace(stop=AsyncMock())
     monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
@@ -144,8 +145,9 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: lis
     assert response.json()["model_patch"] == "agent patch"
     assert response.json()["reward"] == 0.0
     assert response.json()["test_output"] == "test run output"
-    assert response.json()["evaluation_completed"] is True
-    verify.assert_awaited_once()  # A wrong answer must not be retried or excluded.
+    assert response.json()["evaluation_completed"] is completed
+    assert bool(response.json()["error"]) is not completed
+    verify.assert_awaited_once()
 
 
 def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
@@ -502,3 +504,11 @@ def test_close_session_endpoint_cleans_up_matching_cookie_only() -> None:
     assert response.status_code == 200 and response.json() == {"closed": True}
     mine.stop.assert_awaited_once()
     other.stop.assert_not_awaited()
+
+
+async def test_close_session_without_session_is_a_noop() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_sandbox["other"] = sandbox
+    assert await server.close_session(SimpleNamespace(session={})) == {"closed": True}
+    sandbox.stop.assert_not_awaited()

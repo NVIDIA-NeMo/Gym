@@ -395,15 +395,16 @@ def test_inconclusive_reason_treats_a_failing_test_as_a_verdict() -> None:
 
     assert inconclusive_reason(_result(test_results=ran_and_failed), sample) is None
     assert inconclusive_reason(_result(test_results=all_passed), sample) is None
+    assert inconclusive_reason(_result(test_results={"tests": ran_and_failed["tests"][:1]}), sample) is None
 
 
 def test_inconclusive_reason_flags_runs_that_produced_no_verdict() -> None:
     sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
     only_one = {"tests": [{"name": "test_old", "status": "PASSED"}]}
 
-    assert inconclusive_reason(_result(test_results=only_one), sample) is None
+    assert "1 of 2 graded tests" in inconclusive_reason(_result(test_results=only_one), sample)
     assert not grade_output(only_one, sample)
-    assert inconclusive_reason(_result(), sample) is None
+    assert "no tests at all" in inconclusive_reason(_result(), sample)
     assert not grade_output({"tests": []}, sample)
     assert "no usable output" in inconclusive_reason(_result(test_results=None), sample)
     assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"), sample)
@@ -415,6 +416,7 @@ def test_inconclusive_reason_ignores_tests_the_task_does_not_grade_on() -> None:
     extra = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "unrelated", "status": "FAILED"}]}
 
     assert inconclusive_reason(_result(test_results=extra), sample) is None
+    assert "1 of 1 graded tests" in inconclusive_reason(_result(test_results={"tests": extra["tests"][1:]}), sample)
 
 
 def test_environment_repairs_are_individually_selectable() -> None:

@@ -94,7 +94,8 @@ fails explicitly. Harness failures retain `verifier_reward`, omit
 `*_failures.jsonl` sidecar and excludes them from scores. Incomplete verification
 is excluded too. Reaching a turn, output-token or wall-time budget after model
 output retains the patch's score and records
-`response.metadata.budget_exhausted=true`. Missing or failing graded tests score zero.
+`response.metadata.budget_exhausted=true`. Explicitly failing graded tests score zero;
+missing test results remain inconclusive unless a required test already failed.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
 ```bash

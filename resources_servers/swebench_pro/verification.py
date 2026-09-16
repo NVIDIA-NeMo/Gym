@@ -286,8 +286,17 @@ def inconclusive_reason(result: VerificationResult, sample: dict[str, Any]) -> s
     if result.test_results is None:
         return "parser produced no usable output"
 
-    # Pro parsers may omit failed tests, including every test after a build failure.
-    # A valid output is graded by grade_output(), just as in the anyswe Pro path.
+    tests = result.test_results.get("tests") or []
+    reported = {test["name"] for test in tests}
+    required = set(parse_string_list(sample["fail_to_pass"])) | set(parse_string_list(sample["pass_to_pass"]))
+    # One explicit failure is conclusive even if other graded tests never ran.
+    if result.patch_applied and any(test["name"] in required and test["status"] == "FAILED" for test in tests):
+        return None
+    if required and not reported:
+        return "parser reported no tests at all"
+    unobserved = required - reported
+    if unobserved:
+        return f"{len(unobserved)} of {len(required)} graded tests never reported an outcome"
     return None
 
 

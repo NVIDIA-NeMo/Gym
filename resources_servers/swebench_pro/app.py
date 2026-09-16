@@ -216,7 +216,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         return app
 
     async def close_session(self, request: Request) -> dict[str, bool]:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id is None:
+            return {"closed": True}
         self._session_id_to_pristine_untracked.pop(session_id, None)
         sandbox = self._session_id_to_sandbox.pop(session_id, None)
         if sandbox is not None:

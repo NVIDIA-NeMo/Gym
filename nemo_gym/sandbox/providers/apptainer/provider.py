@@ -589,7 +589,7 @@ class ApptainerProvider:
         if not isinstance(mount_point, str) or not mount_point.startswith("/"):
             raise ValueError("Invalid Apptainer mount point")
         env = dict(descriptor.get("env", {}))
-        _serialize_env_file(env)
+        _serialize_env_file(env)  # Validate keys and values before accepting the descriptor.
         handle = SandboxHandle(
             sandbox_id=name,
             provider_name=self.name,
