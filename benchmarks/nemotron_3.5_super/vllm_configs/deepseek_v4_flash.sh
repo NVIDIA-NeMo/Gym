@@ -6,22 +6,23 @@ GYM_MODEL_PARAMS=(
 )
 
 export MOONCAKE_CONFIG_PATH=/etc/mooncake/mooncake_vllm_config.json
-cat > $MOONCAKE_CONFIG_PATH <<EOF
-{
-  "mode": "embedded",
-  "metadata_server": "P2PHANDSHAKE",
-  "master_server_address": "$MOONCAKE_MASTER_IP:50051",
-  "global_segment_size": "100GB",
-  "local_buffer_size": "4GB",
-  "protocol": "rdma",
-  "device_name": "$MOONCAKE_DEVICE_NAME",
-  "enable_offload": false
-}
-EOF
 
 uv pip install --system 'mooncake-transfer-engine>=0.3.10'
 
 if (( SLURM_PROCID == 0 )); then
+cat > $MOONCAKE_CONFIG_PATH <<EOF
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "$(hostname):50051",
+  "global_segment_size": "100GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "",
+  "enable_offload": false
+}
+EOF
+
     mooncake_master \
         -rpc_port=50051 \
         -rpc_thread_num=4 \
@@ -29,6 +30,11 @@ if (( SLURM_PROCID == 0 )); then
         -eviction_high_watermark_ratio=0.95 \
         -eviction_ratio=0.1 \
         -logtostderr
+else
+    until [ -f $MOONCAKE_CONFIG_PATH ]
+    do
+        sleep 1
+    done
 fi
 
 VLLM_COMMON_ARGS=(
