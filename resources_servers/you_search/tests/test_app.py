@@ -64,7 +64,7 @@ class TestApp:
             port=8080,
             entrypoint="",
             name="",
-            you_api_key="test_api_key",  # pragma: allowlist secret
+            ydc_api_key="test_api_key",  # pragma: allowlist secret
             exclude_domains_file_path=os.path.join(_TEST_DIR, "dummy_exclude_domains_file.json"),
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -563,7 +563,7 @@ class TestApp:
 
     async def test_api_key_rotation_sanity(self, config: YouSearchResourcesServerConfig) -> None:
         """Multiple calls rotate through the configured keys, round-robin."""
-        config.you_api_key = ["key1", "key2", "key3"]  # pragma: allowlist secret
+        config.ydc_api_key = ["key1", "key2", "key3"]  # pragma: allowlist secret
         server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         assert [server._select_api_key() for _ in range(5)] == ["key1", "key2", "key3", "key1", "key2"]
@@ -633,7 +633,7 @@ class TestApp:
 
     async def test_post_rotates_key_on_retry(self, config: YouSearchResourcesServerConfig) -> None:
         """A retry after a 429 must move to the next key, not re-hit the throttled one."""
-        config.you_api_key = ["key1", "key2"]  # pragma: allowlist secret
+        config.ydc_api_key = ["key1", "key2"]  # pragma: allowlist secret
         server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
             mock_request.side_effect = [self._fake_response(429), self._fake_response(200, {"ok": True})]
