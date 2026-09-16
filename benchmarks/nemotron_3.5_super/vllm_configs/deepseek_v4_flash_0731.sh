@@ -5,9 +5,6 @@ GYM_MODEL_PARAMS=(
     "++model_endpoint_readiness_timeout_seconds=1200"
 )
 
-export WITH_NVIDIA_PEERMEM=0
-export VLLM_USE_NCCL_SYMM_MEM=0
-
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log

@@ -179,6 +179,9 @@ MOONCAKE_CONFIG
 
     uv pip install --system mooncake-transfer-engine-cuda13
 
+    # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
+    export WITH_NVIDIA_PEERMEM=0
+
     if (( SLURM_PROCID == 0 )); then
         echo "Starting mooncake_master on \${nodes[0]}"
         mooncake_master \
