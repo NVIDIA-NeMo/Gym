@@ -97,7 +97,7 @@ class _AgentGroup:
 @dataclass(frozen=True)
 class _ModelCallIndex:
     calls: list[TrajectoryModelCall]
-    by_id: dict[str, int]
+    by_id: dict[str, list[int]]
     by_response: dict[tuple[str, str, str], list[int]]
 
 
@@ -618,26 +618,15 @@ def _build_groups(trajectory: TrajectoryRecord, invocation: Any) -> tuple[list[A
 
 
 def _model_call_index(calls: list[TrajectoryModelCall]) -> _ModelCallIndex:
-    by_id: dict[str, int] = {}
+    by_id: dict[str, list[int]] = {}
     by_response: dict[tuple[str, str, str], list[int]] = {}
     for index, call in enumerate(calls):
-        if call.model_call_id is not None and not call.model_call_id.strip():
-            raise _path_error(f"ng_trajectory.model_calls[{index}].model_call_id", "cannot be blank")
-        if call.model_call_id:
-            if call.model_call_id in by_id:
-                raise _path_error("ng_trajectory.model_calls", "model_call_id values must be unique")
-            by_id[call.model_call_id] = index
+        if call.model_call_id and call.model_call_id.strip():
+            by_id.setdefault(call.model_call_id, []).append(index)
         metadata = call.response_metadata
-        if metadata.response_id is not None and not metadata.response_id.strip():
-            raise _path_error(f"ng_trajectory.model_calls[{index}].response_metadata.response_id", "cannot be blank")
-        if metadata.model_ref is not None and metadata.response_id:
+        if metadata.model_ref is not None and metadata.response_id and metadata.response_id.strip():
             key = (metadata.model_ref.type, metadata.model_ref.name, metadata.response_id)
             by_response.setdefault(key, []).append(index)
-        if not call.model_call_id and not (metadata.model_ref is not None and metadata.response_id):
-            raise _path_error(
-                f"ng_trajectory.model_calls[{index}]",
-                "model_call_id or both model_ref and response_id are required",
-            )
     return _ModelCallIndex(calls=calls, by_id=by_id, by_response=by_response)
 
 
@@ -647,9 +636,12 @@ def _resolve_model_call(ref: ModelCallRef, calls: _ModelCallIndex, *, path: str)
     if ref.response_id is not None and not ref.response_id.strip():
         raise _path_error(f"{path}.response_id", "cannot be blank")
     if ref.model_call_id:
-        index = calls.by_id.get(ref.model_call_id)
-        if index is None:
+        candidate_indices = calls.by_id.get(ref.model_call_id, [])
+        if not candidate_indices:
             raise _path_error(path, f"unknown model_call_id {ref.model_call_id!r}")
+        if len(candidate_indices) > 1:
+            raise _path_error(path, "model_call_id matches more than one captured model call")
+        index = candidate_indices[0]
         call = calls.calls[index]
     else:
         assert ref.model_ref is not None and ref.response_id is not None
@@ -661,6 +653,13 @@ def _resolve_model_call(ref: ModelCallRef, calls: _ModelCallIndex, *, path: str)
             raise _path_error(path, "model_ref and response_id match more than one captured model call")
         index = candidate_indices[0]
         call = calls.calls[index]
+    if call.model_call_id is not None and not call.model_call_id.strip():
+        raise _path_error(f"ng_trajectory.model_calls[{index}].model_call_id", "cannot be blank")
+    if call.response_metadata.response_id is not None and not call.response_metadata.response_id.strip():
+        raise _path_error(
+            f"ng_trajectory.model_calls[{index}].response_metadata.response_id",
+            "cannot be blank",
+        )
     if ref.response_id is not None and ref.response_id != call.response_metadata.response_id:
         raise _path_error(path, "response_id conflicts with the captured model call")
     if ref.model_ref is not None and ref.model_ref != call.response_metadata.model_ref:

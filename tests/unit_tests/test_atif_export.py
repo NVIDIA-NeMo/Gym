@@ -923,7 +923,7 @@ def test_strict_export_requires_exact_turn_and_model_call_evidence() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        ("identityless-captured-call", "model_call_id or both model_ref and response_id are required"),
+        ("identityless-captured-call", "unknown model_call_id"),
         ("unknown-model-ref", "unknown model_call_id"),
         ("unmatched-response-ref", "model_ref and response_id do not match a captured model call"),
         ("wrong-turn-invocation", "does not match the root invocation"),
@@ -1013,6 +1013,52 @@ def test_strict_export_preserves_surplus_failed_model_attempt_without_counting_i
     assert trajectory.extra is not None
     preserved = trajectory.extra["nemo_gym"]["surplus_model_calls"]
     assert preserved == [surplus]
+
+
+@pytest.mark.parametrize(
+    "identity_shape",
+    ("missing", "blank-model-call-id", "blank-response-id", "duplicate-response-pair"),
+)
+def test_strict_export_preserves_unreferenced_surplus_calls_with_noncanonical_identity(
+    identity_shape: str,
+) -> None:
+    rollout = _canonical_rollout()
+    surplus = copy.deepcopy(rollout["ng_trajectory"]["model_calls"][1])
+    surplus["model_call_id"] = "model-call-retry"
+    surplus["response_metadata"].update(
+        {
+            "response_id": "response-retry",
+            "response_status": "failed",
+            "error_category": "provider_error",
+        }
+    )
+    surplus["token_stats"] = {
+        "prompt_tokens": 10_000,
+        "completion_tokens": 10_000,
+        "total_tokens": 20_000,
+    }
+    if identity_shape == "missing":
+        surplus.pop("model_call_id")
+        surplus["response_metadata"].pop("model_ref")
+        surplus["response_metadata"].pop("response_id")
+    elif identity_shape == "blank-model-call-id":
+        surplus["model_call_id"] = " \t"
+    elif identity_shape == "blank-response-id":
+        surplus["response_metadata"]["response_id"] = " \t"
+    else:
+        surplus["response_metadata"]["response_id"] = "response-2"
+    rollout["ng_trajectory"]["model_calls"].append(surplus)
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.final_metrics.model_dump(exclude_none=True) == {
+        "total_prompt_tokens": 232,
+        "total_completion_tokens": 24,
+        "total_cached_tokens": 13,
+        "total_steps": 4,
+    }
+    assert trajectory.extra is not None
+    assert trajectory.extra["nemo_gym"]["surplus_model_calls"] == [surplus]
 
 
 def test_strict_export_rejects_duplicate_root_invocation_model_references() -> None:
@@ -1289,15 +1335,19 @@ def test_strict_export_rejects_ambiguous_model_ref_and_response_id_pairs() -> No
 
 
 @pytest.mark.parametrize(
-    ("location", "field_name"),
+    ("location", "field_name", "message"),
     [
-        ("captured", "model_call_id"),
-        ("captured", "response_id"),
-        ("turn-ref", "model_call_id"),
-        ("turn-ref", "response_id"),
+        ("captured", "model_call_id", "unknown model_call_id"),
+        ("captured", "response_id", "cannot be blank"),
+        ("turn-ref", "model_call_id", "cannot be blank"),
+        ("turn-ref", "response_id", "cannot be blank"),
     ],
 )
-def test_strict_export_rejects_blank_model_call_identifiers(location: str, field_name: str) -> None:
+def test_strict_export_rejects_blank_model_call_identifiers(
+    location: str,
+    field_name: str,
+    message: str,
+) -> None:
     rollout = _canonical_rollout()
     if location == "captured":
         if field_name == "model_call_id":
@@ -1315,7 +1365,7 @@ def test_strict_export_rejects_blank_model_call_identifiers(location: str, field
             )
         ref[field_name] = " \t"
 
-    with pytest.raises(AtifExportError, match="cannot be blank"):
+    with pytest.raises(AtifExportError, match=message):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
