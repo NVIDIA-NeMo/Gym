@@ -817,13 +817,16 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
 
+    # setup_dev.sh's no-uv fallback downloads the pinned uv into
+    # ${repo_root}/.cache/nemo-gym-ci/uv-0.11.29 and puts that directory on PATH.
+    # The fake curl ignores the URL and installs a fake uv there directly.
     _write_executable(
         bin_dir / "curl",
         """#!/usr/bin/env bash
-cat <<'INSTALL'
 set -eu
-mkdir -p "${UV_UNMANAGED_INSTALL}"
-cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
+uv_bin_dir="${PWD}/.cache/nemo-gym-ci/uv-0.11.29"
+mkdir -p "${uv_bin_dir}"
+cat > "${uv_bin_dir}/uv" <<'UV'
 #!/usr/bin/env bash
 set -eu
 case "${1:-}" in
@@ -840,8 +843,7 @@ case "${1:-}" in
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
 UV
-chmod +x "${UV_UNMANAGED_INSTALL}/uv"
-INSTALL
+chmod +x "${uv_bin_dir}/uv"
 """,
     )
     _write_executable(
