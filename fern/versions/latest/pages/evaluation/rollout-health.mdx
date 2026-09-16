@@ -97,6 +97,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `record_unreadable` | Rollout | A non-empty JSONL line is not a JSON object, or its `ng_trajectory` cannot be parsed as a `TrajectoryRecord`. |
 | `rollout_duplicate_identity` | Rollout | More than one input record has the same `_ng_task_index` and `_ng_rollout_index`. Every duplicated record receives the finding. |
 | `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
+| `rollout_ended_on_failed_model_call` | Rollout | The last captured policy-model call for the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. A failure followed by a successful call does not produce a finding. |
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of bound policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
 | `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
@@ -130,6 +131,8 @@ The per-call checks bind both `TrajectoryTurn.model_calls` and `AgentInvocation.
 It does not match calls by list position, timestamp, model name, or payload similarity. A reference that resolves exactly once
 becomes a bound policy-model call. When the same call is referenced by both a turn and its containing invocation, the call is
 evaluated once. Unreferenced model calls are not assigned to the policy model because they can belong to an auxiliary model.
+
+`rollout_ended_on_failed_model_call` is the exception: it reads the captured calls directly, so it still applies to a rollout whose producer published no trajectory at all.
 
 The per-call checks are `model_call_failed`, `model_call_missing_token_counts`, `model_call_runaway_generation`,
 `model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
@@ -166,7 +169,7 @@ behavior according to the evidence required by a check. A recorded gap is not au
 | Observation gap | Health behavior |
 | --- | --- |
 | `trajectory_projection_failed` | All checks that require `ng_trajectory` are unobserved. |
-| `turns_unavailable` | Checks that require agent turns are unobserved. |
+| `turns_unavailable` | Checks that require agent turns are unobserved. Recorded only when no producer published a `TrajectoryRecord`; a producer that publishes one and reports no turns yields a `rollout_missing_agent_turns` finding instead. |
 | `model_calls_unavailable`, `model_call_capture_incomplete`, `model_call_capture_records_unreadable`, `model_call_capture_unreadable` | Checks that require bound policy-model calls are unobserved. |
 | `model_call_reference_unmatched`, `model_call_reference_ambiguous`, `model_call_reference_conflict` | `trajectory_capture_mismatch` produces a finding because the available evidence contradicts itself. |
 | `model_call_ownership_unavailable` | No finding by itself. An unowned call can belong to an auxiliary model. |
