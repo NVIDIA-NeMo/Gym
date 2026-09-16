@@ -11,7 +11,7 @@ GYM_MODEL_PARAMS=()
 
 VLLM_COMMON_ARGS=(
     --trust-remote-code
-    --dtype bfloat16
+    --disable-uvicorn-access-log
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
     --data-parallel-backend mp
