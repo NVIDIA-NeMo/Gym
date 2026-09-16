@@ -180,6 +180,7 @@ def install_model_admission(
             "model-admission/resume",
             allowed_phases=frozenset(
                 {
+                    CheckpointPhase.IDLE,
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
