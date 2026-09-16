@@ -10,6 +10,7 @@ export MOONCAKE_CONFIG_PATH=/etc/mooncake/mooncake_vllm_config.json
 uv pip install --system 'mooncake-transfer-engine>=0.3.10'
 
 if (( SLURM_PROCID == 0 )); then
+mkdir -p /etc/mooncake
 cat > $MOONCAKE_CONFIG_PATH <<EOF
 {
   "mode": "embedded",
