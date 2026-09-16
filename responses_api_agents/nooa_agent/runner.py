@@ -16,15 +16,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
-from nooa import Agent
+from nooa.atif import atif_scope
 
-from nemo_gym.rollout_observability import ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
+from responses_api_agents.nooa_agent.observability import project_nooa_episode
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -44,9 +47,8 @@ class NOOARunRequest:
 
 @dataclass(slots=True)
 class NOOARunResult:
+    episode: AgentEpisode
     return_value: Any
-    agent: Agent
-    model_calls: list[ModelCallRef]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
 
@@ -99,11 +101,20 @@ class EmbeddedNOOARunner:
 
         arguments = materialize_arguments(request.row, self._invocation.arguments)
         entrypoint = getattr(agent, self._invocation.entrypoint)
-        return_value = await entrypoint(**arguments)
-        return NOOARunResult(
-            return_value=return_value,
-            agent=agent,
+        with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
+            path = Path(directory) / "trajectory.json"
+            async with atif_scope(agent, path=path) as exporter:
+                return_value = await entrypoint(**arguments)
+            trajectory = exporter.get_trajectory()
+
+        episode = project_nooa_episode(
+            create_params=request.row.responses_create_params,
+            trajectory=trajectory,
             model_calls=model_calls,
+        )
+        return NOOARunResult(
+            episode=episode,
+            return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
         )
