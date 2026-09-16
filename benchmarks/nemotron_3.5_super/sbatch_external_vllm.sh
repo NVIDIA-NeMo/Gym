@@ -3,14 +3,35 @@
 set -euo pipefail
 
 # Input arguments and validation
-NUM_PREFILL_NODES=$NUM_PREFILL_NODES
-NUM_DECODE_NODES=$NUM_DECODE_NODES
+# PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
+# Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
+VLLM_MODE="${VLLM_MODE:-pd}"
+case "$VLLM_MODE" in
+    pd)
+        NUM_PREFILL_NODES=${NUM_PREFILL_NODES:?Required in PD mode}
+        NUM_DECODE_NODES=${NUM_DECODE_NODES:?Required in PD mode}
+        NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+        ;;
+    aggregated)
+        NUM_NODES=${NUM_NODES:-1}
+        NUM_PREFILL_NODES=0
+        NUM_DECODE_NODES=0
+        ;;
+    *)
+        echo "VLLM_MODE must be pd or aggregated" >&2
+        exit 1
+        ;;
+esac
 MODEL=$MODEL
 MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
+if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
+    echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
+    exit 1
+fi
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
@@ -38,6 +59,7 @@ WORKER_SERVER_PORT=8001
 
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
+ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 
 eval_command=$(cat <<EOF
@@ -103,7 +125,7 @@ fi
 EOF
 )
 
-pd_command=$(cat <<EOF
+vllm_command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
@@ -143,7 +165,7 @@ read -r -a nodes <<< "\$ALL_NODES"
 router_pid=""
 mooncake_pid=""
 
-cleanup_pd() {
+cleanup_vllm() {
     if [[ -n "\$router_pid" ]]; then
         kill "\$router_pid" 2>/dev/null || true
         wait "\$router_pid" 2>/dev/null || true
@@ -153,7 +175,7 @@ cleanup_pd() {
         wait "\$mooncake_pid" 2>/dev/null || true
     fi
 }
-trap cleanup_pd EXIT
+trap cleanup_vllm EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -217,9 +239,6 @@ if (( SLURM_PROCID == 0 )); then
     # Don't manually wait as vllm-router will wait for the URLs to come up
     # Set a longer worker startup timeout since some models e.g. DSv4 take > 10 mins to load.
     router_args=( \
-        --prefill-policy $ROUTER_PREFILL_POLICY \
-        --decode-policy $ROUTER_DECODE_POLICY \
-        --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
@@ -228,13 +247,25 @@ if (( SLURM_PROCID == 0 )); then
         --log-level error
     )
 
-    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
-    done
-    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
-        node_idx=\$(( $NUM_PREFILL_NODES + i ))
-        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
-    done
+    if [[ "$VLLM_MODE" == pd ]]; then
+        router_args+=( \
+            --prefill-policy $ROUTER_PREFILL_POLICY \
+            --decode-policy $ROUTER_DECODE_POLICY \
+            --vllm-pd-disaggregation
+        )
+        for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+            router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+        done
+        for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+            node_idx=\$(( $NUM_PREFILL_NODES + i ))
+            router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+        done
+    else
+        router_args+=(--policy $ROUTER_POLICY --worker-urls)
+        for node in "\${nodes[@]}"; do
+            router_args+=("http://\$node:$WORKER_SERVER_PORT")
+        done
+    fi
 
     vllm-router "\${router_args[@]}" &
 
@@ -247,8 +278,33 @@ if (( SLURM_PROCID == 0 )); then
     fi
 fi
 
-# Split nodes here by index
-if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+if [[ "$VLLM_MODE" == aggregated ]]; then
+    # Reuse decode tuning by default. Configs can supply VLLM_AGGREGATED_ARGS
+    # instead (including an empty array) for independent tuning.
+    if declare -p VLLM_AGGREGATED_ARGS &>/dev/null; then
+        worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_AGGREGATED_ARGS[@]}")
+    else
+        worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}")
+    fi
+    # A complete replica must not wait for KV transfers from a prefill worker.
+    # Strip both CLI forms, including connectors set in VLLM_COMMON_ARGS.
+    aggregated_args=()
+    skip_value=0
+    for arg in "\${worker_args[@]}"; do
+        if (( skip_value )); then
+            skip_value=0
+            continue
+        fi
+        if [[ "\$arg" == --kv-transfer-config ]]; then
+            skip_value=1
+        elif [[ "\$arg" != --kv-transfer-config=* ]]; then
+            aggregated_args+=("\$arg")
+        fi
+    done
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
+        --host \$this_node_hostname \
+        --port $WORKER_SERVER_PORT
+elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
@@ -266,7 +322,6 @@ fi
 EOF
 )
 
-NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -301,7 +356,7 @@ trap 'exit 143' TERM
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
-    # @bxyu-nvidia: Put the Gym servers on a separate node than the PREFILL_HEAD which is also running the vllm-router
+    # @bxyu-nvidia: Put the Gym servers on a separate node from the one running vllm-router.
     # This helps relieve so much network traffic on one node.
     if [[ -v 'nodes[1]' ]]; then
         EVAL_NODE=\${nodes[1]}
@@ -358,7 +413,7 @@ fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
-    vllm_command="$pd_command" \
+    vllm_command="$vllm_command" \
     eval_command="$eval_command" \
     batch_command="$batch_command" \
     sbatch \
