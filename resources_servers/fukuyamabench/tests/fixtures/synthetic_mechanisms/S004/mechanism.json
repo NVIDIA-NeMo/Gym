@@ -1,0 +1,118 @@
+{
+    "reactions": [
+        {
+            "reaction_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC=C",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "O",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC(C)O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH3+]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "conditions": [
+                {
+                    "role": "reagent",
+                    "text": "H2SO4 (cat.)",
+                    "reaction_step": "1"
+                },
+                {
+                    "role": "solvent",
+                    "text": "H2O",
+                    "reaction_step": "1"
+                }
+            ]
+        }
+    ],
+    "mechanism": [
+        {
+            "mechanism_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC=C",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "O",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "C[CH+]C",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        },
+        {
+            "mechanism_id": "2",
+            "reactants": [
+                {
+                    "smiles": "C[CH+]C",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC(C)[OH2+]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        },
+        {
+            "mechanism_id": "3",
+            "reactants": [
+                {
+                    "smiles": "CC(C)[OH2+]",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC(C)O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH3+]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,8 @@
+-e nemo-gym[dev] @ ../../
+# Pinned to 2025.9.6 rather than the then-current 2026.3.6 (released 2026-09-03):
+# every control recorded in README.md — 241/241 gold-as-prediction, the four
+# negative controls, and the 17-species organometallic recovery — was measured on
+# this version, and canonical SMILES output can change across RDKit releases.
+# Also matches the sibling moldetox server. Revisit by re-running those controls,
+# not by bumping the pin alone. See README "Dependencies" for the alternatives.
+rdkit==2025.9.6
