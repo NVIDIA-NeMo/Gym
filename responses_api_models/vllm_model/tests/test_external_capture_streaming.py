@@ -291,8 +291,7 @@ async def test_runtime_override_is_scoped_to_captured_calls(make_harness, dialec
 
 @pytest.mark.parametrize(
     "dialect,content_kind",
-    [(dialect, "reasoning") for dialect in DIALECTS]
-    + [(dialect, "refusal") for dialect in ("responses", "messages", "compaction")],
+    [(dialect, "reasoning") for dialect in DIALECTS] + [(dialect, "refusal") for dialect in DIALECTS],
 )
 @pytest.mark.parametrize("tool_call", [False, True])
 @pytest.mark.parametrize("evaluation", [False, True])
@@ -320,7 +319,15 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
         expected = b"I cannot help with that." if h.worker.refusal else b"Check the requested calculation."
         assert expected in raw
         wire_dialect = {"chat/completions": "chat_completions", "compaction": "responses"}.get(dialect, dialect)
-        return _reconstruct_streamed_response(raw, wire_dialect)
+        response = _reconstruct_streamed_response(raw, wire_dialect)
+        if dialect == "chat/completions" and h.worker.refusal:
+            assert any(
+                choice["delta"].get("refusal") == expected.decode()
+                for event in _events(messages)
+                for choice in event.get("choices", [])
+            )
+            assert response["choices"][0]["message"]["refusal"] == expected.decode()
+        return response
 
     first = await complete()
     if dialect in ("responses", "compaction"):

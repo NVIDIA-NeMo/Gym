@@ -1068,6 +1068,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     """Rebuild a Chat Completions response from streamed chunks."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    refusal_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
@@ -1089,6 +1090,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             role = delta.get("role") or role
             if delta.get("content"):
                 content_parts.append(delta["content"])
+            if delta.get("refusal"):
+                refusal_parts.append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
                 reasoning_parts.append(reasoning)
@@ -1110,6 +1113,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     result: dict[str, Any] = {
