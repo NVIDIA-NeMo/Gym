@@ -197,6 +197,7 @@ class GymResponsesLLM(UnifiedLLM):
         cookies: dict[str, str],
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
+        sampling_overrides: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
@@ -204,6 +205,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_url_path = model_url_path
         self._state = state
         self._on_call = on_call
+        self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
@@ -267,6 +269,8 @@ class GymResponsesLLM(UnifiedLLM):
             if destination in supported and value is not None:
                 request[destination] = value
 
+        # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
+        request.update(self._sampling_overrides)
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
