@@ -817,17 +817,12 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
 
-    # setup_dev.sh's no-uv fallback downloads the pinned uv into
-    # ${repo_root}/.cache/nemo-gym-ci/uv-0.11.29 and puts that directory on PATH.
-    # The fake curl ignores the URL and installs a fake uv there directly.
+    # setup_dev.sh reuses a uv already on PATH when it is the pinned version, so the
+    # test puts a fake pinned uv first. The fake uv's `sync` is a no-op so it works
+    # against this bare repo (which intentionally has no pyproject.toml).
     _write_executable(
-        bin_dir / "curl",
+        bin_dir / "uv",
         """#!/usr/bin/env bash
-set -eu
-uv_bin_dir="${PWD}/.cache/nemo-gym-ci/uv-0.11.29"
-mkdir -p "${uv_bin_dir}"
-cat > "${uv_bin_dir}/uv" <<'UV'
-#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
     --version) printf '%s\\n' 'uv 0.11.29' ;;
@@ -842,8 +837,6 @@ case "${1:-}" in
     sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-UV
-chmod +x "${uv_bin_dir}/uv"
 """,
     )
     _write_executable(
