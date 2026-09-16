@@ -43,7 +43,7 @@ REPO = "HaCTang/ReactionMechanismReasoning"
 # The paper cites commit 7c1cb69 for its reported results, but that SHA does not
 # exist in the public repository. This pins the current main HEAD instead, which
 # is an unverified proxy for the evaluated state.
-REVISION = "63bb79f912f0b2de593996b80ffeea894f6f1a59"
+REVISION = "63bb79f912f0b2de593996b80ffeea894f6f1a59"  # pragma: allowlist secret
 TARBALL_URL = f"https://codeload.github.com/{REPO}/tar.gz/{REVISION}"
 
 # Case counts per tier at the pinned revision. A run that silently prepares
