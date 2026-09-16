@@ -378,6 +378,19 @@ class TestCLISetupCommandRunCommand:
         assert popen.call_args.kwargs["stdout"] == "isolated stdout"
         assert popen.call_args.kwargs["stderr"] == "isolated stderr"
 
+    def test_extra_environment_is_inherited_without_entering_the_command(self, monkeypatch: MonkeyPatch) -> None:
+        popen, _get_global_config = self._setup(monkeypatch)
+        secret = "credential-fixture"  # pragma: allowlist secret
+
+        run_command(
+            command="python app.py",
+            working_dir_path=Path("/my path"),
+            extra_env={"NEMO_GYM_CONFIG_DICT": f"api_key: {secret}"},
+        )
+
+        assert secret not in popen.call_args.args[0]
+        assert popen.call_args.kwargs["env"]["NEMO_GYM_CONFIG_DICT"] == f"api_key: {secret}"
+
 
 class TestGetNemoGymInstallFlags:
     """Test _get_nemo_gym_install_flags helper function."""
