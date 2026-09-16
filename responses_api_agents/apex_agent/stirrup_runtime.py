@@ -8,12 +8,17 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import shutil
 import zipfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, get_args, get_origin
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 FILESYSTEM_ROOT = Path("/filesystem")
@@ -346,6 +351,123 @@ def install_tool_schema_type_annotation() -> None:
     for module in client_modules:
         if hasattr(module, "to_openai_tools"):
             module.to_openai_tools = to_openai_tools_with_annotated_ref_types
+
+
+# Stock Stirrup raises ContextOverflowError whenever a completion ends with
+# finish_reason "length" (or "max_tokens"). That conflates two different events:
+# the prompt overflowing the context window, which vLLM rejects with HTTP 400
+# before generating anything, and one turn exhausting max_output_tokens
+# mid-reasoning. GLM-5.2 hits the second case on long deliberations. The raise
+# then unwinds the last completed turn and, when that would cross a progress
+# boundary, ends the rollout with zero credit. On the full 452 x 3 benchmark,
+# 45 rollouts died this way, every one with valid partial content and a usable
+# history.
+#
+# The recovery mirrors the GDPVal Stirrup client: keep the truncated message as
+# an ordinary assistant turn and, if it carried no tool call, steer the very next
+# request with thinking disabled and a short notice. The notice is sent to the
+# server only; it never enters the agent's history or the recorded trajectory.
+LENGTH_TRUNCATION_RECOVERY_NUDGE = (
+    "SYSTEM NOTICE: your previous response hit the output token limit before it "
+    "produced a tool call, so none of that reasoning was saved. Do not start that "
+    "analysis over. Act now on what you already know: respond with a tool call and "
+    "keep any preamble to a few sentences."
+)
+_LENGTH_FINISH_REASONS = ("length", "max_tokens")
+
+
+class _LengthRecordingCompletions:
+    """Stand-in for ``openai_client.chat.completions`` that records a length finish and neutralises it.
+
+    Stirrup checks ``finish_reason`` before parsing the message. Rewriting a
+    length finish to ``stop`` ahead of that check keeps the stock parsing of
+    reasoning, tool calls and token usage intact while suppressing the raise.
+    """
+
+    def __init__(self, inner_create: Any, record: dict[str, Any]) -> None:
+        self._inner_create = inner_create
+        self._record = record
+
+    async def create(self, **kwargs: Any) -> Any:
+        response = await self._inner_create(**kwargs)
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            choice = choices[0]
+            if getattr(choice, "finish_reason", None) in _LENGTH_FINISH_REASONS:
+                self._record["finish_reason"] = choice.finish_reason
+                choice.finish_reason = "stop"
+        return response
+
+
+class _LengthRecordingClient:
+    def __init__(self, inner_client: Any, record: dict[str, Any]) -> None:
+        self.chat = SimpleNamespace(
+            completions=_LengthRecordingCompletions(inner_client.chat.completions.create, record)
+        )
+
+
+def make_length_tolerant_client_class(base_cls: Any) -> Any:
+    """Subclass Stirrup's ``ChatCompletionsClient`` so a length finish is a turn, not a crash.
+
+    ``base_cls`` is passed in because stirrup is only importable inside the
+    sandbox; the subclass is created at call time in ``run_stirrup_rollout``.
+    """
+
+    class LengthTolerantChatCompletionsClient(base_cls):
+        def __init__(self, *args: Any, truncation_recovery: bool = True, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.truncation_recovery = truncation_recovery
+            self.length_truncations = 0
+            self.recovery_turns = 0
+            self._recover_from_truncation = False
+
+        async def generate(self, messages: Any, tools: Any) -> Any:
+            from stirrup.core.models import UserMessage
+
+            recovering = self._recover_from_truncation and self.truncation_recovery
+            self._recover_from_truncation = False
+            request_messages = list(messages)
+            saved_kwargs = self._kwargs
+            saved_client = self._client
+            if recovering:
+                self.recovery_turns += 1
+                request_messages.append(UserMessage(content=LENGTH_TRUNCATION_RECOVERY_NUDGE))
+                extra_body = dict(saved_kwargs.get("extra_body") or {})
+                chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+                chat_template_kwargs["enable_thinking"] = False
+                extra_body["chat_template_kwargs"] = chat_template_kwargs
+                self._kwargs = {**saved_kwargs, "extra_body": extra_body}
+            record: dict[str, Any] = {}
+            self._client = _LengthRecordingClient(saved_client, record)
+            try:
+                message = await super().generate(request_messages, tools)
+            finally:
+                self._client = saved_client
+                self._kwargs = saved_kwargs
+            if record.get("finish_reason") is not None:
+                self.length_truncations += 1
+                if message.tool_calls:
+                    LOGGER.warning(
+                        "completion budget (%d tokens) exhausted with %d tool call(s) present; continuing [truncation #%d]",
+                        self._max_tokens,
+                        len(message.tool_calls),
+                        self.length_truncations,
+                    )
+                else:
+                    self._recover_from_truncation = True
+                    LOGGER.warning(
+                        "completion budget (%d tokens) exhausted with no tool call [truncation #%d]; %s",
+                        self._max_tokens,
+                        self.length_truncations,
+                        "next turn runs with thinking disabled and a recovery notice"
+                        if self.truncation_recovery
+                        else "truncation recovery is off, next turn is unchanged",
+                    )
+            return message
+
+    LengthTolerantChatCompletionsClient.__name__ = f"LengthTolerant{base_cls.__name__}"
+    LengthTolerantChatCompletionsClient.__qualname__ = LengthTolerantChatCompletionsClient.__name__
+    return LengthTolerantChatCompletionsClient
 
 
 def replace_tool_images_for_text_only_model(
@@ -878,12 +1000,14 @@ async def run_stirrup_rollout(
         "temperature": float(config["temperature"]),
         "top_p": float(config["top_p"]),
     }
-    client = ChatCompletionsClient(
+    length_tolerant_client_class = make_length_tolerant_client_class(ChatCompletionsClient)
+    client = length_tolerant_client_class(
         model=config["policy_model"],
         base_url=config["model_base_url"],
         api_key="unused",
         max_tokens=int(config["max_output_tokens"]),
         kwargs=model_kwargs,
+        truncation_recovery=bool(config.get("truncation_recovery", True)),
     )
     managed_tools = ManagedMCPTools()
     agent = Agent(
@@ -932,6 +1056,8 @@ async def run_stirrup_rollout(
         "n_input_tokens": input_tokens,
         "n_output_tokens": output_tokens,
         "n_reasoning_tokens": reasoning_tokens,
+        "n_length_truncations": client.length_truncations,
+        "n_truncation_recovery_turns": client.recovery_turns,
         "trajectory": _serialize_history(history),
         "tool_metadata": metadata,
     }

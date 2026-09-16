@@ -49,6 +49,10 @@ apex_agent:
       supports_vision: ${oc.select:apex_agent_supports_vision,true}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
+      # A turn that exhausts max_output_tokens is kept as a normal turn instead of
+      # ending the rollout; when it carried no tool call, the next turn runs with
+      # thinking disabled and a recovery notice.
+      truncation_recovery: ${oc.select:apex_agent_truncation_recovery,true}
       max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}
       max_world_bytes: ${oc.select:apex_agent_max_world_bytes,null}
       # Shares the verifier's output root. Incomplete/max-turn runs are saved
