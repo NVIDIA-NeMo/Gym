@@ -24,9 +24,10 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
+from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -54,12 +55,23 @@ from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
-class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
-    # key must be present (validated below). exclude_domains are honored by both.
-    search_provider: str = "tavily"
+YouSearchMode = Literal["snippets", "highlights", "full_page", "eco", "lite"]
+
+
+class BrowseCompResourcesServerConfig(BaseResourcesServerConfig):
+    # Search/browse backend. "tavily" (default), "exa", or "you". The chosen
+    # provider's key must be present (validated below). exclude_domains are
+    # honored by all three.
+    search_provider: str = "you"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
+    ydc_api_key: str | List[str] | None = None
+    # How much of each page You.com's /v1/search returns; "eco" hits the lighter
+    # /v1/eco_search endpoint and "lite" hits /v2/search instead (both: query + count
+    # only, no extraction, no exclude_domains support server-side). Only used when
+    # search_provider="you" -- browse always pulls full markdown via /v1/contents.
+    you_search_mode: YouSearchMode = "highlights"
+    you_crawl_timeout: int = 60
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -79,17 +91,19 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     max_results: int = 5
 
     @model_validator(mode="after")
-    def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
+    def _check_provider_key(self) -> "BrowseCompResourcesServerConfig":
+        if self.search_provider == "you" and not self.ydc_api_key:
+            raise ValueError("ydc_api_key is required when search_provider='you'")
         if self.search_provider == "tavily" and not self.tavily_api_key:
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
-        if self.search_provider not in ("tavily", "exa"):
-            raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.search_provider not in ("you", "tavily", "exa"):
+            raise ValueError(f"search_provider must be 'you', 'tavily', or 'exa', got {self.search_provider!r}")
         return self
 
 
-class TavilySearchRequest(BaseModel):
+class SearchRequest(BaseModel):
     queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
     max_total_length: int = 30000
 
@@ -118,7 +132,7 @@ class TavilySearchRequest(BaseModel):
         return data
 
 
-class TavilySearchResponse(BaseModel):
+class SearchResponse(BaseModel):
     results_string: str
 
 
@@ -165,12 +179,12 @@ class BashCommandResponse(BaseModel):
     results_string: str
 
 
-class TavilySearchRunRequest(BaseRunRequest):
+class BrowseCompRunRequest(BaseRunRequest):
     ground_truth: str
     question: str
 
 
-class TavilySearchVerifyRequest(TavilySearchRunRequest, BaseVerifyRequest):
+class BrowseCompVerifyRequest(BrowseCompRunRequest, BaseVerifyRequest):
     pass
 
 
@@ -182,9 +196,9 @@ class JudgeEvaluation(BaseModel):
     judge_response: Optional[NeMoGymResponse] = None
 
 
-class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
+class SearchProviderCallMetrics(BaseModel):
     function: str  # "search" | "browse"
-    provider: str = "tavily"  # "tavily" | "exa"
+    provider: str = "you"  # "you" | "tavily" | "exa"
     status: str
     start_time: float
     end_time: float
@@ -201,14 +215,14 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
         return self
 
 
-class TavilySearchMetrics(BaseModel):
-    async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
+class SearchMetrics(BaseModel):
+    async_search_provider_calls: List[SearchProviderCallMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class BrowseCompVerifyResponse(BrowseCompVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
     reset_count: int = 0
-    metrics: TavilySearchMetrics
+    metrics: SearchMetrics
     # Top-level ints so Gym's aggregate_other_metrics reports them alongside
     # reward in <split>_metrics.json (nested metrics.* records are not recursed).
     num_provider_429s: int = 0
@@ -233,10 +247,10 @@ def _count_provider_retry(status: int) -> None:
     counts["num_429_retries" if status == 429 else "num_other_retries"] += 1
 
 
-def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
+def _sum_provider_retry_counts(metrics: "SearchMetrics") -> tuple:
     """(total true 429s, total other retried statuses) across a session's calls."""
-    n429 = sum(c.num_429_retries for c in metrics.async_tavily_calls)
-    n_other = sum(c.num_other_retries for c in metrics.async_tavily_calls)
+    n429 = sum(c.num_429_retries for c in metrics.async_search_provider_calls)
+    n_other = sum(c.num_other_retries for c in metrics.async_search_provider_calls)
     return n429, n_other
 
 
@@ -394,6 +408,105 @@ class ExaAIOHTTPClient(BaseModel):
     async def get_contents(self, urls: List[str], max_characters: int) -> Dict[str, Any]:
         body = {"urls": list(urls), "text": {"maxCharacters": max_characters}}
         return await self._post("/contents", body)
+
+
+class YouAIOHTTPClient(BaseModel):
+    """Async You.com REST client over NeMo Gym's global aiohttp client (no SDK).
+
+    Mirrors ExaAIOHTTPClient's retry + rate-limit-tagging loop. You.com has two
+    search endpoints (``/v1/search`` and the lighter ``/v1/eco_search``) plus
+    ``/v1/contents`` for explicit-URL page content.
+    """
+
+    MAX_EXCLUDE_DOMAINS: ClassVar[int] = 500
+
+    headers: Dict[str, str]
+    base_url: str = "https://ydc-index.io"
+    debug: bool = False
+
+    async def _post(self, endpoint: str, body: Dict[str, Any]) -> Any:
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": json.dumps(body),
+        }
+
+        MAX_NUM_TRIES = 3
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in (401, 403):
+                _abort_on_invalid_api_key("you", response.status, (await response.content.read()).decode())
+
+            if response.status in RETRY_ERROR_CODES:
+                rate_limited = response.status in RATE_LIMIT_ERROR_CODES
+                if rate_limited:
+                    # don't let rate limits burn the retry budget
+                    max_num_tries += 1
+                _count_provider_retry(response.status)
+                content = (await response.content.read()).decode()
+                tag = "you_rate_limit" if rate_limited else "you_retry"
+                print(
+                    f"[browsecomp][tool_fail][{tag}] endpoint={endpoint} status={response.status} "
+                    f"try={tries} body={content[:300]}",
+                    flush=True,
+                )
+                await sleep(0.5)
+                continue
+
+            if not response.ok:
+                # Don't return the error body as if it were results -- that turns a
+                # misconfigured key or bad request into a full run of silent
+                # zero-reward "No results found."
+                await raise_for_status(response)
+
+            data = await response.json()
+            if self.debug:
+                print(f"Received the following You.com response: status={response.status}")
+            return data
+
+        # Retry budget exhausted while still holding a retryable status.
+        await raise_for_status(response)
+        raise RuntimeError(f"You.com request to {endpoint} failed after {tries} tries with no response to return")
+
+    async def search(
+        self,
+        query: str,
+        num_results: int,
+        mode: YouSearchMode,
+        crawl_timeout: int,
+        exclude_domains: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        # eco and lite are separate, lighter endpoints rather than extraction levels:
+        # query and count only, no extraction, no exclude_domains support server-side
+        # (client-side exclusion in _is_url_excluded covers both).
+        if mode == "eco":
+            return await self._post("/v1/eco_search", {"query": query, "count": num_results})
+        if mode == "lite":
+            return await self._post("/v2/search", {"query": query, "count": num_results, "mode": "lite"})
+
+        body: Dict[str, Any] = {"query": query, "count": num_results}
+        if mode == "highlights":
+            body["extraction"] = {"extraction_mode": "highlights"}
+        elif mode == "full_page":
+            body["extraction"] = {
+                "extraction_mode": "full_page",
+                "full_page": {"extraction_formats": ["markdown"]},
+            }
+            body["crawl_timeout"] = crawl_timeout
+        if exclude_domains:
+            body["exclude_domains"] = list(exclude_domains)[: self.MAX_EXCLUDE_DOMAINS]
+        return await self._post("/v1/search", body)
+
+    async def get_contents(self, urls: List[str], crawl_timeout: int) -> List[Dict[str, Any]]:
+        # /v1/contents answers with a bare array, one entry per requested URL.
+        return await self._post(
+            "/v1/contents", {"urls": list(urls), "formats": ["markdown"], "crawl_timeout": crawl_timeout}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -742,12 +855,12 @@ def _last_assistant_text(response) -> str:
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
-    config: TavilySearchResourcesServerConfig
+    config: BrowseCompResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
-    _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
+    _session_id_to_metrics: Optional[Dict[str, SearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
@@ -789,7 +902,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             ]
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
 
-        self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
+        self._session_id_to_metrics = defaultdict(SearchMetrics)
 
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
@@ -920,15 +1033,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    def _record_call(
-        self, metrics: "TavilySearchMetrics", function: str, provider: str, status: str, start: float
-    ) -> None:
+    def _record_call(self, metrics: "SearchMetrics", function: str, provider: str, status: str, start: float) -> None:
         """Append one per-API-call metering record (provider, function, latency).
         One record per provider HTTP request: per query for search, per call for browse."""
         retry_counts = _PROVIDER_RETRY_COUNTS.get() or {}
         _PROVIDER_RETRY_COUNTS.set(None)  # next call in this task starts from zero
-        metrics.async_tavily_calls.append(
-            TavilySearchSingleAsyncTavilyMetrics(
+        metrics.async_search_provider_calls.append(
+            SearchProviderCallMetrics(
                 function=function,
                 provider=provider,
                 status=status,
@@ -939,7 +1050,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
         )
 
-    async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
+    async def _exa_search_one(self, query: str, max_length: int, metrics: "SearchMetrics") -> str:
         """Exa search: highlight snippets returned INLINE (never written to pages/, even in
         terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
         if len(query) > 400:
@@ -971,7 +1082,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             running_len += len(entry)
         return "\n".join(blocks)
 
-    async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
+    async def _search_one(self, query: str, max_length: int, metrics: "SearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
 
@@ -1007,7 +1118,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return postprocessed_results
 
     async def _search_one_to_disk(
-        self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "TavilySearchMetrics"
+        self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "SearchMetrics"
     ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
         title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
@@ -1049,7 +1160,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             running_len += len(entry)
         return "\n".join(blocks)
 
-    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+    async def search(self, request: Request, body: SearchRequest) -> SearchResponse:
         sid = request.session[SESSION_ID_KEY]
         metrics = self._session_id_to_metrics[sid]
 
@@ -1057,7 +1168,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print("\n\n body.queries: ", body.queries)
 
         if body.queries is None or len(body.queries) == 0:
-            return TavilySearchResponse(results_string="Query is none or empty")
+            return SearchResponse(results_string="Query is none or empty")
 
         max_per_query_length = body.max_total_length // len(body.queries)
         if self.config.search_provider == "exa":
@@ -1078,7 +1189,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     *[self._search_one(q, max_per_query_length, metrics) for q in body.queries]
                 )
 
-        return TavilySearchResponse(results_string="\n\n".join(results))
+        return SearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
@@ -1168,7 +1279,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         results_string = "\n\n".join(blocks)
         return BrowseResponse(results_string=results_string)
 
-    async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+    async def verify(self, request: Request, body: BrowseCompVerifyRequest) -> BrowseCompVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
@@ -1189,7 +1300,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
         session_metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
         num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
-        verify_response = TavilySearchVerifyResponse(
+        verify_response = BrowseCompVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=agent_num_tool_calls,
@@ -1385,5 +1496,274 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return is_correct, extracted, True
 
 
+class YouSearchResourcesServer(TavilySearchResourcesServer):
+    """You.com search/browse. Subclasses TavilySearchResourcesServer to reuse verify(),
+    the terminal/bash-tool machinery, and provider-retry metering as-is."""
+
+    _you_clients: Optional[List[YouAIOHTTPClient]] = PrivateAttr(default=None)
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+
+        # You.com clients (built only when a You.com key is configured). One client
+        # per key, round-robined across calls. Native aiohttp REST (no SDK dep).
+        ydc_api_keys = self.config.ydc_api_key
+        if isinstance(ydc_api_keys, str):
+            ydc_api_keys = [ydc_api_keys]
+        if ydc_api_keys:
+            self._you_clients = [
+                YouAIOHTTPClient(headers={"X-API-Key": k, "Content-Type": "application/json"}, debug=self.config.debug)
+                for k in ydc_api_keys
+            ]
+            print(f"Search provider: you ({len(self._you_clients)} key(s))")
+
+    def _select_you_client(self) -> YouAIOHTTPClient:
+        client = self._you_clients[self._num_requests % len(self._you_clients)]
+        self._num_requests += 1
+        return client
+
+    @staticmethod
+    def _normalize_you_contents(raw: Any, urls: List[str]) -> List[Dict[str, str]]:
+        """Normalize /v1/contents into [{"url", "raw_content"}, ...].
+
+        The exact response shape isn't nailed down yet (seen so far: a list whose
+        entries are plain strings rather than {"url","markdown"} dicts). Handle every
+        shape we've seen instead of assuming one, and fall back to pairing positionally
+        with the requested urls so browse degrades instead of crashing on a new shape.
+        """
+        items: List[Any] = raw
+        if isinstance(raw, dict):
+            items = raw.get("results") or raw.get("data") or list(raw.values())
+
+        normalized = []
+        for i, r in enumerate(items or []):
+            url = urls[i] if i < len(urls) else ""
+            if isinstance(r, dict):
+                normalized.append(
+                    {"url": r.get("url", "") or url, "raw_content": r.get("markdown") or r.get("text") or ""}
+                )
+            elif isinstance(r, str):
+                normalized.append({"url": url, "raw_content": r})
+
+        return normalized
+
+    @staticmethod
+    def _you_result_items(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Normalize a You.com search response's hit list. /v1/search and /v1/eco_search
+        nest hits under {"results": {"web": [...]}}; /v2/search (lite) returns a flat
+        {"results": [...]} list."""
+        raw = results.get("results")
+        if isinstance(raw, list):
+            return raw
+        return (raw or {}).get("web") or []
+
+    @staticmethod
+    def _you_result_body(result: Dict[str, Any]) -> str:
+        """You.com's search result body, by extraction precedence: full-page
+        markdown > per-page highlights (nested, /v1/search) > per-page highlights
+        (top-level, /v2/search lite) > title snippets (eco/snippets mode)."""
+        contents = result.get("contents") or {}
+        if contents.get("markdown"):
+            return contents["markdown"]
+        if contents.get("highlights"):
+            return " ... ".join(h for h in contents["highlights"] if h)
+        if result.get("highlights"):
+            return " ... ".join(h for h in result["highlights"] if h)
+
+        snippets = result.get("snippets") or []
+        return " ... ".join(s for s in snippets if s) or (result.get("description") or "")
+
+    async def _you_search_one(self, query: str, max_length: int, metrics: "SearchMetrics") -> str:
+        if len(query) > 400:
+            return "Query is too long, use a maximum of 400 characters and 50 words."
+
+        client = self._select_you_client()
+        call_start = time()
+        try:
+            results = await client.search(
+                query,
+                num_results=self.config.max_results,
+                mode=self.config.you_search_mode,
+                crawl_timeout=self.config.you_crawl_timeout,
+                exclude_domains=self._exclude_domains,
+            )
+        except ClientResponseError as e:
+            self._record_call(metrics, "search", "you", "error", call_start)
+            print(f"[browsecomp][tool_fail][you_search_bad_request] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        except Exception as e:
+            self._record_call(metrics, "search", "you", "error", call_start)
+            print(
+                f"[browsecomp][tool_fail][you_search] query={query[:200]!r} error_type={type(e).__name__} error={e}",
+                flush=True,
+            )
+            raise
+        self._record_call(metrics, "search", "you", "success", call_start)
+
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        for result in self._you_result_items(results):
+            url = result.get("url", "") or ""
+            if self._is_url_excluded(url):  # eco / API-side exclusion doesn't apply; enforce client-side
+                continue
+            title = result.get("title", "") or ""
+            snippet = self._you_result_body(result)
+            # cap per-result content: without this, a single full_page markdown body can
+            # exceed max_length on its own and the loop breaks on iteration 1, returning
+            # zero results with no error and no truncation notice.
+            if len(snippet) > 5000:
+                snippet = snippet[:5000] + "\n... [truncated]"
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            if running_len + len(entry) > max_length:
+                break
+            blocks.append(entry)
+            running_len += len(entry)
+        return "\n".join(blocks)
+
+    async def _you_search_one_to_disk(
+        self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "SearchMetrics"
+    ) -> str:
+        """Terminal mode: run one You.com search, write each result's body to disk, return
+        title/url/content/[Saved to] metadata. Mirrors the other providers' disk-mode formatting."""
+        if len(query) > 400:
+            return "Query is too long, use a maximum of 400 characters and 50 words."
+
+        client = self._select_you_client()
+        call_start = time()
+        try:
+            results = await client.search(
+                query,
+                num_results=self.config.max_results,
+                mode=self.config.you_search_mode,
+                crawl_timeout=self.config.you_crawl_timeout,
+                exclude_domains=self._exclude_domains,
+            )
+        except ClientResponseError as e:
+            self._record_call(metrics, "search", "you", "error", call_start)
+            print(f"[browsecomp][tool_fail][you_search_bad_request] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        except Exception as e:
+            self._record_call(metrics, "search", "you", "error", call_start)
+            print(
+                f"[browsecomp][tool_fail][you_search] query={query[:200]!r} error_type={type(e).__name__} error={e}",
+                flush=True,
+            )
+            raise
+        self._record_call(metrics, "search", "you", "success", call_start)
+
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        for ri, result in enumerate(self._you_result_items(results), start=1):
+            url = result.get("url", "") or ""
+            if self._is_url_excluded(url):
+                continue
+            title = result.get("title", "") or ""
+            body = self._you_result_body(result)
+            search_content = body[:500]
+            saved_line = ""
+            entry = f"[Title]: {title}\n[URL]: {url}\n[content]: {search_content}\n{saved_line}"
+            if running_len + len(entry) > max_per_query:
+                break
+            if body:
+                # write to disk only once the entry is known to fit -- otherwise a
+                # page lands in pages/ and manifest.tsv with no [Saved to] line ever
+                # shown to the model, orphaning the file.
+                content = body if len(body) <= self.config.max_page_bytes else body[: self.config.max_page_bytes]
+                saved = page_writer.write_search_result(query, ri, title, url, content)
+                saved_line = f"[Saved to]: {saved} ({len(content)} bytes)\n"
+                entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {search_content}\n{saved_line}"
+            blocks.append(entry)
+            running_len += len(entry)
+        return "\n".join(blocks)
+
+    async def search(self, request: Request, body: SearchRequest) -> SearchResponse:
+        sid = request.session[SESSION_ID_KEY]
+        metrics = self._session_id_to_metrics[sid]
+
+        if self.config.debug:
+            print("\n\n body.queries: ", body.queries)
+
+        if body.queries is None or len(body.queries) == 0:
+            return SearchResponse(results_string="Query is none or empty")
+
+        max_per_query_length = body.max_total_length // len(body.queries)
+        page_writer = self._get_page_writer(sid)
+        if page_writer is not None:
+            results = await asyncio.gather(
+                *[self._you_search_one_to_disk(q, page_writer, max_per_query_length, metrics) for q in body.queries]
+            )
+        else:
+            results = await asyncio.gather(
+                *[self._you_search_one(q, max_per_query_length, metrics) for q in body.queries]
+            )
+
+        return SearchResponse(results_string="\n\n".join(results))
+
+    async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+
+        if self.config.debug:
+            print("\n\n browse urls: ", body.urls)
+            print(f"goal={body.goal}")
+
+        urls = [u for u in body.urls if not self._is_url_excluded(u)]
+        if not urls:
+            return BrowseResponse(results_string="Error: no URLs provided.")
+        urls = urls[:5]
+
+        # set max length per url
+        max_per_url_length = body.max_total_length // len(urls)
+
+        start_time = time()
+        you_client = self._select_you_client()
+        print(f"[you_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
+        try:
+            raw = await you_client.get_contents(urls=urls, crawl_timeout=self.config.you_crawl_timeout)
+        except Exception as e:
+            self._record_call(metrics, "browse", "you", "error", start_time)
+            print(f"[browsecomp][tool_fail][you_contents] urls={urls} error={e}", flush=True)
+            return BrowseResponse(results_string=f"Failed to extract content: {e}")
+        self._record_call(metrics, "browse", "you", "success", start_time)
+        print(f"[you_contents_raw] type={type(raw).__name__} value={str(raw)[:500]!r}", flush=True)
+        result_list = self._normalize_you_contents(raw, urls)
+
+        # return if no results
+        if not result_list:
+            return BrowseResponse(results_string="No content extracted.")
+
+        page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
+        if page_writer is not None:
+            # terminal mode: write each page to disk, return metadata + preview.
+            blocks = []
+            for result in result_list:
+                url = result.get("url", "") or ""
+                content = result.get("raw_content", "") or ""
+                if content:
+                    if len(content) > self.config.max_page_bytes:
+                        content = content[: self.config.max_page_bytes]
+                    saved = page_writer.write_browse_page(url, "", content)
+                    preview = content[:500].replace("\n", " ")
+                    blocks.append(f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n")
+                else:
+                    blocks.append(f"[URL]: {url}\n[Empty content]\n")
+            return BrowseResponse(results_string="\n\n".join(blocks))
+
+        # inline mode: return content directly
+        blocks = []
+        for result in result_list:
+            url = result.get("url", "")
+            content = result.get("raw_content", "")
+            if len(content) > max_per_url_length:
+                content = content[:max_per_url_length] + "\n... [truncated]"
+            blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
+
+        return BrowseResponse(results_string="\n\n".join(blocks))
+
+
+def _select_server_class(config: "BrowseCompResourcesServerConfig"):
+    """Both provider families share one config schema; pick the behavior class here."""
+    return YouSearchResourcesServer if config.search_provider == "you" else TavilySearchResourcesServer
+
+
 if __name__ == "__main__":
-    TavilySearchResourcesServer.run_webserver()
+    _select_server_class(TavilySearchResourcesServer.load_config_from_global_config()).run_webserver()

@@ -69,11 +69,13 @@ gym eval run \
   --max-output-tokens 32768 \
   "++$QWEN.model=$BROWSECOMP_JUDGE_MODEL" \
   "++$HARNESS.judge_model_server.name=Qwen3-235B-A22B-Instruct-2507-FP8" \
+  "++$HARNESS.search_provider=tavily" \
   "++$HARNESS.tavily_api_key=$TAVILY_API_KEY" \
   "++$HARNESS.exclude_domains_file_path=$EXCLUDE_JSON" \
   "++$AGENT.save_model_call_using_vllm_tokenize_endpoint=false" \
   "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
   "++$POLICY.extra_body={skip_special_tokens: false}" \
+  ${OPENAI_PROJECT:+"++policy_model.responses_api_models.vllm_model.default_headers={OpenAI-Project:$OPENAI_PROJECT}"} \
   "++overwrite_metrics_conflicts=true" \
   ${LIMIT:+--limit "$LIMIT"} \
   ${PARALLEL:+--concurrency "$PARALLEL"}

@@ -20,10 +20,10 @@ import resources_servers.browsecomp_advanced_harness.app as app_module
 from resources_servers.browsecomp_advanced_harness.app import (
     _PROVIDER_RETRY_COUNTS,
     ExaAIOHTTPClient,
+    SearchMetrics,
+    SearchProviderCallMetrics,
     TavilySearchAIOHTTPClient,
-    TavilySearchMetrics,
     TavilySearchResourcesServer,
-    TavilySearchSingleAsyncTavilyMetrics,
     _sum_provider_retry_counts,
 )
 
@@ -87,30 +87,30 @@ class TestClientRetryCounting:
 
 class TestRecordCall:
     def test_record_call_moves_counts_into_record_and_resets(self) -> None:
-        metrics = TavilySearchMetrics()
+        metrics = SearchMetrics()
         _PROVIDER_RETRY_COUNTS.set({"num_429_retries": 3, "num_other_retries": 1})
 
         TavilySearchResourcesServer._record_call(MagicMock(), metrics, "search", "tavily", "success", time())
 
-        rec = metrics.async_tavily_calls[-1]
+        rec = metrics.async_search_provider_calls[-1]
         assert rec.num_429_retries == 3
         assert rec.num_other_retries == 1
         # Reset so the next call in this task starts from zero.
         assert _PROVIDER_RETRY_COUNTS.get() is None
 
     def test_record_call_defaults_to_zero(self) -> None:
-        metrics = TavilySearchMetrics()
+        metrics = SearchMetrics()
         TavilySearchResourcesServer._record_call(MagicMock(), metrics, "browse", "exa", "error", time())
-        rec = metrics.async_tavily_calls[-1]
+        rec = metrics.async_search_provider_calls[-1]
         assert rec.num_429_retries == 0
         assert rec.num_other_retries == 0
 
 
 class TestVerifySummation:
     def test_sum_provider_retry_counts(self) -> None:
-        metrics = TavilySearchMetrics(
-            async_tavily_calls=[
-                TavilySearchSingleAsyncTavilyMetrics(
+        metrics = SearchMetrics(
+            async_search_provider_calls=[
+                SearchProviderCallMetrics(
                     function="search",
                     provider="tavily",
                     status="success",
@@ -119,7 +119,7 @@ class TestVerifySummation:
                     num_429_retries=2,
                     num_other_retries=0,
                 ),
-                TavilySearchSingleAsyncTavilyMetrics(
+                SearchProviderCallMetrics(
                     function="browse",
                     provider="tavily",
                     status="error",
@@ -133,9 +133,9 @@ class TestVerifySummation:
         assert _sum_provider_retry_counts(metrics) == (3, 4)
 
     def test_old_records_without_fields_sum_to_zero(self) -> None:
-        metrics = TavilySearchMetrics(
-            async_tavily_calls=[
-                TavilySearchSingleAsyncTavilyMetrics(
+        metrics = SearchMetrics(
+            async_search_provider_calls=[
+                SearchProviderCallMetrics(
                     function="search", provider="tavily", status="success", start_time=0.0, end_time=1.0
                 )
             ]
