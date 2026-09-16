@@ -178,7 +178,7 @@ if (( ENABLE_MOONCAKE )); then
 }
 MOONCAKE_CONFIG
 
-    uv pip install --system 'mooncake-transfer-engine>=0.3.10'
+    uv pip install --system 'mooncake-transfer-engine>=0.3.10' mooncake-transfer-engine-cuda13
 
     if (( SLURM_PROCID == 0 )); then
         echo "Starting mooncake_master on \${nodes[0]}"
