@@ -50,11 +50,11 @@ search_judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 you_search_resources_server:
   resources_servers:
     you_search:
-      you_api_key: <YOUR_KEY>
+      ydc_api_key: <YOUR_KEY>
       search_mode: snippets
 ```
 
-`you_api_key` also accepts a list, in which case calls round-robin across the keys.
+`ydc_api_key` also accepts a list, in which case calls round-robin across the keys.
 
 ## Commands to Run
 

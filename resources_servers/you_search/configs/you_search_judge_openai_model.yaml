@@ -3,7 +3,7 @@ you_search_resources_server:
     you_search:
       entrypoint: app.py
       domain: agent
-      you_api_key: ${you_api_key}
+      ydc_api_key: ${ydc_api_key}
       search_mode: snippets
       use_judge: true
       judge_model_server:

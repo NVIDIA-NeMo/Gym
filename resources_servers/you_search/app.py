@@ -71,7 +71,7 @@ SearchMode = Literal["snippets", "highlights", "full_page", "eco"]
 
 
 class YouSearchResourcesServerConfig(BaseResourcesServerConfig):
-    you_api_key: str | List[str]
+    ydc_api_key: str | List[str]
     # How much of each page the search call returns:
     #   snippets   — keyword excerpts + description only (cheapest, fewest tokens)
     #   highlights — query-relevant passages extracted per page
@@ -178,10 +178,10 @@ class YouSearchResourcesServer(SimpleResourcesServer):
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
     def model_post_init(self, __context) -> None:
-        you_api_keys = self.config.you_api_key
-        if isinstance(you_api_keys, str):
-            you_api_keys = [you_api_keys]
-        self._api_keys = you_api_keys
+        ydc_api_keys = self.config.ydc_api_key
+        if isinstance(ydc_api_keys, str):
+            ydc_api_keys = [ydc_api_keys]
+        self._api_keys = ydc_api_keys
 
         self._session_id_to_metrics = defaultdict(YouSearchMetrics)
 
