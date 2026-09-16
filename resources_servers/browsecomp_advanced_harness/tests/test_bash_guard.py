@@ -31,8 +31,8 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
+    BrowseCompResourcesServerConfig,
     TavilySearchResourcesServer,
-    TavilySearchResourcesServerConfig,
     _bash_allowlisted,
     _bash_denylisted,
 )
@@ -162,11 +162,12 @@ def test_allowlist_blocks_non_read_only():
 
 # ---- integration: _run_bash_readonly blocks without executing + allows reads ----
 def _server() -> TavilySearchResourcesServer:
-    config = TavilySearchResourcesServerConfig(
+    config = BrowseCompResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
+        search_provider="tavily",
         tavily_api_key="test_api_key",  # pragma: allowlist secret
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),

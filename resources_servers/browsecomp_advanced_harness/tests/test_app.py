@@ -34,22 +34,23 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
+    BrowseCompResourcesServerConfig,
+    BrowseCompVerifyRequest,
     BrowseRequest,
-    TavilySearchRequest,
+    SearchRequest,
     TavilySearchResourcesServer,
-    TavilySearchResourcesServerConfig,
-    TavilySearchVerifyRequest,
 )
 
 
 class TestApp:
     @fixture
-    def config(self) -> TavilySearchResourcesServerConfig:
-        return TavilySearchResourcesServerConfig(
+    def config(self) -> BrowseCompResourcesServerConfig:
+        return BrowseCompResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
+            search_provider="tavily",
             tavily_api_key="test_api_key",  # pragma: allowlist secret
             exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
@@ -57,7 +58,7 @@ class TestApp:
         )
 
     @fixture
-    def server(self, config: TavilySearchResourcesServerConfig) -> TavilySearchResourcesServer:
+    def server(self, config: BrowseCompResourcesServerConfig) -> TavilySearchResourcesServer:
         return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _create_dummy_request(self) -> MagicMock:
@@ -100,7 +101,7 @@ class TestApp:
 
     # ---- Sanity ----
 
-    def test_sanity(self, config: TavilySearchResourcesServerConfig) -> None:
+    def test_sanity(self, config: BrowseCompResourcesServerConfig) -> None:
         TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     # ---- _parse_judge ----
@@ -195,19 +196,19 @@ class TestApp:
         mock_client.search = AsyncMock(return_value=mock_tavily_response)
         server._async_tavily_clients = [mock_client]
 
-        request = TavilySearchRequest(queries=["NVIDIA GPU"])
+        request = SearchRequest(queries=["NVIDIA GPU"])
         response = await server.search(self._create_dummy_request(), request)
 
         mock_client.search.assert_called_once()
         assert "NVIDIA" in response.results_string
 
     async def test_search_empty_queries(self, server: TavilySearchResourcesServer) -> None:
-        request = TavilySearchRequest(queries=[])
+        request = SearchRequest(queries=[])
         response = await server.search(self._create_dummy_request(), request)
         assert response.results_string == "Query is none or empty"
 
     async def test_search_none_queries(self, server: TavilySearchResourcesServer) -> None:
-        request = TavilySearchRequest(queries=None)
+        request = SearchRequest(queries=None)
         response = await server.search(self._create_dummy_request(), request)
         assert response.results_string == "Query is none or empty"
 
@@ -229,7 +230,7 @@ class TestApp:
 
     # ---- verify ----
 
-    async def test_verify_correct_answer(self, config: TavilySearchResourcesServerConfig) -> None:
+    async def test_verify_correct_answer(self, config: BrowseCompResourcesServerConfig) -> None:
         server_client = MagicMock(spec=ServerClient)
         server = TavilySearchResourcesServer(config=config, server_client=server_client)
 
@@ -240,7 +241,7 @@ class TestApp:
         post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
-        req = TavilySearchVerifyRequest(
+        req = BrowseCompVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
             response=self._create_model_response("The capital of France is Paris."),
             ground_truth="Paris",
@@ -251,7 +252,7 @@ class TestApp:
         assert res.reward == approx(1.0)
         assert res.extracted_final_answer == "Paris"
 
-    async def test_verify_incorrect_answer(self, config: TavilySearchResourcesServerConfig) -> None:
+    async def test_verify_incorrect_answer(self, config: BrowseCompResourcesServerConfig) -> None:
         server_client = MagicMock(spec=ServerClient)
         server = TavilySearchResourcesServer(config=config, server_client=server_client)
 
@@ -262,7 +263,7 @@ class TestApp:
         post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
-        req = TavilySearchVerifyRequest(
+        req = BrowseCompVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
             response=self._create_model_response("The capital of France is London."),
             ground_truth="Paris",

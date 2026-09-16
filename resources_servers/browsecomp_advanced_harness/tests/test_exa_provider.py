@@ -31,12 +31,12 @@ from pytest import fixture
 import resources_servers.browsecomp_advanced_harness.app as app_module
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
+    BrowseCompResourcesServerConfig,
     BrowseRequest,
     ExaAIOHTTPClient,
+    SearchRequest,
     TavilySearchAIOHTTPClient,
-    TavilySearchRequest,
     TavilySearchResourcesServer,
-    TavilySearchResourcesServerConfig,
 )
 
 
@@ -46,8 +46,8 @@ _DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(_TEST_DIR, "dummy_exclude_domains_fil
 
 class TestExaProvider:
     @fixture
-    def config(self) -> TavilySearchResourcesServerConfig:
-        return TavilySearchResourcesServerConfig(
+    def config(self) -> BrowseCompResourcesServerConfig:
+        return BrowseCompResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -58,7 +58,7 @@ class TestExaProvider:
         )
 
     @fixture
-    def server(self, config: TavilySearchResourcesServerConfig) -> TavilySearchResourcesServer:
+    def server(self, config: BrowseCompResourcesServerConfig) -> TavilySearchResourcesServer:
         return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _req(self) -> MagicMock:
@@ -67,7 +67,7 @@ class TestExaProvider:
         return m
 
     def _exa_server_per_session(self, ws_root: str) -> TavilySearchResourcesServer:
-        config = TavilySearchResourcesServerConfig(
+        config = BrowseCompResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -84,7 +84,7 @@ class TestExaProvider:
 
     def test_config_requires_exa_key(self) -> None:
         with pytest.raises(ValueError):
-            TavilySearchResourcesServerConfig(
+            BrowseCompResourcesServerConfig(
                 host="0.0.0.0",
                 port=8080,
                 entrypoint="",
@@ -95,7 +95,7 @@ class TestExaProvider:
 
     def test_config_requires_tavily_key(self) -> None:
         with pytest.raises(ValueError):
-            TavilySearchResourcesServerConfig(
+            BrowseCompResourcesServerConfig(
                 host="0.0.0.0",
                 port=8080,
                 entrypoint="",
@@ -117,7 +117,7 @@ class TestExaProvider:
         )
         server._exa_clients = [mock]
 
-        resp = await server.search(self._req(), TavilySearchRequest(queries=["who won"]))
+        resp = await server.search(self._req(), SearchRequest(queries=["who won"]))
         mock.search.assert_called_once()
         assert "[Search Query]: who won" in resp.results_string
         assert "[Title]: T1" in resp.results_string
@@ -131,7 +131,7 @@ class TestExaProvider:
         mock.search = AsyncMock(return_value={"results": []})
         server._exa_clients = [mock]
 
-        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        await server.search(self._req(), SearchRequest(queries=["q"]))
         _, kwargs = mock.search.call_args
         assert "blacklisteddomain.com" in (kwargs.get("exclude_domains") or [])
 
@@ -142,7 +142,7 @@ class TestExaProvider:
         )
         server._exa_clients = [mock]
 
-        resp = await server.search(self._req(), TavilySearchRequest(queries=["q"], max_total_length=50))
+        resp = await server.search(self._req(), SearchRequest(queries=["q"], max_total_length=50))
         # entry exceeds the 50-char per-query budget -> dropped; only the query header remains
         assert "BIG" not in resp.results_string
         assert "[Search Query]: q" in resp.results_string
@@ -156,7 +156,7 @@ class TestExaProvider:
         server._exa_clients = [mock]
 
         server._get_page_writer("test_session_id")  # create the workspace
-        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        await server.search(self._req(), SearchRequest(queries=["q"]))
 
         pages = list((Path(tmp_path) / "test_session_id" / "pages").iterdir())
         assert pages == []  # exa search is highlights-only, never writes pages
@@ -241,7 +241,7 @@ class TestExaProvider:
         server._exa_clients = [exa]
         server._async_tavily_clients = [tavily]
 
-        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        await server.search(self._req(), SearchRequest(queries=["q"]))
         exa.search.assert_called_once()
         tavily.search.assert_not_called()
 
@@ -252,9 +252,11 @@ class TestExaProvider:
         mock.search = AsyncMock(return_value={"results": []})
         server._exa_clients = [mock]
 
-        await server.search(self._req(), TavilySearchRequest(queries=["q1", "q2", "q3"]))
+        await server.search(self._req(), SearchRequest(queries=["q1", "q2", "q3"]))
         recs = [
-            c for c in server._session_id_to_metrics["test_session_id"].async_tavily_calls if c.function == "search"
+            c
+            for c in server._session_id_to_metrics["test_session_id"].async_search_provider_calls
+            if c.function == "search"
         ]
         assert len(recs) == 3
         assert all(c.provider == "exa" for c in recs)
@@ -267,7 +269,9 @@ class TestExaProvider:
 
         await server.browse(self._req(), BrowseRequest(urls=["https://x.com"]))
         recs = [
-            c for c in server._session_id_to_metrics["test_session_id"].async_tavily_calls if c.function == "browse"
+            c
+            for c in server._session_id_to_metrics["test_session_id"].async_search_provider_calls
+            if c.function == "browse"
         ]
         assert len(recs) == 1
         assert recs[0].provider == "exa"
@@ -288,10 +292,10 @@ class TestExaProvider:
             kwargs["exa_api_key"] = "test_exa_key"  # pragma: allowlist secret
         else:
             kwargs["tavily_api_key"] = "test_tavily_key"  # pragma: allowlist secret
-        config = TavilySearchResourcesServerConfig(**kwargs)
+        config = BrowseCompResourcesServerConfig(**kwargs)
         return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def test_max_results_config_default_is_5(self, config: TavilySearchResourcesServerConfig) -> None:
+    def test_max_results_config_default_is_5(self, config: BrowseCompResourcesServerConfig) -> None:
         assert config.max_results == 5
 
     async def test_exa_search_uses_configured_max_results(self) -> None:
@@ -300,7 +304,7 @@ class TestExaProvider:
         mock.search = AsyncMock(return_value={"results": []})
         server._exa_clients = [mock]
 
-        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        await server.search(self._req(), SearchRequest(queries=["q"]))
         _, kwargs = mock.search.call_args
         assert kwargs.get("num_results") == 10
 
@@ -310,6 +314,6 @@ class TestExaProvider:
         mock.search = AsyncMock(return_value={"results": []})
         server._async_tavily_clients = [mock]
 
-        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        await server.search(self._req(), SearchRequest(queries=["q"]))
         _, kwargs = mock.search.call_args
         assert kwargs.get("max_results") == 10

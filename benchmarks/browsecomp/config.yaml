@@ -21,9 +21,10 @@ browsecomp_benchmark_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
-      # Search/browse backend: "tavily" (default) or "exa". Override per-run with
-      # ++...browsecomp_advanced_harness.search_provider=exa (+ exa_api_key=[...]).
-      search_provider: tavily
+      # Search/browse backend: "you" (default), "tavily", or "exa". Override per-run with
+      # ++...browsecomp_advanced_harness.search_provider=exa (+ exa_api_key=[...])
+      # ++...browsecomp_advanced_harness.search_provider=tavily (+ tavily_api_key=[...]).
+      search_provider: you
       # terminal mode: search/browse write pages to a per-session disk workspace
       # and the read-only bash_command tool is exposed for the model to grep/read them.
       workspace: per_session
