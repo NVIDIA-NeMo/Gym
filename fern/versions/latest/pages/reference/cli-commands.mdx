@@ -807,7 +807,9 @@ gym eval aggregate \
 Export supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
 trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
 if Gym cannot represent a source trajectory completely in the supported ATIF subset, the export fails instead of silently
-omitting data. The destination directory must not already exist.
+omitting data. All invalid JSONL rows are reported together, and no destination is published if any row fails. Captured
+model attempts not selected by a turn, such as failed retries, remain in `extra.nemo_gym.surplus_model_calls`; they do not
+become canonical ATIF steps or contribute to final usage totals. The destination directory must not already exist.
 
 This command does not parse ATOF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
 row's `agent_ref.name`; `--agent-version` records the version of that agent implementation.

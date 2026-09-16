@@ -936,7 +936,6 @@ def test_strict_export_requires_exact_turn_and_model_call_evidence() -> None:
         ("blank-model", "model: cannot be blank"),
         ("blank-finish-reason", "finish_reason: cannot be blank"),
         ("unrepresentable-timestamp", "cannot be represented as an ISO 8601 timestamp"),
-        ("unreferenced-model-call", "unreferenced model-call indices"),
     ],
 )
 def test_strict_export_rejects_inconsistent_turn_and_model_call_ownership(mutation: str, message: str) -> None:
@@ -979,13 +978,48 @@ def test_strict_export_rejects_inconsistent_turn_and_model_call_ownership(mutati
         model_calls[0]["response_metadata"]["finish_reason"] = " \t"
     elif mutation == "unrepresentable-timestamp":
         turns[0]["timestamp"] = 1e100
-    else:
-        unreferenced = copy.deepcopy(model_calls[1])
-        unreferenced["model_call_id"] = "model-call-unused"
-        unreferenced["response_metadata"]["response_id"] = "response-unused"
-        model_calls.append(unreferenced)
 
     with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_preserves_surplus_failed_model_attempt_without_counting_it() -> None:
+    rollout = _canonical_rollout()
+    surplus = copy.deepcopy(rollout["ng_trajectory"]["model_calls"][1])
+    surplus["model_call_id"] = "model-call-retry"
+    surplus["response_metadata"].update(
+        {
+            "response_id": "response-retry",
+            "response_status": "failed",
+            "error_category": "provider_error",
+        }
+    )
+    surplus["token_stats"] = {
+        "prompt_tokens": 10_000,
+        "completion_tokens": 10_000,
+        "total_tokens": 20_000,
+    }
+    rollout["ng_trajectory"]["model_calls"].append(surplus)
+    rollout["ng_trajectory"]["invocations"][0]["model_calls"].append({"model_call_id": "model-call-retry"})
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.final_metrics.model_dump(exclude_none=True) == {
+        "total_prompt_tokens": 232,
+        "total_completion_tokens": 24,
+        "total_cached_tokens": 13,
+        "total_steps": 4,
+    }
+    assert trajectory.extra is not None
+    preserved = trajectory.extra["nemo_gym"]["surplus_model_calls"]
+    assert preserved == [surplus]
+
+
+def test_strict_export_rejects_duplicate_root_invocation_model_references() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["model_calls"].append({"model_call_id": "model-call-1"})
+
+    with pytest.raises(AtifExportError, match="must not reference a captured model call more than once"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
@@ -1387,6 +1421,45 @@ def test_export_validates_every_record_before_publishing_any_output(tmp_path: Pa
     assert list(tmp_path.glob(".atif.tmp-*")) == []
 
 
+def test_export_reports_every_invalid_row_before_publishing_any_output(tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    first_invalid = _canonical_rollout(task_index=3, rollout_index=7)
+    first_invalid["ng_trajectory"]["invocations"][0]["conversation"][1]["role"] = "developer"
+    second_invalid = _canonical_rollout(task_index=5, rollout_index=0)
+    second_invalid["ng_trajectory"]["turns"][0]["timestamp"] = 1e100
+    _write_jsonl(
+        source,
+        [
+            first_invalid,
+            _canonical_rollout(task_index=4, rollout_index=0),
+            second_invalid,
+        ],
+    )
+    output = tmp_path / "atif"
+
+    with pytest.raises(AtifExportError) as captured:
+        export_rollouts_to_atif(_export_config(source, output))
+
+    message = str(captured.value)
+    assert "ATIF export rejected 2 row(s)" in message
+    assert "line 1" in message
+    assert "developer messages are not supported" in message
+    assert "line 3" in message
+    assert "cannot be represented as an ISO 8601 timestamp" in message
+    assert not output.exists()
+    assert list(tmp_path.glob(".atif.tmp-*")) == []
+
+
+def test_export_publishes_group_readable_directory(tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    _write_jsonl(source, [_canonical_rollout()])
+    output = tmp_path / "atif"
+
+    export_rollouts_to_atif(_export_config(source, output))
+
+    assert output.stat().st_mode & 0o777 == 0o755
+
+
 def test_export_rejects_an_invalid_json_batch_before_conversion(tmp_path: Path) -> None:
     source = tmp_path / "rollouts.jsonl"
     rollout = _canonical_rollout()
@@ -1582,7 +1655,7 @@ def _with_turn_mismatch(row: dict[str, Any]) -> None:
         (_with_nonstandard_tool_arguments, "expected a JSON object string"),
         (_with_incomplete_function_call, "expected completed, got 'incomplete'"),
         (_with_incomplete_function_output, "function result 'call-read' is 'incomplete'"),
-        (_with_missing_invocation_model_ref, "must reference every exported model call exactly once"),
+        (_with_missing_invocation_model_ref, "must reference every turn-selected model call"),
         (_with_non_agent_ref, "expected responses_api_agents when present"),
         (_with_turn_mismatch, "does not match the exported agent answer"),
     ],

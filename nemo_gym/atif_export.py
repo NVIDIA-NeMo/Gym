@@ -668,7 +668,7 @@ def _resolve_model_call(ref: ModelCallRef, calls: _ModelCallIndex, *, path: str)
     return index, call
 
 
-def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> None:
+def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set[int]:
     if len(trajectory.turns) != len(groups):
         raise _path_error(
             "ng_trajectory.turns",
@@ -826,13 +826,6 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             }
         }
 
-    all_call_indices = set(range(len(calls.calls)))
-    if all_call_indices != used_calls:
-        raise _path_error(
-            "ng_trajectory.model_calls",
-            f"unreferenced model-call indices: {sorted(all_call_indices - used_calls)}",
-        )
-
     invocation_call_indices: list[int] = []
     for index, ref in enumerate(trajectory.invocations[0].model_calls):
         call_index, _ = _resolve_model_call(
@@ -841,11 +834,19 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             path=f"ng_trajectory.invocations[0].model_calls[{index}]",
         )
         invocation_call_indices.append(call_index)
-    if len(invocation_call_indices) != len(set(invocation_call_indices)) or set(invocation_call_indices) != used_calls:
+    invocation_calls = set(invocation_call_indices)
+    if len(invocation_call_indices) != len(invocation_calls):
         raise _path_error(
             "ng_trajectory.invocations[0].model_calls",
-            "must reference every exported model call exactly once",
+            "must not reference a captured model call more than once",
         )
+    missing_from_invocation = used_calls - invocation_calls
+    if missing_from_invocation:
+        raise _path_error(
+            "ng_trajectory.invocations[0].model_calls",
+            f"must reference every turn-selected model call; missing indices: {sorted(missing_from_invocation)}",
+        )
+    return used_calls
 
 
 def _final_metrics(groups: list[_AgentGroup], *, total_steps: int) -> AtifFinalMetrics:
@@ -908,7 +909,12 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
     rollout_index = _index(rollout, ROLLOUT_INDEX_KEY_NAME, path=ROLLOUT_INDEX_KEY_NAME)
 
     steps, groups = _build_groups(trajectory, invocation)
-    _apply_turns(trajectory, groups)
+    used_model_call_indices = _apply_turns(trajectory, groups)
+    surplus_model_calls = [
+        call.model_dump(mode="json", exclude_none=True)
+        for index, call in enumerate(trajectory.model_calls)
+        if index not in used_model_call_indices
+    ]
     step_model_names = [group.step.model_name for group in groups]
     known_model_names = {name for name in step_model_names if name is not None}
     model_name = (
@@ -940,6 +946,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
                     ),
                 },
                 "conversion": {"profile": "ng-trajectory-to-atif-v1", "status": "complete"},
+                **({"surplus_model_calls": surplus_model_calls} if surplus_model_calls else {}),
             }
         },
     )
@@ -975,45 +982,56 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     try:
         manifest_lines: list[str] = []
+        row_errors: list[str] = []
         with source.open("rb") as handle:
             for line_no, line in enumerate(handle, 1):
-                if not line.strip():
-                    raise _path_error(f"line {line_no}", "blank JSONL records are not supported")
                 try:
-                    row = _strict_json_loads(line.decode("utf-8"))
-                except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                    raise _path_error(f"line {line_no}", "invalid JSON") from exc
-                if not isinstance(row, dict):
-                    raise _path_error(f"line {line_no}", "expected a JSON object")
-                task_index = _index(row, TASK_INDEX_KEY_NAME, path=f"line {line_no}.{TASK_INDEX_KEY_NAME}")
-                rollout_index = _index(row, ROLLOUT_INDEX_KEY_NAME, path=f"line {line_no}.{ROLLOUT_INDEX_KEY_NAME}")
-                key = (task_index, rollout_index)
-                if key in keys:
-                    raise _path_error(f"line {line_no}", f"duplicate Gym rollout key {key}")
-                keys.add(key)
-                agent_ref = row.get(AGENT_REF_KEY_NAME)
-                if isinstance(agent_ref, dict) and isinstance(agent_ref.get("name"), str):
-                    agent_names.add(agent_ref["name"])
-                try:
+                    if not line.strip():
+                        raise _path_error(f"line {line_no}", "blank JSONL records are not supported")
+                    try:
+                        row = _strict_json_loads(line.decode("utf-8"))
+                    except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                        raise _path_error(f"line {line_no}", "invalid JSON") from exc
+                    if not isinstance(row, dict):
+                        raise _path_error(f"line {line_no}", "expected a JSON object")
+                    task_index = _index(row, TASK_INDEX_KEY_NAME, path=f"line {line_no}.{TASK_INDEX_KEY_NAME}")
+                    rollout_index = _index(
+                        row,
+                        ROLLOUT_INDEX_KEY_NAME,
+                        path=f"line {line_no}.{ROLLOUT_INDEX_KEY_NAME}",
+                    )
+                    key = (task_index, rollout_index)
+                    if key in keys:
+                        raise _path_error(f"line {line_no}", f"duplicate Gym rollout key {key}")
+                    keys.add(key)
+                    agent_ref = row.get(AGENT_REF_KEY_NAME)
+                    if isinstance(agent_ref, dict) and isinstance(agent_ref.get("name"), str):
+                        agent_names.add(agent_ref["name"])
                     trajectory = gym_rollout_to_atif(
                         row,
                         session_id=config.session_id,
                         agent_version=config.agent_version,
                     )
+                    encoded = _encoded_trajectory(trajectory)
+                    digest = hashlib.sha256(encoded).hexdigest()
+                    filename = f"{task_index}-{rollout_index}.json"
+                    manifest = {
+                        "trajectory_path": filename,
+                        TASK_INDEX_KEY_NAME: task_index,
+                        ROLLOUT_INDEX_KEY_NAME: rollout_index,
+                        "expected_sha256": digest,
+                    }
+                    (staging / filename).write_bytes(encoded)
+                    manifest_lines.append(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
                 except AtifExportError as exc:
-                    raise _path_error(f"line {line_no}", str(exc)) from exc
-                encoded = _encoded_trajectory(trajectory)
-                digest = hashlib.sha256(encoded).hexdigest()
-                filename = f"{task_index}-{rollout_index}.json"
-                manifest = {
-                    "trajectory_path": filename,
-                    TASK_INDEX_KEY_NAME: task_index,
-                    ROLLOUT_INDEX_KEY_NAME: rollout_index,
-                    "expected_sha256": digest,
-                }
-                (staging / filename).write_bytes(encoded)
-                manifest_lines.append(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+                    message = str(exc)
+                    row_errors.append(
+                        message if message.startswith(f"line {line_no}") else f"line {line_no}: {message}"
+                    )
 
+        if row_errors:
+            details = "\n".join(f"- {message}" for message in row_errors)
+            raise AtifExportError(f"ATIF export rejected {len(row_errors)} row(s):\n{details}")
         if not manifest_lines:
             raise AtifExportError("Rollouts file contains no records")
         if len(agent_names) != 1:
@@ -1023,6 +1041,7 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
         (staging / "manifest.jsonl").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
         if os.path.lexists(output):
             raise AtifExportError(f"Output path was created during export: {output}")
+        staging.chmod(0o755)
         os.replace(staging, output)
     finally:
         if staging.exists():
