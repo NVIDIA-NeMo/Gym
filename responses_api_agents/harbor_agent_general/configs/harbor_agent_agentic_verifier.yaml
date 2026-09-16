@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer this after harbor_agent.yaml. The task must use Harbor's separate
+# verifier mode and provide judge_instruction.md plus score_solution.py under
+# its hidden tests directory.
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      harbor_verifier:
+        import_path: responses_api_agents.harbor_agent_general.agentic_verifier:AgenticVerifier
+        # Keep this below the default 7200s OpenSandbox TTL so retry exhaustion
+        # can return a zero reward instead of losing the rollout to sandbox expiry.
+        override_timeout_sec: 7000
+        kwargs:
+          config:
+            judge_agent:
+              name: null
+              import_path: responses_api_agents.harbor_agent_general.audited_opencode:PreinstalledOpenCode
+              model_name: ${oc.env:RUBRIC_MODEL}
+              env: {}
+              kwargs:
+                use_preinstalled: true
+              mcp_servers:
+                - name: harbor_score
+                  transport: stdio
+                  command: python3
+                  args:
+                    - /tests/score_solution.py
+            judge_opencode_provider:
+              api_mode: ${oc.env:RUBRIC_MODEL_API_MODE,chat_completions}
+              base_url: ${oc.env:RUBRIC_MODEL_API_BASE}
+            judge_env_aliases:
+              OPENAI_API_KEY: RUBRIC_MODEL_API_KEY
+              OPENAI_BASE_URL: RUBRIC_MODEL_API_BASE
+            instruction_path: judge_instruction.md
+            judge_workdir: /judge
+            reward_path: /logs/verifier/reward.json
+            judge_logs_subdir: judge
+            setup_timeout_sec: 900
+            run_timeout_sec: 2400
+            client_timeout_grace_sec: 60
+            # Two full attempts fit beneath the 7000s verifier cap while
+            # preserving headroom for setup, integrity checks, and teardown.
+            max_attempts: 2
+
+      # Harbor records an integrity marker after the policy exits. The separate
+      # verifier consumes the marker against its direct read-only /app mount;
+      # no policy files pass through the Gym host.
+      artifacts:
+        - source: /app
+          exclude: ${oc.create:${oc.env:HARBOR_POLICY_WORKSPACE_EXCLUDES,[.opencode]}}

@@ -17,8 +17,8 @@ Use `harbor_jobs_dir`, `harbor_dataset`, `harbor_agent`, `harbor_environment`,
 
 Set `model_server` and `model_api_key` to route policy calls through Gym, and
 enable `token_id_capture`. These are optional for direct-provider evaluation.
-Policy alerts and filesystem auditing are independently optional.
-Verifier behavior is configured through Harbor's verifier model.
+Policy alerts, filesystem auditing, and host-validated agentic judging are
+independently optional. The policy and verifier can use different Harbor agents.
 
 The OpenCode wrappers declare Harbor's typed `options_model`, including their
 title, preinstalled-image, alert, process-limit and audit options. Invalid kwargs
@@ -29,7 +29,8 @@ of the training framework's lockfile.
 `harbor_debug` and `harbor_max_retries` control Harbor job execution.
 A nonempty reward dictionary must contain `harbor_reward_key` (default `reward`).
 Multi-step tasks retain all ATIF trajectories and use Harbor's configured
-trial-level reward aggregation.
+trial-level reward aggregation. Integrity verdicts are validated per step;
+`judge_score_host_fallback_zero` indicates that any step exhausted judge retries.
 
 ATIF is the human-readable transcript, not a substitute for captured inference
 inputs. Training consumes independent exact-call token records, preserving

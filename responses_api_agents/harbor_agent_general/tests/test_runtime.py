@@ -22,6 +22,7 @@ from responses_api_agents.harbor_agent_general.app import (
     _policy_agent_timed_out,
     _policy_alert_metrics,
     _sandbox_cleanup_failed,
+    _validated_judge_score_integrity_metrics,
     _verifier_file_access_audit_metrics,
 )
 
@@ -37,6 +38,81 @@ def test_failure_class_preserves_sandbox_lifecycle_reset_through_wrapper():
         == "sandbox_backend_unreachable"
     )
     assert _failure_class_for_error(RuntimeError("judge failed")) == "harbor_failed"
+
+
+def test_missing_judge_integrity_does_not_mask_absent_verifier_result(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "steps" / "rollout" / "agent" / "trajectory.json"
+    trajectory_path.parent.mkdir(parents=True)
+    trajectory_path.write_text("{}")
+    trial = SimpleNamespace(verifier_result=None, step_results=None)
+
+    with pytest.raises(RuntimeError, match="did not produce a result or a host score-integrity verdict"):
+        _validated_judge_score_integrity_metrics(trial, [trajectory_path])
+
+
+def test_accepts_audited_host_fallback_zero(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "steps" / "rollout" / "agent" / "trajectory.json"
+    trajectory_path.parent.mkdir(parents=True)
+    trajectory_path.write_text("{}")
+    verifier_dir = trajectory_path.parent.parent / "verifier"
+    verifier_dir.mkdir()
+    (verifier_dir / "score_integrity.json").write_text(
+        '{"terminal": false, "accepted_call_count": 0, "reason": "retries exhausted", "host_fallback_zero": true}'
+    )
+    trial = SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 0.0}), step_results=None)
+
+    metrics = _validated_judge_score_integrity_metrics(trial, [trajectory_path])
+
+    assert metrics["judge_score_terminal"] is False
+    assert metrics["judge_score_host_fallback_zero"] is True
+
+
+def test_rejects_nonzero_reward_with_host_fallback_verdict(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "steps" / "rollout" / "agent" / "trajectory.json"
+    trajectory_path.parent.mkdir(parents=True)
+    trajectory_path.write_text("{}")
+    verifier_dir = trajectory_path.parent.parent / "verifier"
+    verifier_dir.mkdir()
+    (verifier_dir / "score_integrity.json").write_text(
+        '{"terminal": false, "accepted_call_count": 0, "reason": "retries exhausted", "host_fallback_zero": true}'
+    )
+    trial = SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 0.5}), step_results=None)
+
+    with pytest.raises(RuntimeError, match="requires zero rewards"):
+        _validated_judge_score_integrity_metrics(trial, [trajectory_path])
+
+
+@pytest.mark.parametrize("fallback_reward", [0.0, 0.5])
+def test_multistep_integrity_validates_fallback_reward_per_step(tmp_path: Path, fallback_reward: float) -> None:
+    paths = []
+    for name, terminal in [("first", True), ("second", False)]:
+        step_dir = tmp_path / "steps" / name
+        (step_dir / "verifier").mkdir(parents=True)
+        (step_dir / "verifier" / "score_integrity.json").write_text(
+            json.dumps(
+                {
+                    "terminal": terminal,
+                    "accepted_call_count": int(terminal),
+                    "host_fallback_zero": not terminal,
+                }
+            )
+        )
+        paths.append(step_dir / "agent" / "trajectory.json")
+    trial = SimpleNamespace(
+        verifier_result=SimpleNamespace(rewards={"reward": (1.0 + fallback_reward) / 2}),
+        step_results=[
+            SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": value}))
+            for value in [1.0, fallback_reward]
+        ],
+    )
+    if fallback_reward:
+        with pytest.raises(RuntimeError, match="requires zero rewards"):
+            _validated_judge_score_integrity_metrics(trial, paths)
+    else:
+        metrics = _validated_judge_score_integrity_metrics(trial, paths)
+        assert metrics["judge_score_terminal"] is False
+        assert metrics["judge_score_host_fallback_zero"] is True
+        assert metrics["judge_score_accepted_call_count"] == 1
 
 
 def make_config(tmp_path: Path) -> HarborAgentConfig:
@@ -594,6 +670,48 @@ def test_opensandbox_config_separates_requests_from_limits(monkeypatch) -> None:
         "nemo.nvidia.com/efs-hostpath": "false",
         "nemo.nvidia.com/s3-hostpath": "false",
     }
+
+
+def test_agentic_verifier_config_keeps_policy_and_judge_agents_independent(
+    monkeypatch,
+) -> None:
+    gym_root = Path(__file__).resolve().parents[3]
+    monkeypatch.setenv("HARBOR_DATASET_PATH", "/datasets/test")
+    monkeypatch.setenv("RUBRIC_MODEL", "judge-model")
+    monkeypatch.setenv("RUBRIC_MODEL_API_BASE", "https://judge.test/v1")
+    monkeypatch.setenv("RUBRIC_MODEL_API_MODE", "responses")
+    monkeypatch.setenv("HARBOR_POLICY_WORKSPACE_EXCLUDES", "[data,.opencode]")
+
+    config = OmegaConf.merge(
+        {"policy_model_name": "policy-model", "policy_api_key": "policy-key"},
+        OmegaConf.load(gym_root / "responses_api_agents/harbor_agent_general/configs/harbor_agent.yaml"),
+        OmegaConf.load(
+            gym_root / "responses_api_agents/harbor_agent_general/configs/harbor_agent_agentic_verifier.yaml"
+        ),
+    )
+    agent_config = OmegaConf.to_container(
+        config.harbor_agent_general.responses_api_agents.harbor_agent_general,
+        resolve=True,
+    )
+
+    assert agent_config["harbor_agent"]["model_name"] == "nemo/policy-model"
+    verifier = agent_config["harbor_verifier"]
+    assert verifier["import_path"].endswith(":AgenticVerifier")
+    judge = verifier["kwargs"]["config"]["judge_agent"]
+    assert judge["name"] is None
+    assert judge["import_path"].endswith(":PreinstalledOpenCode")
+    assert judge["model_name"] == "judge-model"
+    assert judge["kwargs"] == {"use_preinstalled": True}
+    assert verifier["kwargs"]["config"]["judge_opencode_provider"] == {
+        "api_mode": "responses",
+        "base_url": "https://judge.test/v1",
+    }
+    assert verifier["kwargs"]["config"]["judge_env_aliases"] == {
+        "OPENAI_API_KEY": "RUBRIC_MODEL_API_KEY",
+        "OPENAI_BASE_URL": "RUBRIC_MODEL_API_BASE",
+    }
+    assert agent_config["artifacts"] == [{"source": "/app", "exclude": ["data", ".opencode"]}]
+    assert agent_config.get("verifier_file_access_audit") is None
 
 
 def test_honeypot_audit_config_is_independent_of_task_data_transport(monkeypatch) -> None:
