@@ -14,7 +14,7 @@ it, then the resources server grades the patch. Our cluster uses Apptainer.
 | [Hermes agent server](app.py#L239) | Added. Coordinates seed → attach → run → verify → cleanup. | Another Gym HTTP service outside task containers. |
 | [Hermes runner](runner.py#L95) | Added adapter around unchanged upstream Hermes, pinned to `2237be355906fbe6065ce1815711eee52b2d646e`. | Inside the task container. Tools work in `/app`; the runner works outside the repository to avoid Python import shadowing. |
 | [Model proxy](../../responses_api_models/openai_model/app.py) | Existing. Holds provider credentials and forwards model requests. | Outside task containers; inference runs at the configured model endpoint. |
-| [Pro verifier](../../resources_servers/swebench_pro/verification.py#L396) | Existing task scripts and grading. Missing tests remain inconclusive unless a required test explicitly failed; that verdict is also retained after a timeout. | Fresh verification containers, managed by the Pro server. |
+| [Pro verifier](../../resources_servers/swebench_pro/verification.py#L388) | Existing task scripts and grading. Completed parser output follows Pro's required-pass rule, including empty reports. Execution failures remain inconclusive; an explicit required-test failure is retained after a timeout. | Fresh verification containers, managed by the Pro server. |
 | [Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560) | Existing provider; only `serialize_handle()` and `connect()` were added. | Library used by both Gym services on the same host and UID. |
 
 The benchmark is data, task images and grading scripts. The **resources server**
@@ -25,7 +25,7 @@ settings live in the separate [Slurm evaluations repository](https://gitlab-mast
 
 1. [Agent `run()`](app.py#L239): the overall flow and failure handling.
 2. [Runner](runner.py#L95), then [runtime preparation](prepare_runtime.sh#L1): how Hermes starts. The existing portable-Python helper is reused; GNU and musl builds support Debian/Ubuntu and Alpine task images.
-3. [Pro `seed_session()`](../../resources_servers/swebench_pro/app.py#L324) and [verification](../../resources_servers/swebench_pro/verification.py#L396): inspect the diff against main to distinguish changes from the existing implementation.
+3. [Pro `seed_session()`](../../resources_servers/swebench_pro/app.py#L324) and [verification](../../resources_servers/swebench_pro/verification.py#L388): inspect the diff against main to distinguish changes from the existing implementation.
 4. [Apptainer handoff](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560): the only core-library change. A bare instance ID cannot reconstruct the provider's staging directory, mount point and environment in the agent process.
 5. Slurm [configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml) and [existing launcher](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh).
 

@@ -389,25 +389,27 @@ def _result(**overrides) -> VerificationInputs:
 
 def test_inconclusive_reason_treats_a_failing_test_as_a_verdict() -> None:
     """The retry hangs off this: re-running FAILED tests would be re-rolling for a nicer answer."""
-    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
     ran_and_failed = {"tests": [{"name": "test_new", "status": "FAILED"}, {"name": "test_old", "status": "PASSED"}]}
     all_passed = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "test_old", "status": "PASSED"}]}
 
-    assert inconclusive_reason(_result(test_results=ran_and_failed), sample) is None
-    assert inconclusive_reason(_result(test_results=all_passed), sample) is None
-    assert inconclusive_reason(_result(test_results={"tests": ran_and_failed["tests"][:1]}), sample) is None
+    assert inconclusive_reason(_result(test_results=ran_and_failed)) is None
+    assert inconclusive_reason(_result(test_results=all_passed)) is None
+    assert inconclusive_reason(_result(test_results={"tests": ran_and_failed["tests"][:1]})) is None
+
+
+@pytest.mark.parametrize("tests", [[], [{"name": "test_old", "status": "PASSED"}]])
+def test_completed_partial_parser_reports_score_as_failures(tests) -> None:
+    """Pro's pass-only parsers omit failed tests; these must stay in the denominator."""
+    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
+    output = {"tests": tests}
+
+    assert inconclusive_reason(_result(test_results=output)) is None
+    assert not grade_output(output, sample)
 
 
 def test_inconclusive_reason_flags_runs_that_produced_no_verdict() -> None:
-    sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass='["test_old"]'))
-    only_one = {"tests": [{"name": "test_old", "status": "PASSED"}]}
-
-    assert "1 of 2 graded tests" in inconclusive_reason(_result(test_results=only_one), sample)
-    assert not grade_output(only_one, sample)
-    assert "no tests at all" in inconclusive_reason(_result(), sample)
-    assert not grade_output({"tests": []}, sample)
-    assert "no usable output" in inconclusive_reason(_result(test_results=None), sample)
-    assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"), sample)
+    assert "no usable output" in inconclusive_reason(_result(test_results=None))
+    assert "did not complete" in inconclusive_reason(_result(completed=False, error="OOM"))
 
 
 def test_inconclusive_reason_ignores_tests_the_task_does_not_grade_on() -> None:
@@ -415,8 +417,11 @@ def test_inconclusive_reason_ignores_tests_the_task_does_not_grade_on() -> None:
     sample = asdict(make_inputs(fail_to_pass='["test_new"]', pass_to_pass="[]"))
     extra = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "unrelated", "status": "FAILED"}]}
 
-    assert inconclusive_reason(_result(test_results=extra), sample) is None
-    assert "1 of 1 graded tests" in inconclusive_reason(_result(test_results={"tests": extra["tests"][1:]}), sample)
+    assert inconclusive_reason(_result(test_results=extra)) is None
+    assert grade_output(extra, sample)
+    only_unrelated = {"tests": extra["tests"][1:]}
+    assert inconclusive_reason(_result(test_results=only_unrelated)) is None
+    assert not grade_output(only_unrelated, sample)
 
 
 def test_environment_repairs_are_individually_selectable() -> None:

@@ -119,8 +119,8 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     [
         ([{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}], True),
         ([{"name": "new_test", "status": "FAILED"}], True),
-        ([{"name": "old_test", "status": "PASSED"}], False),
-        ([], False),  # Missing tests do not establish whether the patch or environment failed.
+        ([{"name": "old_test", "status": "PASSED"}], True),
+        ([], True),  # Pass-only parsers and compilation failures can produce empty reports.
     ],
 )
 def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict], completed: bool) -> None:

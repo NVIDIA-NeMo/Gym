@@ -446,7 +446,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
-            reason = inconclusive_reason(result, asdict(inputs))
+            reason = inconclusive_reason(result)
             if reason is not None and _budget_spent(deadline):
                 print(
                     f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
