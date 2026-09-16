@@ -352,11 +352,7 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
-def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
-    asyncio.run(_assert_start_with_setup_stops_the_sandbox_when_setup_fails())
-
-
-async def _assert_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
+async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
     provider = FakeSandboxProvider()
     sandbox = AsyncSandbox(provider)
 
@@ -374,11 +370,7 @@ async def _assert_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
     assert await sandbox.status() == SandboxStatus.STOPPED
 
 
-def test_start_with_setup_returns_the_started_sandbox_on_success() -> None:
-    asyncio.run(_assert_start_with_setup_returns_the_started_sandbox_on_success())
-
-
-async def _assert_start_with_setup_returns_the_started_sandbox_on_success() -> None:
+async def test_start_with_setup_returns_the_started_sandbox_on_success() -> None:
     provider = FakeSandboxProvider()
     sandbox = AsyncSandbox(provider)
 
