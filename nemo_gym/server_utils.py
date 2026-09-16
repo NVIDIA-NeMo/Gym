@@ -79,6 +79,16 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
+SOCK_READ_TIMEOUT_ENV_VAR = "GYM_SOCK_READ_TIMEOUT_S"
+
+
+def _sock_read_timeout_from_env() -> Optional[float]:  # pragma: no cover
+    raw = getenv(SOCK_READ_TIMEOUT_ENV_VAR)
+    if raw is None or raw == "":
+        return None
+    return float(raw)
+
+
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
@@ -96,6 +106,17 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_tcp_keepalive_probes: int = Field(
         default=3,
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+    )
+
+    global_aiohttp_client_sock_read_timeout_seconds: Optional[float] = Field(
+        default_factory=_sock_read_timeout_from_env,
+        description=(
+            "Seconds to wait for the next byte from an upstream response before the request is "
+            "abandoned. None leaves the session unbounded, which lets a peer that accepts a "
+            "connection and never answers hold its caller forever; TCP keepalive does not cover "
+            "this, because the peer is alive and the socket is open. Defaults from "
+            "GYM_SOCK_READ_TIMEOUT_S so a single deployment can set it per endpoint."
+        ),
     )
 
 
@@ -156,7 +177,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(sock_read=cfg.global_aiohttp_client_sock_read_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 
