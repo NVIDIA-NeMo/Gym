@@ -33,17 +33,22 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
         rendered = json.dumps(request.get("input", []))
-        result = 56 if "multiply" in rendered.lower() else 7
+        if "balance the supreme court" in rendered.lower():
+            result: int | str = r"Answer: \boxed{D}"
+            response_suffix = "mmlu-d"
+        else:
+            result = 56 if "multiply" in rendered.lower() else 7
+            response_suffix = str(result)
         self._send(
             {
-                "id": f"resp-nooa-{result}",
+                "id": f"resp-nooa-{response_suffix}",
                 "created_at": 0,
                 "model": "deterministic-nooa",
                 "object": "response",
                 "output": [
                     {
-                        "id": f"fc-nooa-{result}",
-                        "call_id": f"return-nooa-{result}",
+                        "id": f"fc-nooa-{response_suffix}",
+                        "call_id": f"return-nooa-{response_suffix}",
                         "type": "function_call",
                         "name": "return_result",
                         "arguments": json.dumps({"result": result}),

@@ -14,6 +14,13 @@ GYM_PID=""
 GYM_BIN="${GYM_BIN:-$ROOT_DIR/.venv/bin/gym}"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 SERVER_VENV="${SERVER_VENV:-}"
+E2E_CONFIG="${NOOA_E2E_CONFIG:-$ROOT_DIR/tests/e2e/nooa_calculate_e2e.yaml}"
+E2E_AGENT="${NOOA_E2E_AGENT:-nooa_calculate_capability}"
+E2E_INPUT="${NOOA_E2E_INPUT:-$ROOT_DIR/responses_api_agents/nooa_agent/data/capability_calculate.jsonl}"
+E2E_LIMIT="${NOOA_E2E_LIMIT:-2}"
+E2E_VERIFY="${NOOA_E2E_VERIFY:-$ROOT_DIR/tests/e2e/verify_nooa_calculate_rollout.py}"
+E2E_MODEL_TYPE="${NOOA_E2E_MODEL_TYPE:-}"
+E2E_PROMPT_CONFIG="${NOOA_E2E_PROMPT_CONFIG:-}"
 
 show_log_tail() {
   local label="$1" log_path="$2"
@@ -101,35 +108,48 @@ MODEL_PID=$!
 wait_for_url "deterministic model" "http://127.0.0.1:${MODEL_PORT}/v1/models" "$MODEL_PID"
 
 cd "$E2E_DIR/workspace"
+ENV_START=(
+  "$GYM_BIN" env start
+  --config "$E2E_CONFIG"
+  --model-url "http://127.0.0.1:${MODEL_PORT}/v1"
+  --model-api-key not-a-real-key
+  --model deterministic-nooa
+  "++observability_enabled=true"
+  "++model_call_capture_dir=$NOOA_E2E_CAPTURE_DIR"
+  "++head_server.host=127.0.0.1"
+  "++head_server.port=$HEAD_PORT"
+  "++uv_venv_dir=$VENV_ROOT"
+  "+nemo_gym_log_dir=$RESULTS_DIR/component-logs"
+)
+if [[ -n "$E2E_MODEL_TYPE" ]]; then
+  ENV_START+=(--model-type "$E2E_MODEL_TYPE")
+fi
 "$PYTHON_BIN" -c \
   "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])" \
-  "$GYM_BIN" env start \
-  --config "$ROOT_DIR/tests/e2e/nooa_calculate_e2e.yaml" \
-  --model-url "http://127.0.0.1:${MODEL_PORT}/v1" \
-  --model-api-key not-a-real-key \
-  --model deterministic-nooa \
-  "++head_server.host=127.0.0.1" \
-  "++head_server.port=$HEAD_PORT" \
-  "++uv_venv_dir=$VENV_ROOT" \
-  "+nemo_gym_log_dir=$RESULTS_DIR/component-logs" \
+  "${ENV_START[@]}" \
   > "$RESULTS_DIR/gym.log" 2>&1 &
 GYM_PID=$!
 "$ROOT_DIR/scripts/wait_for_servers.sh" "$GYM_PID" "$HEAD_PORT" 180
 
-"$GYM_BIN" eval run \
-  --no-serve \
-  --agent nooa_calculate_capability \
-  --input "$ROOT_DIR/responses_api_agents/nooa_agent/data/capability_calculate.jsonl" \
-  --output "$RESULTS_DIR/rollouts.jsonl" \
-  --limit 2 \
-  --concurrency 1 \
-  --temperature 0 \
-  --max-output-tokens 64 \
-  "++observability_enabled=true" \
-  "++model_call_capture_dir=$NOOA_E2E_CAPTURE_DIR" \
-  "++head_server.host=127.0.0.1" \
+EVAL_RUN=(
+  "$GYM_BIN" eval run
+  --no-serve
+  --agent "$E2E_AGENT"
+  --input "$E2E_INPUT"
+  --output "$RESULTS_DIR/rollouts.jsonl"
+  --limit "$E2E_LIMIT"
+  --concurrency 1
+  --temperature 0
+  --max-output-tokens 64
+  "++observability_enabled=true"
+  "++model_call_capture_dir=$NOOA_E2E_CAPTURE_DIR"
+  "++head_server.host=127.0.0.1"
   "++head_server.port=$HEAD_PORT"
+)
+if [[ -n "$E2E_PROMPT_CONFIG" ]]; then
+  EVAL_RUN+=(--prompt-config "$E2E_PROMPT_CONFIG")
+fi
+"${EVAL_RUN[@]}"
 
-"$PYTHON_BIN" "$ROOT_DIR/tests/e2e/verify_nooa_calculate_rollout.py" \
-  --rollouts "$RESULTS_DIR/rollouts.jsonl"
+"$PYTHON_BIN" "$E2E_VERIFY" --rollouts "$RESULTS_DIR/rollouts.jsonl"
 echo "NOOA E2E passed; artifacts retained at $RESULTS_DIR"
