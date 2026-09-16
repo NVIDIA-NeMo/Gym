@@ -1,14 +1,17 @@
-# BrokenArXiv 05/2026
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# BrokenArXiv 06/2026
 
 Sycophancy benchmark from [MathArena](https://matharena.ai/brokenarxiv/), sourced
-from `MathArena/brokenarxiv-0526` on HuggingFace (50 problems). Each problem is a
+from `MathArena/brokenarxiv-0626` on HuggingFace (54 problems). Each problem is a
 statement lifted from a recent arXiv paper and perturbed so that it is **false as
 written**; the model is asked to prove it. Scoring is on whether the model
 notices — not on proof quality.
 
 MathArena publishes a new BrokenArXiv problem set each month and scores each
 release on its own leaderboard, so every month is a separate Gym benchmark
-(see also `brokenarxiv_0426`).
+(see also `brokenarxiv_0526`).
 
 ## Verification
 
@@ -31,8 +34,8 @@ exact reproduction of MathArena's grading.
 ## Prompt
 
 Byte-identical to MathArena's BrokenArXiv prompt
-(`configs/competitions/arxiv_false/may.yaml`), verified against the
-`user_message` field of `MathArena/brokenarxiv-0526_outputs`:
+(`configs/competitions/arxiv_false/june.yaml`), verified against the
+`user_message` field of `MathArena/brokenarxiv-0626_outputs`:
 
 ```
 Try to generate a proof for the following statement:
@@ -47,10 +50,10 @@ Changing this defeats the benchmark.
 ## Data preparation
 
 ```bash
-gym eval prepare --benchmark brokenarxiv_0526
+gym eval prepare --benchmark brokenarxiv_0626
 ```
 
-Writes `data/brokenarxiv_0526_benchmark.jsonl`. There is no `expected_answer`;
+Writes `data/brokenarxiv_0626_benchmark.jsonl`. There is no `expected_answer`;
 each row carries `question` (the false statement) and `original_problem`
 (the true one) for the judge. The HuggingFace revision is pinned in `prepare.py`.
 
@@ -59,16 +62,16 @@ each row carries `question` (the false statement) and `original_problem`
 ```bash
 gym env start \
     --model-type inference_provider \
-    --benchmark brokenarxiv_0526
+    --benchmark brokenarxiv_0626
 ```
 
 ## Collecting rollouts
 
 ```bash
 gym eval run --no-serve \
-    --agent brokenarxiv_0526_false_statement_judge_simple_agent \
-    --input benchmarks/brokenarxiv_0526/data/brokenarxiv_0526_benchmark.jsonl \
-    --output results/brokenarxiv_0526_rollouts.jsonl \
+    --agent brokenarxiv_0626_false_statement_judge_simple_agent \
+    --input benchmarks/brokenarxiv_0626/data/brokenarxiv_0626_benchmark.jsonl \
+    --output results/brokenarxiv_0626_rollouts.jsonl \
     --num-repeats 16
 ```
 
@@ -78,3 +81,6 @@ API. For another compatible provider, set `JUDGE_BASE_URL`, `JUDGE_MODEL`, and
 `JUDGE_API_KEY` together. It must support medium reasoning through the Responses
 API. The example supplies all repeats at collection time; do not also repeat
 the prepared dataset.
+
+Dataset: [MathArena/brokenarxiv-0626](https://huggingface.co/datasets/MathArena/brokenarxiv-0626),
+licensed under CC BY-SA 4.0. The pinned revision is `73dd424784fbdeab599557fcba3d77559c89d1ee`.

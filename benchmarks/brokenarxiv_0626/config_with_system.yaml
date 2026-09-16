@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Chain to existing resource server + agent config
 config_paths:
   - resources_servers/false_statement_judge/configs/false_statement_judge.yaml
@@ -5,7 +8,7 @@ config_paths:
 
 # We use `_inherit_from` directives to inherit from and not use the generic config
 # above to ensure this benchmark config is isolated.
-brokenarxiv_0526_false_statement_judge_resources_server:
+brokenarxiv_0626_false_statement_judge_resources_server:
   _inherit_from: false_statement_judge
   resources_servers:
     false_statement_judge:
@@ -15,15 +18,15 @@ brokenarxiv_0526_false_statement_judge_resources_server:
         temperature: null
         top_p: null
 
-brokenarxiv_0526_false_statement_judge_simple_agent:
+brokenarxiv_0626_false_statement_judge_simple_agent:
   _inherit_from: false_statement_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
-        name: brokenarxiv_0526_false_statement_judge_resources_server
+        name: brokenarxiv_0626_false_statement_judge_resources_server
       datasets:
-      - name: brokenarxiv_0526
+      - name: brokenarxiv_0626
         type: benchmark
-        jsonl_fpath: benchmarks/brokenarxiv_0526/data/brokenarxiv_0526_withsys.jsonl
-        prompt_config: benchmarks/brokenarxiv_0526/prompts/with_system.yaml
-        prepare_script: benchmarks/brokenarxiv_0526/prepare.py
+        jsonl_fpath: benchmarks/brokenarxiv_0626/data/brokenarxiv_0626_benchmark.jsonl
+        prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml
+        prepare_script: benchmarks/brokenarxiv_0626/prepare.py
