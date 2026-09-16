@@ -4,7 +4,7 @@ you_search_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
-      you_api_key: ${you_api_key}
+      ydc_api_key: ${ydc_api_key}
       # snippets | highlights | full_page | eco — see resources_servers/you_search/README.md
       search_mode: snippets
       use_judge: true
