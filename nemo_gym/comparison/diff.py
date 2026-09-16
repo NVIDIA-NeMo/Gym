@@ -15,6 +15,7 @@
 """Diffing two loaded runs: metric rows, difference confidence intervals, and per-task sample flips."""
 
 import math
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from scipy import stats
@@ -69,8 +70,18 @@ DISPERSION_PREFIXES = (
     CI_LOW_95_PREFIX,
     CI_HIGH_95_PREFIX,
 )
-# Companion statistics of the `pass@k` family, likewise not metrics of their own.
-STAT_SUFFIXES = (STD_DEV_ACROSS_RUNS_SUFFIX, STD_ERR_ACROSS_RUNS_SUFFIX, AVG_SAMPLE_STD_DEV_SUFFIX)
+# Suffix-form companion statistics, likewise not metrics of their own.
+STAT_SUFFIXES = (
+    "/ci_low_95",
+    "/ci_high_95",
+    "/ci_lower",
+    "/ci_upper",
+    "_ci95_lower",
+    "_ci95_upper",
+    STD_DEV_ACROSS_RUNS_SUFFIX,
+    STD_ERR_ACROSS_RUNS_SUFFIX,
+    AVG_SAMPLE_STD_DEV_SUFFIX,
+)
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
 FLIP_FIELD = REWARD_KEY_NAME
@@ -136,6 +147,17 @@ def _repeat_metric_values(run: LoadedRun, name: str) -> List[float]:
     return [value for value in values if value is not None and math.isfinite(value)]
 
 
+def _warn_if_repeat_samples_differ(run: LoadedRun, label: str) -> None:
+    """Warn when repeat estimates cover incomplete or unequal task samples."""
+    sample_counts = {entry.get("sample_count") for entry in run.repeat_level_metrics}
+    if any(entry.get("missing_count", 0) > 0 for entry in run.repeat_level_metrics) or len(sample_counts) > 1:
+        warnings.warn(
+            f"{label} agent {run.agent_name!r} has incomplete or unequal task coverage across repeats; "
+            "delta confidence intervals may mix task-difficulty differences with repeat variance.",
+            stacklevel=2,
+        )
+
+
 def _welch_delta_confidence_interval(
     baseline: LoadedRun, candidate: LoadedRun, name: str
 ) -> Tuple[Optional[float], Optional[float]]:
@@ -148,17 +170,11 @@ def _welch_delta_confidence_interval(
     candidate_values = _repeat_metric_values(candidate, name)
     if len(baseline_values) < 2 or len(candidate_values) < 2:
         return None, None
-    if len(set(baseline_values)) == len(set(candidate_values)) == 1:
-        delta = candidate_values[0] - baseline_values[0]
-        return delta, delta
 
     test_result = stats.ttest_ind(candidate_values, baseline_values, equal_var=False)
     interval = test_result.confidence_interval(confidence_level=0.95)
 
-    low, high = float(interval.low), float(interval.high)
-    if not math.isfinite(low) or not math.isfinite(high):
-        return None, None
-    return low, high
+    return float(interval.low), float(interval.high)
 
 
 def _candidate_metric_value(
@@ -190,6 +206,10 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
     server's `corpus_wer@k=N` -> `wer`), so rows are built from the union of both, taking the value
     from `key_metrics` only when `agent_metrics` doesn't already carry that name.
     """
+    _warn_if_repeat_samples_differ(baseline, "Baseline")
+    for index, candidate in enumerate(candidates):
+        _warn_if_repeat_samples_differ(candidate, f"Candidate[{index}]")
+
     baseline_metrics = {**baseline.key_metrics, **baseline.agent_metrics}
     candidate_metrics = [{**run.key_metrics, **run.agent_metrics} for run in candidates]
     key_metric_names = set(baseline.key_metrics) | {name for run in candidates for name in run.key_metrics}

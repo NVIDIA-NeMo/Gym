@@ -193,13 +193,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.
 
-        RewardProfiler provides baseline stats. Override compute_metrics() and/or
-        get_key_metrics() for benchmark-specific customization.
+        RewardProfiler provides baseline stats. Override compute_metrics(),
+        compute_repeat_metrics(), and/or get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
     async def get_reverify_mode(self) -> ReverifyMode:

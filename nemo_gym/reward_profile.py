@@ -39,7 +39,6 @@ from nemo_gym.global_config import (
     CI_HIGH_95_PREFIX,
     CI_LOW_95_ACROSS_REPEATS_PREFIX,
     CI_LOW_95_PREFIX,
-    HISTOGRAM_PREFIX,
     HISTOGRAM_STAT_NAME,
     MAX_ACROSS_REPEATS_PREFIX,
     MAX_PREFIX,
@@ -83,39 +82,20 @@ REPEAT_AGGREGATION_EXCLUDED_PREFIXES = (
     P75_PREFIX,
     CI_LOW_95_PREFIX,
     CI_HIGH_95_PREFIX,
-    HISTOGRAM_PREFIX,
-    "variance/",
-    "var/",
-    "mad/",
-    "iqr/",
 )
 REPEAT_AGGREGATION_EXCLUDED_SUFFIXES = (
     "/max",
     "/min",
     "/median",
-    "/std",
-    "/se",
-    "/sem",
     "/p5",
-    "/p25",
-    "/p50",
-    "/p75",
-    "/p90",
     "/p95",
-    "/p99",
-    "/ci_low_95",
-    "/ci_high_95",
     "/ci_lower",
     "/ci_upper",
-    "/variance",
-    "/var",
-    "/mad",
-    "/iqr",
     "_ci95_lower",
     "_ci95_upper",
-    "std_dev_across_runs",
-    "std_err_across_runs",
-    "avg_sample_std_dev",
+    STD_DEV_ACROSS_RUNS_SUFFIX,
+    STD_ERR_ACROSS_RUNS_SUFFIX,
+    AVG_SAMPLE_STD_DEV_SUFFIX,
 )
 REPEAT_AGGREGATION_EXCLUDED_NAMES = (
     TASK_INDEX_KEY_NAME,
@@ -123,7 +103,6 @@ REPEAT_AGGREGATION_EXCLUDED_NAMES = (
     "sample_count",
     "missing_count",
     "num_repeats",
-    "max_rollouts_per_task",
     "token_usage_version",
 )
 
@@ -881,7 +860,7 @@ def highest_k_metrics(
 
 
 class AggregateMetricsMixin:
-    """Mixin providing compute_metrics/get_key_metrics hooks and the aggregate_metrics endpoint.
+    """Mixin providing full-run, per-repeat, and key-metric aggregation hooks.
 
     Inherited by both SimpleResourcesServer and SimpleResponsesAPIAgent so that
     benchmark-specific metric logic can live on either server type.
@@ -892,8 +871,8 @@ class AggregateMetricsMixin:
 
         Receives verify responses grouped by task: tasks[i] is a list of rollout
         dicts for task i. Each dict has at minimum reward, plus any custom fields
-        from the verify response (e.g. symbolic_correct, judgement-gen-base). The
-        callback runs first for the full dataset and then once for each repeat.
+        from the verify response (e.g. symbolic_correct, judgement-gen-base). This
+        hook is called once for the full dataset.
 
         Use for metrics that need the full dataset at once:
         - Confidence intervals (ArenaMetrics)
@@ -902,6 +881,14 @@ class AggregateMetricsMixin:
 
         The returned dict is merged into agent_metrics.
         Default: empty dict (no additional metrics).
+        """
+        return {}
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Override to compute custom metrics independently for one repeat.
+
+        This hook is called once per repeat. Only finite numeric metrics also returned
+        by compute_metrics() are retained and summarized across repeats.
         """
         return {}
 
@@ -1029,7 +1016,7 @@ def _add_custom_repeat_metrics(
     repeat_level_metrics: List[Dict[str, Any]],
     agent_metrics: Dict[str, Any],
     custom_metrics: Dict[str, Any],
-    compute_metrics_fn: Any,
+    compute_repeat_metrics_fn: Any,
 ) -> None:
     """Recompute benchmark metrics per repeat, replacing generic collisions and their aggregates."""
     if not custom_metrics or not repeat_level_metrics:
@@ -1044,8 +1031,10 @@ def _add_custom_repeat_metrics(
         rollout_idx = repeat_metrics[ROLLOUT_INDEX_KEY_NAME]
         for name in custom_metrics:
             repeat_metrics.pop(name, None)
+        if compute_repeat_metrics_fn is None:
+            continue
         try:
-            repeat_custom = compute_metrics_fn(_group_by_task(responses_by_repeat[rollout_idx]))
+            repeat_custom = compute_repeat_metrics_fn(_group_by_task(responses_by_repeat[rollout_idx]))
         except Exception as e:
             warnings.warn(
                 f"Benchmark custom repeat metrics were omitted for repeat {rollout_idx}: {e!r}",
@@ -1069,6 +1058,7 @@ def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
     get_key_metrics_fn=None,
+    compute_repeat_metrics_fn=None,
 ) -> AggregateMetrics:
     """Shared aggregation logic for /aggregate_metrics.
 
@@ -1076,9 +1066,11 @@ def compute_aggregate_metrics(
     for both group-level (per-task) and agent-level metrics.
 
     Optionally accepts custom functions for benchmark-specific customization:
-      - compute_metrics_fn: receives verify responses grouped by task, first for the full
-        dataset and then once per repeat. Its returned dict is merged into agent_metrics.
+      - compute_metrics_fn: receives all verify responses grouped by task. Its returned
+        dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
+      - compute_repeat_metrics_fn: receives one repeat grouped by task. Its returned
+        metrics are summarized across repeats.
     """
     if not verify_responses:
         return AggregateMetrics()
@@ -1137,7 +1129,7 @@ def compute_aggregate_metrics(
 
     serialized_agent["num_repeats"] = len({vr.get(ROLLOUT_INDEX_KEY_NAME, 0) for vr in verify_responses})
 
-    # Select headline metrics before repeat calls can mutate benchmark callback state.
+    # Select headline metrics from the full-run estimates.
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
@@ -1150,7 +1142,7 @@ def compute_aggregate_metrics(
             repeat_level_metrics,
             serialized_agent,
             custom,
-            compute_metrics_fn,
+            compute_repeat_metrics_fn,
         )
 
     serialized_repeat_level_metrics = [
