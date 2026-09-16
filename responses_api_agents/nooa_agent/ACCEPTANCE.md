@@ -95,6 +95,45 @@ The sole trajectory gap is `non_trainable_terminal_output`: the typed return val
 the final assistant message. This is explicit and does not make any acceptance health check
 unobserved.
 
+## Consolidation plan (post-review)
+
+The review asked whether `gym_llm.py` could reuse NOOA main's `ResponsesClient` machinery instead
+of re-implementing it. Assessment against the pinned NOOA main (`b160b539`):
+
+**Already delegated.** Parts capture and replay projection use NOOA's
+`nooa.unifiedllm.response_parts` (`capture_parts` / `project_turn`); encrypted reasoning and native
+tool metadata round-trip through NOOA's scoped replay machinery rather than bridge-local shaping.
+Response and turn types (`LLMResponse`, `CacheBoundary`) come from NOOA directly.
+
+**Not consolidable today without coupling to unstable private API.**
+
+- `_responses_input` is Gym-protocol specific: the rollout-prefixed model-server input shape, the
+  `_batch` legacy protocol, tool-role to `function_call_output` conversion, instructions
+  extraction, prior-output restoration hooks, and `CacheBoundary` skipping.
+- The prior-outputs ledger is already scoped to the normalized-history path (it is skipped whenever
+  messages carry `LLMResponse` objects); it cannot be deleted until NOOA guarantees that compacted
+  history preserves `part.native` training metadata. Until then it is the only mechanism that
+  restores byte-exact `generation_token_ids` and log-prob metadata for dict-shaped history.
+- NOOA's `_responses_output_params` returns a litellm-only `text_format` param that the Gym model
+  server does not consume; its structured-output path is not a drop-in for the Gym `text` field.
+- NOOA's `_map_responses_finish_reason` reads a litellm response and treats non-token incomplete
+  reasons as errors; the bridge mapping is `NeMoGymResponse`-typed and `tool_calls`-aware.
+- `_convert_tool_to_schema` is an instance method and requires a litellm-configured client
+  instance.
+
+**Upstream extractions that would let this stack shed the remaining duplication (NOOA-side
+changes):**
+
+1. Public module-level `convert_tool_to_schema(tool, *, strict=...)` without a client instance.
+2. Public provider-agnostic structured-output `text` params for the Responses wire format.
+3. Public provider-agnostic finish-reason mapping over Responses output items.
+4. Preserve `part.native` training metadata through compaction and summarization so the bridge's
+   prior-outputs ledger can retire.
+
+**Divergence to unify during extraction:** the bridge marks a tool schema `strict` only when every
+property is required; NOOA marks strict when the strict-mode schema is valid and falls back to a
+loose schema otherwise.
+
 ## Verification environment note
 
 Scoped `pre-commit` was invoked, but initialization failed before any hook ran because this host's
