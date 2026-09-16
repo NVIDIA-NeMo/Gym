@@ -22,7 +22,7 @@ async def test_default_agent_submits_in_borrowed_environment(tmp_path):
 
     agent = DefaultAgent(
         GymModel(bridge, query),
-        BorrowedEnvironment(bridge, execute),
+        BorrowedEnvironment(bridge, execute, {"system": "Linux"}),
         system_template="System",
         instance_template="{{task}}",
         cost_limit=0,

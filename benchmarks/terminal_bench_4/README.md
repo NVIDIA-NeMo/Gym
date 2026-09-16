@@ -4,8 +4,40 @@
 
 ## Profiles
 
-- `terminal_bench_4/miniswe`: mini-SWE **2.1.0** `DefaultAgent`, with a generic
-  text-action prompt, Gym Responses model adapter, and task-local MCP CLI.
+- `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
+  `mini.yaml` prompts, native bash tool calls through Gym's Responses model
+  adapter, and task-local MCP CLI.
+
+## Artificial Analysis comparison
+
+The version, prompts, 500-step limit, and 30-second command timeout follow
+[Artificial Analysis's Terminal-Bench 4.0 methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking)
+(checked September 16, 2026). Prompts and command environment defaults are loaded
+from the pinned package's `mini.yaml`, not copied into this repository.
+
+The following choices remain intentional differences:
+
+- **Repeats:** keep `num_repeats: 1` in this profile. Clients must explicitly set
+  `++num_repeats=3` to reproduce AA's repetition protocol and average pass@1 over
+  all three attempts, rather than reporting pass@3.
+- **Observations:** retain full command output, without the upstream template's
+  first/last 5,000-character truncation. It is unclear whether AA intended that
+  truncation or was unaware of the upstream behavior. No history compaction or
+  summarization is applied.
+- **Verifier timeouts:** preserve the current behavior until we understand how
+  often these occur on real workloads. Timeouts remain incomplete evaluations
+  classified as infrastructure failures and excluded from default aggregates,
+  whereas AA describes counting them as failures.
+
+The adapter also keeps `cost_limit=0` and unattended `DefaultAgent` execution.
+Task MCP schemas and CLI invocation instructions are added to the prompt; MCP
+calls run through native bash. These adaptations mean this profile is not an
+exact reproduction of AA's evaluation.
+
+The benchmark defaults can be overridden with `++tb4_max_steps=...` and
+`++tb4_step_timeout_sec=...`. An explicit `++tb4_max_steps=0` disables the step cap.
+The generic Python adapter retains its 600-second command timeout default; the
+benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 
 ## Dataset and deployment
 
@@ -62,14 +94,16 @@ gym eval prepare --benchmark terminal_bench_4/miniswe \
 
 Preparation also accepts `++prepare_script_args.category=cpu`, `compose`, or `gpu`.
 Prepare again without filters for all tasks. The profile defaults to one attempt;
-official leaderboard submissions use five. Scheduler allocations must cover
+AA reproduction requires explicitly setting `++num_repeats=3` (the official
+Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
 setup, the full official agent budget, and verification.
 
 ## Infra validation
 
 For capped smoke runs, add `++tb4_max_steps=3` and
 `++tb4_agent_max_timeout_sec=900`. The cap can only shorten the task's official
-agent budget. Default runs have no step cap or timeout override. Installation
+agent budget. Default benchmark runs allow 500 steps and 30 seconds per command,
+with no override of the task's overall agent timeout. Installation
 uses the separate 360-second harness-setup budget. Provider renewal keeps
 resources alive without extending agent execution.
 

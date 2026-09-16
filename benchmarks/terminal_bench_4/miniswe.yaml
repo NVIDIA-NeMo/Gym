@@ -5,14 +5,15 @@ terminal_bench_4_miniswe:
     miniswe_sandboxed_agent:
       entrypoint: app.py
       domain: agent
-      description: mini-SWE 2.1 text-action profile on TB4 resources.
+      description: mini-SWE 2.4.6 native bash profile on TB4 resources.
       resources_server:
         type: resources_servers
         name: terminal_bench_4
       model_server:
         type: responses_api_models
         name: policy_model
-      step_limit: ${oc.select:tb4_max_steps,0}
+      step_limit: ${oc.select:tb4_max_steps,500}
+      step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
       datasets:
       - name: terminal_bench_4
         type: benchmark

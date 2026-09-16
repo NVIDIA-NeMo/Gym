@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""mini-SWE 2.1 DefaultAgent on a borrowed environment, with Gym model routing."""
+"""mini-SWE 2.4.6 on a borrowed environment, with Gym model routing.
+
+Version and mini.yaml prompts follow Artificial Analysis's TB4 methodology:
+https://artificialanalysis.ai/methodology/intelligence-benchmarking
+Intentional differences (full observations, repeats, verifier timeout scoring)
+are documented in benchmarks/terminal_bench_4/README.md.
+"""
 
 import asyncio
 import json
@@ -10,25 +16,44 @@ from shlex import quote
 from threading import Lock
 from typing import Any
 
+import yaml
 from fastapi import Request
+from minisweagent import __version__ as mini_swe_version
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.config import builtin_config_dir
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models.utils.actions_text import format_observation_messages, parse_regex_actions
+from minisweagent.models.utils.actions_toolcall import (
+    BASH_TOOL,
+    format_toolcall_observation_messages,
+    parse_toolcall_actions,
+)
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.openai_utils import NeMoGymChatCompletionMessageToolCall, NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.terminal_bench_4.agent import artifact_directory, empty_response, run_borrowed
 from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedVerifyResponse
 
 
-SYSTEM = """You are an assistant operating a task environment. Respond with exactly one bash action in a
-```mswea_bash_command code block. Commands run in separate shells; filesystem changes persist.
-Complete the task in the environment. To finish, run only: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
-After submission you cannot change the environment. Task-specific instructions take precedence."""
+MINI_CONFIG = yaml.safe_load((builtin_config_dir / "mini.yaml").read_text())
+
+
+def responses_input(messages):
+    """Replay native Responses items and associate observations with their calls."""
+    items = []
+    for message in messages:
+        if message["role"] == "tool":
+            items.append(
+                {"type": "function_call_output", "call_id": message["tool_call_id"], "output": message["content"]}
+            )
+        elif "response_output" in message.get("extra", {}):
+            items.extend(message["extra"]["response_output"])
+        else:
+            items.append({"role": message["role"], "content": message.get("content", "")})
+    return items
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
@@ -83,11 +108,13 @@ class GymModel:
         return kwargs
 
     def format_observation_messages(self, message, outputs, template_vars=None):
-        messages = format_observation_messages(
-            outputs,
+        messages = format_toolcall_observation_messages(
+            actions=message.get("extra", {}).get("actions", []),
+            outputs=outputs,
+            # Intentionally retain full observations instead of mini.yaml's head/tail truncation.
             observation_template="<returncode>{{output.returncode}}</returncode>\n{{output.output}}",
         )
-        for observation, output in zip(messages, outputs, strict=True):
+        for observation, output in zip(messages, outputs):
             if output.get("images"):
                 observation["content"] = [{"type": "input_text", "text": observation["content"]}] + [
                     {"type": "input_image", "image_url": uri} for uri in output["images"]
@@ -102,8 +129,9 @@ class GymModel:
 
 
 class BorrowedEnvironment:
-    def __init__(self, bridge, execute):
+    def __init__(self, bridge, execute, system_info):
         self.bridge, self._execute = bridge, execute
+        self.system_info = system_info
 
     def execute(self, action):
         output = self.bridge.call(lambda: self._execute(action["command"]))
@@ -111,7 +139,7 @@ class BorrowedEnvironment:
         return output
 
     def get_template_vars(self):
-        return {"system": "Linux"}
+        return self.system_info
 
     def serialize(self):
         return {"info": {"environment_type": "gym_borrowed_sandbox"}}
@@ -125,12 +153,19 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> SandboxedVerifyResponse:
         extra_instruction = ""
+        system_info = {}
 
         async def setup(sandbox, seed):
             nonlocal extra_instruction
             result = await sandbox.exec("command -v setsid", user=seed.user)
             if result.return_code:
                 raise RuntimeError("mini-SWE requires setsid for process cleanup")
+            result = await sandbox.exec("uname -s; uname -r; uname -v; uname -m", user=seed.user)
+            if result.return_code or len(result.stdout.splitlines()) != 4:
+                raise RuntimeError("Could not read task environment system information")
+            system_info.update(
+                zip(("system", "release", "version", "machine"), result.stdout.splitlines(), strict=True)
+            )
             if seed.skills_dir:
                 extra_instruction += f"\nTask skills are in {seed.skills_dir}. Read the relevant SKILL.md files.\n"
             if seed.mcp_servers:
@@ -172,9 +207,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
             async def query(messages):
                 params = body.responses_create_params.model_dump(exclude_none=True)
-                params["input"] = [{"role": m["role"], "content": m.get("content", "")} for m in messages]
-                params.pop("tools", None)
-                params.pop("tool_choice", None)
+                params["input"] = responses_input(messages)
+                # mini-SWE executes bash calls; task MCP tools are discovered in setup
+                # and made available through the task-local CLI described in the prompt.
+                params["tools"] = [{"type": "function", **BASH_TOOL["function"], "strict": False}]
                 model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
                     url_path=self.url_path_for_run(url_path="/v1/responses", body=body),
@@ -191,17 +227,32 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     for part in item.content
                     if part.type == "output_text"
                 )
-                actions = parse_regex_actions(
-                    content,
-                    action_regex=r"```(?:mswea_bash_command|bash)\s*\n(.*?)\n```",
-                    format_error_template="Return exactly one bash action in a mswea_bash_command code block.",
+                calls = [
+                    NeMoGymChatCompletionMessageToolCall(
+                        id=item.call_id, type="function", function={"name": item.name, "arguments": item.arguments}
+                    )
+                    for item in response.output
+                    if item.type == "function_call"
+                ]
+                actions = parse_toolcall_actions(
+                    calls,
+                    format_error_template=MINI_CONFIG["model"]["format_error_template"],
                 )
-                return {"role": "assistant", "content": content, "extra": {"actions": actions}}
+                return {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [call.model_dump() for call in calls],
+                    "extra": {
+                        "actions": actions,
+                        "response_output": [item.model_dump(exclude_none=True) for item in response.output],
+                    },
+                }
 
             async def command(text):
                 result = await sandbox.exec(
                     "setsid --wait bash -c " + quote(f"echo $$ >> /tmp/{seed.session_id}.pids; " + text),
                     user=seed.user,
+                    env=MINI_CONFIG["environment"]["env"],
                     timeout_s=min(budget, self.config.step_timeout_sec),
                 )
                 if result.error_type and result.error_type != "timeout":
@@ -221,9 +272,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
             agent = DefaultAgent(
                 GymModel(bridge, query),
-                BorrowedEnvironment(bridge, command),
-                system_template=SYSTEM,
-                instance_template="{{task}}",
+                BorrowedEnvironment(bridge, command, system_info),
+                system_template=MINI_CONFIG["agent"]["system_template"],
+                instance_template=MINI_CONFIG["agent"]["instance_template"],
                 step_limit=self.config.step_limit,
                 cost_limit=0,
                 output_path=directory / "trajectory.json",
@@ -246,7 +297,11 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             response.output = [item for part in responses for item in part.output]
             response.usage = NeMoGymResponseUsage.sum_from_list([r.usage for r in responses if r.usage])
             termination.artifacts = [str(directory / "trajectory.json")]
-            return response, termination, {"mini_swe_trajectory": agent.serialize(), "harness_version": "2.1.0"}
+            return (
+                response,
+                termination,
+                {"mini_swe_trajectory": agent.serialize(), "harness_version": mini_swe_version},
+            )
 
         return SandboxedVerifyResponse.model_validate(
             await run_borrowed(self, request, body, setup=setup, execute=execute)

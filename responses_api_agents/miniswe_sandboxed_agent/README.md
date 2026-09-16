@@ -1,6 +1,6 @@
 # Sandboxed mini-SWE
 
-Generic mini-SWE 2.1.0 `DefaultAgent` execution on an environment owned by a Gym
+Generic mini-SWE 2.4.6 `DefaultAgent` execution on an environment owned by a Gym
 resources server. It uses the sandbox seed/start/verify contract. It has no SWE-bench image, patch, dataset, or grading assumptions.
 
 The existing synchronous mini-SWE loop uses an explicit bridge to Gym's async
@@ -8,21 +8,42 @@ Responses model client and sandbox operations. Cancellation closes pending I/O
 and joins the loop before requesting verification. The worker releases its
 connection; resources retain destruction ownership and the authoritative budget.
 
-Profile `tb4-miniswe-text-v1` uses one text-form bash action per model response.
-The generic prompt defines completion as a successful command whose first output
+The adapter loads system and instance prompts from the pinned package's `mini.yaml`
+and exposes mini-SWE's native `bash` tool through Gym's Responses API. The version
+and prompts follow [Artificial Analysis's TB4 methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking).
+The prompt defines completion as a successful command whose first output
 line is `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, matching mini-SWE's convention.
-`step_limit=0` and `cost_limit=0` leave those caps disabled; resources bound time.
+The Python defaults remain `step_limit=0`, `step_timeout_sec=600`, and `cost_limit=0`;
+resources bound total execution time. The TB4 benchmark sets a 500-step limit and
+30-second command timeout, overridable with `++tb4_max_steps=...` and
+`++tb4_step_timeout_sec=...`. Commands receive the environment defaults from `mini.yaml`;
+system information in the prompt comes from the task sandbox.
 Every step persists the native mini-SWE trajectory, including observations.
+The adapter preserves Responses output items (including reasoning and tool calls)
+when replaying history and returns observations with their matching call IDs.
+
+Full command observations are deliberately retained: we do not use `mini.yaml`'s
+first/last 5,000-character truncation. AA's intent regarding that upstream default
+is unclear. There is no context compaction or summarization. Execution uses
+`DefaultAgent` without interactive confirmations and keeps cost limits disabled.
 
 Task skills are exposed by their supplied directory. For MCP tasks, setup installs
 `mcp==1.29.0` into a task-local virtual environment, discovers the declared tools,
 and adds their schemas and invocation command to the prompt. The CLI supports
 stdio, SSE, and streamable HTTP; calls execute inside the main sandbox so service
 names retain their task-network meaning. A persistent MCP session preserves state
-across calls. Image tool results become multimodal model inputs. This changes the evaluation profile
+across calls. MCP tools are visible as schemas and CLI instructions in the task
+prompt and invoked through native `bash` calls, rather than registered as separate
+model tools. Image tool results become multimodal model inputs. This changes the evaluation profile
 relative to native mini-SWE and must be disclosed in score comparisons.
 
 Use [the TB4 mini-SWE profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md). Existing
 `mini_swe_agent_2` SWE-bench behavior remains unchanged. Coverage is a validation
 claim, not implied by selecting this configuration.
+
+The TB4 profile retains one repeat; clients seeking AA's three-repeat protocol
+must explicitly set `++num_repeats=3`. Verifier timeout handling is unchanged:
+timeouts remain infrastructure failures pending evidence of their frequency on
+real workloads. These decisions are detailed in the benchmark README and mean
+the profile is not an exact reproduction of AA's evaluation.
