@@ -396,6 +396,57 @@ class TestVerify:
         assert result.reward == reward
         assert result.resolved_reward_rule == "exact"
 
+    @pytest.mark.parametrize(
+        ("text", "expected_answer", "property_type", "abs_error"),
+        [
+            ("((7))", 5, "count", 2.0),
+            ("((5))", 5, "count", 0.0),
+            ("((2))", 3, "fragment", None),
+            ("((1))", 0, "bool", None),
+            ("no answer here", 5, "count", None),
+        ],
+    )
+    async def test_abs_error_set_only_for_continuous_property_types(
+        self, text, expected_answer, property_type, abs_error
+    ):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(text, expected_answer=expected_answer, property_type=property_type)
+        )
+        if abs_error is None:
+            assert result.abs_error is None
+        else:
+            assert result.abs_error == pytest.approx(abs_error)
+
+    @pytest.mark.parametrize(
+        ("text", "expected_answer", "answer_type", "abs_error"),
+        [
+            ("((2.6))", 2.1, FLOAT, 0.5),
+            ("((2.1))", 2.1, FLOAT, 0.0),
+            ("((1))", 0, BOOL, None),
+            ("no answer here", 2.1, FLOAT, None),
+        ],
+    )
+    async def test_abs_error_falls_back_to_answer_type_without_property_type(
+        self, text, expected_answer, answer_type, abs_error
+    ):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(text, expected_answer=expected_answer, answer_type=answer_type)
+        )
+        if abs_error is None:
+            assert result.abs_error is None
+        else:
+            assert result.abs_error == pytest.approx(abs_error)
+
+    async def test_property_type_wins_over_answer_type_for_abs_error(self):
+        """A `fragment` row stays excluded even though it resolves to FLOAT."""
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request("((2))", expected_answer=3, property_type="fragment", answer_type=FLOAT)
+        )
+        assert result.abs_error is None
+
     async def test_legacy_float_keeps_isclose_policy(self):
         server = _make_server()
         result = await server.verify(_make_verify_request("((1.0000005))", expected_answer=1.0, property_type="float"))
@@ -589,10 +640,82 @@ class TestComputeMetrics:
         assert metrics["unknown"]["by_answer_type"]["unknown"]["count"] == 1
         assert metrics["unknown"]["accuracy"] == 0.0
 
+    def test_mae_grouped_per_property(self):
+        server = _make_server()
+
+        def _row(prop, ptype, abs_error, correct):
+            return {
+                "method": "direct",
+                "resolved_answer_type": FLOAT,
+                "property": prop,
+                "property_type": ptype,
+                "reward": 1.0 if correct else 0.0,
+                "correct": correct,
+                "abs_error": abs_error,
+            }
+
+        tasks = [
+            [_row("MolWt", "float", 0.0, True), _row("MolWt", "float", 4.0, False)],
+            [_row("HeavyAtomCount", "count", 2.0, False), _row("HeavyAtomCount", "count", None, False)],
+            [_row("HasBenzene", "bool", None, True)],
+        ]
+        by_property = server.compute_metrics(tasks)["by_property"]
+
+        assert by_property["MolWt"]["mae"] == pytest.approx(2.0)
+        assert by_property["MolWt"]["mae_count"] == 2
+        # The unparsed rollout is excluded from the mean but still counted.
+        assert by_property["HeavyAtomCount"]["mae"] == pytest.approx(2.0)
+        assert by_property["HeavyAtomCount"]["mae_count"] == 1
+        assert by_property["HeavyAtomCount"]["count"] == 2
+        # bool properties carry no abs_error, so they report no MAE.
+        assert by_property["HasBenzene"]["mae"] is None
+        assert by_property["HasBenzene"]["mae_count"] == 0
+        assert by_property["HasBenzene"]["accuracy"] == 1.0
+
+    def test_pass_at_k_metrics_merged_in(self):
+        server = _make_server()
+        tasks = [
+            [
+                {**self._rollout("direct", FLOAT, 1.0, True), "predicted_value": 3.0},
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": 4.0},
+            ],
+            [
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": 7.0},
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": None},
+            ],
+        ]
+        metrics = server.compute_metrics(tasks)
+
+        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(25.0)
+        assert metrics["pass@2/accuracy"] == pytest.approx(50.0)
+        assert metrics["pass@1[avg-of-2]/no_answer"] == pytest.approx(25.0)
+        assert "majority@2/accuracy" in metrics
+        # The method breakdown is preserved alongside.
+        assert metrics["direct"]["count"] == 4
+
     def test_get_key_metrics_filters(self):
         server = _make_server()
         out = server.get_key_metrics({"mean/reward": 0.5, "mean/correct": 0.5, "other": 9})
         assert out == {"mean/reward": 0.5, "mean/correct": 0.5}
+
+    def test_get_key_metrics_selects_highest_k(self):
+        server = _make_server()
+        out = server.get_key_metrics(
+            {
+                "mean/reward": 0.5,
+                "mean/output_tokens": 120.0,
+                "pass@1/accuracy": 40.0,
+                "pass@2/accuracy": 60.0,
+                "pass@1[avg-of-2]/accuracy": 50.0,
+                "pass@2/no_answer": 10.0,
+            }
+        )
+        assert out == {
+            "mean/reward": 0.5,
+            "mean/output_tokens": 120.0,
+            "pass@2/accuracy": 60.0,
+            "pass@1[avg-of-2]/accuracy": 50.0,
+        }
 
 
 # ---------------------------------------------------------------------------

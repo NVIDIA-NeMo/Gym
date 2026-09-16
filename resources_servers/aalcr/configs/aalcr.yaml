@@ -7,6 +7,7 @@ aalcr_resources_server:
       judge_model_server:
         type: responses_api_models
         name: Qwen3-235B-A22B-Instruct-2507-FP8
+      judge_protocol: legacy_v1_0
       judge_responses_create_params_overrides: {}
 aalcr_simple_agent:
   responses_api_agents:

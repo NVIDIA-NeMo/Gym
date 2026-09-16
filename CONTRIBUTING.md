@@ -73,12 +73,14 @@ For complete development setup, CI/CD requirements, DCO sign-off, and troublesho
 **Quick Start:**
 
 ```bash
-git clone git@github.com:NVIDIA-NeMo/Gym.git
+git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev
 pre-commit install
 ```
+
+Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registered with GitHub, `git clone git@github.com:NVIDIA-NeMo/Gym.git` also works.
 
 **Important:** All commits must be signed with DCO sign-off (`-s`):
 
@@ -94,6 +96,8 @@ CI runs in two clearly separated stages:
 
 1. **Pre-merge checks** — run on every pull request. All must be green before a PR can merge.
 2. **Post-merge full test suite** — runs after merge on `main`, with no change detection. It always exercises everything.
+
+**Triggering CI (`/ok to test`):** GitHub CI workflows only run automatically for verified commits from NVIDIA-NeMo members. If your commits are unverified, or you're an external contributor, CI won't start until an NVIDIA-NeMo member comments `/ok to test <commit sha>` on the PR. This safeguards CI capacity and adds a review gate before external code can execute in CI.
 
 Reproduce the pre-merge checks locally before you push:
 
@@ -154,6 +158,12 @@ Hooks that auto-modify files (`ruff`, `ruff-format`, `add-verified-flag`, `updat
 | Anything else (core library, CI, scripts, and so on) | **Full suite** — all tests run |
 
 Priority is `other > server > doc`: a PR touching both a server file and a core file triggers the full suite. When the full suite runs, the server tests are split across **8 parallel shards** with `fail_on_total_and_test_mismatch=true` — this means **every resources server must have at least one test**, or its shard fails.
+
+### Scheduled GPU E2E Tests
+
+**Workflow:** `cicd-main.yml`, `gpu_e2e_tests` job. GPU E2E tests run on internal GPU infra on a schedule (cron, every 4 hours). Current coverage: **GPU E2E - Qwen vLLM rollout** (`tests/e2e/gpu_e2e_test.sh`, `Qwen/Qwen2.5-0.5B-Instruct`), which builds the Gym container and runs a live vLLM rollout end-to-end.
+
+If you need to exercise this path for a change (e.g. inference-path or container changes), trigger it manually via `workflow_dispatch` on `cicd-main.yml` rather than waiting for the next scheduled run.
 
 ### Checks a New Environment Must Satisfy
 

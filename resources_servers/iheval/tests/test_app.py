@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import ServerClient
 from resources_servers.iheval.app import (
     IHEvalResourcesServer,
@@ -50,6 +52,7 @@ from resources_servers.iheval.app import (
     _verb_f1,
     _word_f1_no_punc,
 )
+from resources_servers.iheval.prepare_iheval import _to_chat_row
 
 
 def _make_response(text: str) -> NeMoGymResponse:
@@ -812,3 +815,144 @@ class TestCategoryAggregation:
         m = server.compute_metrics([[r] for r in rows])
         assert m["diff_conflict"] == approx(0.4 - 0.8)
         assert m["diff_aligned"] == approx(0.9 - 0.8)
+
+
+class TestExampleDataShape:
+    """The shipped dataset must satisfy the request schema the model server validates against."""
+
+    @staticmethod
+    def _rows() -> list:
+        data = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        return [json.loads(line) for line in data.read_text().splitlines() if line.strip()]
+
+    def test_rows_validate_as_response_create_params(self) -> None:
+        for row in self._rows():
+            NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+
+    def test_tools_use_responses_flat_shape(self) -> None:
+        tool_rows = [r for r in self._rows() if "tools" in r["responses_create_params"]]
+        assert tool_rows, "example.jsonl must keep at least one tool-use row"
+        for row in tool_rows:
+            for tool in row["responses_create_params"]["tools"]:
+                # Responses API `FunctionToolParam`, not the nested Chat Completions shape.
+                assert tool["type"] == "function"
+                assert "function" not in tool
+                assert {"name", "description", "parameters", "strict"} <= set(tool)
+
+    def test_tool_turns_use_responses_typed_items(self) -> None:
+        """Pre-canned tool turns are Responses items, not Chat-Completions messages."""
+        rows_with_tool_turns = 0
+        for row in self._rows():
+            items = row["responses_create_params"]["input"]
+            for item in items:
+                assert "tool_calls" not in item, "chat-shaped assistant tool turn in example.jsonl"
+                assert item.get("role") != "tool", "chat-shaped tool result in example.jsonl"
+            calls = [i for i in items if i.get("type") == "function_call"]
+            outputs = [i for i in items if i.get("type") == "function_call_output"]
+            if not calls:
+                assert not outputs, "function_call_output without a matching function_call"
+                continue
+            rows_with_tool_turns += 1
+            # Every result is paired to its call by ``call_id``.
+            assert [c["call_id"] for c in calls] == [o["call_id"] for o in outputs]
+            assert all(c["call_id"] for c in calls)
+        assert rows_with_tool_turns, "example.jsonl must keep at least one tool-use row"
+
+    def test_tool_turns_convert_to_chat_completions(self) -> None:
+        converter = ResponsesConverter(return_token_id_information=False)
+        for row in self._rows():
+            params = converter.responses_to_chat_completion_create_params(
+                NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+            )
+            call_ids = [
+                tc["id"] for m in params.messages if m["role"] == "assistant" for tc in (m.get("tool_calls") or [])
+            ]
+            result_ids = [m["tool_call_id"] for m in params.messages if m["role"] == "tool"]
+            assert all(result_ids), "tool result lost its tool_call_id in conversion"
+            # Results stay paired to their calls once back in Chat-Completions shape.
+            assert result_ids == call_ids
+
+    def test_conversation_history_survives_conversion(self) -> None:
+        """Pre-canned ``conversation_history`` turns reach the model intact."""
+        converter = ResponsesConverter(return_token_id_information=False)
+        multi_turn = [r for r in self._rows() if r["task"] == "multi-turn"]
+        assert multi_turn, "example.jsonl must keep a multi-turn row"
+        for row in multi_turn:
+            params = converter.responses_to_chat_completion_create_params(
+                NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+            )
+            roles = [m["role"] for m in params.messages]
+            assert "assistant" in roles, "history assistant turns dropped in conversion"
+            assert roles[-1] == "user", "the scored instruction must be the final turn"
+
+    def test_no_assistant_turn_carries_an_empty_tool_calls_array(self) -> None:
+        """OpenAI rejects ``tool_calls: []``; plain history turns must omit the key."""
+        converter = ResponsesConverter(return_token_id_information=False)
+        for row in self._rows():
+            params = converter.responses_to_chat_completion_create_params(
+                NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+            )
+            for message in params.messages:
+                assert message.get("tool_calls") != [], f"empty tool_calls in row {row['id']}"
+
+
+class TestChatCompletionsVariant:
+    """``--chat-completions`` twins carry a request a ``/chat/completions`` caller can send as-is.
+
+    The Responses shapes the default files use — flat ``FunctionToolParam`` tools and
+    ``function_call`` / ``function_call_output`` items — are rejected by that endpoint.
+    """
+
+    @staticmethod
+    def _rows() -> list:
+        data = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        return [json.loads(line) for line in data.read_text().splitlines() if line.strip()]
+
+    def test_only_the_request_shape_changes(self) -> None:
+        """Verifier inputs are untouched, so both files score the same rows the same way."""
+        for row in self._rows():
+            chat_row = _to_chat_row(row)
+            assert {k: v for k, v in chat_row.items() if k != "responses_create_params"} == {
+                k: v for k, v in row.items() if k != "responses_create_params"
+            }
+
+    def test_tools_are_re_nested_without_strict(self) -> None:
+        tool_rows = [r for r in self._rows() if "tools" in r["responses_create_params"]]
+        assert tool_rows, "example.jsonl must keep at least one tool-use row"
+        for row in tool_rows:
+            flat = row["responses_create_params"]["tools"]
+            nested = _to_chat_row(row)["responses_create_params"]["tools"]
+            assert [t["function"]["name"] for t in nested] == [t["name"] for t in flat]
+            for original, converted in zip(flat, nested):
+                assert converted["type"] == "function"
+                assert converted["function"]["description"] == original["description"]
+                assert converted["function"]["parameters"] == original["parameters"]
+                # vLLM rejects a null ``strict`` on the chat endpoint.
+                assert "strict" not in converted and "strict" not in converted["function"]
+
+    def test_tool_turns_become_paired_chat_messages(self) -> None:
+        tool_rows = [r for r in self._rows() if "tools" in r["responses_create_params"]]
+        for row in tool_rows:
+            messages = _to_chat_row(row)["responses_create_params"]["input"]
+            calls = [c for m in messages if m.get("tool_calls") for c in m["tool_calls"]]
+            results = [m for m in messages if m.get("role") == "tool"]
+            assert calls, "the pre-canned tool call vanished"
+            assert [c["id"] for c in calls] == [m["tool_call_id"] for m in results]
+            # Upstream IHEval names the tool on the result message and sends no
+            # assistant text alongside a tool call; both must survive.
+            assert [m["name"] for m in results] == [c["function"]["name"] for c in calls]
+            for message in messages:
+                if message.get("tool_calls"):
+                    assert "content" not in message
+
+    def test_no_responses_typed_items_remain(self) -> None:
+        for row in self._rows():
+            for item in _to_chat_row(row)["responses_create_params"]["input"]:
+                assert item.get("type") not in ("function_call", "function_call_output")
+                assert "role" in item
+
+    def test_non_tool_rows_are_unchanged(self) -> None:
+        plain = [r for r in self._rows() if "tools" not in r["responses_create_params"]]
+        assert plain, "example.jsonl must keep at least one row without tools"
+        for row in plain:
+            assert _to_chat_row(row) == row

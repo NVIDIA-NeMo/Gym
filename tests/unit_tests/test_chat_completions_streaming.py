@@ -280,6 +280,33 @@ class TestChatDispatchRoute:
         assert resp.status_code == 422
         assert resp.json()["detail"][0]["loc"][0] == "body"
 
+    def test_non_streaming_request_does_not_forward_outer_tool_call_name(self) -> None:
+        client, server = _client(_EchoChatModel)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "name": "get_weather",
+                                "function": {"name": "get_weather", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = server.last_params.model_dump(exclude_unset=True)["messages"][0]["tool_calls"][0]
+        assert "name" not in forwarded
+        assert forwarded["function"]["name"] == "get_weather"
+
     def test_streaming_request_returns_synthesized_sse(self) -> None:
         client, server = _client(_EchoChatModel)
         resp = client.post(

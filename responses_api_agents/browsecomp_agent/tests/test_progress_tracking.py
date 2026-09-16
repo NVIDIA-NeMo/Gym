@@ -14,8 +14,7 @@
 # limitations under the License.
 """Unit tests for the progress-board feature (config.progress / update_progress).
 
-Ported from bc_frankie_bash_tool_w_progress_tracking tests/test_progress_tracking.py
-(commits 43e59bc, 5099589, 8cdd075). Key behaviours:
+Ported from an internal reference harness. Key behaviours:
   * the update_progress tool is offered only when progress=True;
   * each call OVERWRITES the whole board (not appended);
   * the board is rendered into the system prompt and rebuilt on every context
@@ -183,7 +182,7 @@ class TestGating:
         assert "update_progress" not in _tool_names(fake.model_bodies[0])
 
     async def test_progress_tool_inserted_before_bash_command(self) -> None:
-        """bc_frankie parity: active_tools = TOOLS + [PROGRESS_TOOL] + [BASH_TOOL],
+        """reference-harness parity: active_tools = TOOLS + [PROGRESS_TOOL] + [BASH_TOOL],
         so update_progress must render before bash_command in the prompt."""
         agent, fake = _make_agent([_model_response([_make_msg("Exact Answer: X")])], progress=True)
         request_mock = MagicMock()
@@ -225,7 +224,7 @@ class TestSystemPromptAddendum:
         assert "## Progress Board" not in fake.model_bodies[0].input[0].content
 
     async def test_addendum_has_ledger_slots_and_no_leading_cue(self) -> None:
-        """De-anchored board (bc_frankie Fix A): settled-state ledger slots, no
+        """De-anchored board (reference-harness Fix A): settled-state ledger slots, no
         example block (the '<- leading' cue was the anchor), and a post-reset
         re-derivation rule."""
         agent, fake = _make_agent([_model_response([_make_msg("done")])], progress=True)
@@ -286,7 +285,7 @@ class TestBoardLifecycle:
         assert "FIRST board text" not in last_sys
 
     async def test_board_not_rendered_mid_segment(self) -> None:
-        """The board is re-rendered only at resets (bc_frankie parity): a write on
+        """The board is re-rendered only at resets (reference-harness parity): a write on
         turn 1 is not visible in the system prompt of turn 2."""
         steps = [
             _model_response([_progress_call("MID SEGMENT WRITE", "a")], input_tokens=100),
@@ -298,7 +297,7 @@ class TestBoardLifecycle:
 
 
 class TestCommitGuard:
-    """bc_frankie Fix B.1: the handler warns when the board contains an
+    """reference-harness Fix B.1: the handler warns when the board contains an
     answer-commit marker instead of the model committing it as a message."""
 
     async def test_handler_warns_when_board_contains_answer_commit(self) -> None:
@@ -384,7 +383,7 @@ class TestPreResetWarning:
 
 
 class TestBoardAnswerFallback:
-    """bc_frankie Fix B.2: recover an answer committed only to the board so the
+    """reference-harness Fix B.2: recover an answer committed only to the board so the
     judge can extract it. Appends only — a trajectory that already commits an
     answer is returned unchanged."""
 

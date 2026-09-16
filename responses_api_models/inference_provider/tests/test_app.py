@@ -49,7 +49,14 @@ def _make_server(**overrides):
     return InferenceProvider(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
-def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None, usage=None):
+def _mock_chat_response(
+    content="Hello!",
+    finish_reason="stop",
+    tool_calls=None,
+    usage=None,
+    refusal=None,
+    native_finish_reason=None,
+):
     response = {
         "id": "chatcmpl-test",
         "choices": [
@@ -70,6 +77,10 @@ def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None,
         response["choices"][0]["message"]["tool_calls"] = tool_calls
     if usage:
         response["usage"] = usage
+    if refusal is not None:
+        response["choices"][0]["message"]["refusal"] = refusal
+    if native_finish_reason is not None:
+        response["choices"][0]["native_finish_reason"] = native_finish_reason
     return response
 
 
@@ -456,6 +467,26 @@ class TestResponses:
         assert len(message_items) == 1
         assert message_items[0]["content"][0]["text"] == "<think>Let me reason about this...</think>The answer is 42."
 
+    async def test_responses_preserve_provider_refusal_signals(self) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_data = _mock_chat_response(
+            content=None,
+            refusal="Policy refusal.",
+            native_finish_reason="refusal",
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=mock_data)
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["native_finish_reason"] == "refusal"
+        assert data["output"][0]["content"] == [{"refusal": "Policy refusal.", "type": "refusal"}]
+
     async def test_responses_with_usage(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
@@ -486,6 +517,35 @@ class TestResponses:
         assert data["usage"]["total_tokens"] == 19
         assert data["usage"]["input_tokens_details"]["cached_tokens"] == 4
         assert data["usage"]["output_tokens_details"]["reasoning_tokens"] == 2
+
+    async def test_responses_preserve_unknown_usage_details(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = _make_server()
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_data = _mock_chat_response(content="Hi!")
+        mock_data["usage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=mock_data)
+
+        response = client.post("/ng-rollout/0-0/v1/responses", json={"input": "hello"})
+        data = response.json()
+
+        assert data["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert data["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+        [record] = read_model_call_records(CaptureStore(tmp_path), "0-0")
+        assert record.cache_hit is None
+        assert record.cached_tokens is None
+        assert record.tokens_reasoning is None
 
     async def test_responses_incomplete_max_tokens(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()

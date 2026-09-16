@@ -1,0 +1,40 @@
+cline_agent:
+  responses_api_agents:
+    cline_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      # Cline's model calls go through this Gym model server, so they are captured and the backend
+      # is swappable (vLLM, OpenAI, an inference provider) without touching this config. The agent
+      # points Cline's `openai-compatible` provider at the server. To call a provider directly
+      # instead, set this to null and configure `provider` / `openai_base_url` (see README).
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Environment-specific; declared here so configs that _inherit_from this one can override it.
+      datasets: null
+      concurrency: 8
+      command: cline
+      model: ${policy_model_name}
+      provider: openai-compatible  # only used when model_server is null
+      openai_api_key: ""
+      openai_base_url: null
+      env: {}
+      workspace_root: outputs/cline_agent/workspaces
+      repo_dir: null
+      system_prompt: null  # prepended to the user message
+      system_prompt_override: null  # `-s`: replaces Cline's own system prompt entirely
+      thinking: null  # none|low|medium|high|xhigh; null -> provider default
+      compaction: null  # agentic|basic|off; null -> Cline's default (agentic)
+      retries: null  # --retries; null -> Cline's default
+      timeout: 900
+      setup_timeout: 300
+      extra_args: []
+      # JSON policy restricting the shell commands Cline may run, e.g.
+      # {allow: ["python3 *", "git *"], deny: ["sudo *"]}. Empty -> unrestricted.
+      command_permissions: {}
+      # npm version of the `cline` package installed on a clean machine. The event parser was
+      # validated against this version, so treat a bump as a deliberate change: raise it, re-run
+      # the tests and a live eval, then commit. null installs @latest.
+      cline_version: 3.0.55

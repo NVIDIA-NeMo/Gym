@@ -120,6 +120,13 @@ class Terminus2NemoGym(Terminus2):
         finally:
             self._attach_routed_experts_to_trajectory()
             self._write_agent_error_flags()
+            # Close the LLM's persistent HTTP client now the episode is done.
+            llm = getattr(self, "_llm", None)
+            if isinstance(llm, NemoGymLLM):
+                try:
+                    await llm.aclose()
+                except Exception:
+                    pass  # teardown is best-effort; never fail the trial on cleanup
 
     def _attach_routed_experts_to_trajectory(self) -> None:
         """Add NeMo Gym routed experts to Harbor metrics.extra before Gym converts the trajectory."""

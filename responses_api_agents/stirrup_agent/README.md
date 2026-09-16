@@ -113,7 +113,7 @@ land in `results/gdpval_rubric_metrics.json`.
 
 ## Configuration
 
-The agent reads its Hydra config at `configs/stirrup_gdpval.yaml`. Notable keys:
+The agent reads its Hydra config at `configs/stirrup_agent.yaml`. Notable keys:
 
 | Key | Default | Meaning |
 |-----|---------|---------|

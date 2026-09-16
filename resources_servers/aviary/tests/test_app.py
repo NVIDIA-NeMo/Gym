@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from aviary.core import Message
 from aviary.dataset_server import TaskDatasetServer
 from aviary.envs.gsm8k import GSM8kDataset, GSM8kDatasetSplit
 from fastapi import Request
@@ -23,14 +24,19 @@ from starlette.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from nemo_gym.server_utils import ServerClient
-from resources_servers.aviary.app import AviaryResourcesServerConfig
+from resources_servers.aviary.app import AviaryResourcesServerConfig, obs_msg_to_nemo_gym
 from resources_servers.aviary.client_app import AviaryClientResourcesServer, AviaryClientResourcesServerConfig
 from resources_servers.aviary.gsm8k_app import GSM8kResourcesServer
-from resources_servers.aviary.notebook_app import BixBenchResourcesServer
+from resources_servers.aviary.notebook_app import BixBenchDataset, BixBenchResourcesServer
 from resources_servers.aviary.schemas import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
 
 
 class TestGSM8kApp:
+    def test_converts_list_content(self) -> None:
+        obs = Message(content=[{"type": "text", "text": "hello"}])
+
+        assert [message.content for message in obs_msg_to_nemo_gym(obs)] == ["hello"]
+
     @pytest.mark.asyncio
     async def test_server_lifecycle(self) -> None:
         # Create the server
@@ -67,6 +73,17 @@ class TestGSM8kApp:
 
 
 class TestNotebookApp:
+    def test_loads_current_dataset_schema(self, tmp_path) -> None:
+        rows = [{"capsule_uuid": "capsule-1", "question": "Question?", "ideal": "Answer"}]
+
+        with (
+            patch("resources_servers.aviary.notebook_app.load_dataset", return_value=rows),
+            patch("resources_servers.aviary.notebook_app.CAPSULE_DATA_LOCATION", str(tmp_path)),
+        ):
+            dataset = BixBenchDataset()
+
+        assert dataset.dataset == [{"uuid": "capsule-1", "question": "Question?", "answer": "Answer"}]
+
     @pytest.mark.skip(reason="Skipping notebook app tests - requires data download and Docker")
     @pytest.mark.asyncio
     async def test_server_lifecycle(self) -> None:

@@ -20,23 +20,27 @@ from mlflow import MlflowClient
 from mlflow.artifacts import get_artifact_repository
 from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
 from mlflow.exceptions import RestException
-from pydantic import BaseModel
 
 from nemo_gym.config_types import (
+    ConfigError,
     DownloadJsonlDatasetGitlabConfig,
+    MLFlowConfig,
     UploadJsonlDatasetGitlabConfig,
 )
 from nemo_gym.server_utils import get_global_config_dict
 
 
-class MLFlowConfig(BaseModel):
-    mlflow_tracking_uri: str
-    mlflow_tracking_token: str
-
-
 def create_mlflow_client() -> MlflowClient:  # pragma: no cover
     global_config = get_global_config_dict()
     config = MLFlowConfig.model_validate(global_config)
+
+    # Only the registry half of MLFlowConfig is needed here; experiment/run name are exporter-only.
+    if not (config.mlflow_tracking_uri and config.mlflow_tracking_token):
+        raise ConfigError(
+            "GitLab dataset storage needs MLflow credentials. Add to env.yaml:\n"
+            "  mlflow_tracking_uri: <your_gitlab_uri>\n"
+            "  mlflow_tracking_token: <your_gitlab_token>"
+        )
 
     environ["MLFLOW_TRACKING_TOKEN"] = config.mlflow_tracking_token
     client = MlflowClient(tracking_uri=config.mlflow_tracking_uri)

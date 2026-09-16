@@ -1,0 +1,21 @@
+# Judge: Gemma-4-31B-IT (thinking disabled, temperature 0.0), the calibrated
+# judge for both checks; substituting a different model requires recalibration
+# against the gold set. No credentials are stored here: BBQ_JUDGE_BASE_URL and
+# BBQ_JUDGE_API_KEY must be set to real values before live use.
+# BBQ_JUDGE_MODEL defaults to Gemma-4-31B-IT and should only be overridden to
+# match the served model name of a Gemma-4-31B-IT deployment.
+
+bbq_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:BBQ_JUDGE_BASE_URL}
+      api_key: ${oc.env:BBQ_JUDGE_API_KEY}
+      model: ${oc.env:BBQ_JUDGE_MODEL,nvidia/google/gemma-4-31b-it}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      is_responses_native: false
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

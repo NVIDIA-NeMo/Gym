@@ -26,7 +26,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import VLLMConverter
+from nemo_gym.responses_converter import VLLMConverter, _usage_detail
 from nemo_gym.server_utils import request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -72,6 +72,19 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
     input_tokens = usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0)
     output_tokens = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
     total_tokens = usage.get("total_tokens", 0) or (input_tokens + output_tokens)
+    cached_tokens = _usage_detail(
+        usage,
+        "prompt_tokens_details",
+        "cached_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+    )
+    reasoning_tokens = _usage_detail(
+        usage,
+        "completion_tokens_details",
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    )
 
     output = data.get("output")
     if not isinstance(output, list) or not output:
@@ -111,8 +124,8 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens_details": {"reasoning_tokens": 0},
+            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         },
     }
 

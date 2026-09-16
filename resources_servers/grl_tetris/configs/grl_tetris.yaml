@@ -1,6 +1,7 @@
 grl_tetris:
   resources_servers:
     grl_tetris:
+      allowed_agents: [gymnasium_agent]
       entrypoint: app.py
       domain: games
       verified: false

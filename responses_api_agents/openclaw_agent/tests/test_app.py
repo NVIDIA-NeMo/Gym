@@ -14,10 +14,16 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import json
+import os
+import signal
+import sys
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psutil
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -353,7 +359,31 @@ class TestBuildOpenclawConfig:
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
-        assert provider["models"][0]["maxTokens"] == 131072
+
+    def test_context_window_and_max_tokens_omitted_by_default(self) -> None:
+        # Regression: a static default here previously caused every request to fail unconditionally
+        # once it didn't match the deployed model's real context window. None (the default) must omit
+        # both keys so openclaw falls back to its own auto-discovery / sane self-hosted defaults.
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        model_entry = cfg["models"]["providers"]["nemo"]["models"][0]
+        assert "contextWindow" not in model_entry
+        assert "maxTokens" not in model_entry
+
+    def test_context_window_and_max_tokens_included_when_set(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            context_window=131072,
+            max_output_tokens=8192,
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        model_entry = cfg["models"]["providers"]["nemo"]["models"][0]
+        assert model_entry["contextWindow"] == 131072
+        assert model_entry["maxTokens"] == 8192
 
     def test_timeout_pads_empty_output(self) -> None:
         agent = _make_agent()
@@ -635,6 +665,251 @@ class TestObservability:
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
         assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
+
+
+def _seed_session(home: Path, session_id: str, text: str, mtime: Optional[float] = None) -> Path:
+    session_path = home / ".openclaw" / "agents" / "main" / "sessions" / f"{session_id}.jsonl"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": session_id}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                    }
+                ),
+            ]
+        )
+    )
+    if mtime is not None:
+        os.utime(session_path, (mtime, mtime))
+    return session_path
+
+
+class TestFindPartialSession:
+    def test_returns_most_recently_written_parseable_session(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        older = _seed_session(home, "older", "old", mtime=1)
+        newer = _seed_session(home, "newer", "new", mtime=2)
+
+        assert OpenClawAgent._find_partial_session(home) == newer
+        assert older != newer
+
+    def test_skips_unparseable_files_and_returns_none_when_none_parse(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "empty.jsonl").write_text("")
+        (home / "garbage.jsonl").write_text("not json\n")
+
+        assert OpenClawAgent._find_partial_session(home) is None
+
+    def test_returns_none_when_home_missing(self, tmp_path: Path) -> None:
+        assert OpenClawAgent._find_partial_session(tmp_path / "missing") is None
+
+
+class TestTimeoutSalvage:
+    def test_config_timeout_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            raise TimeoutError("openclaw timed out")
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+        ):
+            output, usage, _ = asyncio.run(agent._run_openclaw("solve", None))
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()  # workdir cleanup still runs after salvage
+
+
+class TestRunExecCancellation:
+    def test_cancellation_kills_child_process(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(["sleep", "30"], cwd=None, env=os.environ.copy(), timeout=100)
+                )
+                for _ in range(200):
+                    if "proc" in captured:
+                        break
+                    await asyncio.sleep(0.01)
+                assert "proc" in captured, "subprocess never started"
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                await captured["proc"].wait()
+
+        asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None  # cancellation killed it, not left running
+
+    def test_cancellation_kills_descendant_processes(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import subprocess, sys, time; "
+                            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                            "time.sleep(30)",
+                        ],
+                        cwd=None,
+                        env=os.environ.copy(),
+                        timeout=100,
+                    )
+                )
+                for _ in range(200):
+                    proc = captured.get("proc")
+                    children = psutil.Process(proc.pid).children(recursive=True) if proc else []
+                    if children:
+                        break
+                    await asyncio.sleep(0.01)
+                assert children, "descendant process never started"
+                child_pids = [child.pid for child in children]
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                return child_pids
+
+        child_pids = asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None
+        assert all(not psutil.pid_exists(pid) for pid in child_pids)
+
+
+class TestSigtermSalvage:
+    def test_sigterm_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        registered: dict = {}
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        async def _main():
+            task = asyncio.ensure_future(agent._run_openclaw("solve", None))
+            for _ in range(100):
+                if signal.SIGTERM in registered:
+                    break
+                await asyncio.sleep(0)
+            assert signal.SIGTERM in registered, "SIGTERM handler was never installed"
+            registered[signal.SIGTERM](signal.SIGTERM, None)
+            return await task
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+            patch("signal.getsignal", return_value=signal.SIG_DFL),
+            patch("signal.signal", side_effect=lambda sig, cb: registered.__setitem__(sig, cb)),
+        ):
+            output, usage, _ = asyncio.run(_main())
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()
+
+    def test_handler_installed_once_and_chains_to_previous_across_concurrent_runs(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir_a, work_dir_b = tmp_path / "run_a", tmp_path / "run_b"
+        for work_dir in (work_dir_a, work_dir_b):
+            home = work_dir / ".openclaw-home"
+            config_path = home / ".openclaw" / "openclaw.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("{}")
+            _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        install_calls = 0
+        previous_calls = 0
+
+        def _fake_previous() -> None:
+            nonlocal previous_calls
+            previous_calls += 1
+
+        async def _main():
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGTERM, _fake_previous)
+            process_handler = signal.getsignal(signal.SIGTERM)
+            real_signal = signal.signal
+
+            def _install_signal(sig, handler):
+                nonlocal install_calls
+                install_calls += 1
+                return real_signal(sig, handler)
+
+            try:
+                work_dirs = iter([work_dir_a, work_dir_b])
+                with (
+                    patch.object(agent, "_workspace_root", side_effect=lambda: next(work_dirs)),
+                    patch.object(agent, "_run_exec", _run_exec_stub),
+                    patch("signal.signal", side_effect=_install_signal),
+                ):
+                    task_a = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    task_b = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    for _ in range(100):
+                        if len(agent.sigterm_events) == 2:
+                            break
+                        await asyncio.sleep(0)
+                    assert len(agent.sigterm_events) == 2
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return await asyncio.gather(task_a, task_b)
+            finally:
+                real_signal(signal.SIGTERM, process_handler)
+                loop.remove_signal_handler(signal.SIGTERM)
+
+        results = asyncio.run(_main())
+
+        assert install_calls == 1  # installed once, not once per run
+        assert previous_calls == 1  # the previously-installed handler (uvicorn's) still fires
+        for output, _usage, _model in results:
+            assert output[0].content[0].text == "partial"
 
 
 class TestDeepMerge:

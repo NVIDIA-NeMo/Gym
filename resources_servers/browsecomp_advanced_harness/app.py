@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from urllib.parse import urlparse
 from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
+from pocketshell import run as pocketshell_run
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
@@ -63,6 +65,25 @@ class BrowseCompResourcesServerConfig(BaseResourcesServerConfig):
     # provider's key must be present (validated below). exclude_domains are
     # honored by all three.
     search_provider: str = "you"
+
+# Exa /search "type" values. The deep variants run Exa's multi-step research path:
+# they also return a per-result `summary` and, when an outputSchema is supplied, a
+# top-level `output.content` synthesis — so the deep request asks for both.
+# Default stays "auto". On an internal eval of a reasoning model, deep scored
+# 77.8% vs a 74.3% auto reference — NOT significant, 9 samples of 397 — at +36.7% search
+# spend, because $0.012/deep vs $0.007/auto is a 71% premium against only 21% fewer calls.
+_EXA_DEEP_TYPES = ("deep-lite", "deep", "deep-reasoning")
+_EXA_SEARCH_TYPES = ("instant", "fast", "auto") + _EXA_DEEP_TYPES
+
+# Fraction of a query's render budget the [Deep Answer] block may take. Without a
+# cap a long synthesis crowds out the per-URL entries the model needs to browse.
+_EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
+
+
+class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
+    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
+    # key must be present (validated below). exclude_domains are honored by both.
+    search_provider: str = "tavily"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     ydc_api_key: str | List[str] | None = None
@@ -83,12 +104,39 @@ class BrowseCompResourcesServerConfig(BaseResourcesServerConfig):
     # and a read-only bash_command tool is exposed for the model to grep/read them.
     workspace: str = "none"
     workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
-    bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
+    bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
-    # Results returned per search query (both providers). The bc_frankie Exa
+    # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
+    # Total characters one `search` call may return, split evenly across the queries
+    # in that call (max_total_length // len(queries)). This — not max_results — is what
+    # actually binds: measured on a reference run, 64% of query blocks already return fewer
+    # than 5 results because the per-query slice runs out first, and search output is
+    # 92.5% of all tool-output characters. The tool schema does not expose the field, so
+    # this config value applies to every real call; an explicit request value still wins.
+    search_max_total_length: int = 30000
+    # When true (and workspace="per_session"), exa search asks for full text alongside
+    # highlights, writes each result to pages/, and returns a [Saved to] path — the same
+    # shape the tavily disk path returns, and the shape the `search` tool description and
+    # the system prompt already promise the model. On the exa path that promise was false:
+    # zero of 1,239 exa search outputs in a reference run contained "[Saved to]", so the
+    # workspace/bash_command affordance covered `browse` only.
+    # Default false: enabling it changes what is asked of the provider on EVERY query.
+    # MEASURED 2026-09-02, live against the exa API: this is NOT a dollar cost. Exa
+    # reports costDollars per response and it is identical with and without text —
+    # {"total": 0.007, "search": {"neural": 0.007}} either way, with no `contents` line
+    # item, because exa bills per QUERY not per result. The real cost is latency and
+    # response size: ~243k characters per 10-result query versus ~19k for highlights
+    # alone. Full text is 2.9-12.9x the highlight text and is genuine extra page content,
+    # not the same snippet with markup left in.
+    exa_search_writes_pages: bool = False
+    # Exa /search "type". "auto" is the reference default. The deep variants run
+    # Exa's multi-step research + synthesis path; see _EXA_DEEP_TYPES for what that
+    # changes in the request/response. Validated at config load so a typo dies at
+    # startup rather than 400-ing every live query mid-run.
+    exa_search_type: str = "auto"
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "BrowseCompResourcesServerConfig":
@@ -98,14 +146,21 @@ class BrowseCompResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
+
         if self.search_provider not in ("you", "tavily", "exa"):
             raise ValueError(f"search_provider must be 'you', 'tavily', or 'exa', got {self.search_provider!r}")
+        if self.exa_search_type not in _EXA_SEARCH_TYPES:
+            raise ValueError(
+                f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
+            )
         return self
 
 
 class SearchRequest(BaseModel):
     queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
-    max_total_length: int = 30000
+    # None = fall back to the server's search_max_total_length (30000 unless configured).
+    # Kept settable so a programmatic caller or a test can still pin the budget per call.
+    max_total_length: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -203,11 +258,19 @@ class SearchProviderCallMetrics(BaseModel):
     start_time: float
     end_time: float
     time_taken: Optional[float] = None
-    # Retry counts for THIS provider request: true 429s exactly (bc_frankie
+    # Retry counts for THIS provider request: true 429s exactly (the reference harness
     # parity: status == 429), everything else retryable (500/502/503/504/520)
     # separately — never conflated.
     num_429_retries: int = 0
     num_other_retries: int = 0
+    # Per-query search yield. None = not applicable / never reached (a failed call, or a
+    # browse record) — deliberately NOT 0, which would read as "the provider had nothing".
+    # These separate the three cases the old records conflated: provider returned nothing,
+    # the character budget dropped results, and everything asked for came back.
+    num_results_offered: Optional[int] = None  # results the provider handed us
+    num_results_returned: Optional[int] = None  # results that fit the budget
+    num_results_truncated: Optional[int] = None  # offered - returned
+    chars_returned: Optional[int] = None  # size of the block handed to the model
 
     @model_validator(mode="after")
     def compute_time_taken(self):
@@ -248,6 +311,106 @@ def _count_provider_retry(status: int) -> None:
 
 
 def _sum_provider_retry_counts(metrics: "SearchMetrics") -> tuple:
+# ---- benchmark-contamination guard -----------------------------------------
+#
+# A provider result that quotes the benchmark itself -- a dataset mirror, a
+# leaderboard, the simple-evals repo -- hands the model the answer key. Training
+# on those rollouts teaches retrieval of the answer rather than research, and it
+# shows up later as an unearned score on the very benchmark being measured.
+#
+# Substring, case-insensitive. "browsecomp" already subsumes the org-prefixed
+# forms (openai/browsecomp), and "simple-eval" subsumes "simple-evals"; the other
+# entries are spellings a bare "browsecomp" genuinely misses.
+#
+# WIDENED 2026-09-09 after an audit that measured the
+# original three against five full 400-sample runs. That list caught 2,023 of 2,594
+# mirror-URL result blocks and MISSED 571 (22%) across 34 URLs -- dominated by
+# huggingface.co/datasets/Nithish2410/benchmark-bcplus, a mirror whose name never contains
+# "browsecomp" and which serves test.jsonl directly. The base model queried that one repo
+# 146 times on sample 10 and read the stored answer out of it. Cost of "bcplus": ~7 false
+# positives (a Go package CmdrVasquess/bcplus, a courier firm) against 571 true hits.
+#
+# NOT added, because the same audit measured them and said no: "deep-research"/"deepresearch"
+# (legitimate subject matter, +4..+12 samples/arm) and "GAIA"/"HLE" (false positives dominate,
+# +17..+33 samples/arm). Keep this list narrow and evidence-backed.
+CONTAMINATION_PATTERNS = [
+    "browsecomp",
+    "browse_comp",
+    "browse-comp",
+    "simple-eval",
+    "bcplus",
+    "bc-plus",
+    "bc_plus",
+]
+
+# Checked against the result's `url` FIELD ONLY -- never the page text. A dataset-viewer page
+# is never a legitimate primary source for a BrowseComp question, and HuggingFace hosts 2,163
+# of the leaked blocks: every long-tail mirror that matches no name pattern (RUC-AIBOX/Evo-Bench,
+# Halcyon-Zhang/BrowseComp-V3, Forival/LiveBrowseComp, OpenResearcher/web-bench, ...).
+# Folding these into CONTAMINATION_PATTERNS instead would drop any page that merely LINKS to a
+# HuggingFace dataset, which is a much larger blast radius than intended. (User call 2026-09-09.)
+CONTAMINATED_URL_SUBSTRINGS = [
+    "huggingface.co/datasets",
+    "datasets-server.huggingface.co",
+]
+
+# Dropping is per ITEM: one poisoned hit out of five costs that hit, not the whole tool
+# call. When EVERY result was dropped the call is rendered exactly like a provider that
+# returned nothing (search: the bare "[Search Query]" header; browse: "No content
+# extracted."). There is deliberately NO dedicated message: telling the model that its
+# results "referenced the benchmark" tells it the answer key exists and is nearby.
+# (User call 2026-09-09, replacing the decontam arm's CONTAMINATED_MESSAGE.)
+
+
+def _is_contaminated(*texts: Optional[str]) -> bool:
+    """True if any pattern appears in any of `texts` (case-insensitive)."""
+    hay = " ".join(t for t in texts if t).lower()
+    return any(p in hay for p in CONTAMINATION_PATTERNS)
+
+
+def _is_contaminated_url(url: Optional[str]) -> bool:
+    """True if the URL points at a dataset host that only ever mirrors the benchmark.
+
+    Field-scoped on purpose: see the CONTAMINATED_URL_SUBSTRINGS comment.
+    """
+    if not url:
+        return False
+    u = url.lower()
+    return any(s in u for s in CONTAMINATED_URL_SUBSTRINGS)
+
+
+def _drop_contaminated(result_list: List[dict]) -> tuple[List[dict], int]:
+    """Split a provider result list into (kept, n_dropped).
+
+    Two independent tests, either of which drops the item:
+      1. TEXT   -- scans the WHOLE serialized result, not a field whitelist, because exa
+                   carries its text in a `highlights` LIST that a title/url/content check
+                   would miss entirely.
+      2. URL    -- the `url` field only, against CONTAMINATED_URL_SUBSTRINGS.
+    The cost is one lower() over the raw page text per result -- a few ms against a ~17s
+    generation call, and it buys not having to enumerate provider schemas.
+    """
+    kept = [
+        r
+        for r in result_list
+        if not (_is_contaminated(json.dumps(r, default=str)) or _is_contaminated_url(r.get("url")))
+    ]
+    return kept, len(result_list) - len(kept)
+
+
+def _filter_results(result_list: List[dict], fn: str, provider: str) -> tuple[List[dict], int]:
+    """_drop_contaminated plus telemetry, so the drop rate is measurable per leg
+    rather than silent."""
+    kept, dropped = _drop_contaminated(result_list)
+    if dropped:
+        print(
+            f"[browsecomp][contamination] fn={fn} provider={provider} dropped={dropped} kept={len(kept)}",
+            flush=True,
+        )
+    return kept, dropped
+
+
+def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     """(total true 429s, total other retried statuses) across a session's calls."""
     n429 = sum(c.num_429_retries for c in metrics.async_search_provider_calls)
     n_other = sum(c.num_other_retries for c in metrics.async_search_provider_calls)
@@ -393,14 +556,30 @@ class ExaAIOHTTPClient(BaseModel):
         await raise_for_status(response)
 
     async def search(
-        self, query: str, num_results: int, exclude_domains: Optional[List[str]] = None
+        self,
+        query: str,
+        num_results: int,
+        exclude_domains: Optional[List[str]] = None,
+        include_text: bool = False,
+        search_type: str = "auto",
     ) -> Dict[str, Any]:
+        contents: Dict[str, Any] = {"highlights": True}
+        if include_text:
+            # Full page text per result, so search hits can be written to pages/ the way
+            # the tavily disk path writes raw_content. Opt-in for response size and
+            # latency, not for price: exa bills per query, and costDollars is unchanged
+            # by this field (measured 2026-09-02).
+            contents["text"] = True
         body: Dict[str, Any] = {
             "query": query,
             "numResults": num_results,
-            "type": "auto",
-            "contents": {"highlights": True},
+            "type": search_type,
+            "contents": contents,
         }
+        if search_type in _EXA_DEEP_TYPES:
+            # Deep search only pays off if we ask for what it synthesizes.
+            contents["summary"] = True
+            body["outputSchema"] = {"type": "text"}
         if exclude_domains:
             body["excludeDomains"] = list(exclude_domains)
         return await self._post("/search", body)
@@ -511,7 +690,7 @@ class YouAIOHTTPClient(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
-# read-only bash tool. Ported from the bc_frankie harness.
+# read-only bash tool. Ported from the reference harness.
 # ---------------------------------------------------------------------------
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
@@ -547,8 +726,8 @@ def _bash_truncate(s: str) -> str:
     )
 
 
-# --- bash_command guards (ported byte-for-byte from the bc_frankie_bash_tool
-# harness @ ee72d54: _bash_denylisted + _bash_allowlisted). Layered deny-first,
+# --- bash_command guards (ported byte-for-byte from an internal reference
+# harness: _bash_denylisted + _bash_allowlisted). Layered deny-first,
 # then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
 # _run_bash_readonly is the kernel backstop); these block destructive/network/
 # interpreter commands + command/process substitution + find -exec / sed -i. ---
@@ -840,7 +1019,7 @@ def _last_assistant_text(response) -> str:
     """Text of the LAST assistant message item in response.output (the model's final answer).
     Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
     the model emits text alongside tool calls mid-trajectory (~49% of BrowseComp samples). Also
-    aligns with bc_frankie, which grades only the final message."""
+    aligns with the reference harness, which grades only the final message."""
     text = ""
     for item in response.output:
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
@@ -874,7 +1053,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
 
-        # Optional Tavily client-source identity header (matches bc_frankie's
+        # Optional Tavily client-source identity header (matches the reference harness's
         # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
         # not hardcoded. Empty/unset => header not sent.
         client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
@@ -976,51 +1155,56 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BashCommandResponse(results_string=out)
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
-        # Layered guard (ported from bc_frankie @ ee72d54): deny-list first
-        # (specific reason), then default-deny read-only allow-list. Either one
-        # blocking returns [blocked: ...] and skips execution.
+        """Run the command IN-PROCESS via pocketshell -- no subprocess, no sandbox.
+
+        Replaces `asyncio.create_subprocess_exec("bash", "-c", ...)`. The old
+        design relied on a command-NAME deny/allow list plus `ulimit -f 0`, which
+        never inspected path arguments (so `cat /etc/passwd` passed the guard) and
+        which its own comment described as "NOT a security boundary". pocketshell
+        cannot execute anything it does not implement, and confines every path to
+        the sample workspace, so the protection is structural.
+
+        The legacy guard is deliberately kept IN FRONT so that anything it used to
+        reject still returns the identical `[blocked: ...]` string -- existing
+        synthetic-data corpora, and models trained on them, saw those exact responses.
+
+        Output shape (stdout / --- stderr --- / [exit_code=N]) is unchanged.
+        """
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
             print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
             return f"[blocked: {blocked}]\n[exit_code=-3]"
-        # Read-only enforcement backstop: `ulimit -f 0` sets RLIMIT_FSIZE=0 so the
-        # command cannot write/grow ANY file; reads + pipes still work. cwd is
-        # pinned to the session workspace; env is minimal (no inherited secrets).
-        wrapped = f"ulimit -c 0 2>/dev/null; ulimit -f 0 2>/dev/null; {keystrokes}"
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": cwd, "LC_ALL": "C.UTF-8"}
-        async with self._bash_semaphore:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    wrapped,
-                    cwd=cwd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-            except Exception as e:
-                return f"[bash error: {e}]\n[exit_code=-2]"
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=duration)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
-                return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
 
-        stdout = _bash_truncate(stdout_b.decode(errors="replace"))
-        stderr = _bash_truncate(stderr_b.decode(errors="replace"))
-        truncated = len(stdout_b) + len(stderr_b) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
+        loop = asyncio.get_running_loop()
+        try:
+            # pocketshell is pure-Python and CPU-bound; keep the event loop free.
+            # A run_in_executor thread cannot be cancelled, so pocketshell enforces
+            # its own deadline internally (including a per-match regex timeout --
+            # Python backtracks where GNU grep's DFA does not). asyncio.wait_for is
+            # a belt-and-braces outer bound so a wedged thread can never stall the
+            # sample; the semaphore keeps the shared pool from being swamped.
+            async with self._bash_semaphore:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, functools.partial(pocketshell_run, keystrokes or "", cwd, duration)),
+                    timeout=duration + 30,
+                )
+        except asyncio.TimeoutError:
+            print(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}", flush=True)
+            return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
+            return f"[bash error: {e}]\n[exit_code=-2]"
+
+        stdout = _bash_truncate(result.stdout)
+        stderr = _bash_truncate(result.stderr)
+        truncated = (len(result.stdout) + len(result.stderr)) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
         parts = []
         if stdout:
             parts.append(stdout)
         if stderr:
             parts.append("--- stderr ---")
             parts.append(stderr)
-        parts.append(f"[exit_code={proc.returncode}{' truncated' if truncated else ''}]")
+        parts.append(f"[exit_code={result.exit_code}{' truncated' if truncated else ''}]")
         return "\n".join(parts)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
@@ -1034,12 +1218,32 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return client
 
     def _record_call(self, metrics: "SearchMetrics", function: str, provider: str, status: str, start: float) -> None:
+    def _record_call(
+        self,
+        metrics: "TavilySearchMetrics",
+        function: str,
+        provider: str,
+        status: str,
+        start: float,
+        num_results_offered: Optional[int] = None,
+        num_results_returned: Optional[int] = None,
+        chars_returned: Optional[int] = None,
+    ) -> None:
         """Append one per-API-call metering record (provider, function, latency).
-        One record per provider HTTP request: per query for search, per call for browse."""
+        One record per provider HTTP request: per query for search, per call for browse.
+
+        The yield arguments are optional and default to None, which means "not applicable
+        or never reached" — a failed call or a browse record. They must NOT default to 0,
+        because 0 offered is a real and different observation: the provider had nothing."""
         retry_counts = _PROVIDER_RETRY_COUNTS.get() or {}
         _PROVIDER_RETRY_COUNTS.set(None)  # next call in this task starts from zero
-        metrics.async_search_provider_calls.append(
-            SearchProviderCallMetrics(
+        truncated = (
+            num_results_offered - num_results_returned
+            if num_results_offered is not None and num_results_returned is not None
+            else None
+        )
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
                 function=function,
                 provider=provider,
                 status=status,
@@ -1047,40 +1251,114 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 end_time=time(),
                 num_429_retries=retry_counts.get("num_429_retries", 0),
                 num_other_retries=retry_counts.get("num_other_retries", 0),
+                num_results_offered=num_results_offered,
+                num_results_returned=num_results_returned,
+                num_results_truncated=truncated,
+                chars_returned=chars_returned,
             )
         )
 
-    async def _exa_search_one(self, query: str, max_length: int, metrics: "SearchMetrics") -> str:
-        """Exa search: highlight snippets returned INLINE (never written to pages/, even in
-        terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
+    async def _exa_search_one(
+        self, query: str, max_length: int, metrics: "TavilySearchMetrics", page_writer: Optional["_PageWriter"] = None
+    ) -> str:
+        """Exa search: highlight snippets returned INLINE. Mirrors the reference Exa
+        harness formatting exactly.
+
+        When exa_search_writes_pages is on AND a page_writer is available, each result's
+        full text is also written to pages/ and the entry carries a [Saved to] path — the
+        shape the tool description and system prompt already promise. Snippets stay inline
+        either way; the page is additional, never a substitute."""
         if len(query) > 400:
             return "Query is too long"
 
+        write_pages = self.config.exa_search_writes_pages and page_writer is not None
         client = self._select_exa_client()
         call_start = time()
         try:
             results = await client.search(
-                query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
+                query,
+                num_results=self.config.max_results,
+                exclude_domains=self._exclude_domains,
+                include_text=write_pages,
+                search_type=self.config.exa_search_type,
             )
         except Exception as e:
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
-        self._record_call(metrics, "search", "exa", "success", call_start)
-
+        # Contamination guard. Filtering at each formatting site rather than at the
+        # provider call is deliberate: a result reaches the model by exactly four
+        # routes, and every one of them formats here or in one of the three sites
+        # below, so this is where all of them can be covered. Applied ABOVE the
+        # pages/ write in the loop, so a contaminated page is never written to disk.
+        offered, _ = _filter_results(results.get("results", []) or [], "search", "exa")
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for result in results.get("results", []):
+        returned = 0
+
+        # Deep-search synthesis (outputSchema), when present. Rendered FIRST — it is the
+        # highest-value part — but capped so the per-URL entries still fit; the model
+        # needs those URLs for browse/bash follow-up. Deliberately NOT counted in the
+        # yield counters below: it is a synthesis, not a result. A synthesis that quotes
+        # the benchmark is dropped like any other contaminated result.
+        answer = (results.get("output") or {}).get("content")
+        if answer is not None and not isinstance(answer, str):
+            answer = json.dumps(answer, ensure_ascii=False)
+        if answer and _is_contaminated(answer):
+            print("[browsecomp][contamination] fn=search provider=exa dropped=deep_answer", flush=True)
+            answer = None
+        if answer:
+            cap = int(max_length * _EXA_DEEP_ANSWER_MAX_FRACTION)
+            if len(answer) > cap:
+                answer = f"{answer[:cap]}\n[...deep answer truncated...]"
+            entry = f"[Deep Answer]: {answer}\n"
+            if running_len + len(entry) <= max_length:
+                blocks.append(entry)
+                running_len += len(entry)
+        for ri, result in enumerate(offered, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             highlights = result.get("highlights") or []
             snippet = " ... ".join(h for h in highlights if h)
-            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            saved_line = ""
+            if write_pages:
+                text = result.get("text") or ""
+                if text:
+                    if len(text) > self.config.max_page_bytes:
+                        text = text[: self.config.max_page_bytes]
+                    saved = page_writer.write_search_result(query, ri, title, url, text)
+                    saved_line = f"[Saved to]: {saved} ({len(text)} bytes)\n"
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n{saved_line}"
+            summary = result.get("summary") or ""
+            if summary:
+                entry += f"[Summary]: {summary}\n"
             if running_len + len(entry) > max_length:
                 break
             blocks.append(entry)
             running_len += len(entry)
-        return "\n".join(blocks)
+            returned += 1
+        results_string = "\n".join(blocks)
+        # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
+        # in between, so the retry contextvar _record_call reads is still this call's.
+        self._record_call(
+            metrics,
+            "search",
+            "exa",
+            "success",
+            call_start,
+            num_results_offered=len(offered),
+            num_results_returned=returned,
+            chars_returned=len(results_string),
+        )
+        if returned < len(offered):
+            print(
+                f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
+                f"returned={returned}/{len(offered)} budget={max_length}",
+                flush=True,
+            )
+        elif not offered:
+            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
+        return results_string
 
     async def _search_one(self, query: str, max_length: int, metrics: "SearchMetrics") -> str:
         if len(query) > 400:
@@ -1121,7 +1399,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "SearchMetrics"
     ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
-        title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
+        title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
         client = self._select_tavily_client()
         call_start = time()
@@ -1139,9 +1417,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 
+        # THE important one. In terminal mode the raw page is written to pages/*.txt
+        # and the model reads it later with grep/cat through the bash tool, so
+        # filtering only the returned string would leave the contamination on disk
+        # and fully readable. Filtering here, ABOVE the write loop, means the page is
+        # never written at all.
+        result_list, _ = _filter_results(results.get("results", []), "search", "tavily")
+
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for ri, result in enumerate(results.get("results", []), start=1):
+        for ri, result in enumerate(result_list, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             snippet = (result.get("content") or "")[:500]
@@ -1170,11 +1455,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return SearchResponse(results_string="Query is none or empty")
 
-        max_per_query_length = body.max_total_length // len(body.queries)
+        # The tool schema does not expose max_total_length, so body.max_total_length is
+        # None on every real model call and the configured budget applies.
+        total_length = (
+            body.max_total_length if body.max_total_length is not None else self.config.search_max_total_length
+        )
+        max_per_query_length = total_length // len(body.queries)
         if self.config.search_provider == "exa":
-            # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
+            # Exa: highlight snippets inline. Pages are written only when
+            # exa_search_writes_pages is on and the session has a workspace; otherwise the
+            # historical highlights-only behaviour is unchanged.
+            exa_page_writer = self._get_page_writer(sid) if self.config.exa_search_writes_pages else None
             results = await asyncio.gather(
-                *[self._exa_search_one(q, max_per_query_length, metrics) for q in body.queries]
+                *[self._exa_search_one(q, max_per_query_length, metrics, exa_page_writer) for q in body.queries]
             )
         else:
             page_writer = self._get_page_writer(sid)
@@ -1249,10 +1542,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
+        # Contamination guard for the browse/extract path, which has its own write
+        # loop and does not route through any of the three search sites above.
+        # Applied ABOVE the page writes, so a contaminated page never lands on disk.
+        result_list, _ = _filter_results(result_list, "browse", self.config.search_provider)
+        if not result_list:
+            return BrowseResponse(results_string="No content extracted.")
+
         page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
-            # Mirrors the bc_frankie harness tavily_extract (disk mode) formatting exactly.
+            # Mirrors the reference harness tavily_extract (disk mode) formatting exactly.
             blocks = []
             for result in result_list:
                 url = result.get("url", "") or ""
@@ -1326,10 +1626,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
+        result_list, _ = _filter_results(results["results"], "search", "tavily")
+
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
 
-        for result in results["results"]:
+        for result in result_list:
             title = result.get("title", "")
             url = result.get("url", "")
             content = result.get("raw_content") or result.get("content", "")
@@ -1382,7 +1684,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
         # Budget covers reasoning + final message combined (the reasoning parser splits
-        # post-hoc). 2048 made reasoning judges (e.g. GLM-5.1) burn the whole budget
+        # post-hoc). 2048 made reasoning judges burn the whole budget
         # thinking on ~2.7% of calls — no final message emitted, so output[-1] is the
         # reasoning item and parsing fails until a retry samples a shorter think.
         judge_create_params.max_output_tokens = 10240

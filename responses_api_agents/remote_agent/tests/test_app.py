@@ -868,12 +868,18 @@ class TestCollectorRoundTrip:
 
         class InProcessHelper(RolloutCollectionHelper):
             def setup_server_client(self, *args, **kwargs):
+                from omegaconf import OmegaConf
+
                 async def _post(server_name, url_path, json=None, **kw):
                     response = agent_http.post(url_path, json=json)
                     return FakeServerClientResponse(response.json(), status=response.status_code)
 
                 server_client = MagicMock(spec=ServerClient)
                 server_client.post = AsyncMock(side_effect=_post)
+                # Pre-dispatch agent validation reads the running config off the client.
+                server_client.global_config_dict = OmegaConf.create(
+                    {"remote_agent": {"responses_api_agents": {"impl": {}}}}
+                )
                 return server_client
 
             async def _call_aggregate_metrics(self, results, rows, output_fpath):

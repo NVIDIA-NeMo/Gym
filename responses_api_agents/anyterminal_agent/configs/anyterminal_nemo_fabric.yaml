@@ -1,0 +1,39 @@
+anyterminal_nemo_fabric:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by a NeMo Fabric harness inside the task sandbox.
+      value: Evaluate terminal-task agents through a harness-neutral Fabric lifecycle.
+
+      agent_server_module: responses_api_agents.nemo_fabric_agent.app
+      agent_server_class: NeMoFabricAgent
+      agent_config_class: NeMoFabricAgentConfig
+      agent_kwargs:
+        adapter_id: nvidia.fabric.mini-swe-agent
+        model_provider: openai
+        model: gym-policy-model
+        model_api_key: local  # pragma: allowlist secret
+        timeout: 12000
+        cwd: .
+        fabric_config:
+          environment:
+            env:
+              MSWEA_COST_TRACKING: ignore_errors
+          runtime:
+            max_turns: 90
+
+      container_formatter: "{docker_image}"
+      sandbox_provider: ${sandbox}
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      agent_runtime_source: ${oc.env:ANYTERMINAL_AGENT_RUNTIME_SOURCE,auto}
+      concurrency: 1
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/example.jsonl

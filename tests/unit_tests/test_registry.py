@@ -128,6 +128,13 @@ class TestDiscoverEnvironments:
 
         assert set(_discover_environments_in_dir(envs_dir)) == {"real"}
 
+    def test_ignores_tombstone_directories(self, tmp_path: Path) -> None:
+        envs_dir = tmp_path / "environments"
+        manifest_path = _write_manifest(tmp_path, "environments", "moved", _manifest("moved"))
+        manifest_path.parent.joinpath(registry_module.ENVIRONMENT_TOMBSTONE_FILENAME).write_text("replacement\n")
+
+        assert _discover_environments_in_dir(envs_dir) == {}
+
     def test_unparseable_or_metadataless_configs_still_discovered(self, tmp_path: Path) -> None:
         # Configs without a parseable resources_servers block (or malformed YAML) must still be
         # discovered by name, just with no description/domain — never crash discovery.
@@ -192,7 +199,12 @@ class TestDiscoverEnvironmentsAcrossRoots:
 
 class TestEnvironmentCatalog:
     def test_discovers_manifest_and_legacy_union(self, tmp_path: Path, monkeypatch) -> None:
-        manifest_path = _write_manifest(tmp_path, "environments", "manifest_env", _manifest("manifest_env"))
+        manifest_path = _write_manifest(
+            tmp_path,
+            "environments",
+            "manifest_env",
+            _manifest("manifest_env", experimental=False),
+        )
         _make_env(tmp_path / "environments", "legacy_env", _ENV_CONFIG.format(name="legacy_env"))
         benchmark = tmp_path / "benchmarks" / "legacy_benchmark" / "config.yaml"
         benchmark.parent.mkdir(parents=True)
@@ -216,7 +228,7 @@ class TestEnvironmentCatalog:
             ("benchmark", "legacy_benchmark"),
         }
         manifest_entry = entries[("environment", "manifest_env")]
-        assert manifest_entry.status == "experimental"
+        assert manifest_entry.status is None
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"

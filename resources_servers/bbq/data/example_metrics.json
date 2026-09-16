@@ -1,0 +1,14 @@
+{
+  "Number of examples": 5,
+  "Reference mean reward": 0.7,
+  "Reference answer classes": {
+    "correct_answer": 4,
+    "incorrect_answer": 1
+  },
+  "Reference explanation classes": {
+    "high": 3,
+    "low": 1,
+    "unacceptable": 1
+  },
+  "Status": "Live endpoint rollouts; collected 2026-07-31 via judge nvidia/google/gemma-4-31b-it (calibrated single judge, thinking off) and policy nvidia/nvidia/nemotron-3-nano-30b-a3b over the NVIDIA inference API; 5 rows selected from an internal 50-rollout selection pool (10 repeats/prompt; pool not shipped in this repository) to maximize reward-cell coverage: 3x correct/high (1.0), 1x correct/low (0.5), 1x incorrect/unacceptable (0.0). Cells correct/unacceptable and incorrect/low did not occur in 50 live draws."
+}

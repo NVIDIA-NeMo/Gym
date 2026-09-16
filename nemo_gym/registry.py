@@ -33,6 +33,7 @@ ENVIRONMENTS_DIR = PARENT_DIR / ENVIRONMENTS_SUBDIR
 BENCHMARKS_SUBDIR = "benchmarks"
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
+ENVIRONMENT_TOMBSTONE_FILENAME = ".nemo_gym_tombstone"
 MANIFEST_FILENAME = "manifest.yaml"
 
 CatalogKind = Literal["environment", "benchmark"]
@@ -54,7 +55,7 @@ class EnvironmentCatalogEntry:
     description: Optional[str] = None
     domain: Optional[str] = None
     kind: CatalogKind = "environment"
-    status: CatalogStatus = "no-manifest"
+    status: Optional[CatalogStatus] = "no-manifest"
     manifest_path: Optional[Path] = None
     version: Optional[str] = None
     integration_profile: Optional[str] = None
@@ -113,7 +114,7 @@ def _manifest_entry(
         "path": manifest_path.parent,
         "description": manifest.description,
         "domain": _enum_value(manifest.domain),
-        "status": "experimental",
+        "status": "experimental" if manifest.experimental else None,
         "manifest_path": manifest_path,
         "version": manifest.version,
         "integration_profile": _enum_value(manifest.integration_profile),
@@ -226,7 +227,8 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
 
     for child in sorted(tree_dir.iterdir()):
         config_path = child / ENVIRONMENT_CONFIG_FILENAME
-        if child.is_dir() and config_path.is_file():
+        tombstone_path = child / ENVIRONMENT_TOMBSTONE_FILENAME
+        if child.is_dir() and config_path.is_file() and not tombstone_path.is_file():
             yield child.name, config_path
 
 
@@ -243,6 +245,9 @@ def _discover_registry_tree(
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
     for manifest_path in sorted(tree_dir.rglob(MANIFEST_FILENAME)):
+        relative_path = manifest_path.relative_to(tree_dir)
+        if kind == "environment" and (tree_dir / relative_path.parts[0] / ENVIRONMENT_TOMBSTONE_FILENAME).is_file():
+            continue
         key = (kind, _path_identity(tree_dir, manifest_path))
         if key in claimed:
             continue
