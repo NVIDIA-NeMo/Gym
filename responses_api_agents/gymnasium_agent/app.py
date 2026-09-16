@@ -156,8 +156,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if supports_explicit_close:
                 # Preserve the original model/transport/cancellation failure.
                 try:
-                    # AnyIO scopes can repeatedly cancel at each checkpoint.
-                    # Shield cleanup across its HTTP awaits, but bound
+                    # Disconnect middleware level-cancels the request's AnyIO
+                    # scope. Shield cleanup across its HTTP awaits, but bound
                     # it so an unavailable resource server cannot stall exit.
                     with anyio.fail_after(self.config.environment_cleanup_timeout_seconds, shield=True):
                         await self._close_environment(env_cookies)
