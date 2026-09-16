@@ -159,6 +159,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
+        if CheckInput.OBSERVED_MODEL_CALLS in spec.reads and not (model_calls_observed and calls):
+            unobserved.append(spec.id)
+            continue
         binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
         bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
         if binding_input is not None:
