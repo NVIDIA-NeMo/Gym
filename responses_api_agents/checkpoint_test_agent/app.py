@@ -5,6 +5,7 @@ import asyncio
 import os
 
 from nemo_gym._checkpoint.agent import (
+    AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointParticipant,
     AgentExecution,
@@ -20,6 +21,9 @@ class CheckpointTestParticipant(AgentCheckpointParticipant):
         super().__init__(instance_name)
         self._hold_first_boundary = os.environ.get("NEMO_GYM_TEST_HOLD_FIRST_BOUNDARY") == "1"
         self._hold_first_mutated_boundary = os.environ.get("NEMO_GYM_TEST_HOLD_FIRST_MUTATED_BOUNDARY") == "1"
+        self._hold_second_terminal_boundary = os.environ.get("NEMO_GYM_TEST_HOLD_SECOND_TERMINAL_BOUNDARY") == "1"
+        self._terminal_boundary_count = 0
+        self._terminal_boundary_lock = asyncio.Lock()
 
     async def commit_boundary(
         self,
@@ -31,7 +35,18 @@ class CheckpointTestParticipant(AgentCheckpointParticipant):
         hold_mutated_boundary = (
             self._hold_first_mutated_boundary and pending_action_cursor > 0 and resource_revision >= 2
         )
-        hold = self._hold_first_boundary or hold_mutated_boundary
+        hold_second_terminal_boundary = False
+        if (
+            self._hold_second_terminal_boundary
+            and record.boundary_kind == AgentBoundaryKind.TURN_COMPLETE
+            and record.boundary_index >= 1
+        ):
+            async with self._terminal_boundary_lock:
+                self._terminal_boundary_count += 1
+                if self._terminal_boundary_count == 2:
+                    self._hold_second_terminal_boundary = False
+                    hold_second_terminal_boundary = True
+        hold = self._hold_first_boundary or hold_mutated_boundary or hold_second_terminal_boundary
         if hold:
             self._hold_first_boundary = False
             if hold_mutated_boundary:

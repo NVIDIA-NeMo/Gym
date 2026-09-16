@@ -441,6 +441,28 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
     ).json()["state"] in {"paused", "draining"}
 
 
+def test_policy_model_resume_is_idempotent_when_prepare_never_paused() -> None:
+    """Rollback may race a failed prepare whose fence already returned to idle."""
+    client = TestClient(_model_server("policy").setup_webserver())
+    body = {"checkpoint_id": "ckpt-failed-prepare", "deadline_ts": 4e9}
+
+    resume = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+        json=body,
+        headers=AUTH_HEADERS,
+    )
+    assert resume.status_code == 200
+    assert resume.json()["state"] == "accepting"
+
+    replay = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+        json=body,
+        headers=AUTH_HEADERS,
+    )
+    assert replay.status_code == 200
+    assert replay.json() == resume.json()
+
+
 def test_model_admission_requires_existing_control_bearer() -> None:
     client = TestClient(_model_server("policy").setup_webserver())
     response = client.post(
