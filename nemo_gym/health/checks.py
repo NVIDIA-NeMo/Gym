@@ -598,6 +598,11 @@ def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -
     ]
 
 
+def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
+    """Whether the rollout's last observed model call failed."""
+    return bool(calls and _is_failed(calls[-1]))
+
+
 def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     """Flag a rollout whose last observed model call failed.
 
@@ -612,7 +617,7 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
     what makes its reward indistinguishable from a genuine zero.
     """
     calls = _normalized_trajectory_calls(trajectory)
-    if not calls or not _is_failed(calls[-1]):
+    if not _ended_on_failed_call(calls):
         return []
     last = calls[-1]
     return [

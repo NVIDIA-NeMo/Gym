@@ -1368,3 +1368,17 @@ def test_an_agent_that_publishes_no_trajectory_still_reports_turns_unavailable()
     trajectory = rollout_collection._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, {})
 
     assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
+
+
+def test_the_ended_on_error_statistic_and_the_finding_agree(tmp_path: Path) -> None:
+    """The digest already reported `ended_on_error` for this rollout while the
+    verdict stayed `unobserved` -- the gate knew and said nothing. Both now read
+    one predicate, so they cannot drift apart again."""
+    record = _unreferenced_failure_record([])
+    calls = [_call(call_index=0, model_call_id=None, response_id=None, status_code=500)]
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.ended_on_error is True
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
