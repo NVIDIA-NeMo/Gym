@@ -323,6 +323,74 @@ async def test_replays_encrypted_reasoning_and_native_tool_metadata_on_next_call
 
 
 @pytest.mark.asyncio
+async def test_adaptive_budget_never_exceeds_estimated_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prompt that (by estimate) fills the window gets a small graceful budget.
+
+    Requesting the 16000 floor here would make input + max_output_tokens exceed
+    the context window, and the endpoint rejects the whole request instead of
+    truncating — the failure mode this budget exists to avoid.
+    """
+    monkeypatch.setenv("NOOA_CONTEXT_WINDOW", "10000")
+    monkeypatch.setenv("NOOA_MAX_OUTPUT_TOKENS", "32000")
+    monkeypatch.setenv("NOOA_MIN_OUTPUT_TOKENS", "16000")
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="ok")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, _ = make_llm(model_response(output))
+
+    await llm.acall([{"role": "user", "content": "x" * 30_000}])
+
+    request = client.post.await_args.kwargs["json"]
+    assert request.max_output_tokens == 1024
+
+
+@pytest.mark.asyncio
+async def test_adaptive_budget_floor_cannot_exceed_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The floor never pushes the budget past the estimated remaining window."""
+    monkeypatch.setenv("NOOA_CONTEXT_WINDOW", "20000")
+    monkeypatch.setenv("NOOA_MAX_OUTPUT_TOKENS", "32000")
+    monkeypatch.setenv("NOOA_MIN_OUTPUT_TOKENS", "16000")
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="ok")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, _ = make_llm(model_response(output))
+
+    # 12000 chars -> ~4000 estimated tokens; available = 20000 - 4000 - 1000 = 15000.
+    await llm.acall([{"role": "user", "content": "x" * 12_000}])
+
+    request = client.post.await_args.kwargs["json"]
+    assert request.max_output_tokens == 15000
+
+
+@pytest.mark.asyncio
+async def test_adaptive_budget_respects_cap_when_headroom_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOOA_CONTEXT_WINDOW", "131072")
+    monkeypatch.setenv("NOOA_MAX_OUTPUT_TOKENS", "32000")
+    monkeypatch.setenv("NOOA_MIN_OUTPUT_TOKENS", "16000")
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="ok")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, _ = make_llm(model_response(output))
+
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+
+    request = client.post.await_args.kwargs["json"]
+    assert request.max_output_tokens == 32000
+
+
+@pytest.mark.asyncio
 async def test_enforces_total_policy_call_budget() -> None:
     output = NeMoGymResponseOutputMessageForTraining(
         id="msg-1",

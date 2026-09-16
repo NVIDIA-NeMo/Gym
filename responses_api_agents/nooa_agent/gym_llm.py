@@ -405,10 +405,24 @@ class GymResponsesLLM(UnifiedLLM):
             _context_window = int(_os.environ.get("NOOA_CONTEXT_WINDOW", "131072"))
             try:
                 _input_chars = sum(len(str(m.get("content") or "")) for m in input_items)
-                _available = _context_window - _input_chars // 4 - int(_context_window * 0.05)
+                # ~3 chars/token: dense code/JSON often tokenize below the ~4 chars/token
+                # of prose, and underestimating the prompt overestimates headroom — which
+                # turns a graceful length-limit truncation into a hard request rejection.
+                _estimated_input = _input_chars // 3
+                _available = _context_window - _estimated_input - int(_context_window * 0.05)
             except Exception:
                 _available = _cap
-            request["max_output_tokens"] = max(min(_available, _cap), _floor)
+            if _available > 0:
+                # Headroom always wins over the floor: requesting more output tokens
+                # than the window can hold makes the endpoint reject the entire request
+                # (input + max_output_tokens > context) instead of truncating. The
+                # floor only bounds the graceful fallback below.
+                request["max_output_tokens"] = min(_cap, _available)
+            else:
+                # The estimate says the prompt may already fill the window. Request the
+                # smallest useful budget so a fitting prompt still completes gracefully;
+                # a truly over-window prompt fails at the endpoint regardless of this.
+                request["max_output_tokens"] = min(_floor, 1024)
 
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         self._request_collector.append(body.model_copy(deep=True))
