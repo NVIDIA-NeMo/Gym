@@ -1,0 +1,29 @@
+{
+  "source_repository": "https://github.com/NVIDIA-NeMo/labs-OO-Agents",
+  "source_tag": "v0.0.9",
+  "source_commit": "54e8fa23778ec384dc5813cee61b8f814276e05b",
+  "agent_source": "tests/capability/agents/calculate_single.py",
+  "agent_sha256": "7970895acd6b001eb53ea934b77a7da1abb12da007ee54e0456de670ab4b027f",
+  "data_source": "tests/capability/data/calculate_simple.jsonl",
+  "data_sha256": "6d8b5700dea4aaa8a38df45e76e8fe5413752cd627f7977d12524d906bcc45d9",
+  "cases": [
+    {
+      "args": [],
+      "kwargs": {
+        "a": 2,
+        "b": 5,
+        "calculation": "compute a plus b"
+      },
+      "expected": 7
+    },
+    {
+      "args": [],
+      "kwargs": {
+        "a": 7,
+        "b": 8,
+        "calculation": "multiply a by b"
+      },
+      "expected": 56
+    }
+  ]
+}
