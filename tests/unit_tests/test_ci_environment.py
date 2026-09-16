@@ -888,3 +888,37 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
+    setup_dev = SETUP_DEV.read_text()
+
+    assert "command -v uv >/dev/null 2>&1" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
+
+
+def test_lint_reuses_pre_commit_on_path() -> None:
+    # lint.sh reuses a pre-commit already on PATH (the offline/container dev
+    # environment); otherwise it provisions the pinned pre-commit (version from
+    # uv.lock) into an isolated venv. It does not use uv or setup_dev.sh.
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    assert "command -v pre-commit" in lint
+    assert "uv.lock" in lint
+    assert "uv sync" not in lint
+    assert "setup_dev.sh" not in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
