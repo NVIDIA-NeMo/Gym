@@ -194,6 +194,9 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture after conversion to the response returned to the client."""
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -255,7 +258,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return _orjson_dispatch_response(await self._invoke_responses(request, params))
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -300,7 +306,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            response = await self._invoke_chat_completions(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
@@ -354,7 +363,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
                 media_type="text/event-stream",
             )
-        return _orjson_dispatch_response(anthropic_response)
+        dispatched = _orjson_dispatch_response(anthropic_response)
+        await self._finalize_served_response(anthropic_response)
+        return dispatched
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
