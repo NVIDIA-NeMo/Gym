@@ -24,14 +24,15 @@ Zero external dependencies beyond nemo_gym + pydantic.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import sys
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import FastAPI
 from problem import Board, ColorPalette
-from pydantic import Field
+from pydantic import Field, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -40,6 +41,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry import GymSpanGroup, managed_span
 
 
 # =============================================================================
@@ -161,6 +163,7 @@ except Exception as e:
 class NVARCResourcesServerConfig(BaseResourcesServerConfig):
     agent_mode: str = "transductive"
     python_timeout_seconds: int = 30
+    python_max_concurrency: PositiveInt = 32
 
 
 class NVARCRunRequest(BaseRunRequest):
@@ -190,6 +193,10 @@ class NVARCVerifyResponse(BaseVerifyResponse):
 
 class NVARCResourcesServer(SimpleResourcesServer):
     config: NVARCResourcesServerConfig
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._python_semaphore = asyncio.Semaphore(self.config.python_max_concurrency)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -229,11 +236,17 @@ class NVARCResourcesServer(SimpleResourcesServer):
         code = _extract_python_code(response_text)
         if code is None:
             return None
-        return await _execute_python(
-            code,
-            test_input,
-            self.config.python_timeout_seconds,
-        )
+        with managed_span(GymSpanGroup.VERIFY, "gym.verify.nvarc.python.queue"):
+            await self._python_semaphore.acquire()
+        try:
+            with managed_span(GymSpanGroup.VERIFY, "gym.verify.nvarc.python.execute"):
+                return await _execute_python(
+                    code,
+                    test_input,
+                    self.config.python_timeout_seconds,
+                )
+        finally:
+            self._python_semaphore.release()
 
 
 # =============================================================================
@@ -295,6 +308,38 @@ def _extract_python_code(text: str) -> Optional[str]:
     return None
 
 
+_PROCESS_TIMEOUT_GRACE_SECONDS = 5.0
+_PROCESS_TERMINATION_GRACE_SECONDS = 1.0
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_PROCESS_TERMINATION_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        await proc.wait()
+
+
+async def _reap_process(proc: asyncio.subprocess.Process) -> None:
+    cleanup_task = asyncio.create_task(_terminate_process(proc))
+    cancellation = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+    await cleanup_task
+    if cancellation is not None:
+        raise cancellation
+
+
 async def _execute_python(
     code: str,
     input_grid: List[List[int]],
@@ -307,6 +352,7 @@ async def _execute_python(
         input_json=json.dumps(input_grid),
     )
 
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -315,7 +361,10 @@ async def _execute_python(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds + 5)
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout_seconds + _PROCESS_TIMEOUT_GRACE_SECONDS,
+        )
 
         if proc.returncode != 0:
             return None
@@ -329,9 +378,11 @@ async def _execute_python(
             board = Board(board=result["result"])
             if board.is_valid:
                 return board.board
-
-    except (asyncio.TimeoutError, json.JSONDecodeError, Exception):
-        pass
+    except Exception:
+        return None
+    finally:
+        if proc is not None:
+            await _reap_process(proc)
 
     return None
 
