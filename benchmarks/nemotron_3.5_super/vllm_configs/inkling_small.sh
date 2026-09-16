@@ -7,7 +7,9 @@
 export VLLM_USE_V2_MODEL_RUNNER=1
 export FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
 
-GYM_MODEL_PARAMS=()
+GYM_MODEL_PARAMS=(
+    "++policy_model.responses_api_models.vllm_model.chat_template_kwargs.reasoning_effort=max"
+)
 
 VLLM_COMMON_ARGS=(
     --trust-remote-code
