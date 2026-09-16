@@ -11,17 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.grl_sokoban.app import (
     GrlSokobanResourcesServer,
     GrlSokobanResourcesServerConfig,
+    SokobanSessionState,
 )
-from resources_servers.gymnasium import EnvResetRequest
+from resources_servers.gymnasium import EnvResetRequest, EnvStepRequest
 
 
 _RESET_CREATE_PARAMS = NeMoGymResponseCreateParamsNonStreaming(input="placeholder")
@@ -179,3 +183,49 @@ class TestApp:
             resp = client.post("/step", json=_step_payload("Move diagonally"), cookies=cookies)
             assert resp.status_code == 400
             assert resp.json()["detail"].startswith("Unable to parse action")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("terminated", "truncated"), [(True, False), (False, True)])
+    async def test_terminal_step_releases_session_state(self, terminated: bool, truncated: bool) -> None:
+        config = GrlSokobanResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = GrlSokobanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        env = MagicMock()
+        server.session_id_to_state["sid"] = SokobanSessionState(env=env, observation="board")
+
+        with patch.object(type(server), "step", new=AsyncMock(return_value=(None, 0.0, terminated, truncated, {}))):
+            response = await server._step_endpoint(
+                EnvStepRequest.model_validate(_step_payload("<action>Up</action>")),
+                SimpleNamespace(session={SESSION_ID_KEY: "sid"}),
+            )
+
+        assert response.terminated is terminated
+        assert response.truncated is truncated
+        assert "sid" not in server.session_id_to_state
+        env.close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_is_idempotent_under_concurrent_calls(self) -> None:
+        config = GrlSokobanResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = GrlSokobanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        env = MagicMock()
+        server.session_id_to_state["sid"] = SokobanSessionState(env=env, observation="board")
+
+        await asyncio.gather(*(server.close_session("sid") for _ in range(3)))
+
+        assert "sid" not in server.session_id_to_state
+        env.close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_reset_releases_replaced_environment(self) -> None:
+        config = GrlSokobanResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = GrlSokobanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        old_env = MagicMock()
+        new_env = MagicMock()
+        new_env.reset.return_value = "new board"
+        server.session_id_to_state["sid"] = SokobanSessionState(env=old_env, observation="old board")
+
+        with patch("resources_servers.grl_sokoban.app.SokobanEnv", return_value=new_env):
+            await server.reset({}, "sid")
+
+        old_env.close.assert_called_once_with()
+        assert server.session_id_to_state["sid"].env is new_env
