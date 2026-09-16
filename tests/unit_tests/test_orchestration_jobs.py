@@ -20,10 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from pytest import MonkeyPatch
 
+from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.jobs import (
+    RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
@@ -54,6 +57,17 @@ def _record(**overrides) -> SubmissionRecord:
         ],
     )
     return SubmissionRecord(**{**defaults, **overrides})
+
+
+def _submit_config(tmp_path) -> SubmitConfig:
+    return SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
+            "driver": {"container": "gym:latest", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
 
 
 def test_record_round_trips_through_json():
@@ -183,7 +197,7 @@ def test_persist_writes_the_local_index_even_when_the_manifest_fails(tmp_path, m
 
     record = _record()
     with pytest.raises(RuntimeError, match="Record these by hand"):
-        _Executor().persist(record, _explode)
+        _Executor().persist(record, _submit_config(tmp_path), _explode)
 
     index = tmp_path / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
     assert SubmissionRecord.load(json.loads(index.read_text())) == record
@@ -198,7 +212,27 @@ def test_persist_names_the_queued_jobs_when_the_manifest_fails(tmp_path, monkeyp
 
     record = _record()
     with pytest.raises(RuntimeError, match=r"Already queued: .*gsm8k=12345"):
-        _Executor().persist(record, lambda path, text: (_ for _ in ()).throw(OSError("nope")))
+        _Executor().persist(
+            record, _submit_config(tmp_path), lambda path, text: (_ for _ in ()).throw(OSError("nope"))
+        )
+
+
+def test_persist_writes_the_resolved_config_next_to_the_manifest(tmp_path, monkeypatch: MonkeyPatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    class _Executor(BaseExecutor):
+        def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
+            raise NotImplementedError
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = _record(run_dir=str(run_dir))
+    written: dict[Path, str] = {}
+
+    _Executor().persist(record, _submit_config(tmp_path), lambda path, text: written.__setitem__(path, text))
+
+    resolved = yaml.safe_load(written[run_dir / RESOLVED_CONFIG_NAME])
+    assert resolved["job"]["output_path"] == str(tmp_path / "jobs")
 
 
 def test_jobs_module_is_executor_agnostic():

@@ -188,7 +188,7 @@ class TestApp:
         async def mock_create_response(**kwargs):
             nonlocal called_args_response
             called_args_response = kwargs
-            return _response_data()
+            return {**_response_data(), "reasoning": {"effort": "none"}}
 
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(side_effect=mock_create_response)
@@ -197,6 +197,7 @@ class TestApp:
         res_no_model = client.post("/ng-rollout/openai-test/v1/responses", json={"input": "hello"})
         assert res_no_model.status_code == 200
         assert called_args_response.get("model") == "dummy_model"
+        assert res_no_model.json()["reasoning"]["effort"] == "minimal"
 
         # model provided should override config
         res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
@@ -323,28 +324,36 @@ class TestApp:
         assert "reasoning" not in sent_types
         assert "message" in sent_types
 
-    @pytest.mark.parametrize("provider_effort", ["none", "minimal"])
-    def test_responses_preserves_provider_reasoning_effort(self, provider_effort: str) -> None:
-        server = self._setup_server()
-        provider_response = {**_response_data(), "reasoning": {"effort": provider_effort}}
+    @pytest.mark.parametrize("replacement, expected_effort", [("low", "low"), (None, "none")])
+    async def test_responses_reasoning_effort_none_replacement_is_configurable(
+        self, replacement, expected_effort
+    ) -> None:
+        server = self._setup_server(reasoning_effort_none_replacement=replacement)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_data = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "reasoning": {"effort": "none"},
+        }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_response = AsyncMock(return_value=provider_response)
-        client = TestClient(server.setup_webserver())
+        server._client.create_response = AsyncMock(return_value=mock_response_data)
 
-        response = client.post(
-            "/v1/responses",
-            json={"input": "hello", "reasoning": {"effort": "minimal"}},
-        )
+        res = client.post("/v1/responses", json={"input": "hello"})
+        assert res.status_code == 200
+        assert res.json()["reasoning"]["effort"] == expected_effort
 
-        assert response.status_code == 200
-        assert response.json()["reasoning"]["effort"] == provider_effort
-        server._client.create_response.assert_awaited_once_with(
-            input="hello", reasoning={"effort": "minimal"}, model="dummy_model"
-        )
-
-    async def test_responses_preserves_reasoning_behavior_when_retrying(self) -> None:
+    async def test_responses_reasoning_workarounds_apply_when_retrying(self) -> None:
         server = self._setup_server(
             drop_input_reasoning_items=True,
+            reasoning_effort_none_replacement="low",
             upstream_max_num_tries=1,
             upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
         )
@@ -362,7 +371,7 @@ class TestApp:
 
         response = await server.responses(body)
 
-        assert response.reasoning.effort == "none"
+        assert response.reasoning.effort == "low"
         assert server._client.create_response.await_count == 2
         for call in server._client.create_response.await_args_list:
             assert call.kwargs == {
@@ -709,7 +718,7 @@ class TestApp:
 
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
     @pytest.mark.parametrize("status_code", [429, 503])
-    def test_opt_in_preserves_provider_http_error_after_retries(self, endpoint: str, status_code: int) -> None:
+    def test_exhausted_provider_http_retries_return_server_error(self, endpoint: str, status_code: int) -> None:
         provider_error = ClientResponseError(
             SimpleNamespace(real_url="https://api.openai.com/v1"),
             (),
@@ -733,12 +742,14 @@ class TestApp:
             operation = server._client.create_chat_completion = AsyncMock(side_effect=provider_error)
             response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hello"}]})
 
-        assert response.status_code == status_code
-        assert response.json() == {"detail": f"Upstream provider request failed with HTTP {status_code}"}
+        assert response.status_code == 500
+        assert "after 2 attempts" in response.text
         assert operation.await_count == 2
 
-    @pytest.mark.parametrize("propagate_status_codes", [[], [400]])
-    async def test_exhausted_retries_wrap_http_errors_without_matching_opt_in(self, propagate_status_codes) -> None:
+    @pytest.mark.parametrize("propagate_status_codes", [[], [400], [429]])
+    async def test_exhausted_retries_wrap_http_errors_even_with_matching_propagation(
+        self, propagate_status_codes
+    ) -> None:
         provider_error = ClientResponseError(
             SimpleNamespace(real_url="https://api.openai.com/v1"),
             (),

@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    ReasoningEffort,
 )
 
 
@@ -91,6 +92,16 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
 
+    reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
+        default="minimal",
+        description=(
+            "Some providers (e.g. NVIDIA's Responses-compatible endpoint) return "
+            "reasoning.effort: 'none'. For compatibility with callers that expect "
+            "a different effort, 'none' is rewritten to this value. Set to null "
+            "to preserve the provider's value, including for exact provenance validation."
+        ),
+    )
+
     max_concurrent_requests: Optional[int] = Field(
         default=None,
         ge=1,
@@ -100,7 +111,6 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
             "to stay under quota; None = unlimited."
         ),
     )
-
     upstream_max_num_tries: Optional[Literal[1]] = Field(
         default=None,
         description=(
@@ -192,10 +202,11 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def _upstream_request_slot(self):
         """Acquire one provider slot without wrapping the provider operation.
 
-        A provider pool timeout bounds the wait for upstream concurrency
-        separately from the duration or transport timeout of the internal
-        HTTP hop. Time only semaphore acquisition here and always release
-        an acquired slot in the serving process.
+        A timeout on the resource-server -> model-server HTTP request cannot
+        stand in for a provider pool timeout: client disconnect does not
+        cancel the server handler, so the provider call can continue as a
+        ghost. Time only semaphore acquisition here and always release an
+        acquired slot in the serving process.
         """
 
         if self.config.max_concurrent_requests is None or self.config.upstream_pool_timeout_seconds is None:
@@ -267,8 +278,6 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             )
             await asyncio.sleep(retry_wait)
 
-        if isinstance(last_error, ClientResponseError) and self._should_propagate_http_error(last_error):
-            raise last_error
         raise RuntimeError(
             f"Upstream provider request failed after {retry_policy.max_attempts} attempts"
         ) from last_error
@@ -285,6 +294,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         async def create_and_validate() -> NeMoGymResponse:
             response_dict = await self._client.create_response(**body_dict)
+            reasoning = response_dict.get("reasoning")
+            if (
+                self.config.reasoning_effort_none_replacement is not None
+                and isinstance(reasoning, dict)
+                and reasoning.get("effort") == "none"
+            ):
+                response_dict = dict(response_dict)
+                response_dict["reasoning"] = {
+                    **reasoning,
+                    "effort": self.config.reasoning_effort_none_replacement,
+                }
             return NeMoGymResponse.model_validate(response_dict)
 
         try:
