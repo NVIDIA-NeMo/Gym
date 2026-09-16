@@ -100,7 +100,7 @@ def test_trajectory_contains_actual_reasoning_tools_and_usage():
         ({"completed": True, "failed": True}, None, "failed", "false"),
         ({"completed": False, "budget_exhausted": True}, None, "incomplete", "true"),
         ({"completed": False, "budget_exhausted": True, "failed": True}, None, "failed", "false"),
-        ({"completed": False, "budget_exhausted": True, "interrupted": True}, None, "incomplete", "false"),
+        ({"completed": False, "budget_exhausted": True, "interrupted": True}, None, "incomplete", "true"),
     ],
 )
 def test_failed_or_aborted_never_marked_completed(result, error, status, budget_stop):
@@ -225,8 +225,12 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
         ),
     )
     if failed_endpoint == "/verify":
-        with pytest.raises(RuntimeError, match="verify unavailable"):
-            await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        wire = result.model_dump(mode="json")
+        assert wire["_ng_failure_class"] == "agent_run_error"
+        assert "verify unavailable" in wire["_ng_failure_message"]
+        assert "reward" not in wire and "response" not in wire
+        assert result.hermes_result_path == "artifact"
     else:
         result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
         assert result.verifier_reward == verifier_reward
@@ -265,13 +269,69 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
     monkeypatch.setattr(module, "get_response_json", AsyncMock(return_value=seed.data))
     monkeypatch.setattr(module.AsyncSandbox, "connect", AsyncMock(side_effect=RuntimeError("cannot attach")))
 
-    error, message = (ValueError, "must return sandbox_descriptor") if bare_handle else (RuntimeError, "cannot attach")
-    with pytest.raises(error, match=message):
-        await agent.run(
-            SimpleNamespace(cookies={}),
-            HermesSandboxedRunRequest.model_validate({"responses_create_params": {"input": "fix"}}),
-        )
+    result = await agent.run(
+        SimpleNamespace(cookies={}),
+        HermesSandboxedRunRequest.model_validate({"responses_create_params": {"input": "fix"}}),
+    )
+    wire = result.model_dump(mode="json")
+    assert wire["_ng_failure_class"] == "agent_run_error"
+    assert ("must return sandbox_descriptor" if bare_handle else "cannot attach") in wire["_ng_failure_message"]
+    assert "reward" not in wire and "response" not in wire
 
     cleanup = agent.server_client.post.call_args.kwargs
     assert cleanup["url_path"] == "/close_session"
     assert cleanup["cookies"] == {"session": "seeded"}
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovers_checkpoint_and_keeps_verifier_eligible_trajectory(agent, monkeypatch):
+    from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop
+
+    progress = {
+        "api_calls": 8,
+        "n_input": 1,
+        "messages": [{"role": "user", "content": "fix"}, {"role": "assistant", "content": "working"}],
+    }
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
+                SandboxExecResult(return_code=125, stdout="", stderr="deadline expired", error_type="timeout"),
+            ]
+        ),
+        upload=AsyncMock(),
+    )
+
+    async def download(remote, local):
+        if remote.endswith("/result.json"):
+            raise FileNotFoundError(remote)
+        local.write_text(json.dumps(progress))
+
+    sandbox.download = download
+    monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/v1")
+    response, metrics = await agent._run_in_sandbox(
+        sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None
+    )
+    assert response.status == "incomplete" and response.metadata["budget_exhausted"] == "true"
+    assert response.output[0].content[0].text == "working"
+    assert metrics["turns_used"] == 8 and metrics["agent_timed_out"]
+    assert metrics["hermes_error_type"] == "timeout"  # Keep the process evidence.
+    truncated = classify_stop(
+        progress
+        | {
+            "partial": True,
+            "error": "Model used all output tokens on reasoning with none left for the response. Try lowering reasoning effort or increasing max_tokens.",
+        }
+    )
+    assert truncated["stop_reason"] == "output_tokens" and "error" not in truncated
+    crash = classify_stop(progress | {"failed": True, "error": "connection refused"})
+    assert crash["failed"] and not crash.get("budget_exhausted")
+
+
+def test_timeout_before_any_model_reply_is_not_a_scored_budget_stop():
+    from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop
+
+    result = classify_stop({"api_calls": 1, "messages": [{"role": "user", "content": "fix"}]}, timed_out=True)
+    assert not result.get("budget_exhausted")
+    response = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="fix"), "model", "timeout")
+    assert response.status == "failed"

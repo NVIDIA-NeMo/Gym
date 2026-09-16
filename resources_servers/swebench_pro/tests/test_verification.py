@@ -167,12 +167,14 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> None:
+@pytest.mark.parametrize("error_type", [None, "timeout"])
+async def test_run_verification_rejects_malformed_parser_output(tmp_path, error_type) -> None:
     sandbox = SimpleNamespace(
         exec=AsyncMock(
             side_effect=[
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=1, stdout="", stderr="failed"),
+                SimpleNamespace(return_code=1, stdout="", stderr="failed", error_type=error_type),
+                *([SimpleNamespace(return_code=0, stdout="", stderr="")] if error_type else []),
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
                 SimpleNamespace(return_code=0, stdout="failed", stderr=""),
                 SimpleNamespace(return_code=0, stdout="1\n", stderr=""),
@@ -186,7 +188,7 @@ async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> Non
     assert not result.completed
     assert not result.resolved
     assert result.test_output == "STDOUT:\n\n\nSTDERR:\nfailed"
-    assert "invalid JSON" in result.error
+    assert ("invalid JSON" if error_type is None else "execution timeout (limit: 30s)") in result.error
 
 
 def test_patch_section_path_reads_adds_deletes_and_binaries() -> None:
@@ -456,3 +458,30 @@ def test_seed_normalization_only_carries_repairs_that_outlive_one_command() -> N
     # Nothing that dies with the shell that set it belongs here.
     assert "ulimit -c 0" not in script
     assert "dns-result-order" not in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "test_name,status,conclusive",
+    [("test_new", "FAILED", True), ("other", "FAILED", False), ("test_new", "PASSED", False)],
+)
+async def test_timeout_only_scores_an_explicit_required_test_failure(tmp_path, test_name, status, conclusive):
+    output = {"tests": [{"name": test_name, "status": status}]}
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0),
+                SimpleNamespace(return_code=125, error_type="timeout", stdout="", stderr="deadline"),
+                SimpleNamespace(return_code=0),  # Parse partial logs after the test process stopped.
+                SimpleNamespace(stdout="test output"),
+                SimpleNamespace(stdout=""),
+                SimpleNamespace(stdout="0"),
+                SimpleNamespace(stdout=json.dumps(output)),
+            ]
+        )
+    )
+    result = await run_verification(sandbox, make_inputs(), tmp_path, timeout_s=30)
+    assert result.timed_out and not result.resolved
+    assert result.completed == conclusive
+    assert (result.error is None) == conclusive
+    assert sandbox.exec.call_args_list[2].kwargs["timeout_s"] == 60

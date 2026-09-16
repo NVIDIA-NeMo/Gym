@@ -18,6 +18,50 @@ from pathlib import Path
 HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"
 
 
+def progress_result(agent, n_input):
+    return {
+        "completed": False,
+        "messages": getattr(agent, "_session_messages", []),
+        "api_calls": getattr(agent, "_api_call_count", 0),
+        "n_input": n_input,
+        "usage": {
+            "input_tokens": agent.session_input_tokens,
+            "output_tokens": agent.session_output_tokens,
+            "cached_tokens": agent.session_cache_read_tokens,
+            "reasoning_tokens": agent.session_reasoning_tokens,
+        },
+    }
+
+
+def classify_stop(result, timed_out=False):
+    # This pinned Hermes version reports reasoning-only truncation as a partial
+    # result with an error string. It is a model budget stop, not a harness crash.
+    has_model_output = bool((result.get("usage") or {}).get("output_tokens")) or any(
+        m.get("role") == "assistant" for m in result.get("messages", [])[result.get("n_input", 0) :]
+    )
+    if timed_out and has_model_output:
+        result["budget_exhausted"] = True
+        result["stop_reason"] = "wall_time"
+    elif (
+        result.get("partial")
+        and not result.get("failed")
+        and str(result.get("error", "")).startswith(
+            "Model used all output tokens on reasoning with none left for the response."
+        )
+    ):
+        result["budget_exhausted"] = True
+        result["stop_reason"] = "output_tokens"
+    elif result.get("budget_exhausted") and not (
+        result.get("failed") or result.get("error") or result.get("interrupted")
+    ):
+        result["stop_reason"] = "max_turns"
+    if result.get("stop_reason"):
+        result["completed"] = False
+        result["failed"] = False
+        result["stop_detail"] = result.pop("error", None)
+    return result
+
+
 def write_json(path, data):
     path = Path(path)
     temporary = path.with_suffix(".tmp")
@@ -121,8 +165,31 @@ def run(params):
         save_trajectories=False,
         checkpoints_enabled=False,
     )
-    signal.signal(signal.SIGTERM, lambda *_: agent.interrupt("sandbox timeout"))
-    result = agent.run_conversation(query, params["system_prompt"] or input_system, history)
+    n_input = len(history) + 1
+    timed_out = False
+
+    def checkpoint(*_):
+        write_json(Path(params["run_dir"]) / "progress.json", progress_result(agent, n_input))
+
+    def on_timeout(*_):
+        nonlocal timed_out
+        timed_out = True
+        # Save before cancellation: a blocked tool or API worker may not unwind
+        # before the sandbox provider's SIGKILL grace period expires.
+        write_json(Path(params["run_dir"]) / "result.json", classify_stop(progress_result(agent, n_input), True))
+        agent.interrupt("sandbox timeout", hard_cancel=True)
+
+    agent.step_callback = checkpoint
+    signal.signal(signal.SIGTERM, on_timeout)
+    try:
+        result = agent.run_conversation(query, params["system_prompt"] or input_system, history)
+    except BaseException as exc:
+        result = progress_result(agent, n_input) | {
+            "failed": True,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+        traceback.print_exc()
     result["budget_exhausted"] = (
         agent.iteration_budget.remaining <= 0 or result.get("api_calls", 0) >= params["max_turns"]
     )
@@ -141,7 +208,7 @@ def run(params):
         "cwd": os.getcwd(),
         "tool_cwd": os.environ["TERMINAL_CWD"],
     }
-    return result
+    return classify_stop(result, timed_out)
 
 
 def main():

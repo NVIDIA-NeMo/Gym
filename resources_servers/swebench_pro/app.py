@@ -177,6 +177,7 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
     image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
+    eval_timed_out: bool = False
     resolved: bool
     patch_applied: bool
     eval_sandbox_start_time_taken: float
@@ -469,6 +470,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
             "evaluation_completed": result.completed and reason is None,
+            "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
             "patch_applied": result.patch_applied,
             "eval_sandbox_start_time_taken": eval_sandbox_start_time_taken,

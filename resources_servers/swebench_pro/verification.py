@@ -84,6 +84,7 @@ class VerificationResult:
     test_results: dict[str, Any] | None
     test_output: str = ""
     error: str | None = None
+    timed_out: bool = False
 
 
 def parse_string_list(value: str | list[str]) -> list[str]:
@@ -337,6 +338,8 @@ git checkout {base_commit}
 apply_patch
 # NeMo Gym change: retain patch application status for the structured verification response.
 PATCH_APPLY_STATUS=$?
+# NeMo Gym change: preserve patch status even if the test command times out.
+printf '%s\\n' "$PATCH_APPLY_STATUS" > /workspace/patch_apply_status
 {before_repo_set_cmd}
 {environment_repairs}
 {go_module_prefetch_cmd}
@@ -344,8 +347,6 @@ PATCH_APPLY_STATUS=$?
 bash /workspace/run_script.sh {selected_test_files_to_run} > /workspace/stdout.log 2> /workspace/stderr.log
 # run parsing script
 python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
-# NeMo Gym change: persist the status after running the upstream script sequence.
-printf '%s\\n' "$PATCH_APPLY_STATUS" > /workspace/patch_apply_status
 """
     return entry_script
 
@@ -407,6 +408,15 @@ async def run_verification(
     except Exception as exc:
         execution_error = exc
 
+    timed_out = getattr(execution, "error_type", None) == "timeout" or isinstance(execution_error, TimeoutError)
+    if timed_out:
+        # The timeout killed the shell before its parser step. Parse the saved
+        # logs separately: an already failed required test is a definite verdict.
+        try:
+            await sandbox.exec(f"python {PARSER_PATH} {STDOUT_PATH} {STDERR_PATH} {OUTPUT_PATH}", timeout_s=60)
+        except Exception:
+            pass  # The original timeout remains the primary diagnosis below.
+
     async def capture(remote_path: str, local_name: str) -> str:
         try:
             result = await sandbox.exec(f"cat {shlex.quote(remote_path)}")
@@ -429,6 +439,26 @@ async def run_verification(
         (execution.stderr if execution is not None else "") or "", encoding="utf-8"
     )
 
+    if timed_out:
+        try:
+            partial = json.loads(output_text)
+            required = set(parse_string_list(inputs.fail_to_pass) + parse_string_list(inputs.pass_to_pass))
+            failed = {test["name"] for test in partial["tests"] if test["status"] == "FAILED"}
+            conclusive = patch_applied and bool(required & failed)
+        except (ValueError, KeyError, TypeError):
+            partial, conclusive = None, False
+        return VerificationResult(
+            completed=conclusive,
+            resolved=False,
+            patch_applied=patch_applied,
+            test_results=partial,
+            test_output=test_output,
+            error=None
+            if conclusive
+            else f"Evaluation execution timeout (limit: {timeout_s}s); no conclusive test verdict",
+            timed_out=True,
+        )
+
     if execution_error is not None:
         return VerificationResult(
             completed=False,
@@ -437,6 +467,16 @@ async def run_verification(
             test_results=None,
             test_output=test_output,
             error=f"Evaluation execution failed: {execution_error}",
+        )
+
+    if getattr(execution, "error_type", None):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=patch_applied,
+            test_results=None,
+            test_output=test_output,
+            error=f"Evaluation execution {execution.error_type} (limit: {timeout_s}s): {execution.stderr or ''}",
         )
 
     try:

@@ -22,6 +22,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop
 
 
 LOG = logging.getLogger(__name__)
@@ -58,11 +59,11 @@ class HermesSandboxedVerifyResponse(BaseVerifyResponse):
     # Gym's agent_run_error contract carries diagnostics, but no score or response.
     reward: float | None = Field(default=None, exclude_if=lambda value: value is None)
     response: NeMoGymResponse | None = Field(default=None, exclude_if=lambda value: value is None)
-    hermes_result_path: str
-    hermes_return_code: int | None
-    hermes_error_type: str | None
-    hermes_finished: bool
-    turns_used: int
+    hermes_result_path: str | None = None
+    hermes_return_code: int | None = None
+    hermes_error_type: str | None = None
+    hermes_finished: bool = False
+    turns_used: int | None = None
 
 
 def trajectory_response(result, body, model, error_type=None):
@@ -116,9 +117,8 @@ def trajectory_response(result, body, model, error_type=None):
             "status": "failed" if failed else "completed" if completed else "incomplete",
             "error": {"code": "server_error", "message": str(result.get("error") or error_type)} if failed else None,
             "metadata": {
-                "budget_exhausted": str(
-                    bool(result.get("budget_exhausted")) and not failed and not result.get("interrupted", False)
-                ).lower(),
+                "budget_exhausted": str(bool(result.get("budget_exhausted")) and not failed).lower(),
+                "stop_reason": result.get("stop_reason", ""),
             },
             "output": output,
             "tool_choice": body.tool_choice,
@@ -195,9 +195,16 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""
-            await sandbox.download(f"{remote}/result.json", local / "result.json")
+            try:
+                await sandbox.download(f"{remote}/result.json", local / "result.json")
+            except Exception:
+                # An outer hard kill can prevent the final write; each Hermes
+                # iteration checkpoints the last known transcript independently.
+                await sandbox.download(f"{remote}/progress.json", local / "result.json")
             result = json.loads((local / "result.json").read_text())
-            if return_code and not error_type:
+            if error_type == "timeout":
+                result = classify_stop(result, timed_out=True)
+            elif return_code and not error_type:
                 error_type = result.get("error_type") or "runner_exit"
         except Exception as exc:
             error_type = error_type or type(exc).__name__
@@ -216,29 +223,33 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     indent=2,
                 )
             )
-        response = trajectory_response(result, body, self.config.model, error_type)
+        budget_timeout = error_type == "timeout" and result.get("stop_reason") == "wall_time"
+        response = trajectory_response(result, body, self.config.model, None if budget_timeout else error_type)
         return response, {
             "agent_run_time": monotonic() - started,
             "hermes_result_path": str(local / "agent_result.json"),
             "hermes_return_code": return_code,
             "hermes_error_type": error_type,
             "hermes_finished": response.status == "completed",
-            "turns_used": result.get("api_calls", 0),
+            "turns_used": result.get("api_calls"),
+            "agent_timed_out": budget_timeout or result.get("stop_reason") == "wall_time",
+            "agent_stop_reason": result.get("stop_reason"),
         }
 
     async def run(self, request: Request, body: HermesSandboxedRunRequest) -> HermesSandboxedVerifyResponse:
         async with self._sem:
             cookies = dict(request.cookies)
-            seeded = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(mode="json") | {"create_pty": False},
-                cookies=cookies,
-            )
-            await raise_for_status(seeded)
-            cookies.update(seeded.cookies)
             sandbox = None
+            metrics = {}
             try:
+                seeded = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json=body.model_dump(mode="json") | {"create_pty": False},
+                    cookies=cookies,
+                )
+                await raise_for_status(seeded)
+                cookies.update(seeded.cookies)
                 seed = await get_response_json(seeded)
                 descriptor = seed.get("sandbox_descriptor")
                 if not isinstance(descriptor, dict) or not descriptor:
@@ -282,6 +293,19 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                         _ng_failure_message=failure,
                     )
                 return HermesSandboxedVerifyResponse.model_validate(result | metrics)
+            except Exception as exc:
+                LOG.exception("Hermes rollout failed")
+                # A single seed/connect/verify failure must not abort collection
+                # of the rest of the dataset. Keep it retryable and unscored.
+                return HermesSandboxedVerifyResponse.model_validate(
+                    body.model_dump(mode="json")
+                    | metrics
+                    | {
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_message": f"{type(exc).__name__}: {exc}",
+                        "hermes_error_type": type(exc).__name__,
+                    }
+                )
             finally:
                 try:
                     cleaned = await self.server_client.post(
