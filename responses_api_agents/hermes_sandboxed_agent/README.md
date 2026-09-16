@@ -3,15 +3,17 @@
 Runs **NousResearch/hermes-agent@v2026.9.7** inside the task container prepared by
 Gym's existing SWE-bench Pro resources server. Hermes uses its terminal and file
 tools in `/app`; Pro extracts and grades the patch through its existing verifier.
-The model server runs separately. See [ASSESSMENT.md](ASSESSMENT.md) for a short
-walkthrough and code review order, and [VALIDATION.md](VALIDATION.md) for results.
+The model server runs separately. See [ASSESSMENT.md](ASSESSMENT.md) for the
+component map and code review order.
 
 ## Prepare the Hermes runtime
 
-On Linux x86_64, build the runtime once:
+On Linux x86_64, build both runtimes once. Pro includes GNU and Alpine/musl images:
 
 ```bash
 DEPS_DIR=/absolute/path/hermes-runtime \
+  bash responses_api_agents/hermes_sandboxed_agent/prepare_runtime.sh
+DEPS_DIR=/absolute/path/hermes-runtime/musl ARCH=x86_64-unknown-linux-musl \
   bash responses_api_agents/hermes_sandboxed_agent/prepare_runtime.sh
 ```
 
@@ -19,7 +21,8 @@ Mount that directory read-only at `/opt/hermes` in task containers. Gym and
 Hermes have conflicting OpenAI SDK pins, so keep their Python installations
 separate. The runtime contains the exact source checkout, its Python interpreter,
 resolved dependency versions and a commit manifest. Task startup verifies the
-runtime and does not download or install Hermes.
+runtime and does not download or install Hermes. The default `hermes-python`
+launcher selects the interpreter for each task image.
 
 ## Launch with Pro
 
@@ -89,19 +92,10 @@ fails explicitly. Harness failures retain `verifier_reward`, omit
 `reward` and `response` from their HTTP result, and set Gym's existing
 `_ng_failure_class=agent_run_error` marker. Gym's collector puts them in its
 `*_failures.jsonl` sidecar and excludes them from scores. Incomplete verification
-is excluded too. Reaching the turn budget retains the patch's score and records
+is excluded too. Reaching a turn, output-token or wall-time budget after model
+output retains the patch's score and records
 `response.metadata.budget_exhausted=true`. Missing or failing graded tests score zero.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
-
-This agent requires a resources server that accepts `create_pty=false` and
-returns a full `sandbox_descriptor`, with `/close_session` for cleanup.
-Only the Pro integration has been exercised. The current Verified server returns
-a bare handle, so changing the benchmark configuration alone will not make
-Verified work on Apptainer. Its interface migration and a second-benchmark run
-remain shelved with Verified; cross-benchmark swappability is unproven.
-
-Rich Hermes invocation/compaction observation bundles are not yet
-implemented; no training token IDs are fabricated.
 
 ```bash
 pytest responses_api_agents/hermes_sandboxed_agent/tests \

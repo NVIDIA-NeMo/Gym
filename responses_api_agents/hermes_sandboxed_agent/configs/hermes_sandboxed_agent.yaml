@@ -11,7 +11,6 @@ hermes_sandboxed_agent:
         name: policy_model
       model: ???  # Real model identity, used by Hermes's context and timeout logic.
       sandbox_provider: sandbox
-      runtime_python: /opt/hermes/bin/python3
       concurrency: 4
       max_turns: 90
       sandbox_timeout: 2700

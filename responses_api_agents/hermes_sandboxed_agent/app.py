@@ -33,7 +33,7 @@ class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: str
     sandbox_provider: str = "sandbox"
-    runtime_python: str = "/opt/hermes/bin/python3"
+    runtime_python: str = "/opt/hermes/bin/hermes-python"
     remote_run_root: str = "/tmp"
     results_dir: str = "responses_api_agents/hermes_sandboxed_agent/results"
     concurrency: int = Field(default=4, ge=1)
