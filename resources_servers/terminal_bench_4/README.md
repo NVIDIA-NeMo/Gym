@@ -71,7 +71,7 @@ execution user. This allows non-root images to initialize their log directories
 and keeps root verifier reward-directory protections effective. Compose mounts
 these logs in `main`; sidecar mounts and collection order remain unchanged.
 
-A CPU helper (`environment.efs_logs_init_image`, configured as `python:3.13-slim`)
+A helper (`environment.efs_logs_init_image`, configured as `python:3.13-slim`)
 initializes ownership and remains alive until both workloads are stopped. It
 reuses the collected `/logs/artifacts` archive through EFS after agent teardown,
 avoiding its upload from the resources host to the verifier. The archive is
@@ -81,7 +81,12 @@ Overlapping artifact declarations and unavailable snapshots use the existing
 ordered host restore. Agent logs, undeclared files, and agent-written reward
 files do not leak into the fresh verifier role.
 
-Both endpoint pools must expose the same EFS share. An endpoint that explicitly
+With split endpoints, a GPU requirement in either the agent or verifier environment
+places the entire task on the GPU deployment, including CPU-only roles, Compose
+sidecars, and storage helpers. Tasks without a GPU requirement use the CPU deployment.
+Individual containers retain their declared resource requests; helpers do not request
+GPUs. This keeps each task on one EFS share and network even when the endpoint pools
+use different storage. An endpoint that explicitly
 rejects the host mount with `VOLUME::HOST_PATH_NOT_ALLOWED` uses the original
 filesystem/transfer lifecycle, recording `efs_logs_fallback` in diagnostics.
 This preserves existing healthy GPU tasks on deployments without EFS support;

@@ -294,19 +294,33 @@ async def test_cancelled_cleanup_continues_and_closes_helper(tmp_path, monkeypat
     helper.stop.assert_awaited_once()
 
 
-def test_gpu_workload_uses_cpu_helper_and_independent_role_mounts(tmp_path, monkeypatch):
-    for pool in ("CPU", "GPU"):
-        monkeypatch.setenv(f"OPENSANDBOX_DOMAIN_{pool}", pool + ".invalid")
-        monkeypatch.setenv(f"OPENSANDBOX_API_KEY_{pool}", "credential")
-    env, *_ = make_environment(tmp_path, monkeypatch, config={"sandbox_split_endpoints": True}, verifier=True)
+@pytest.mark.parametrize("agent_gpus,verifier_gpus,pool", [(0, 0, "cpu"), (1, 0, "gpu"), (0, 1, "gpu"), (1, 1, "gpu")])
+@pytest.mark.parametrize("verifier", [False, True])
+def test_logs_helper_uses_task_deployment_and_independent_role_mounts(
+    tmp_path, monkeypatch, agent_gpus, verifier_gpus, pool, verifier
+):
+    for endpoint in ("CPU", "GPU"):
+        monkeypatch.setenv(f"OPENSANDBOX_DOMAIN_{endpoint}", endpoint.lower() + ".invalid")
+        monkeypatch.setenv(f"OPENSANDBOX_API_KEY_{endpoint}", endpoint + "-credential")
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={"sandbox_split_endpoints": True},
+        verifier=verifier,
+        task_config={
+            "environment": {"gpus": agent_gpus},
+            "verifier": {"environment": {"docker_image": "public/verifier", "gpus": verifier_gpus}},
+        },
+    )
     env.config.efs_logs_host_path = "/mnt/efs/data/shared"
     create = MagicMock()
     monkeypatch.setattr(module, "AsyncSandbox", create)
     logs = SharedLogs(env)
     cfg, spec = create.call_args.args
-    assert cfg["opensandbox"]["connection"]["domain"] == "CPU.invalid"
-    assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == "cpu"
+    assert cfg["opensandbox"]["connection"]["domain"] == pool + ".invalid"
+    assert cfg["opensandbox"]["connection"]["api_key"] == pool.upper() + "-credential"
+    assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == pool
     assert spec.resources.gpu is None and not spec.env
-    assert env.provider_config["opensandbox"]["connection"]["domain"] == "GPU.invalid"
+    assert env.provider_config["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     env.shared_logs = logs
-    assert env.build_spec().provider_options["volumes"] == [logs.volume("verifier")]
+    assert env.build_spec().provider_options["volumes"] == [logs.volume("verifier" if verifier else "agent")]

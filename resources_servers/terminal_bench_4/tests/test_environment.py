@@ -89,10 +89,14 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
     return env, box, create, compose_create
 
 
-def test_specs_keep_resource_units_and_independent_verifier_pools(tmp_path, monkeypatch):
-    for pool in ["CPU", "GPU"]:
-        monkeypatch.setenv("OPENSANDBOX_DOMAIN_" + pool, pool + ".invalid")
-        monkeypatch.setenv("OPENSANDBOX_API_KEY_" + pool, "credential")
+@pytest.mark.parametrize("agent_gpus,verifier_gpus,pool", [(0, 0, "cpu"), (1, 0, "gpu"), (0, 1, "gpu"), (1, 1, "gpu")])
+def test_specs_keep_resource_units_and_task_deployment(tmp_path, monkeypatch, agent_gpus, verifier_gpus, pool):
+    # The other deployment's credentials must not be needed by any task role.
+    for endpoint in ["CPU", "GPU"]:
+        monkeypatch.delenv("OPENSANDBOX_DOMAIN_" + endpoint, raising=False)
+        monkeypatch.delenv("OPENSANDBOX_API_KEY_" + endpoint, raising=False)
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN_" + pool.upper(), pool + ".invalid")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY_" + pool.upper(), "credential")
     args = {
         "sandbox_split_endpoints": True,
         "sandbox_request_gpu_type": False,
@@ -100,17 +104,43 @@ def test_specs_keep_resource_units_and_independent_verifier_pools(tmp_path, monk
         "sandbox_env_by_task": {"test": {"OVERRIDE": "task"}},
         "sandbox_env": {"OVERRIDE": "global"},
     }
-    env, *_ = make_environment(tmp_path, monkeypatch, config=args)
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config=args,
+        task_config={
+            "environment": {"gpus": agent_gpus},
+            "verifier": {"environment": {"docker_image": "public/verifier", "gpus": verifier_gpus}},
+        },
+    )
     verifier = Environment(env.task, env.config, "verify", tmp_path, verifier=True)
     agent_spec, verifier_spec = env.build_spec(), verifier.build_spec()
-    assert env.pool == "cpu" and verifier.pool == "gpu"
+    assert env.pool == verifier.pool == pool
     assert agent_spec.resources.cpu == 2 and agent_spec.resources.memory_mib == 4096
     assert agent_spec.resources.disk_gib == 15
-    assert verifier_spec.resources.gpu == 1 and verifier_spec.resources.gpu_type is None
+    assert agent_spec.resources.gpu == (agent_gpus or None)
+    assert verifier_spec.resources.gpu == (verifier_gpus or None) and verifier_spec.resources.gpu_type is None
     assert agent_spec.env == {"TASK": "value", "OVERRIDE": "global"}
     assert agent_spec.provider_options == {"resource_requests": "limits"}
     assert "credential" not in str(agent_spec)
-    assert verifier.provider_config["opensandbox"]["connection"]["domain"] == "GPU.invalid"
+    for role in (env, verifier):
+        connection = role.provider_config["opensandbox"]["connection"]
+        assert connection["domain"] == pool + ".invalid"
+        assert connection["api_key"] == "credential"
+        assert role.build_spec().metadata["nemo-gym.nvidia.com/resource-pool"] == pool
+
+
+async def test_cpu_compose_services_follow_gpu_verifier_deployment(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN_GPU", "gpu.invalid")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY_GPU", "gpu-credential")
+    env, _, _, create = make_environment(tmp_path, monkeypatch, compose=True, config={"sandbox_split_endpoints": True})
+    await env.start()
+    connection = create.call_args.args[0]["opensandbox"]["connection"]
+    assert connection["domain"] == "gpu.invalid"
+    assert connection["api_key"] == "gpu-credential"
+    for spec in create.call_args.kwargs["service_specs"].values():
+        assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == "gpu"
+        assert spec.resources.gpu is None
 
 
 async def test_single_start_descriptor_env_user_quiescence_cleanup(tmp_path, monkeypatch):

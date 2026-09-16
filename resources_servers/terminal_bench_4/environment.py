@@ -84,7 +84,9 @@ class Environment:
             if services - {None, "main"}:
                 raise ValueError("Sidecar artifacts and hooks require Compose")
         if config.sandbox_split_endpoints:
-            self.pool = "gpu" if self.settings.gpus else "cpu"
+            # Keep every role and its helpers on one deployment: endpoint pools
+            # can have different EFS filesystems and inter-sandbox networks.
+            self.pool = "gpu" if task.config.environment.gpus or task.config.verifier_environment.gpus else "cpu"
             if "opensandbox" not in self.provider_config:
                 raise ValueError("Split endpoints require OpenSandbox")
             connection = self.provider_config["opensandbox"].setdefault("connection", {})

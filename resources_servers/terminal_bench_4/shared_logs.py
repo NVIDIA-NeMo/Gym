@@ -6,7 +6,6 @@
 import asyncio
 import io
 import json
-import os
 import shlex
 import tarfile
 from copy import deepcopy
@@ -39,14 +38,8 @@ class SharedLogs:
         self.initialized = False
         provider = deepcopy(environment.provider_config)
         self.pool = environment.pool
-        # Storage management is CPU work, even for a GPU episode. Both pools
-        # must refer to the same EFS share on the cell.
-        if config.sandbox_split_endpoints:
-            self.pool = "cpu"
-            connection = provider["opensandbox"].setdefault("connection", {})
-            connection.update(
-                domain=os.environ["OPENSANDBOX_DOMAIN_CPU"], api_key=os.environ["OPENSANDBOX_API_KEY_CPU"]
-            )
+        # The helper needs no GPU, but must use the workload's deployment so
+        # ownership changes and artifact snapshots reach the same EFS share.
         metadata = dict(environment.build_spec().metadata)
         metadata.update({"tb4-session": self.session_id, "tb4-role": "logs-helper"})
         if self.pool != "default":
