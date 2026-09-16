@@ -71,7 +71,7 @@ import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -86,6 +86,7 @@ from nemo_gym.token_id_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+ExternalStagingBackend = Literal["vllm_worker", "megatron_worker"]
 
 
 class TokenIdCaptureSettings(BaseModel):
@@ -133,6 +134,8 @@ class TokenIdCaptureSettings(BaseModel):
     # It also makes committed parents visible to every serving worker.
     # No additional in-memory coordinator is used.
     external_staging: bool = False
+    # Both backends stage a canonical delta before returning coordinates.
+    external_staging_backend: ExternalStagingBackend = "vllm_worker"
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.
     control_auth_token_env: str = Field(
@@ -170,6 +173,8 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
+        if block.external_staging_backend != "vllm_worker" and not block.external_staging:
+            raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.
