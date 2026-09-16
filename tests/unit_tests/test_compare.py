@@ -431,6 +431,8 @@ class TestMetricRows:
             ("score/ci_high_95", False),
             ("arena_elo/ci_lower", False),
             ("arena_elo/ci_upper", False),
+            ("win_rate_ci_lower", False),
+            ("win_rate_ci_upper", False),
             ("win_rate_ci95_lower", False),
             ("win_rate_ci95_upper", False),
             ("response_tokens/median", True),

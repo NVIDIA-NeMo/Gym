@@ -76,6 +76,8 @@ STAT_SUFFIXES = (
     "/ci_high_95",
     "/ci_lower",
     "/ci_upper",
+    "_ci_lower",
+    "_ci_upper",
     "_ci95_lower",
     "_ci95_upper",
     STD_DEV_ACROSS_RUNS_SUFFIX,
