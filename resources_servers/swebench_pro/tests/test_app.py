@@ -164,6 +164,16 @@ def test_image_digest_avoids_case_sensitive_tag_rewriting() -> None:
     assert make_server(golden=True)._image(instance) == "docker.io/jefzda/sweap-images@sha256:abc123"
 
 
+def test_image_override_wins_over_digest_and_tag() -> None:
+    """image_override targets native-arch rebuilds of pinned eval images."""
+    body = request_body()
+    body["image_digest"] = "sha256:def456"
+    body["image_override"] = "ghcr.io/native/rebuild:arm64"
+    instance = SWEBenchProInstanceRequest.model_validate(body)
+
+    assert make_server(golden=True)._image(instance) == "ghcr.io/native/rebuild:arm64"
+
+
 @pytest.mark.asyncio
 async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyPatch) -> None:
     server = make_server(golden=False)
@@ -326,6 +336,27 @@ async def test_seed_session_returns_the_pty_session_the_agent_attaches_to() -> N
     assert response.pty_session_id == "pty-id"
     sandbox.pty.create.assert_awaited_once()
     assert server._session_id_to_pty["session"].session_id == "pty-id"
+
+
+@pytest.mark.asyncio
+async def test_seed_session_serves_exec_only_when_provider_has_no_pty() -> None:
+    """Providers without PTY support (e.g. docker) still seed exec-based agents."""
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=SimpleNamespace(create=AsyncMock(side_effect=NotImplementedError)),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    response = await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+
+    assert response.sandbox_handle == "sandbox-id"
+    assert response.pty_session_id is None
+    assert server._session_id_to_pty["session"] is None
 
 
 @pytest.mark.asyncio

@@ -1554,6 +1554,46 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
 
+def test_chat_completion_to_response_does_not_echo_request_text_format(converter: ResponsesConverter):
+    """Echoing the request's strict text_format into the response produced a
+    json_schema shape whose schema member is stripped in serialization, which
+    matches no response-text union variant — every structured-output call then
+    retried against the identical broken envelope until the policy budget died
+    (navidrome: 16/16 summarize calls, budget kill)."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        model="",
+        input=[dict(role="user", content="hello")],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "Answer",
+                "schema": {"type": "object", "properties": {"verdict": {"type": "string"}}},
+                "strict": True,
+            }
+        },
+    )
+    chat_completion = NeMoGymChatCompletion(
+        id="",
+        created=0,
+        model="",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason="stop",
+                message=NeMoGymChatCompletionMessage(role="assistant", content='{"verdict": "ok"}'),
+            )
+        ],
+        usage=CompletionUsage(prompt_tokens=11, completion_tokens=5, total_tokens=16),
+    )
+
+    response = converter.chat_completion_to_response(responses_create_params=params, chat_completion=chat_completion)
+
+    assert response.text is None
+    reparsed = NeMoGymResponse.model_validate(response.model_dump(mode="json"))
+    assert reparsed.text is None
+
+
 def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
 
