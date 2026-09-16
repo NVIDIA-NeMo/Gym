@@ -1,7 +1,6 @@
-# In-tree counterpart to examples/langchain_deepagent (the remote_agent version of the same deepagents
-# graph): same model, same TavilySearch tool, same <answer>-tag system prompt, same reasoning_gym
-# benchmark — run as a native Gym responses_api_agents server instead of proxied through remote_agent to
-# an externally-hosted FastAPI service.
+# Runs the reasoning_gym benchmark against a LangChain deepagents graph hosted as a native Gym
+# responses_api_agents server, so model calls go through Gym's own model_server (on-policy) rather than
+# the agent bringing its own model.
 #
 #   gym env start --resources-server reasoning_gym/reasoning_gym_langchain_deepagents_agent_model_server \
 #       --model-type inference_provider/openrouter
@@ -15,7 +14,8 @@ reasoning_gym:
       domain: knowledge
       verified: false
       description: In-tree deepagents (LangChain) agent for reasoning gym tasks, via a Gym model server.
-      value: Side-by-side comparison point against examples/langchain_deepagent's remote_agent version.
+      value: Runs a LangChain deepagents graph on-policy against Gym's model server, with deterministic
+        <answer>-tag scoring and no LLM judge.
 
 reasoning_gym_langchain_deepagents_agent_model_server:
   responses_api_agents:

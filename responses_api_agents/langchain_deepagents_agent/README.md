@@ -72,8 +72,8 @@ gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_s
     --output /tmp/langchain_deepagents_agent_rg.jsonl
 ```
 
-Expect a `mean/reward` comparable to `examples/langchain_deepagent`'s documented baseline (1.0 over the
-same 5 rows) — the underlying agent and model are unchanged, only the calling architecture differs.
+Expect `mean/reward: 1.0` over those 5 rows — `reasoning_gym` scores deterministically by extracting the
+`<answer>` tag, so there's no judge noise in the number.
 
 ## Tool ownership: agent vs. resources server
 

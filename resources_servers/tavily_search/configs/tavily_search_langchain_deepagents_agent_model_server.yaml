@@ -1,6 +1,6 @@
-# In-tree counterpart to examples/langchain_deepagent's tavily_search config, structurally mirroring
-# tavily_search_judge_openai_model.yaml (resources server + judge_model + an in-tree agent composing with
-# --model-type at launch).
+# Runs the tavily_search benchmark against a LangChain deepagents graph hosted as a native Gym
+# responses_api_agents server. Structurally mirrors tavily_search_judge_openai_model.yaml (resources
+# server + judge_model + an agent composing with --model-type at launch).
 #
 #   gym env start --resources-server tavily_search/tavily_search_langchain_deepagents_agent_model_server \
 #       --model-type inference_provider/openrouter
