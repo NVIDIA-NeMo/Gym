@@ -130,6 +130,8 @@ class AgentCloseSessionResponse(BaseModel):
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Opt in only when an unfinished verifier is safe to replay after recovery.
+    checkpoint_replayable_verify: bool = False
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -345,6 +347,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if execution is None or self._checkpoint_participant is None:
                 return response
             await self._checkpoint_participant.park(execution)
+
+    async def checkpointable_external_wait(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        request: Optional[Request] = None,
+    ) -> Any:
+        """Run a replayable external operation without consuming it across a cut."""
+        execution = self.checkpoint_execution(request)
+        if execution is None or self._checkpoint_participant is None:
+            return await operation()
+        await self._checkpoint_participant.begin_external_wait(execution)
+        try:
+            return await operation()
+        finally:
+            await self._checkpoint_participant.end_external_wait(execution)
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.

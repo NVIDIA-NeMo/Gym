@@ -239,6 +239,52 @@ async def test_prepare_waits_for_boundary_and_resume_is_explicit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_freezes_replayable_external_wait_at_existing_boundary() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+    await participant.begin_external_wait(execution)
+
+    report = await participant.prepare(time.time() + 2)
+
+    assert report["ready_to_commit"] is True
+    assert report["running"] == 0
+    assert report["parked_with_boundary"] == 1
+    assert report["executions"][0]["state"] == "external_wait_frozen"
+    assert report["executions"][0]["parked_boundary_state"] == "external_wait_frozen"
+    records = participant.records_for_commit()
+    assert len(records) == 1
+    assert records[0].rollout_id == "rollout-a"
+    assert records[0].boundary_index == 1
+
+    completed = asyncio.create_task(participant.end_external_wait(execution))
+    await asyncio.sleep(0)
+    assert not completed.done()
+
+    assert (await participant.resume())["released"] == 1
+    await completed
+    assert participant.status()["executions"][0]["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_external_wait_without_boundary_uses_normal_park_request() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.begin_external_wait(execution)
+
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    completed = asyncio.create_task(participant.end_external_wait(execution))
+    report = await prepare
+
+    assert report["ready_to_commit"] is False
+    assert report["parked_without_boundary"] == 1
+    assert not completed.done()
+    assert (await participant.resume())["released"] == 1
+    await completed
+
+
+@pytest.mark.asyncio
 async def test_failed_prepare_rolls_back_park_request() -> None:
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())

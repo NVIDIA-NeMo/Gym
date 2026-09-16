@@ -623,20 +623,27 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 body.model_dump() | {"response": model_response_json}
             )
             verify_request_id = uuid.uuid4().hex
-            verify_response = await self.retry_checkpoint_refusal(
-                lambda: self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/verify",
-                    json=verify_request.model_dump(),
-                    cookies=cookies,
-                    headers={
-                        EXPECTED_RESOURCE_STATE_REVISION_HEADER: str(resource_revision),
-                        RESOURCE_REQUEST_ID_HEADER: verify_request_id,
-                    },
+
+            async def verify() -> dict[str, Any]:
+                verify_response = await self.retry_checkpoint_refusal(
+                    lambda: self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/verify",
+                        json=verify_request.model_dump(),
+                        cookies=cookies,
+                        headers={
+                            EXPECTED_RESOURCE_STATE_REVISION_HEADER: str(resource_revision),
+                            RESOURCE_REQUEST_ID_HEADER: verify_request_id,
+                        },
+                    )
                 )
-            )
-            await raise_for_status(verify_response)
-            result = await get_response_json(verify_response)
+                await raise_for_status(verify_response)
+                return await get_response_json(verify_response)
+
+            if self.config.checkpoint_replayable_verify:
+                result = await self.checkpointable_external_wait(verify)
+            else:
+                result = await verify()
         if trajectory is not None:
             resolved = result.get("resolved")
             if isinstance(resolved, bool) and trajectory.turns:

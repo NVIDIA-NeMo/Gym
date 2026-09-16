@@ -996,8 +996,9 @@ class TestApp:
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
 
-    async def test_terminal_verify_blocks_prepare_until_completed_result_acknowledged(self) -> None:
+    async def test_terminal_verify_freezes_at_last_boundary_until_checkpoint_resumes(self) -> None:
         server, server_client = _make_agent(observability_enabled=False)
+        server.config.checkpoint_replayable_verify = True
         participant = server.checkpoint_participant()
         verify_decode_started = asyncio.Event()
         release_verify_decode = asyncio.Event()
@@ -1043,14 +1044,20 @@ class TestApp:
             run_task = asyncio.create_task(client.post("/run", json=body))
             await verify_decode_started.wait()
             prepare_task = asyncio.create_task(participant.prepare(time.time() + 2))
-            await asyncio.sleep(0)
+            prepare_report = await prepare_task
+
+            assert prepare_report["ready_to_commit"] is True
+            assert prepare_report["completed_unacknowledged"] == 0
+            assert prepare_report["parked_with_boundary"] == 1
+            assert prepare_report["selected_boundaries"][0]["boundary_kind"] == "turn_complete"
+
             release_verify_decode.set()
-            run_response, prepare_report = await asyncio.gather(run_task, prepare_task)
+            await asyncio.sleep(0)
+            assert not run_task.done()
+            assert (await participant.resume())["released"] == 1
+            run_response = await run_task
 
         assert run_response.status_code == 200
-        assert prepare_report["ready_to_commit"] is False
-        assert prepare_report["completed_unacknowledged"] == 1
-        assert prepare_report["selected_boundaries"] == []
         receipt = participant.status()["completed_unacknowledged_attempts"][0]["completion_receipt"]
         await participant.acknowledge(AgentAcknowledgeRequest.model_validate(receipt))
         assert (await participant.prepare(time.time() + 2))["ready_to_commit"] is True
