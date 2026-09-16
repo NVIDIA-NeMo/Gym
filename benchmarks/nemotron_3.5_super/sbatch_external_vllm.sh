@@ -126,11 +126,15 @@ export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
 # host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
-export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
-export UCX_NET_DEVICES=mlx5_0:1
-export UCX_IB_ADDR_TYPE=eth
+export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
+export UCX_NET_DEVICES=all
+
+# Helpful NCCL env vars to set on modern clusters.
+export NCCL_CUMEM_ENABLE=1
+export NCCL_MNNVL_ENABLE=1
+export NCCL_NVLS_ENABLE=1
 
 source "$VLLM_CONFIG"
 
