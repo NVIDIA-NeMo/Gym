@@ -150,9 +150,13 @@ def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], Call
     positional_only = {
         name for name, parameter in parameters.items() if parameter.kind == inspect.Parameter.POSITIONAL_ONLY
     }
-    mapped_positional_only = positional_only & set(config.arguments)
-    if mapped_positional_only:
-        raise ValueError(f"entrypoint parameters must accept keyword arguments: {sorted(mapped_positional_only)}")
+    unsupported_positional_only = {
+        name
+        for name in positional_only
+        if name in config.arguments or parameters[name].default is inspect.Parameter.empty
+    }
+    if unsupported_positional_only:
+        raise ValueError(f"entrypoint parameters must accept keyword arguments: {sorted(unsupported_positional_only)}")
 
     required = {
         name
