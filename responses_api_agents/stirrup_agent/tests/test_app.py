@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from omegaconf import OmegaConf
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -128,6 +129,63 @@ class TestApp:
             ),
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # Generic Stirrup users retain the historical behavior. GDPVal opts in
+        # to its larger floor and matching template semantics in its benchmark
+        # config below.
+        assert config.min_completion_tokens == 1024
+        assert config.context_window_tokens == 262144
+        assert config.prompt_estimator_truncate_history_thinking is None
+        assert config.min_compaction_summary_words == 1
+
+    def test_gdpval_config_opts_into_safe_context_budget(self) -> None:
+        repo_root = STIRRUP_AGENT_DIR.parents[1]
+        config = OmegaConf.load(repo_root / "benchmarks" / "gdpval" / "config.yaml")
+        agent = config.gdpval_stirrup_agent.responses_api_agents.stirrup_agent
+
+        assert agent.min_completion_tokens == 8192
+        assert agent.context_window_tokens == 262144
+        assert "prompt_estimator_truncate_history_thinking" not in agent
+        assert agent.min_compaction_summary_words == 50
+
+    @pytest.mark.asyncio
+    async def test_request_output_cap_does_not_replace_model_context_window(self) -> None:
+        config = _make_config()
+        config.context_window_tokens = 262144
+        config.max_completion_tokens_cap = 64000
+        wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            model="policy",
+            max_output_tokens=8192,
+            metadata={"task_id": "task-1", "prompt": "do the thing"},
+        )
+        captured = {}
+
+        async def completed_rollout():
+            return {
+                "input_items": [],
+                "output_items": [],
+                "deliverable_text": "",
+                "elapsed_seconds": 0,
+            }
+
+        def launch(params):
+            captured.update(params)
+            return completed_rollout()
+
+        with (
+            patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"),
+            patch.object(wrapper.task_strategy, "get_exec_provider", return_value=None),
+            patch(
+                "responses_api_agents.stirrup_agent.app.run_stirrup_agent_remote.remote",
+                side_effect=launch,
+            ),
+        ):
+            await wrapper.responses(body)
+
+        assert captured["context_window_tokens"] == 262144
+        assert captured["max_completion_tokens_cap"] == 8192
 
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
