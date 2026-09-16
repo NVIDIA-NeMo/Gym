@@ -234,12 +234,19 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
             returned_outputs.extend(model_response.output)
             if self.config.text_only_history:
-                new_outputs.append(
-                    NeMoGymEasyInputMessage(
-                        role="assistant",
-                        content=extract_text(model_response),
-                    )
+                visible_message = NeMoGymEasyInputMessage(
+                    role="assistant",
+                    content=extract_text(model_response),
                 )
+                new_outputs.append(visible_message)
+                if not any(
+                    item.type == "message" and getattr(item, "role", None) == "assistant"
+                    for item in model_response.output
+                ):
+                    # Reasoning-only responses still occupy an assistant turn.
+                    # Preserve that empty boundary in the returned transcript,
+                    # alongside the original provider output and status.
+                    returned_outputs.append(visible_message)
             else:
                 new_outputs.extend(model_response.output)
 

@@ -21,6 +21,7 @@ import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
@@ -424,6 +425,90 @@ class TestRun:
         artifact_function_outputs = [item for item in result.response.output if item.type == "function_call_output"]
         assert [item.call_id for item in artifact_function_calls] == ["call-1"]
         assert [item.call_id for item in artifact_function_outputs] == ["call-1"]
+        assert len([item for item in result.response.output if item.type == "message"]) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blank_turn", [0, 1, 2], ids=["first", "middle", "final"])
+    @pytest.mark.parametrize("output_kind", ["reasoning_only", "no_items", "empty_message"])
+    async def test_text_only_history_preserves_blank_assistant_turn(self, blank_turn, output_kind):
+        agent = _make_agent(max_steps=3, text_only_history=True)
+        answers = ["answer-1", "answer-2", "answer-3"]
+        answers[blank_turn] = ""
+        responses = [_model_response(answer) for answer in answers]
+        if output_kind == "reasoning_only":
+            responses[blank_turn] = _model_response_with_reasoning("")
+            responses[blank_turn]["output"].pop()
+            responses[blank_turn]["status"] = "incomplete"
+            responses[blank_turn]["incomplete_details"] = {"reason": "max_output_tokens"}
+        elif output_kind == "no_items":
+            responses[blank_turn]["output"] = []
+        original_responses = [NeMoGymResponse.model_validate(response).model_dump() for response in responses]
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/reset": [{"observation": None}],
+                "/v1/responses": responses,
+                "/step": [
+                    {"observation": "followup-1", "reward": 0.0, "terminated": False, "truncated": False},
+                    {"observation": "followup-2", "reward": 0.0, "terminated": False, "truncated": False},
+                    {"observation": None, "reward": 0.0, "terminated": True, "truncated": False},
+                ],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+
+        result = await agent.run(req, body)
+
+        # The serialized trajectory must retain three distinct assistant turns,
+        # including a blank final turn without a following user-message boundary.
+        response = NeMoGymResponse.model_validate_json(result.response.model_dump_json())
+        messages = [item for item in response.output if item.type == "message"]
+        assert [item.role for item in messages] == ["assistant", "user", "assistant", "user", "assistant"]
+        assert [
+            item.content if isinstance(item.content, str) else "".join(part.text for part in item.content)
+            for item in messages
+        ] == [answers[0], "followup-1", answers[1], "followup-2", answers[2]]
+        original_output = [item for payload in original_responses for item in payload["output"]]
+        preserved_output = [item.model_dump() for item in response.output if getattr(item, "id", None) is not None]
+        assert preserved_output == original_output
+
+        # Resource verification sees exactly the provider response, including
+        # its original incompleteness, rather than the added transcript marker.
+        step_responses = [payload["response"] for _server, path, payload in call_log if path == "/step"]
+        assert step_responses == original_responses
+        assert response.status == original_responses[-1]["status"]
+        assert (
+            response.incomplete_details.model_dump() if response.incomplete_details is not None else None
+        ) == original_responses[-1]["incomplete_details"]
+        model_requests = [payload for _server, path, payload in call_log if path == "/v1/responses"]
+        for index, request_body in enumerate(model_requests):
+            assert [item.content for item in request_body.input if item.role == "assistant"] == answers[:index]
+        assert result.terminated is True
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_original_history_preserves_reasoning_only_output_without_added_message(self):
+        agent = _make_agent(max_steps=1)
+        response = _model_response_with_reasoning("")
+        response["output"].pop()
+        expected_output = NeMoGymResponse.model_validate(response).output
+        _wire_mock_client(
+            agent,
+            {
+                "/reset": [{"observation": None}],
+                "/v1/responses": [response],
+                "/step": [{"observation": None, "reward": 0.0, "terminated": True, "truncated": False}],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+
+        result = await agent.run(req, body)
+
+        assert result.response.output == expected_output
 
     @pytest.mark.asyncio
     async def test_max_steps_sets_truncated(self):
