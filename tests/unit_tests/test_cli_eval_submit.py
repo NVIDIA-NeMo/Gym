@@ -101,7 +101,7 @@ class TestEvalSubmitFlatConfig:
             yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
         )
 
-        _eval_submit(_args(config_path), overrides=["+driver.env.FOO=bar"])
+        _eval_submit(_args(config_path), overrides=["+driver.env.FOO=lit:bar"])
 
         assert captured["config"].driver.env == {"FOO": "bar"}
 
