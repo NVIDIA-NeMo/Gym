@@ -255,8 +255,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             # OpenSandbox cleans up the exec process group on return.
-            # Detach solve.sh so a server it starts is still running when test.sh connects.
-            golden_patch_result = await eval_sandbox.exec_setsid(
+            # Use the provider's service-preserving execution for the reference solution.
+            golden_patch_result = await eval_sandbox.exec_with_background_services(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
             )

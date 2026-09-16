@@ -723,10 +723,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            # OpenSandbox cleans up the process group when the exec command finishes.
-            # Detach it so task servers remain available to the verifier.
-            result = await sandbox.exec_setsid(
-                command,
+            result = await sandbox.exec(
+                command=command,
                 timeout_s=self.config.sandbox_timeout,
             )
         except Exception as exc:

@@ -15,6 +15,7 @@
 import asyncio
 import importlib.util
 import os
+import shlex
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -52,15 +53,13 @@ pytestmark = pytest.mark.sandbox
 
 
 @pytest.mark.integration
+# Ordinary exec is the negative control: its server starts, but does not survive command cleanup.
+@pytest.mark.parametrize("method, survives", [("exec", False), ("exec_with_background_services", True)])
 @pytest.mark.skipif(
     os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
 )
-def test_exec_setsid_keeps_server_reachable_after_command_finishes() -> None:
-    """A server remains reachable after the command that started it finishes."""
-    asyncio.run(_assert_exec_setsid_keeps_server_reachable_after_command_finishes())
-
-
-async def _assert_exec_setsid_keeps_server_reachable_after_command_finishes() -> None:
+async def test_server_survival_after_command_finishes(method: str, survives: bool) -> None:
+    """Provider session execution preserves the server across OpenSandbox commands."""
     from omegaconf import OmegaConf
 
     config_path = Path(__file__).parents[2] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
@@ -78,14 +77,38 @@ async def _assert_exec_setsid_keeps_server_reachable_after_command_finishes() ->
                     env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
                 )
             )
-            await sandbox.upload(Path(__file__).with_name("sandbox_server_task.py"), "/tmp/server_task.py")
+            probe = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status)"
+            check = f"python3 -c {shlex.quote(probe)}"
+            start = (
+                "python3 -m http.server 5000 --bind 127.0.0.1 > /tmp/http.log 2>&1 < /dev/null & "
+                # Poll readiness before exiting to distinguish startup delay from process cleanup.
+                f"for attempt in {{1..100}}; do {check} 2>/dev/null && exit 0; sleep 0.1; done; exit 1"
+            )
             # The first command exits after its child server accepts connections.
-            started = await sandbox.exec_setsid("python3 /tmp/server_task.py start", timeout_s=30)
+            started = await getattr(sandbox, method)(f"bash -c {shlex.quote(start)}", timeout_s=30)
             assert started.return_code == 0, started
-            # A separate exec proves the server survived the first command's cleanup.
-            response = await sandbox.exec("python3 /tmp/server_task.py check", timeout_s=15)
-            assert response.return_code == 0, response
-            assert response.stdout.strip() == "200"
+            assert started.stdout.strip() == "200"
+            response = await sandbox.exec(check, timeout_s=15)
+            if survives:
+                assert response.return_code == 0, response
+                assert response.stdout.strip() == "200"
+                # A timed-out solution must stop its service while keeping the
+                # sandbox available for the verifier to inspect partial work.
+                timed_start = start.replace("5000", "5001")
+                timed_out = await sandbox.exec_with_background_services(
+                    f"bash -c {shlex.quote(timed_start)}; sleep 60", timeout_s=5
+                )
+                assert timed_out.return_code == 124, timed_out
+                assert timed_out.error_type == "timeout", timed_out
+                assert timed_out.stdout.strip() == "200", timed_out
+                stopped = await sandbox.exec(check.replace("5000", "5001"), timeout_s=15)
+                assert stopped.return_code == 1, stopped
+                assert "ConnectionRefusedError" in (stopped.stdout or "") + (stopped.stderr or "")
+                # Deleting the timed-out session must leave the earlier service alone.
+                assert (await sandbox.exec(check, timeout_s=15)).return_code == 0
+            else:
+                assert response.return_code == 1, response
+                assert "ConnectionRefusedError" in (response.stdout or "") + (response.stderr or "")
     finally:
         await sandbox.stop()
 
@@ -392,69 +415,16 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
-def test_exec_setsid_wraps_command_and_reserves_cleanup_time() -> None:
-    asyncio.run(_assert_exec_setsid_wraps_command_and_reserves_cleanup_time())
-
-
-async def _assert_exec_setsid_wraps_command_and_reserves_cleanup_time() -> None:
+@pytest.mark.parametrize("timeout", [30, None])
+async def test_background_services_uses_ordinary_exec_without_provider_override(timeout: int | None) -> None:
     provider = FakeSandboxProvider()
     sandbox = AsyncSandbox(provider)
-    await sandbox.start(SandboxSpec(image="image:tag"))
-
-    await sandbox.exec_setsid("bash solve.sh", timeout_s=30)
-
+    await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+    await sandbox.exec_with_background_services("bash solve.sh", timeout_s=timeout)
     [call] = provider.exec_calls
-    assert "setsid bash -c " in call["command"]
-    assert "bash solve.sh" in call["command"]
-    assert "kill -TERM -" in call["command"]
-    assert call["timeout_s"] == 90
-
-
-def test_exec_setsid_without_timeout_has_no_deadline() -> None:
-    asyncio.run(_assert_exec_setsid_without_timeout_has_no_deadline())
-
-
-async def _assert_exec_setsid_without_timeout_has_no_deadline() -> None:
-    provider = FakeSandboxProvider()
-    sandbox = AsyncSandbox(provider)
-    await sandbox.start(SandboxSpec(image="image:tag"))
-
-    await sandbox.exec_setsid("sleep 1", timeout_s=None)
-
-    [call] = provider.exec_calls
-    assert call["timeout_s"] is None
-    assert "date +%s" not in call["command"]
-    assert "kill -TERM -" not in call["command"]
-
-
-def test_exec_setsid_reports_timeout_only_when_marker_is_present() -> None:
-    asyncio.run(_assert_exec_setsid_reports_timeout_only_when_marker_is_present())
-
-
-async def _assert_exec_setsid_reports_timeout_only_when_marker_is_present() -> None:
-    from nemo_gym.sandbox.api import SETSID_TIMEOUT_MARKER
-
-    class ExitingProvider(FakeSandboxProvider):
-        stdout = ""
-
-        async def exec(self, handle, command, **kwargs):
-            await super().exec(handle, command, **kwargs)
-            return SandboxExecResult(stdout=self.stdout, stderr=None, return_code=124)
-
-    provider = ExitingProvider()
-    sandbox = AsyncSandbox(provider)
-    await sandbox.start(SandboxSpec(image="image:tag"))
-
-    provider.stdout = f"partial output\n{SETSID_TIMEOUT_MARKER}\n"
-    timed_out = await sandbox.exec_setsid("sleep 999", timeout_s=1)
-    assert timed_out.return_code == 124
-    assert timed_out.error_type == "timeout"
-    assert timed_out.stdout.startswith("partial output")
-
-    provider.stdout = "the command itself exited 124\n"
-    own_exit = await sandbox.exec_setsid("exit 124", timeout_s=1)
-    assert own_exit.return_code == 124
-    assert own_exit.error_type is None
+    assert call["command"] == "bash solve.sh"
+    assert call["cwd"] == "/work"
+    assert call["timeout_s"] == timeout
 
 
 def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
