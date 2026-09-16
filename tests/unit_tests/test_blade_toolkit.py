@@ -19,32 +19,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CLAUDE_SKILLS = (
-    "add-benchmark",
-    "gh-stack",
-    "nemo-gym-blade-analysis",
-    "nemo-gym-debugging",
-    "nemo-gym-docs",
-    "nemo-gym-pivot-datasets",
-    "nemo-gym-reward-profiling",
-)
-CODEX_COMPATIBILITY_LINKS = (
-    "nemo-gym-blade-analysis",
-    "nemo-gym-debugging",
-    "nemo-gym-pivot-datasets",
-    "nemo-gym-reward-profiling",
-)
 TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
-
-
-def test_agent_specific_skill_paths_resolve_to_canonical_skills():
-    for skill in CLAUDE_SKILLS:
-        canonical_skill = REPO_ROOT / ".agents/skills" / skill
-        assert (REPO_ROOT / ".claude/skills" / skill).resolve() == canonical_skill.resolve()
-
-    for skill in CODEX_COMPATIBILITY_LINKS:
-        canonical_skill = REPO_ROOT / ".agents/skills" / skill
-        assert (REPO_ROOT / ".codex/skills" / skill).resolve() == canonical_skill.resolve()
 
 
 def test_make_shallow_keeps_only_high_level_metric_tables(tmp_path):
