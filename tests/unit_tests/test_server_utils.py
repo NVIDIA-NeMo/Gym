@@ -805,10 +805,25 @@ class TestServerUtils:
             (b'{"nested":{"value":"small"}}', False),
             (b"not-json\nwith-control-\x00", False),
             (b'{"credentials":{"password":"secret"}}', False),
+            (b"x" * 4094, False),
+            (b"x" * 4095, True),
             (b"\x00" * 4096, True),
+            ("中文".encode() * 4096, True),
+            (b"\\" * 4096, True),
             (b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}', True),
         ],
-        ids=["empty", "small-json", "non-json-control", "credentials", "escape-boundary", "multi-megabyte"],
+        ids=[
+            "empty",
+            "small-json",
+            "non-json-control",
+            "credentials",
+            "at-limit",
+            "over-limit",
+            "escape-boundary",
+            "unicode",
+            "backslashes",
+            "multi-megabyte",
+        ],
     )
     async def test_validation_exception_log_bounds_body_before_rendering(
         self, body: bytes, expected_truncated: bool, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
@@ -842,7 +857,11 @@ class TestServerUtils:
         assert rendered_body_sizes[0] <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
         assert len(record.request_body_prefix) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
         assert record.request_body_truncated is expected_truncated
-        assert nemo_gym.server_utils.json.loads(record.request_body_prefix) is not None or body == b""
+        decoded_prefix = nemo_gym.server_utils.json.loads(record.request_body_prefix)
+        assert decoded_prefix.endswith("...[truncated]") is expected_truncated
+        assert ("...[truncated]" in record.getMessage()) is expected_truncated
+        if not expected_truncated:
+            assert decoded_prefix == body.decode("utf-8", errors="replace")
         assert "request_body_size_bytes=" in record.getMessage()
         assert "request_body_truncated=" in record.getMessage()
         assert "request_body_prefix=" in record.getMessage()
@@ -861,13 +880,18 @@ class TestServerUtils:
             assert "\\n" in record.request_body_prefix
             assert "\\u0000" in record.request_body_prefix
 
-    async def test_validation_exception_log_bounds_error_count(self, caplog: LogCaptureFixture) -> None:
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_log_bounds_error_count(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
         request = MagicMock(spec=Request)
         request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
         errors = [
             {
                 "type": "missing",
-                "loc": ("body", f"field_{index}"),
+                "loc": (location, f"field_{index}"),
                 "msg": "Field required",
                 "input": None,
             }
@@ -881,6 +905,26 @@ class TestServerUtils:
         assert record.validation_error_count == len(errors)
         assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
         assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+
+    async def test_validation_exception_log_marks_omitted_location_items(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body", *("field" for _ in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS))),
+                "msg": "Field required",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        assert len(record.validation_errors[0]["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
 
     async def test_validation_exception_detects_body_error_after_error_log_cap(
         self, caplog: LogCaptureFixture
@@ -924,6 +968,8 @@ class TestServerUtils:
         summary = record.validation_errors[0]
         assert len(summary["type"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
         assert len(summary["msg"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert summary["type"].endswith("...[truncated]")
+        assert summary["msg"].endswith("...[truncated]")
         assert len(summary["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
         assert all(
             not isinstance(value, str) or len(value) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
@@ -931,7 +977,9 @@ class TestServerUtils:
         )
         assert "\n" not in str(summary)
         assert "\x00" not in str(summary)
+        assert all(value.endswith("...[truncated]") for value in summary["loc"][1:])
         assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
         assert len(record.getMessage()) < 5000
 
     async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
