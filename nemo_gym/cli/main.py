@@ -26,7 +26,7 @@ from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
-from nemo_gym.cli.utils import did_you_mean
+from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
 
 
 logger = logging.getLogger(__name__)
@@ -564,20 +564,51 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
             )
 
 
-def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
-    from pathlib import Path
+def _validate_submit_config(config_path: Path, resolved: dict):
+    """`SubmitConfig.model_validate`, returning the model or raising a `ConfigError` that names the file.
 
+    `SubmitConfig` is an orchestration model, not a `BaseNeMoGymCLIConfig`, so main()'s friendly handler
+    would re-raise its `ValidationError` as a traceback. That handler's "+key=<value>" hint would also be
+    wrong here: the fields live in the YAML file, not on the command line.
+    """
+    from pydantic import ValidationError
+
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.orchestration.api import SubmitConfig
+
+    try:
+        return SubmitConfig.model_validate(resolved)
+    except ValidationError as e:
+        missing, invalid = _describe_validation_errors(e)
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing required configuration: {', '.join(missing)}")
+        if invalid:
+            parts.append(f"invalid configuration: {'; '.join(invalid)}")
+        raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
+
+
+@exit_cleanly_on_config_error
+def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     import rich
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
     from rich.markup import escape
 
-    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.config_types import ConfigError
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
     config_path = Path(args.config).resolve()
+    # Hydra composes by stem, so a missing path would surface from `compose` as a `MissingConfigException`
+    # traceback whose search-path dump never names the offending path. Check up front instead.
+    if not config_path.is_file():
+        what = "is a directory, not a file" if config_path.is_dir() else "was not found"
+        raise ConfigError(
+            f"Submit config '{config_path}' {what}. "
+            "Check the path is spelled correctly and is relative to your working directory."
+        )
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
         composed = compose(config_name=config_path.stem, overrides=overrides)
@@ -586,7 +617,9 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
-    config = SubmitConfig.model_validate({key: value for key, value in resolved.items() if key not in scratch_keys})
+    config = _validate_submit_config(
+        config_path, {key: value for key, value in resolved.items() if key not in scratch_keys}
+    )
 
     record = submit(config, dry_run=args.dry_run)
     if record is None:
@@ -1250,6 +1283,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _describe_validation_errors(exc) -> tuple[list[str], list[str]]:
+    """Split a pydantic `ValidationError` into dotted paths of missing fields and `path (reason)` strings for
+    every other failure, so each CLI error path renders schema mistakes the same way."""
+    missing: list[str] = []
+    invalid: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<config>"
+        if error["type"] == "missing":
+            missing.append(location)
+        else:
+            invalid.append(f"{location} ({error['msg']})")
+    return missing, invalid
+
+
 def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> None:
     # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
     # pydantic sets ValidationError.title to the validated
@@ -1269,14 +1316,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
         raise
 
     # For user's config validation, raise a descriptive error message
-    missing: list[str] = []
-    invalid: list[str] = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error["loc"]) or "<config>"
-        if error["type"] == "missing":
-            missing.append(location)
-        else:
-            invalid.append(f"{location} ({error['msg']})")
+    missing, invalid = _describe_validation_errors(exc)
 
     parts: list[str] = []
     if missing:
