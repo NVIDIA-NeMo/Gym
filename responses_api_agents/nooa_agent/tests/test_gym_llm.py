@@ -79,7 +79,9 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
     ).model_dump(mode="json")
 
 
-def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
+def make_llm(
+    payload: dict, *, max_steps: int = 2, sampling_overrides: dict | None = None
+) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
     state = RolloutLLMState(max_steps=max_steps)
@@ -89,6 +91,7 @@ def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, Mag
         model_url_path="/ng-rollout/rollout-1/v1/responses",
         state=state,
         cookies={},
+        sampling_overrides=sampling_overrides,
     )
     return llm, server_client, state
 
@@ -189,6 +192,34 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert collected.model_calls[0].model_ref.name == "policy_model"
     assert collected.calls[0].request == request["json"]
     assert collected.calls[0].request is not request["json"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": 128}),
+        ({"temperature": 0}, {"temperature": 0, "top_p": 0.9, "max_output_tokens": 128}),
+        (
+            {"temperature": 0, "top_p": 0.8, "max_output_tokens": 64},
+            {"temperature": 0, "top_p": 0.8, "max_output_tokens": 64},
+        ),
+    ],
+)
+async def test_row_sampling_overrides_nooa_call_settings_on_every_call(overrides: dict, expected: dict) -> None:
+    supplied = dict(overrides)
+    llm, client, state = make_llm(model_response(), sampling_overrides=supplied)
+    supplied.clear()
+    for _ in range(2):
+        await llm.acall(
+            [{"role": "user", "content": "question"}],
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=128,
+        )
+        body = client.post.await_args.kwargs["json"]
+        assert body.model_dump(include=set(expected)) == expected
+        assert state.calls[-1].request == body
 
 
 @pytest.mark.asyncio
