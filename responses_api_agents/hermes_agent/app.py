@@ -473,8 +473,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         runner_exit_task = state.runner_exit_task
         if runner_session is None:
             return
+        if runner_exit_task is None:
+            raise RuntimeError("Hermes runner has no exit watcher; cannot confirm termination")
         try:
-            if runner_exit_task is not None and not runner_exit_task.done():
+            if not runner_exit_task.done():
                 await runner_session.send_signal("SIGTERM")
                 try:
                     await asyncio.wait_for(
@@ -487,15 +489,19 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         asyncio.shield(runner_exit_task),
                         timeout=self.config.session_close_timeout_seconds,
                     )
-            elif runner_exit_task is not None:
-                runner_exit_task.exception()
+            else:
+                runner_exit_task.result()
         except SandboxPtyError:
-            if runner_exit_task is not None and not runner_exit_task.done():
+            if not runner_exit_task.done():
                 raise
-        finally:
-            await runner_session.close()
-            state.runner_session = None
-            state.runner_exit_task = None
+            # Signalling can race with process exit, but a failed exit watcher
+            # is not evidence that the runner stopped.
+            runner_exit_task.result()
+        # Keep both handles on timeout, cancellation, or provider failure so a
+        # later close can retry without incorrectly authorizing verification.
+        await runner_session.close()
+        state.runner_session = None
+        state.runner_exit_task = None
 
     async def _close_agent_session_state(
         self,
@@ -691,6 +697,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     extra_body = model_request.pop("extra_body", None)
                     if isinstance(extra_body, dict):
                         model_request = extra_body | model_request
+                    chat_template_kwargs = model_request.pop("chat_template_kwargs", None)
+                    if chat_template_kwargs is not None:
+                        # Gym carries per-request template overrides in metadata,
+                        # not as extra fields on its strict Chat Completions body.
+                        metadata = dict(model_request.get("metadata") or {})
+                        template_overrides = json.loads(metadata.get("chat_template_kwargs") or "{}")
+                        metadata["chat_template_kwargs"] = json.dumps(template_overrides | chat_template_kwargs)
+                        model_request["metadata"] = metadata
                     try:
                         model_response = await self.server_client.post(
                             server_name=self.config.model_server.name,
