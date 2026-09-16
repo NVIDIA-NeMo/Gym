@@ -1259,6 +1259,181 @@ def test_pdf_evaluator_cleanup_patch_reraises_unrelated_missing_file(monkeypatch
         metrics.compare_pdf_images("actual.pdf", "gold.pdf")
 
 
+@pytest.mark.parametrize(
+    "result_kind",
+    [
+        "valid",
+        "empty",
+        "invalid",
+        "truncated",
+        "fetch_none",
+        "fetch_type",
+        "fetch_error",
+        "cache_missing",
+        "cache_permission",
+        "cache_corrupt",
+        "missing_result",
+        "decoder_missing",
+        "decoder_unknown",
+        "metric_error",
+    ],
+)
+@pytest.mark.parametrize("gold_kind", ["valid", "missing", "invalid", "null"])
+def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result_kind: str, gold_kind: str) -> None:
+    import builtins
+    from io import BytesIO
+
+    from PIL import Image
+
+    _patch_client_for_fake_runtime(monkeypatch)
+    result_path, gold_path = tmp_path / "result_wallpaper.png", tmp_path / "gold.png"
+    Image.new("RGB", (16, 16), "red").save(gold_path)
+    content = gold_path.read_bytes()
+    if result_kind == "truncated":
+        buffer = BytesIO()
+        Image.new("RGB", (16, 16)).save(buffer, format="BMP")
+        content = buffer.getvalue()[:-100]
+    content = {"empty": b"", "invalid": b"not an image", "fetch_none": None, "fetch_type": "bad response"}.get(
+        result_kind, content
+    )
+    gold_valid = gold_kind == "valid"
+    if gold_kind == "missing":
+        gold_path.unlink()
+    elif gold_kind == "invalid":
+        gold_path.write_bytes(b"")
+    elif gold_kind == "null":
+        gold_path = None
+
+    image_open = Image.open
+
+    def open_image(path):
+        if isinstance(path, BytesIO) and result_kind in ("decoder_missing", "decoder_unknown"):
+            raise OSError(
+                "decoder jpeg not available" if result_kind == "decoder_missing" else "unexpected decoder error"
+            )
+        return image_open(path)
+
+    monkeypatch.setattr(Image, "open", open_image)
+    file_open = builtins.open
+
+    def open_file(path, mode="r", *args, **kwargs):
+        if str(path) == str(result_path) and mode == "wb":
+            if result_kind == "cache_missing":
+                raise FileNotFoundError(2, "cache directory missing", str(path))
+            if result_kind == "cache_permission":
+                raise PermissionError(13, "Permission denied", str(path))
+        return file_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", open_file)
+    calls = []
+    fetches = []
+
+    def fetch_wallpaper():
+        fetches.append(True)
+        if result_kind == "fetch_error":
+            raise ConnectionError("wallpaper retrieval failed")
+        return content
+
+    def get_result(env, config):
+        # Reproduce the pinned upstream getter's loss of retrieval-failure information.
+        data = env.controller.get_vm_wallpaper()
+        with open(result_path, "wb") as file:
+            file.write(data if isinstance(data, bytes) else b"")
+        return str(result_path)
+
+    def compare_images(image1_path, image2_path, **options):
+        calls.append((image1_path, image2_path, options))
+        with Image.open(image1_path) as image:
+            image.convert("L")
+        with Image.open(image2_path) as image:
+            image.convert("L")
+        if result_kind == "metric_error":
+            raise OSError("comparison failed")
+        return 0.4
+
+    modules = [
+        ModuleType(name)
+        for name in (
+            "desktop_env",
+            "desktop_env.evaluators",
+            "desktop_env.evaluators.metrics",
+            "desktop_env.evaluators.metrics.vlc",
+        )
+    ]
+    desktop_env, evaluators, metrics, vlc = modules
+    desktop_env.evaluators, evaluators.metrics, metrics.vlc = evaluators, metrics, vlc
+    metrics.compare_images = vlc.compare_images = compare_images
+    for module in modules:
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class WallpaperEnv(FakeEnv):
+        def reset(self, task_config):
+            self.cache_dir = str(tmp_path)
+            self.metric = metrics.compare_images
+            self.result_getter = get_result
+            self.controller.get_vm_wallpaper = fetch_wallpaper
+            return super().reset(task_config)
+
+        def evaluate(self):
+            try:
+                result = self.result_getter(self, self.task_config["evaluator"]["result"])
+            except FileNotFoundError:
+                return 0.0  # DesktopEnv catches missing result files before metric dispatch.
+            if result_kind == "cache_corrupt":
+                result_path.write_bytes(b"cache corrupted after retrieval")
+            elif result_kind == "missing_result":
+                result_path.unlink()
+            return self.metric(result, gold_path, reference_base_result=0.11)
+
+    monkeypatch.setattr(osworld_client, "load_attr", lambda _path: WallpaperEnv)
+    task = {
+        "id": "wallpaper",
+        "instruction": "Finish the task.",
+        "evaluator": {"func": "compare_images", "result": {"type": "vm_wallpaper", "dest": result_path.name}},
+    }
+    result = osworld_client.run_osworld_task(
+        task,
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        reward_mode="raw",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+    assert result.finished is True
+    assert result.mask_sample is (not gold_valid or result_kind not in ("valid", "empty", "invalid", "truncated"))
+    if result.mask_sample:
+        assert result.termination_reason == "evaluator_error"
+        assert result.error
+    else:
+        assert result.error is None
+    valid = gold_valid and result_kind == "valid"
+    assert result.score == result.reward == (0.4 if valid else 0.0)
+    called = gold_valid and result_kind in ("valid", "metric_error", "cache_corrupt", "missing_result")
+    assert calls == ([(str(result_path), gold_path, {"reference_base_result": 0.11})] if called else [])
+    assert fetches == [True]
+    assert metrics.compare_images is vlc.compare_images is compare_images
+    next_env = WallpaperEnv()
+    next_env.reset(task)
+    assert next_env.metric is compare_images
+    assert next_env.result_getter is get_result
+
+
+@pytest.mark.parametrize(
+    "evaluator",
+    [
+        {},
+        {"func": "compare_images", "result": {"type": "vm_file"}},
+        {"func": "other_metric", "result": {"type": "vm_wallpaper"}},
+        {"func": ["compare_images"], "result": [{"type": "vm_wallpaper"}]},
+    ],
+)
+def test_wallpaper_evaluator_leaves_other_evaluators_unchanged(evaluator):
+    env = SimpleNamespace(metric=object(), result_getter=object())
+    original = vars(env).copy()
+    osworld_client._configure_wallpaper_evaluator(env, {"evaluator": evaluator})
+    assert vars(env) == original
+
+
 def test_evaluator_result_artifacts_records_zero_byte_output(monkeypatch, tmp_path: Path) -> None:
     task_id = "pdf-task"
     task_cache = tmp_path / task_id
