@@ -211,6 +211,22 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
     assert coverage_report["fail_under"] == 95.0
 
 
+def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
+    # The full test suite measures coverage against the repo-wide gate
+    # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
+    # nemo-lens (requires_lens), which only the telemetry extra installs. If the
+    # full-test-suite install omits that extra, those tests skip, the telemetry
+    # modules count as uncovered, and the gate fails below its threshold.
+    workflow = FULL_TEST_WORKFLOW.read_text()
+
+    assert "uv sync" in workflow, "full test suite must install dependencies with uv sync"
+    sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
+    assert any("--extra telemetry" in line for line in sync_lines), (
+        "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
+    )
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (

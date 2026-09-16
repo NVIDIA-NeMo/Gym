@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dedicated Luna judge for APEX25 and the May ArXiv benchmarks.
+# Override the endpoint, key and model together for an OpenAI-compatible provider.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://api.openai.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,${oc.env:OPENAI_API_KEY,null}}
+      openai_model: ${oc.env:JUDGE_MODEL,gpt-5.6-luna}
+      extra_body:
+        reasoning:
+          effort: medium
+      max_concurrent_requests: 16
