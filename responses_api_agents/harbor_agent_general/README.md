@@ -1,13 +1,13 @@
 # Harbor Agent for NeMo Gym
 
 This agent integrates the [Harbor Framework](https://www.harborframework.com/) into NeMo Gym.
-The rollouts are compeletely owned by Harbor and NeMo Gym acts as the orchestrator,
+The rollouts are completely owned by Harbor and NeMo Gym acts as the orchestrator,
 converting the [Agent Trajectory Format](https://www.harborframework.com/docs/agents/trajectory-format) (ATIF)
-to NeMo Gym-compatible outputs. Harbor-related configuration is transparently exposed for use in a NeMo Gym configuration 
+to NeMo Gym-compatible outputs. Harbor-related configuration is transparently exposed for use in a NeMo Gym configuration
 file, allowing easy translation from `harbor run` commands.
 
 > [!caution]
-> NeMo Gym provides an incompatible [older implementation](../harbor_agent/README.md). 
+> NeMo Gym provides an incompatible [older implementation](../harbor_agent/README.md).
 > See [Implementation Notes](#implementation-notes) below for more details.
 
 ## Configuration
@@ -40,7 +40,10 @@ harbor_agent_general:
         ...
 ```
 
-See [configs](./configs) for specific examples.
+See [configs](./configs) for specific examples. The Docker and Singularity
+examples retain direct Harbor provider configuration. For Gym-routed policy
+training, exact token capture, OpenSandbox, and optional agentic verification,
+see [Training](./TRAINING.md).
 
 ## Example
 
@@ -103,11 +106,13 @@ A few notable details make it more general than the [older implementation](../ha
   - New Harbor datasets can be directly used by using appropriate keys in `harbor_dataset` config key, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.
 - All parsing of the Harbor trajectory into a Gym rollout trajectory now uses Harbor APIs instead of custom dictionary parsing.
 - Reasoning text is correctly handled via `NeMoGymResponseReasoningItem` objects.
-- A minimum harbor version sets to `0.20.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
+- Harbor 0.22 or newer is required by [pyproject.toml](./pyproject.toml).
 
-> [!caution]
-> Using this agent for training is currently not supported because underlying Harbor agents may not return
-> token ID information. Adding this support is currently work in progress.
+Training requires exact token IDs and log probabilities. With Gym model-server
+routing and token capture enabled, these are captured at the inference boundary
+independently of whether the Harbor harness includes them in ATIF. Direct-provider
+runs without equivalent metadata are evaluation-only; text retokenization is not
+a replacement for inference tokens.
 
 ### ATIF Conversion Contract
 

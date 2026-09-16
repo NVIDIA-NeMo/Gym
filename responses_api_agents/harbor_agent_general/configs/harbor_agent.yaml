@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Enabling capture remains a run-level choice. When enabled, Harbor training
+# retains all model calls, including subagents and retokenized contexts.
+token_id_capture:
+  builder: independent_calls
+
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      token_id_capture: true
+
+      # Set HARBOR_JOBS_DIR to shared storage when Ray workers span nodes.
+      harbor_jobs_dir: ${oc.env:HARBOR_JOBS_DIR,${oc.env:RAY_TMPDIR,/tmp}/harbor_agent_general_jobs}
+
+      # Follows harbor.models.job.config.DatasetConfig.
+      harbor_dataset:
+        path: ${oc.env:HARBOR_DATASET_PATH}
+
+      # OpenCode's OpenAI-compatible provider is routed through the Gym policy model.
+      harbor_agent:
+        name: opencode
+        model_name: nemo/${policy_model_name}
+        env: {}
+      context_window: 131072
+      max_output_tokens: 131072
+      reasoning_field: reasoning
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_base_url_env_var: OPENAI_BASE_URL
+      model_api_key_env_var: OPENAI_API_KEY
+      model_api_key: ${policy_api_key}
+
+      # Follows harbor.models.trial.config.EnvironmentConfig.
+      harbor_environment:
+        type: docker
+
+# Preserve vLLM parser output as an OpenAI-compatible reasoning field so
+# OpenCode can replay it on subsequent turns.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      reasoning_response_field: reasoning_content

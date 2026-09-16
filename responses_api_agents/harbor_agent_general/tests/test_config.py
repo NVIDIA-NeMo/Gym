@@ -15,6 +15,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
 
@@ -52,6 +54,18 @@ def test_normalize_jobs_dir_maps_jsonl_path_to_harbor_directory(tmp_path: Path) 
 def test_reward_key_defaults_to_reward_and_accepts_override(tmp_path: Path) -> None:
     assert _make_config(tmp_path, tmp_path / "default").harbor_reward_key == "reward"
     assert _make_config(tmp_path, tmp_path / "custom", harbor_reward_key="score").harbor_reward_key == "score"
+
+
+def test_gym_routing_is_optional_for_direct_provider_evaluation(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, tmp_path / "jobs", harbor_ray_task_num_cpus=0)
+    assert config.model_server is None
+    assert config.model_api_key is None
+    assert config.harbor_agent.model_name == "test-model"
+
+
+def test_token_capture_requires_model_server_routing(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="token_id_capture requires a Gym model_server"):
+        _make_config(tmp_path, tmp_path / "jobs", token_id_capture=True)
 
 
 def test_build_job_config_applies_single_trial_defaults(tmp_path: Path) -> None:
