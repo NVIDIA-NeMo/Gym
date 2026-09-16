@@ -114,7 +114,6 @@ set -euo pipefail
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
-export VLLM_USE_NCCL_SYMM_MEM=1
 
 # @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
