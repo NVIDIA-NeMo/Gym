@@ -1667,7 +1667,8 @@ class TestListEnvironmentsRouting:
         assert error.value.code == 1
         assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
 
-    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("status", ["experimental", "no-manifest"])
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch, status: str) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
             [
@@ -1682,7 +1683,7 @@ class TestListEnvironmentsRouting:
                 "--licensing",
                 "Apache-2.0",
                 "--status",
-                "experimental",
+                status,
                 "--lifecycle",
                 "active",
             ],
@@ -1693,7 +1694,7 @@ class TestListEnvironmentsRouting:
             "+catalog_kind=benchmark",
             '+modality="text"',
             '+licensing="Apache-2.0"',
-            "+status=experimental",
+            f"+status={status}",
             "+lifecycle=active",
         }
 
