@@ -1,0 +1,133 @@
+---
+title: "Run NOOA agents"
+description: "Run ordinary NOOA agents with Gym-owned models, resource tools, verification, and rollout evidence"
+position: 5
+---
+
+# Run NOOA agents
+
+The NOOA adapter runs an ordinary `nooa.Agent` in the Gym agent process. NOOA owns method dispatch,
+strategies, and the agent loop. Gym supplies model and resource transport, session state, verification,
+and the authoritative rollout record. The generic adapter has no NOOA Bench dependency.
+
+<Warning>
+Embedded execution is not an OS sandbox. Agent classes and generated Python execute in the agent
+server process. Tool allowlists and per-rollout objects constrain adapter routing; they do not isolate
+arbitrary Python. Gym's separate agent-sandbox integration is not implemented by this adapter.
+</Warning>
+
+## Run the calculate example
+
+The frozen two-case calculate fixture exercises NOOA's real strategy loop and Gym's exact-value
+verifier. Its agent and source manifest are hash-pinned independently of the runtime dependency.
+It is an integration smoke test, not a model-quality benchmark.
+
+With a configured [Gym model server](/main/model-server), start the environment:
+
+```bash
+gym env start \
+  --config responses_api_agents/nooa_agent/configs/nooa_calculate_capability.yaml \
+  --resources-server nooa_capability \
+  --model-type openai_model \
+  +observability_enabled=true \
+  +model_call_capture_dir=/tmp/nooa-model-calls
+```
+
+Then collect both cases, using the same capture directory on the collector:
+
+```bash
+gym eval run --no-serve \
+  --agent nooa_calculate_capability \
+  --input responses_api_agents/nooa_agent/data/capability_calculate.jsonl \
+  --output results/nooa-calculate.jsonl \
+  +observability_enabled=true \
+  +model_call_capture_dir=/tmp/nooa-model-calls
+```
+
+Use a fresh capture directory for independent runs. For a credential-free process smoke test, run
+`bash tests/e2e/nooa_calculate_e2e_test.sh`. This starts a deterministic Responses endpoint, the three
+Gym component servers, and the real collector; it checks rewards, model capture, turns, and tool-output
+joins. It retains artifacts in a fresh temporary directory and prints their location.
+
+## Agent-facing contract
+
+Make your agent module importable in the agent server's environment. Its class must subclass
+`nooa.Agent`, accept `llm=` at construction, and expose a public async entrypoint. The entrypoint may
+be implemented Python or a NOOA-generated method. It need not inherit a Gym or Bench base class.
+
+```yaml
+feedback_nooa:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: feedback_environment}
+      model_server: {type: responses_api_models, name: policy_model}
+      nooa:
+        agent_class: my_agents.feedback:FeedbackAgent
+        entrypoint: analyze_feedback
+        init_kwargs: {language: en}
+        allowed_tools: [get_customer]
+        model_aliases: {helper: helper_model}
+        arguments:
+          text:
+            source: responses_create_params.input
+            transform: latest_user_text
+          customer_id:
+            source: agent_inputs.customer_id
+      max_steps: 10
+      concurrency: 8
+      run_timeout_secs: 600
+```
+
+This overlay assumes the named resource and model servers are also configured. Startup validates the
+class, constructor, async entrypoint, required keyword-compatible arguments, and mappings.
+`init_kwargs.llm` is reserved for Gym.
+
+Rows put agent-visible structured inputs under `agent_inputs`. Mapping sources are restricted to that
+tree and `responses_create_params.input`; expected answers and verifier metadata cannot be mapped.
+Supported transforms are `identity`, `latest_user_text`, and `normalize_responses_input`. Dotted paths
+support sequence indexes. Missing sources produce explicit mapping errors.
+
+The direct `/v1/responses` endpoint only has `responses_create_params`, not a complete dataset row.
+Use `/run` for mappings from `agent_inputs` and for session seeding and verification.
+
+## Resources and models
+
+Row function declarations describe tools; the server configuration's `allowed_tools` authorizes their
+names. Each permitted resource tool becomes an ordinary async method, such as
+`await self.get_customer(customer_id=customer_id)`. There is no `self.gym_tools` namespace.
+Tools need closed object JSON Schemas with valid public Python parameter names. The adapter rejects
+reserved lifecycle routes, duplicate names, and collisions with agent methods or instance fields.
+Argument validation failures and HTTP error bodies remain visible to the agent and are recorded as
+failed tool observations. Resource calls share a per-rollout cookie jar and lock.
+
+`@strategy(llm="helper")` resolves through `model_aliases` to a named Gym model server. Unknown strings
+fail before NOOA's external registry is consulted. The adapter uses the pinned NOOA per-agent alias
+cache protocol; dependency upgrades must rerun the alias and child-agent compatibility tests.
+Primary and alias clients share one model-call budget and exact-output history, but have separate
+cookie jars. Only primary model cookies are returned to the caller. Each rollout creates a fresh
+subclass and cache, including for children constructed with `type(self)`.
+
+## Evidence and failures
+
+Scoped public NOOA hooks supply invocation parentage and code-execution facts. Gym retains exact model
+requests, outputs, response IDs, and any training metadata returned by its model server. The adapter
+emits `ng_agent_observations` and producer `ng_trajectory`; the collector joins model-server captures
+by model identity and response ID. Both server and collector must use the same capture configuration.
+
+Prior-output restoration prefers stable item identities. Text-only histories are restored only when
+the match is unambiguous; otherwise `prior_output_metadata_ambiguous` reports unavailable metadata
+instead of attaching another model's token IDs.
+
+An entrypoint return that differs from the last model-authored assistant message is JSON-serialized
+and appended only to the verifier-facing response. `non_trainable_terminal_output` marks this adapter
+output; it is not included in model turns or invocation conversations. CodeAct's internal
+`return_result` validation is not a separate external tool observation.
+
+`max_steps` covers all primary, alias, and nested policy calls. `run_timeout_secs` covers agent execution,
+not session seeding or verification. Timeouts are terminal failures; downstream infrastructure errors
+use Gym's retry classification. Completed model/tool evidence survives agent errors, cancellation at
+the episode deadline, and verifier failures.
+
+The adapter does not configure native journal exporters, probe a viewer, or write trace files at import.
+Native file/viewer journaling and NOOA Bench task-sandbox adapters are separate, optional work.
