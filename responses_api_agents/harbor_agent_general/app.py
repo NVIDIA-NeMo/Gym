@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import json
 import logging
 import posixpath
 import re
@@ -67,6 +68,8 @@ NUM_SAMPLES_IN_PARALLEL_KEY_NAME = "num_samples_in_parallel"
 AGENT_TIMEOUT_EXCEPTION_TYPE = "AgentTimeoutError"
 AUDITED_OPENCODE_IMPORT_PATH = "responses_api_agents.harbor_agent_general.audited_opencode:AuditedOpenCode"
 ALERTED_OPENCODE_IMPORT_PATH = "responses_api_agents.harbor_agent_general.audited_opencode:AlertedOpenCode"
+AGENTIC_VERIFIER_IMPORT_PATH = "responses_api_agents.harbor_agent_general.agentic_verifier:AgenticVerifier"
+SCORE_INTEGRITY_FILENAME = "score_integrity.json"
 _SANDBOX_CLEANUP_TIMEOUT_PREFIX = "Timed out during OpenSandbox kill"
 _SANDBOX_LIFECYCLE_RESET_MARKERS = (
     "OpenSandboxLifecycleResetError",
@@ -382,6 +385,71 @@ def _verifier_file_access_audit_metrics(
             metrics[f"verifier_{name}_{mode}_accessed"] = count > 0
             metrics[f"verifier_{name}_{mode}_access_event_count"] = count
     return metrics
+
+
+def _judge_score_integrity_metrics(trajectory_paths: list[Path]) -> dict[str, bool | int | str]:
+    verifier_dirs = {path.parent.parent / "verifier" for path in trajectory_paths}
+    integrity_paths = [directory / SCORE_INTEGRITY_FILENAME for directory in sorted(verifier_dirs)]
+    missing = [path for path in integrity_paths if not path.is_file()]
+    if not integrity_paths or missing:
+        missing_display = ", ".join(str(path) for path in missing) or "<no verifier directories>"
+        raise FileNotFoundError(f"Judge score integrity result is missing: {missing_display}")
+
+    results = [json.loads(path.read_text()) for path in integrity_paths]
+    terminal = all(result.get("terminal") is True for result in results)
+    host_fallback_zero = bool(results) and all(result.get("host_fallback_zero") is True for result in results)
+    accepted_call_count = sum(int(result.get("accepted_call_count", 0)) for result in results)
+    reasons = [str(result.get("reason", "")) for result in results if result.get("reason")]
+    return {
+        "judge_score_terminal": terminal,
+        "judge_score_host_fallback_zero": host_fallback_zero,
+        "judge_score_accepted_call_count": accepted_call_count,
+        "judge_score_integrity_error": "; ".join(reasons),
+    }
+
+
+def _validated_judge_score_integrity_metrics(
+    trial: TrialResult,
+    trajectory_paths: list[Path],
+) -> dict[str, bool | int | str]:
+    verifier_results = (
+        [step.verifier_result for step in trial.step_results] if trial.step_results else [trial.verifier_result]
+    )
+    if not trajectory_paths or len(trajectory_paths) != len(verifier_results):
+        raise ValueError("Agentic verifier trajectories and step results must align")
+
+    step_metrics = []
+    for path, verifier_result in zip(trajectory_paths, verifier_results, strict=True):
+        try:
+            metrics = _judge_score_integrity_metrics([path])
+        except FileNotFoundError as exc:
+            if verifier_result is not None:
+                raise
+            raise RuntimeError("Agentic verifier did not produce a result or a host score-integrity verdict") from exc
+
+        if not metrics["judge_score_terminal"] and not metrics["judge_score_host_fallback_zero"]:
+            reason = metrics["judge_score_integrity_error"] or "judge score was not terminal"
+            raise RuntimeError(f"Agentic verifier score failed host integrity validation: {reason}")
+        if verifier_result is None or verifier_result.rewards is None:
+            raise RuntimeError("Agentic verifier did not produce a result despite a terminal judge score")
+        if metrics["judge_score_host_fallback_zero"] and any(
+            float(reward) != 0.0 for reward in verifier_result.rewards.values()
+        ):
+            raise RuntimeError("Agentic verifier host fallback verdict requires zero rewards")
+        step_metrics.append(metrics)
+
+    return {
+        "judge_score_terminal": all(metrics["judge_score_terminal"] for metrics in step_metrics),
+        "judge_score_host_fallback_zero": any(metrics["judge_score_host_fallback_zero"] for metrics in step_metrics),
+        "judge_score_accepted_call_count": sum(
+            int(metrics["judge_score_accepted_call_count"]) for metrics in step_metrics
+        ),
+        "judge_score_integrity_error": "; ".join(
+            str(metrics["judge_score_integrity_error"])
+            for metrics in step_metrics
+            if metrics["judge_score_integrity_error"]
+        ),
+    }
 
 
 @ray.remote(
@@ -709,6 +777,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
             if self.config.verifier_file_access_audit is not None
             else {}
         )
+        score_integrity_metrics = (
+            _validated_judge_score_integrity_metrics(trial, trajectory_paths)
+            if self.config.harbor_verifier.import_path == AGENTIC_VERIFIER_IMPORT_PATH
+            else {}
+        )
         policy_alert_metrics = _policy_alert_metrics(trial)
 
         return HarborVerifyResponse.model_validate(
@@ -738,6 +811,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 },
                 **file_access_metrics,
                 **verifier_file_access_metrics,
+                **score_integrity_metrics,
                 **policy_alert_metrics,
             }
         )
