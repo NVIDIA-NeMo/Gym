@@ -76,7 +76,7 @@ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
 class _BaseExternalCaptureHandler(ABC):
     """Own the lifecycle shared by external capture backends."""
 
-    _INVALID_CAPTURE_REASON: str
+    _INVALID_CAPTURE_REASON = INVALID_COMMIT_COORDS_REASON
     _BACKEND_LABEL: str
 
     def prepare_request(self, request_payload: dict[str, Any]) -> dict[str, Any]:
@@ -266,7 +266,6 @@ class _BaseExternalCaptureHandler(ABC):
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
     """Commit lineage after a vLLM worker durably stages the token delta."""
 
-    _INVALID_CAPTURE_REASON = INVALID_COMMIT_COORDS_REASON
     _BACKEND_LABEL = "vLLM"
 
     def _prepare_admitted_request(
@@ -288,7 +287,6 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
 class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
     """Commit lineage after an MInf worker durably stages a canonical delta."""
 
-    _INVALID_CAPTURE_REASON = "invalid_megatron_commit_coordinates"
     _BACKEND_LABEL = "Megatron"
 
     def _prepare_admitted_request(
