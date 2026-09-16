@@ -41,8 +41,10 @@ from prompts import SYSTEM_PROMPTS  # noqa: E402
 DATASET = "MolDeTox/MolDeTox"
 
 # Files were revised 2026-08-27 with split sizes changed, so the revision is
-# pinned rather than tracking `main`.
-REVISION = "059e1926fa62a07c3f01afadadf72cce154cfb7f"
+# pinned rather than tracking `main`. The pragma is for detect-secrets, which
+# reads any 40-character hex string as a high-entropy secret; this one is a
+# public Hugging Face commit SHA and is meant to be read.
+REVISION = "059e1926fa62a07c3f01afadadf72cce154cfb7f"  # pragma: allowlist secret
 
 # All eight QA configs. The ninth config, `toxicitycliff`, is the source pair
 # table rather than a task and is loaded separately for the toxic-molecule join.
