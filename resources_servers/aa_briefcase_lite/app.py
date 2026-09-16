@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import tempfile
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from openai import AsyncOpenAI, OpenAI
+import httpx
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
@@ -31,21 +34,133 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
 from resources_servers.gdpval.comparison import (
     JUDGE_REQUEST_TIMEOUT_SECONDS,
+    MAX_SECTION_TEXT_CHARS_FOR_JUDGE,
+    MAX_TEXT_FILE_CHARS_FOR_JUDGE,
     Judge,
+    _bounded_text,
+    _load_raw_text,
     build_file_section,
     run_trials,
 )
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_media_modalities,
+    is_audio_file,
+    is_video_file,
     make_rng,
     merge_create_kwargs,
     sample_judge,
 )
-from resources_servers.gdpval.preconvert import preconvert_dir_async
+from resources_servers.gdpval.preconvert import preconvert_dir_async, sidecar_pdf
 
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
+
+
+_BINARY_TRANSPORT_LOGGER = logging.getLogger(__name__ + ".binary_transport")
+_BINARY_TRANSPORT_LOGGER.setLevel(logging.INFO)
+
+
+_JUDGE_USAGE_LOGGER = logging.getLogger(__name__ + ".judge_usage")
+_JUDGE_USAGE_LOGGER.setLevel(logging.INFO)
+_PAIRWISE_TRANSPORT_LOGGER = logging.getLogger(__name__ + ".pairwise_transport")
+_PAIRWISE_TRANSPORT_LOGGER.setLevel(logging.INFO)
+
+
+def _log_judge_usage(response: httpx.Response, *, mode: str, model: str) -> None:
+    """Retain usage for each returned attempt, without logging submitted content."""
+    if not response.is_success:
+        return
+    try:
+        body = response.json()
+    except ValueError:
+        return
+    usage = body.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    choices = body.get("choices") or []
+    _JUDGE_USAGE_LOGGER.info(
+        "Judge usage: mode=%s model=%s prompt_tokens=%s completion_tokens=%s "
+        "total_tokens=%s reasoning_tokens=%s cached_tokens=%s finish_reason=%s",
+        mode,
+        model,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+        details.get("reasoning_tokens"),
+        prompt_details.get("cached_tokens"),
+        choices[0].get("finish_reason") if choices else None,
+    )
+
+
+class _PairwiseJudgeHttpClient(DefaultHttpxClient):
+    """Capture usage before the shared pairwise helper reduces responses to text."""
+
+    def __init__(self, *, model: str, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.model = model
+
+    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        started = time.monotonic()
+        status = None
+        error_type = None
+        try:
+            response = super().send(request, **kwargs)
+            status = response.status_code
+            response.read()
+            _log_judge_usage(response, mode="pairwise", model=self.model)
+            return response
+        except Exception as error:
+            error_type = type(error).__name__
+            raise
+        finally:
+            _PAIRWISE_TRANSPORT_LOGGER.info(
+                "Pairwise judge transport: model=%s retry_count=%s status=%s error=%s duration_seconds=%.3f",
+                self.model,
+                request.headers.get("x-stainless-retry-count"),
+                status,
+                error_type,
+                time.monotonic() - started,
+            )
+
+
+class _BinaryJudgeHttpClient(DefaultAsyncHttpxClient):
+    """Observe each SDK transport attempt without changing its retry policy."""
+
+    def __init__(self, *, check_id: str, model: str, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.check_id = check_id
+        self.model = model
+        self.format_attempt = 0
+        self.transport_attempt = 0
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        self.transport_attempt += 1
+        started = time.monotonic()
+        status = None
+        error_type = None
+        try:
+            response = await super().send(request, **kwargs)
+            status = response.status_code
+            await response.aread()
+            _log_judge_usage(response, mode="binary", model=self.model)
+            return response
+        except Exception as error:
+            error_type = type(error).__name__
+            raise
+        finally:
+            _BINARY_TRANSPORT_LOGGER.info(
+                "Binary judge transport: check_id=%s model=%s format_attempt=%d "
+                "transport_attempt=%d status=%s error=%s duration_seconds=%.3f",
+                self.check_id,
+                self.model,
+                self.format_attempt,
+                self.transport_attempt,
+                status,
+                error_type,
+                time.monotonic() - started,
+            )
 
 
 class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
@@ -56,7 +171,8 @@ class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     dataset_dir: str
     pairwise_reference_ids: List[str] = ["gpt-5-5"]
     pairwise_num_trials: int = Field(default=2, ge=1)
-    binary_formatting_retries: int = Field(default=1, ge=0, le=3)
+    binary_formatting_retries: int = Field(default=2, ge=0, le=3)
+    binary_max_tokens_by_judge: Dict[str, int] = Field(default_factory=dict)
 
 
 class AABriefcaseLiteVerifyRequest(BaseVerifyRequest):
@@ -207,6 +323,29 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             audio_capable=judge.handles_audio,
             video_capable=judge.handles_video,
         )
+        # GDPval renders unknown extensions through a sibling PDF. AA also grades
+        # the declared LaTeX source, so retain that source alongside the rendering.
+        for source in sorted(stage.glob("*.tex")):
+            # The shared converter labels a sibling PDF as its source file.
+            # Identify the PDF actually attached, including the preferred sidecar.
+            pdf = sidecar_pdf(source)
+            if not pdf.is_file():
+                pdf = source.with_suffix(".pdf")
+            if pdf.is_file():
+                for index, block in enumerate(blocks[:-1]):
+                    content = blocks[index + 1]
+                    has_rendering = content["type"] != "text" or content.get("text", "").startswith(
+                        "[extracted text]\n"
+                    )
+                    if block.get("text") == f"\n{source.name}:\n" and has_rendering:
+                        block["text"] = f"\n{pdf.name} (submitted alongside {source.name}):\n"
+            text_used = sum(len(block.get("text", "")) for block in blocks)
+            remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+            label = _bounded_text(f"\n{source.name} (LaTeX source):\n", remaining)
+            text = await asyncio.to_thread(
+                _load_raw_text, source, min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining - len(label))
+            )
+            blocks.append({"type": "text", "text": label + text})
         blocks.extend({"type": "text", "text": f"[required submitted file missing: {name}]"} for name in missing)
         return blocks
 
@@ -223,93 +362,135 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             score_1_criteria=check["score_1_criteria"],
             score_0_criteria=check["score_0_criteria"],
         )
+        before_artifact, after_artifact = user_text.split("<<<SUBMISSION CONTENT MESSAGES>>>")
         messages = [
-            {"role": "system", "content": self._aa_binary_system},
-            {"role": "user", "content": [{"type": "text", "text": user_text}, *artifact_blocks]},
+            {"role": "system", "content": self._aa_binary_system + "\n\n" + _BINARY_JSON_INSTRUCTION},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": before_artifact},
+                    *artifact_blocks,
+                    {"type": "text", "text": after_artifact},
+                ],
+            },
         ]
-        client = AsyncOpenAI(
-            base_url=judge.base_url,
-            api_key=judge.api_key,
-            timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-        raw = ""
-        for _attempt in range(self.config.binary_formatting_retries + 1):
-            kwargs = merge_create_kwargs(
-                {
-                    "model": judge.model,
-                    "messages": messages,
-                    "temperature": 0.0,
-                    "max_tokens": 4096,
-                },
-                judge.create_overrides,
+        async with _BinaryJudgeHttpClient(check_id=check["check_id"], model=judge.model) as http_client:
+            client = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=2,
+                http_client=http_client,
             )
-            response = await client.chat.completions.create(**kwargs)
-            raw = (response.choices[0].message.content or "").strip()
-            parsed = _parse_binary_judgement(raw)
-            if parsed is not None:
-                return parsed, raw
-            messages.extend(
-                [
-                    {"role": "assistant", "content": raw},
+            raw = ""
+            for _attempt in range(self.config.binary_formatting_retries + 1):
+                http_client.format_attempt = _attempt + 1
+                http_client.transport_attempt = 0
+                kwargs = merge_create_kwargs(
                     {
-                        "role": "user",
-                        "content": (
-                            'Return only one JSON object with boolean key "passed" and string key "reasoning".'
-                        ),
+                        "model": judge.model,
+                        "messages": messages,
+                        "temperature": 0.0,
+                        "max_tokens": 4096,
                     },
-                ]
-            )
-        return None, raw
+                    judge.create_overrides,
+                )
+                # Binary budgets are independent of the larger pairwise comparison budget.
+                if judge.name in self.config.binary_max_tokens_by_judge:
+                    kwargs["max_tokens"] = self.config.binary_max_tokens_by_judge[judge.name]
+                response = await client.chat.completions.create(**kwargs)
+                raw = (response.choices[0].message.content or "").strip()
+                parsed = _parse_binary_judgement(raw)
+                if parsed is not None:
+                    return parsed, raw
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    logging.getLogger(__name__).warning(
+                        "Invalid binary judge answer reached its token limit: check_id=%s model=%s "
+                        "format_attempt=%d completion_tokens=%s",
+                        check["check_id"],
+                        judge.model,
+                        _attempt + 1,
+                        getattr(getattr(response, "usage", None), "completion_tokens", None),
+                    )
+                # Empty generations have nothing to repair: retry the same check without
+                # adding empty assistant turns or rerunning already completed checks.
+                if not raw:
+                    continue
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": _BINARY_JSON_INSTRUCTION},
+                    ]
+                )
+            return None, raw
 
     async def _verify_binary(
         self,
         body: AABriefcaseLiteVerifyRequest,
         task_markdown: str,
         judges: list[ResolvedJudge],
-        stage: Path,
-        missing: list[str],
     ) -> tuple[float, list[dict[str, Any]], int]:
         checks = self._checks_for_task(body.task_id, "binary")
-        section_cache: dict[str, list[dict[str, Any]]] = {}
+        section_cache: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
+        stages: dict[tuple[str, ...], tuple[Path, list[str]]] = {}
         results: list[dict[str, Any]] = []
         invalid = 0
         passed = 0
-        for check in checks:
-            rng = make_rng(self.config.judge_sampling_seed, body.task_id, check["check_id"], "binary")
-            selected = sample_judge(judges, rng)
-            if selected.name not in section_cache:
-                section_cache[selected.name] = await self._section(stage, selected, missing)
-            parsed, raw = await self._binary_call(selected, task_markdown, check, section_cache[selected.name])
-            result: dict[str, Any] = {
-                "check_id": check["check_id"],
-                "check_type": check["check_type"],
-                "judge_name": selected.name,
-                "passed": parsed["passed"] if parsed else None,
-                "reasoning": parsed["reasoning"] if parsed else "invalid judge response",
-            }
-            if self.config.persist_raw_judge_responses:
-                result["raw_response"] = raw
-            if parsed is None:
-                invalid += 1
-            elif parsed["passed"]:
-                passed += 1
-            results.append(result)
+        with ExitStack() as stack:
+            for check in checks:
+                filenames = tuple(_requested_filenames([check]))
+                if filenames not in stages:
+                    stages[filenames] = _stage_submission(body.deliverables_dir, list(filenames), stack)
+                    await self._preconvert(stages[filenames][0])
+                stage, missing = stages[filenames]
+                eligible = judges
+                modalities = dir_media_modalities(stage)
+                # Missing required media must not change this check's judge panel
+                # across submissions; retain capability checks for attached media too.
+                if any(is_audio_file(name) for name in filenames):
+                    modalities.add("audio")
+                if any(is_video_file(name) for name in filenames):
+                    modalities.add("video")
+                if modalities:
+                    eligible, _audio, _video = self._route_media_judges(
+                        judges, task_id=body.task_id, modalities=modalities, label="binary check artifact"
+                    )
+                rng = make_rng(self.config.judge_sampling_seed, body.task_id, check["check_id"], "binary")
+                selected = sample_judge(eligible, rng)
+                cache_key = (filenames, selected.name)
+                if cache_key not in section_cache:
+                    section_cache[cache_key] = await self._section(stage, selected, missing)
+                parsed, raw = await self._binary_call(selected, task_markdown, check, section_cache[cache_key])
+                result: dict[str, Any] = {
+                    "check_id": check["check_id"],
+                    "check_type": check["check_type"],
+                    "judge_name": selected.name,
+                    "passed": parsed["passed"] if parsed else None,
+                    "reasoning": parsed["reasoning"] if parsed else "invalid judge response",
+                }
+                if self.config.persist_raw_judge_responses:
+                    result["raw_response"] = raw
+                if parsed is None:
+                    invalid += 1
+                elif parsed["passed"]:
+                    passed += 1
+                results.append(result)
         return passed / len(checks), results, invalid
 
     @staticmethod
     def _pairwise_judges(resolved: list[ResolvedJudge]) -> list[Judge]:
-        clients: dict[tuple[str, str], OpenAI] = {}
+        clients: dict[tuple[str, str, str], OpenAI] = {}
         output: list[Judge] = []
         for item in resolved:
-            key = (item.base_url, item.api_key)
+            key = (item.base_url, item.api_key, item.model)
             clients.setdefault(
                 key,
                 OpenAI(
                     base_url=item.base_url,
                     api_key=item.api_key,
                     timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-                    max_retries=0,
+                    max_retries=2,
+                    http_client=_PairwiseJudgeHttpClient(model=item.model),
                 ),
             )
             output.append(
@@ -387,6 +568,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     submission_b=ref_sections[judges[0].name],
                     sections_by_judge=sections_by_judge,
                     num_trials=self.config.pairwise_num_trials,
+                    # The SDK owns transport retries, matching the binary caller.
+                    request_attempts=1,
+                    invalid_response_retries=2,
                     return_raw_responses=self.config.persist_raw_judge_responses,
                     rng=rng,
                 )
@@ -417,30 +601,29 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         filenames = _requested_filenames(binary_checks + pairwise_checks)
 
         with ExitStack() as stack:
-            eval_stage, missing = _stage_submission(body.deliverables_dir, filenames, stack)
-            await self._preconvert(eval_stage)
-            resolved = self._resolve_judges()
-            modalities = dir_media_modalities(eval_stage)
-            if modalities:
-                resolved, _audio, _video = self._route_media_judges(
-                    resolved,
-                    task_id=body.task_id,
-                    modalities=modalities,
-                    label="submitted artifact",
-                )
+            judges = self._resolve_judges()
+            resolved = judges
 
             binary_reward = 0.0
             binary_results: list[dict[str, Any]] = []
             binary_invalid = 0
             if self.config.reward_mode in {"binary", "all"}:
-                binary_reward, binary_results, binary_invalid = await self._verify_binary(
-                    body, task_markdown, resolved, eval_stage, missing
-                )
+                binary_reward, binary_results, binary_invalid = await self._verify_binary(body, task_markdown, judges)
 
             pairwise_reward = 0.0
             pairwise_results: list[dict[str, Any]] = []
             wins = losses = ties = pairwise_invalid = 0
             if self.config.reward_mode in {"pairwise", "all"}:
+                eval_stage, missing = _stage_submission(body.deliverables_dir, filenames, stack)
+                await self._preconvert(eval_stage)
+                modalities = dir_media_modalities(eval_stage)
+                if modalities:
+                    resolved, _audio, _video = self._route_media_judges(
+                        resolved,
+                        task_id=body.task_id,
+                        modalities=modalities,
+                        label="submitted artifact",
+                    )
                 if not self.config.pairwise_reference_ids:
                     raise ValueError("pairwise mode requires at least one pairwise_reference_id")
                 pairwise_reward, pairwise_results, wins, losses, ties, pairwise_invalid = await self._verify_pairwise(
