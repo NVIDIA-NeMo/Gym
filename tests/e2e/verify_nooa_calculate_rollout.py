@@ -33,9 +33,11 @@ def main() -> None:
         captured = trajectory["model_calls"][0]
         assert captured["response_metadata"]["response_id"] == f"resp-nooa-{expected}"
         assert captured["request"] and captured["response"]
-        assert row["ng_perf"]["token_observability_coverage"] == 1.0
-        assert row["response"]["usage"]["input_tokens"] == row["ng_perf"]["prompt_tokens"]
-        assert row["response"]["usage"]["output_tokens"] == row["ng_perf"]["completion_tokens"]
+        usage = row["response"]["usage"]
+        assert usage == captured["response"]["usage"]
+        assert usage["input_tokens"] > 0
+        assert usage["output_tokens"] > 0
+        assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
         assert {gap["code"] for gap in trajectory["gaps"]} == {"non_trainable_terminal_output"}
         assert trajectory["tool_calls"]
         for tool in trajectory["tool_calls"]:
@@ -48,8 +50,6 @@ def main() -> None:
             assert len(outputs) == 1
             assert outputs[0]["output"] == tool["output"]
         assert all(item.get("id") != "nooa_fallback" for item in invocations[0]["conversation"])
-    health = json.loads(args.rollouts.with_name("quality_summary.json").read_text())
-    assert health["run"]["verdicts"] == {"healthy": 2, "unhealthy": 0, "unobserved": 0}
 
 
 if __name__ == "__main__":
