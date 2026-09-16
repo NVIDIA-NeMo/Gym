@@ -4,16 +4,30 @@ version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "harbor>=0.22",
+    "harbor==0.23.0",
+    "opensandbox>=0.1.15",
+    "httpx-aiohttp>=0.2.0",
+    "tenacity>=9.1.4",
 ]
 
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = ["setuptools"]
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
-where = [".."]
-include = ["harbor_agent_general"]
+where = ["../.."]
+include = [
+    "responses_api_agents.harbor_agent_general",
+    "responses_api_agents.harbor_agent_general.custom_envs*",
+]
+
+[tool.setuptools.package-data]
+"responses_api_agents.harbor_agent_general" = ["configs/*.yaml", "README.md", "TRAINING.md"]
 
 [tool.uv]
 sources.nemo-gym = { path = "../..", editable = true }
+# OpenCode owns the provider client; reconcile Harbor and Gym's litellm pins.
+override-dependencies = ["litellm"]
