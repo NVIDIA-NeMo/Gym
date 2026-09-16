@@ -28,8 +28,8 @@ Three splits are written, one per task slice::
     data/test_summary.jsonl
     data/test_data2txt.jsonl
 
-On first use the two upstream JSONL files (and any git-LFS-pointer stubs) are
-downloaded into ``$XDG_CACHE_HOME/byob_ragtruth`` (or ``~/.cache/byob_ragtruth``).
+On first use the two source JSONL files (and any git-LFS-pointer stubs) are
+downloaded into ``$XDG_CACHE_HOME/ragtruth`` (or ``~/.cache/ragtruth``).
 Set ``RAGTRUTH_DATASET_DIR`` to read from a pre-staged directory instead, or
 ``RAGTRUTH_NO_FETCH=1`` to disable the network download (air-gapped clusters).
 
@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Tuple
 
 _DATASET_DIR_ENV = "RAGTRUTH_DATASET_DIR"
 _NO_FETCH_ENV = "RAGTRUTH_NO_FETCH"
-_CACHE_DIRNAME = "byob_ragtruth"
+_CACHE_DIRNAME = "ragtruth"
 _TEST_SPLIT = "test"
 _GOOD_QUALITY = "good"
 
@@ -65,7 +65,7 @@ _FETCH_TIMEOUT_S = 300.0
 _DATA_DIR = Path(__file__).parent / "data"
 _AGENT = "ragtruth_simple_agent"
 
-# task_type -> (output split filename). Order matches upstream's QA/Summary/Data2txt.
+# task_type -> output split filename, in QA/Summary/Data2txt report order.
 _TASK_SPLITS: Tuple[Tuple[str, str], ...] = (
     ("QA", "test_qa.jsonl"),
     ("Summary", "test_summary.jsonl"),
@@ -73,7 +73,7 @@ _TASK_SPLITS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-# ── Prompt templates (verbatim from byob_ragtruth.py) ─────────────────────
+# ── Prompt templates ──────────────────────────────────────────────────────
 
 _QA_TEMPLATE = (
     "Below is a question:\n"
@@ -120,7 +120,7 @@ _TEMPLATE_BY_TYPE = {
 }
 
 
-# ── Dataset fetch + join (ported from byob_ragtruth.py) ───────────────────
+# ── Dataset fetch + join ──────────────────────────────────────────────────
 
 
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -156,7 +156,7 @@ def _fetch_file(url: str, dst: Path) -> None:
 
 
 def _ensure_dataset_files(base: Path) -> None:
-    """Populate ``base`` with the upstream RAGTruth JSONL files.
+    """Populate ``base`` with the RAGTruth source JSONL files.
 
     Replaces missing files and git-LFS-pointer stubs with the real content from
     the public ParticleMedia/RAGTruth GitHub repo. Set ``RAGTRUTH_NO_FETCH`` to
@@ -226,7 +226,7 @@ def _load_test_rows() -> Dict[str, List[Dict[str, Any]]]:
                 "question": question,
                 "reference": _build_reference(task_type, source_info),
                 "candidate_response": str(resp.get("response", "")),
-                # is_halu == bool(labels), per upstream's binary case label.
+                # is_halu == bool(labels): any annotated span makes the case positive.
                 "is_halu": bool(resp.get("labels") or []),
             }
         )

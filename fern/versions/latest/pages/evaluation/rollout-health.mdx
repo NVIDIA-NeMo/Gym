@@ -137,6 +137,12 @@ because each evaluates one call or one explicit reference independently. `rollou
 also own support calls that should be inspected individually but must not satisfy a trajectory-level token total or successful-call
 claim.
 
+The producer gap `turn_model_call_scope_incomplete` means that turn references do not establish the complete call
+scope needed for aggregate checks. For example, invocation usage may include summarization calls outside the recorded
+task turns, or a failed attempt may lack an exact turn reference. This gap makes `rollout_token_count_mismatch` and
+`task_no_successful_model_calls` unobserved. Checks on recorded turn content and individually owned model calls still
+evaluate; the gap does not suppress evidence of failed calls or hollow turns.
+
 <Note>
   The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
   coverage: when a trajectory producer does not write explicit turn or invocation references, binding-dependent checks are
