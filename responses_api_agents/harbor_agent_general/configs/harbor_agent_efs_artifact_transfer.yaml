@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer this after harbor_agent_opensandbox.yaml. The policy writes directly to
+# an EFS-backed /app; the separate verifier mounts that exact context-scoped
+# source read-only at /app. Harbor passes only an integrity marker between them.
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      harbor_environment:
+        kwargs:
+          shared_workspace:
+            volume:
+              name: harbor-policy-workspace
+              host:
+                path: ${oc.env:HARBOR_EFS_ARTIFACT_SOURCE_PATH}
+              mountPath: ${oc.env:HARBOR_EFS_ARTIFACT_MOUNT_PATH,/app}
+            handoff_timeout_s: ${oc.decode:${oc.env:HARBOR_EFS_ARTIFACT_TIMEOUT_S,600}}
+            cleanup_timeout_s: ${oc.decode:${oc.env:HARBOR_EFS_CLEANUP_TIMEOUT_S,600}}
+            cleanup_ttl_s: ${oc.decode:${oc.env:HARBOR_EFS_CLEANUP_TTL_S,900}}

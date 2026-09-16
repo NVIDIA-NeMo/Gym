@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer this after harbor_agent.yaml. RLIMIT_AS is inherited by OpenCode's
+# server, attached CLI, and tool subprocesses, but is enforced per process.
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      harbor_agent:
+        name: null
+        import_path: responses_api_agents.harbor_agent_general.audited_opencode:AlertedOpenCode
+        kwargs:
+          use_preinstalled: ${oc.decode:${oc.env:HARBOR_OPENCODE_PREINSTALLED,true}}
+          process_rlimits:
+            address_space_mib: ${oc.decode:${oc.env:HARBOR_POLICY_RLIMIT_AS_MIB}}

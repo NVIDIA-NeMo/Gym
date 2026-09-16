@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer this after harbor_agent.yaml. The same deadline controls Harbor's policy
+# timeout and the time-left conditions, so the two cannot drift independently.
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      harbor_agent:
+        name: null
+        import_path: responses_api_agents.harbor_agent_general.audited_opencode:AlertedOpenCode
+        kwargs:
+          use_preinstalled: ${oc.decode:${oc.env:HARBOR_OPENCODE_PREINSTALLED,true}}
+
+      policy_alerts:
+        deadline_seconds: ${oc.decode:${oc.env:HARBOR_POLICY_TIMEOUT_S,3600}}
+        poll_interval_seconds: ${oc.decode:${oc.env:HARBOR_POLICY_ALERT_POLL_INTERVAL_S,5}}
+        retry_interval_seconds: ${oc.decode:${oc.env:HARBOR_POLICY_ALERT_RETRY_INTERVAL_S,15}}
+        alerts:
+          - remaining_seconds: 600
+            message: >-
+              You have approximately 10 minutes remaining. Prioritize completing
+              the analysis and writing the critical reproducible artifacts and REPORT.md.
+          - remaining_seconds: 300
+            message: >-
+              You have approximately 5 minutes remaining. Stop optional work now
+              and leave the strongest valid REPORT.md and reproducible artifacts you have.

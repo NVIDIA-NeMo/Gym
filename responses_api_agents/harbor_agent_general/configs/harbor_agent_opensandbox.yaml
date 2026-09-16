@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer this after harbor_agent.yaml and the OpenSandbox provider config.
+# HARBOR_DATASET_PATH must point at a materialized Harbor dataset.
+sandbox:
+  opensandbox:
+    connection:
+      protocol: ${oc.env:OPENSANDBOX_PROTOCOL,http}
+      use_server_proxy: ${oc.decode:${oc.env:OPENSANDBOX_USE_SERVER_PROXY,true}}
+      ca_bundle_path: ${oc.env:OPENSANDBOX_CA_BUNDLE,null}
+      # Also bounds filesystem request bodies. Large self-contained Harbor
+      # environments can otherwise hit the provider config's 300-second limit.
+      request_timeout_s: ${oc.decode:${oc.env:OPENSANDBOX_REQUEST_TIMEOUT_S,1200}}
+    # Image-specific readiness can warm lazy-pulled files before Harbor's
+    # shorter task setup timeout begins.
+    probe:
+      command: ${oc.env:HARBOR_SANDBOX_PROBE_COMMAND,printf nemo-gym-sandbox-ready}
+      expected_stdout: ${oc.env:HARBOR_SANDBOX_PROBE_EXPECTED_STDOUT,nemo-gym-sandbox-ready}
+      timeout_s: ${oc.decode:${oc.env:HARBOR_SANDBOX_PROBE_TIMEOUT_S,30}}
+      deadline_s: ${oc.decode:${oc.env:HARBOR_SANDBOX_PROBE_DEADLINE_S,null}}
+      stable_count: ${oc.decode:${oc.env:HARBOR_SANDBOX_PROBE_STABLE_COUNT,1}}
+      stable_delay_s: ${oc.decode:${oc.env:HARBOR_SANDBOX_PROBE_STABLE_DELAY_S,0.0}}
+    # Long OpenCode runs are submitted once and polled through short status
+    # requests. This avoids holding an HTTP chunked-response stream open for
+    # the full policy or judge timeout.
+    operations:
+      background_exec: true
+      background_poll_interval_s: 10.0
+      status_poll_timeout_s: 30.0
+      background_request_retries: 0
+
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      harbor_dataset:
+        path: ${oc.env:HARBOR_DATASET_PATH}
+
+      # Must exceed OpenSandbox's create/readiness bounds. Harbor otherwise
+      # cancels environment.start() at the task's default 600 seconds.
+      environment_build_timeout_multiplier: 3.0
+
+      harbor_environment:
+        type: null
+        import_path: responses_api_agents.harbor_agent_general.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment
+        cpu_enforcement_policy: limit
+        memory_enforcement_policy: limit
+        override_cpus: 4
+        override_memory_mb: 65536
+        kwargs:
+          sandbox_provider: ${sandbox}
+          image_override: ${oc.env:HARBOR_IMAGE_OVERRIDE,null}
+          entrypoint: ${oc.decode:${oc.env:HARBOR_SANDBOX_ENTRYPOINT,null}}
+          sandbox_provider_options:
+            resource_requests:
+              cpu: 0.25
+              memory_mib: 512
+            # OpenSandbox Volume dictionaries. Strings support the per-task
+            # placeholders {context_id}, {environment_name}, {task_name},
+            # {task_id}, and {session_id}. task_name aliases environment_name.
+            volumes: ${oc.create:${oc.env:HARBOR_SANDBOX_VOLUMES,[]}}
+          # Relative task environment paths supplied by the image or a volume.
+          environment_upload_excludes: ${oc.create:${oc.env:HARBOR_ENVIRONMENT_UPLOAD_EXCLUDES,[]}}
+          # Optional compatibility path for writable copies.
+          sandbox_path_copies: ${oc.create:${oc.env:HARBOR_SANDBOX_PATH_COPIES,[]}}
+          # Compatibility links prepared after volumes are mounted. With a
+          # direct shared /app workspace, mount task data at sibling /data and
+          # expose it to policy and verifier as /app/data through this link.
+          sandbox_path_symlinks: ${oc.create:${oc.env:HARBOR_SANDBOX_PATH_SYMLINKS,[]}}
+          sandbox_metadata:
+            harbor-benchmark: ${oc.env:HARBOR_BENCHMARK_NAME,harbor}
+            nemo-gym.nvidia.com/user: ${oc.env:NEMO_GYM_USER,unknown}
+            nemo-gym.nvidia.com/run: ${oc.env:HARBOR_EFS_ARTIFACT_RUN,unscoped}
+            # EFS is mounted as a scoped provider volume. Never expose the
+            # blanket mount merely to relay policy artifacts.
+            nemo.nvidia.com/efs-hostpath: 'false'
+            # The clean path uses only task-specific read-only S3 volumes.
+            nemo.nvidia.com/s3-hostpath: ${oc.env:HARBOR_ENABLE_DEFAULT_S3_MOUNT,'false'}
+          sandbox_ttl_s: 7200
+          sandbox_ready_timeout_s: 1200
+          default_exec_timeout_s: 3600
+          # OpenSandbox background logs combine stdout and stderr. An
+          # interactive shell emits job-control warnings without a TTY, which
+          # corrupts stdout-only probes such as Harbor's `pwd` workdir lookup.
+          # OpenCode sources NVM explicitly in its install and run commands.
+          exec_shell: bash -lc

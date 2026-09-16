@@ -1,0 +1,7 @@
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # Preserve vLLM's input-overflow error so OpenCode can invoke its native
+      # compaction path. A successful zero-token `length` response looks like
+      # ordinary output truncation to agent harnesses and cannot be recovered.
+      propagate_context_overflow_errors: true
