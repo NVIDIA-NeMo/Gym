@@ -40,7 +40,7 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.protocols import CallRejection, TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -242,6 +242,11 @@ class TokenCaptureStore:
             if state.get("frozen", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
             index_changed = self._sync_entry_index(rollout_id, state)
+            if entry.model_call_id in state.get("rejected_calls", {}):
+                state["incomplete"] = True
+                state["version"] = int(state.get("version", 0)) + 1
+                self._write_state(rollout_id, state)
+                raise ValueError(f"Model call {entry.model_call_id!r} was already rejected before generation")
             entry_digests = state["entry_digests"]
             existing_digest = entry_digests.get(entry.model_call_id)
             if existing_digest is not None:
@@ -292,6 +297,8 @@ class TokenCaptureStore:
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+            if model_call_id in state.get("rejected_calls", {}):
+                raise ValueError(f"Model call {model_call_id!r} was already rejected; retry with a new call id")
             with self.intents_path_for(rollout_id).open("ab") as handle:
                 handle.write(model_call_id.encode("utf-8") + b"\n")
                 handle.flush()
@@ -300,13 +307,41 @@ class TokenCaptureStore:
     async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
         await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
-    def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...]) -> list[str]:
+    def _read_intents(self, rollout_id: str) -> set[str]:
         path = self.intents_path_for(rollout_id)
         if not path.exists():
-            return []
-        recorded = {entry.model_call_id for entry in entries}
-        intents = [line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()]
-        return [call_id for call_id in intents if call_id not in recorded]
+            return set()
+        return {line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()}
+
+    async def reject_call(self, rollout_id: str, model_call_id: str, *, reason: str) -> None:
+        """Durably settle a known pre-generation rejection, never a transport failure."""
+        await asyncio.to_thread(self._reject_call, rollout_id, model_call_id, reason=reason)
+
+    def _reject_call(self, rollout_id: str, model_call_id: str, *, reason: str) -> None:
+        if not reason:
+            raise ValueError("A pre-generation rejection requires a reason")
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if state.get("retired", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+            if state.get("frozen", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+            self._sync_entry_index(rollout_id, state)
+            rejected = state.setdefault("rejected_calls", {})
+            if model_call_id in state["entry_digests"] or (
+                model_call_id in rejected and rejected[model_call_id] != reason
+            ):
+                state["incomplete"] = True
+                state["version"] = int(state.get("version", 0)) + 1
+                self._write_state(rollout_id, state)
+                raise ValueError(f"Model call {model_call_id!r} has conflicting terminal outcomes")
+            if model_call_id not in self._read_intents(rollout_id):
+                raise ValueError(f"Model call {model_call_id!r} has no registered intent")
+            if model_call_id in rejected:
+                return
+            rejected[model_call_id] = reason
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         return await asyncio.to_thread(self.freeze_now, rollout_id)
@@ -326,15 +361,19 @@ class TokenCaptureStore:
             elif index_changed:
                 self._write_state(rollout_id, state)
             entries = tuple(self._read_entries_unlocked(rollout_id))
-            # A dispatched call with no entry was lost.
-            # The rollout must be masked.
-            incomplete = bool(state.get("incomplete", False)) or bool(self._dangling_intents(rollout_id, entries))
+            rejected = state.get("rejected_calls", {})
+            recorded = {entry.model_call_id for entry in entries}
+            dangling = self._read_intents(rollout_id) - recorded - rejected.keys()
+            # Known input rejections have no tokens to lose. Unknown outcomes,
+            # conflicting outcomes and explicit capture failures remain unsafe.
+            incomplete = bool(state.get("incomplete", False)) or bool(dangling) or bool(recorded & rejected.keys())
             return TokenCaptureSnapshot(
                 rollout_id=rollout_id,
                 entries=entries,
                 incomplete=incomplete,
                 snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
+                rejected_calls=tuple(CallRejection(call_id, reason) for call_id, reason in sorted(rejected.items())),
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
@@ -357,6 +396,7 @@ class TokenCaptureStore:
             # A late writer from this attempt must still observe the freeze.
             state["indexed_size"] = 0
             state["entry_digests"] = {}
+            state.pop("rejected_calls", None)
             state["retired"] = True
             self._write_state(rollout_id, state)
             self._fsync_root()

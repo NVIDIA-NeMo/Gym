@@ -32,9 +32,15 @@ A transport that returns before cross-client visibility can produce intermittent
 A sink may additionally implement ``begin_call(rollout_id, model_call_id)``.
 It is an optional extension and deliberately not part of the ``TokenSink`` protocol.
 ``begin_call`` durably records a pre-dispatch intent.
-An intent with no matching entry at freeze must mask the rollout.
+An intent with no matching entry or confirmed pre-generation rejection at freeze must mask the rollout.
 That closes the window where the final call's entry is lost without a trace.
 ``begin_call`` runs before generation, so the caller may fail the model call at zero compute cost.
+
+Sinks with call intents may also implement ``reject_call(rollout_id, model_call_id, *, reason)``.
+Only a backend adapter that can prove no generation started may settle an intent this way.
+Rejections must be durable, idempotent and disjoint from captured entries. They are not
+token records or lineage parents. Unknown transport failures must leave intents unresolved.
+An implementation without this optional extension keeps its existing fail-closed behavior.
 
 ``nemo_gym.token_id_capture.conformance`` checks an external implementation against these contracts.
 """
@@ -49,6 +55,14 @@ from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
 @dataclass(frozen=True)
+class CallRejection:
+    """A backend-confirmed request rejection before any generation started."""
+
+    model_call_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class TokenCaptureSnapshot:
     """An immutable view of one rollout's frozen capture records."""
 
@@ -57,6 +71,7 @@ class TokenCaptureSnapshot:
     incomplete: bool
     snapshot_id: str
     version: int
+    rejected_calls: tuple[CallRejection, ...] = ()
 
 
 @dataclass(frozen=True)

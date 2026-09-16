@@ -8,3 +8,9 @@ policy_model:
       return_token_id_information: true
       request_prompt_and_generation_token_ids: false
       uses_reasoning_parser: true
+      # External harnesses may omit or choose their own sampling parameters.
+      # Pin every outbound request to the integrating trainer's distribution.
+      sampling_overrides:
+        temperature: ${oc.select:policy_generation_temperature,1.0}
+        top_p: ${oc.select:policy_generation_top_p,1.0}
+        top_k: ${oc.select:policy_generation_top_k,-1}

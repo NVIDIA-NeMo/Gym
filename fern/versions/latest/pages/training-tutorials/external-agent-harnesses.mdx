@@ -114,6 +114,35 @@ The trainer reads the rebuilt `response.output` in the same way it reads output 
 
 Masked or failed builds are retained for diagnosis. Successfully delivered records are removed after the output row is durable.
 
+### Train on all calls in an episode
+
+For a trainer that supports independent sequences or tree attention, select
+`token_id_capture.builder: independent_calls`. The default remains
+`prefix_merging`, which selects one verified chain.
+
+The independent builder delivers every distinct completed model call under
+`_ng_training_responses`, including subagents, compaction calls, and retokenized
+contexts. Each response carries that call's exact prompt IDs, generated IDs,
+log probabilities, and available routing and execution metadata. A full prompt
+does not need a resolvable parent; a delta prompt still needs verified
+reconstruction. Missing or corrupt capture masks the rollout.
+
+Distinct call IDs remain distinct sampled actions even if their prompts or
+outputs are identical. Only duplicate records for the same call are
+deduplicated. Terminal attribution does not remove other completed calls.
+The ordinary `response` remains available for compatibility, but is not the
+all-call training payload.
+
+The trainer must consume `_ng_training_responses` explicitly, preserve every
+call's conditioning context, and count each sampled action's loss once.
+Sharing token prefixes must also respect routing and execution compatibility.
+Gym does not construct the physical training tree or its attention masks.
+
+For framework-owned consumption, pass `builder="independent_calls"` to
+`finalize_rollout_token_capture` and retire the frozen capture only after
+the full call set reaches durable downstream storage. Capture still requires
+the run-wide `enabled: true` setting.
+
 ## Check the first run
 
 Gym adds capture metrics under `_ng_token_capture` on each rebuilt rollout.
@@ -205,7 +234,7 @@ The id may contain letters, digits, dots, dashes, and underscores, and it must b
 
 ## Current limitations
 
-- Gym delivers one verified model-call chain per rollout. When Gym can attribute the verifier-scored response to a captured terminal call, it delivers that call's intact ancestor chain and excludes unrelated calls. Without terminal attribution, multiple plausible chains cause masking.
-- Harness-generated title, compaction, retry, or sub-agent calls can appear as additional chains. Inspect `terminal_attribution`, `chains`, and `delivered_fraction` to confirm that Gym selected the intended chain.
-- Full-tree training requires a trainer data contract that accepts multiple related trajectories.
+- The default `prefix_merging` builder delivers one verified model-call chain per rollout. When Gym can attribute the verifier-scored response to a captured terminal call, it delivers that call's intact ancestor chain and excludes unrelated calls. Without terminal attribution, multiple plausible chains cause masking.
+- Harness-generated title, compaction, retry, or sub-agent calls can appear as additional chains. Inspect `terminal_attribution`, `chains`, and `delivered_fraction` to confirm that the selected builder delivers the intended calls.
+- Full-tree training requires `independent_calls` and a trainer data contract that accepts multiple related trajectories. The external-staging terminal-chain receipt path is a separate contract, not an automatic substitute for the all-call payload.
 - Prefix supply requires a compatible inference backend and is not available in stock vLLM.

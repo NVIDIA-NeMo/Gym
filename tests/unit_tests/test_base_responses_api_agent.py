@@ -92,6 +92,13 @@ class TestBaseResponsesAPIAgent:
         assert self._agent({}).rollout_id_from_run(body) is None
         assert self._agent({"observability_enabled": True}).rollout_id_from_run(body) == "0-0"
 
+    def test_model_call_capture_gate_is_independent_of_token_capture(self) -> None:
+        assert not self._agent({})._model_call_capture_enabled()
+        assert self._agent({"observability_enabled": True})._model_call_capture_enabled()
+        assert not self._agent(
+            {"token_id_capture": {"enabled": True}}, token_id_capture=True
+        )._model_call_capture_enabled()
+
     def test_token_capture_prefix_is_scoped_to_participating_agents(self) -> None:
         # Training-token capture requires both run-level enablement and agent opt-in.
         # Correlated calls preserve ``/ng-rollout/<id>/training-token-capture``.

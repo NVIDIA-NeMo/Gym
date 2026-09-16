@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from pathlib import Path
 
 from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
+    project_independent_call_responses,
     project_main_chain_response,
     run_builder,
 )
@@ -139,7 +141,17 @@ def _assemble(
     try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
+        responses = None
+        if builder == "independent_calls":
+            responses = project_independent_call_responses(rollout_id, out, model=model)
+            if not responses:
+                raise ValueError("capture produced no safe trainable calls")
+            for call_response in responses:
+                assert_prefix_contiguity(call_response)
+            main_index = next((index for index, chain in enumerate(out.chains) if chain.chain_id == "main"), 0)
+            response = responses[main_index]
+        else:
+            response = project_main_chain_response(rollout_id, out, model=model)
         assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(
@@ -176,7 +188,20 @@ def _assemble(
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
-    if notes.terminal_chain == "delivered":
+    if builder == "independent_calls":
+        # No parent link is needed for a full, independently decoded context.
+        # Builder validation already rejects corrupt provenance/delta records.
+        # Distinct calls remain distinct actions, including identical-prompt
+        # subagents and completed retries. Terminal attribution does not select
+        # which other calls contribute to the episode.
+        mask = (
+            bool(unresolved)
+            or (attribution.attributed and notes.terminal_chain != "delivered")
+            or bool(declared_response_id and not attribution.attributed)
+            or ("witness_disagreement[" in attribution.reason or attribution.reason == "attribution_error")
+        )
+        metrics["training_sequences"] = len(responses)
+    elif notes.terminal_chain == "delivered":
         # The verified chain is attributed and intact.
         # Off-path calls (auxiliary calls, sub-agent forks, abandoned retries)
         # are excluded from delivery instead of masking the rollout.
@@ -192,7 +217,7 @@ def _assemble(
         mask = bool(unresolved) or bool(notes.unresolved_parent_calls) or notes.roots != 1 or notes.chains != 1
     # An empty delivery must never be trainable, whatever produced it.
     mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
-    return {
+    result = {
         "rollout_id": rollout_id,
         "builder": builder,
         "rebuilt_response": response,
@@ -201,6 +226,9 @@ def _assemble(
         "unresolved_retries": list(unresolved),
         "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
+    if responses is not None:
+        result["rebuilt_responses"] = responses
+    return result
 
 
 def trajectories_for_rollout(
@@ -239,6 +267,10 @@ def trajectories_for_rollout(
         if snapshot.incomplete:
             built["mask_sample"] = True
             built.setdefault("metrics", {})["capture_incomplete"] = True
+        built["metrics"]["rejected_without_generation_calls"] = len(snapshot.rejected_calls)
+        built["metrics"]["pre_generation_rejections_by_reason"] = dict(
+            Counter(rejection.reason for rejection in snapshot.rejected_calls)
+        )
         built["_capture_snapshot"] = {
             "snapshot_id": snapshot.snapshot_id,
             "version": snapshot.version,
@@ -288,6 +320,10 @@ async def trajectories_from_source(
     if snapshot.incomplete:
         built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
+    built["metrics"]["rejected_without_generation_calls"] = len(snapshot.rejected_calls)
+    built["metrics"]["pre_generation_rejections_by_reason"] = dict(
+        Counter(rejection.reason for rejection in snapshot.rejected_calls)
+    )
     built["_capture_snapshot"] = {
         "snapshot_id": snapshot.snapshot_id,
         "version": snapshot.version,

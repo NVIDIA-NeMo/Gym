@@ -40,6 +40,7 @@ from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
     prefix_merging,
     project_chain_to_output_items,
+    project_independent_call_responses,
     project_main_chain_response,
     run_builder,
 )
@@ -60,6 +61,7 @@ from nemo_gym.token_id_capture.lineage import (
     stamp_continuation,
 )
 from nemo_gym.token_id_capture.protocols import (
+    CallRejection,
     CaptureLedger,
     LineageMatch,
     LineageResolution,
@@ -96,6 +98,7 @@ from nemo_gym.token_id_capture.sink import (
     commit_entry,
     current_capture_context,
     mark_external_staging_committed,
+    record_call_rejection,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
@@ -134,6 +137,7 @@ __all__ = [
     "install_lineage_store",
     "installed_lineage_store",
     "TokenCaptureSnapshot",
+    "CallRejection",
     "install_token_sink",
     "install_token_source",
     "installed_token_sink",
@@ -146,6 +150,7 @@ __all__ = [
     "set_token_sink",
     "capture_health_snapshot",
     "register_call_intent",
+    "record_call_rejection",
     "reset_token_sink",
     "resolve_parent",
     "capture_tokens",
@@ -161,6 +166,7 @@ __all__ = [
     "stamp_continuation",
     "prefix_merging",
     "project_chain_to_output_items",
+    "project_independent_call_responses",
     "project_main_chain_response",
     "run_builder",
     "assert_prefix_contiguity",

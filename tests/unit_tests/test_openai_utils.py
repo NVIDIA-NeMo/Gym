@@ -694,6 +694,21 @@ class TestNeMoGymFunctionCallOutput:
         assert item.model_dump()["output"] == output
 
 
+class TestReasoningControls:
+    def test_current_reasoning_efforts_validate_and_round_trip(self) -> None:
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="hello",
+            reasoning={"effort": "none", "summary": "auto"},
+        )
+
+        assert params.reasoning["effort"] == "none"
+        assert params.reasoning["summary"] == "auto"
+
+        response = NeMoGymResponse.model_validate(_response_with_output([]) | {"reasoning": params.reasoning})
+        assert response.reasoning is not None
+        assert response.reasoning["effort"] == "none"
+
+
 class TestNeMoGymResponseHostedMcpItems:
     """Hosted-MCP output items (``mcp_call`` etc.) must validate rather than 500.
 

@@ -25,10 +25,10 @@ this module provides:
 - the request-side sanitizer that flattens namespace tools into plain functions (joined as
   ``<namespace>__<name>``), rewrites replayed namespaced calls in the input history the same
   way, and drops the fields the params model does not know;
-- the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
-  Responses SSE event sequence streaming clients require (``response.created`` ->
-  ``response.output_item.done`` per output item -> ``response.completed``), splitting flattened
-  function-call names back into ``namespace`` + ``name`` on the way out.
+- the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as a valid
+  Responses SSE item lifecycle (``response.output_item.added`` -> content deltas ->
+  ``response.output_item.done``), splitting flattened function-call names back into
+  ``namespace`` + ``name`` on the way out.
 """
 
 import json
@@ -244,10 +244,9 @@ def _sse_event(payload: dict[str, Any]) -> str:
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
-    Streaming clients build their view of the turn from ``response.output_item.done`` events and
-    treat ``response.completed`` (which carries the response id and usage) as the terminal event,
-    so those two are the required minimum; ``response.created`` is included for clients that wait
-    for an acknowledgement before reading items.
+    Streaming clients build state on ``response.output_item.added`` and consume message/reasoning
+    content from delta events. A done-only stream is not sufficient: the OpenAI AI SDK initializes
+    reasoning bookkeeping on the added event and otherwise crashes when the done event arrives.
     """
     output_items = []
     for item in response_json.get("output") or []:
@@ -260,6 +259,67 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
     )
     for index, item in enumerate(output_items):
+        started_item = {**item}
+        if "status" in started_item:
+            started_item["status"] = "in_progress"
+        yield _sse_event({"type": "response.output_item.added", "output_index": index, "item": started_item})
+
+        if isinstance(item, dict) and item.get("type") == "message":
+            for content in item.get("content") or []:
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") == "output_text":
+                    yield _sse_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": item["id"],
+                            "output_index": index,
+                            "content_index": 0,
+                            "delta": content.get("text") or "",
+                        }
+                    )
+                elif content.get("type") == "refusal":
+                    # The AI SDK consumes assistant content from output_text deltas. Preserve a
+                    # refusal as text when adapting an already-complete response.
+                    yield _sse_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": item["id"],
+                            "output_index": index,
+                            "content_index": 0,
+                            "delta": content.get("refusal") or "",
+                        }
+                    )
+        elif isinstance(item, dict) and item.get("type") == "reasoning":
+            for summary_index, summary in enumerate(item.get("summary") or []):
+                yield _sse_event(
+                    {
+                        "type": "response.reasoning_summary_part.added",
+                        "item_id": item["id"],
+                        "output_index": index,
+                        "summary_index": summary_index,
+                        "part": {"type": "summary_text", "text": ""},
+                    }
+                )
+                yield _sse_event(
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": item["id"],
+                        "output_index": index,
+                        "summary_index": summary_index,
+                        "delta": summary.get("text", "") if isinstance(summary, dict) else "",
+                    }
+                )
+                yield _sse_event(
+                    {
+                        "type": "response.reasoning_summary_part.done",
+                        "item_id": item["id"],
+                        "output_index": index,
+                        "summary_index": summary_index,
+                        "part": summary,
+                    }
+                )
+
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
     yield _sse_event({"type": "response.completed", "response": {**response_json, "output": output_items}})
 

@@ -1433,7 +1433,9 @@ class RolloutCollectionHelper(BaseModel):
                 global_config,
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
             ):
-                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                token_capture_build = await finalize_rollout_token_capture(
+                    result, token_source, builder=token_capture_config.token_id_capture.builder
+                )
                 if token_capture_build is not None:
                     finalized_count += 1
                     if token_capture_build.get(MASK_SAMPLE_KEY):
@@ -1501,7 +1503,11 @@ class RolloutCollectionHelper(BaseModel):
                             "its token capture will not be retired.",
                             stacklevel=2,
                         )
-                if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                if (
+                    rollout_id is not None
+                    and not token_capture_config.token_id_capture.retain_consumed
+                    and capture_build_can_retire(token_capture_build)
+                ):
                     os.fsync(results_file.fileno())
                     await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 

@@ -37,10 +37,17 @@ Prompt tokens have a mask value of 0.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
+from nemo_gym.token_id_capture.records import (
+    GENERATION_METADATA_FIELDS,
+    TOKEN_FIELDS,
+    ParentResolutionStatus,
+    TokenEntry,
+    compute_digest,
+)
 
 
 @dataclass
@@ -83,9 +90,7 @@ class BuildNotes:
     chains: int = 0
     generated_tokens_captured: int = 0
     generated_tokens_delivered: int = 0
-    # Only one chain is delivered per rollout.
-    # Sub-agent branches and post-compaction chains are dropped.
-    # The delivered fraction exposes this limitation.
+    # prefix_merging delivers one chain; independent_calls delivers every safe call.
     delivered_fraction: float = 0.0
     # These calls have a retry sibling that the harness may not have kept.
     # A final-call retry is unresolved because no later call identifies the survivor.
@@ -537,8 +542,91 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 
 
+def independent_calls(entries: list[TokenEntry], terminal_call_id: str | None = None) -> BuildOutput:
+    """Retain exact model invocations, without inventing continuity across calls.
+
+    Full prompts with unresolved ancestry are valid independent contexts. Delta
+    prompts still require a verified reconstruction. Distinct call IDs represent
+    distinct sampled actions, even with identical prompts or outputs: prompt
+    equality cannot distinguish a retry from an independent subagent invocation.
+    Repeated capture records for the same call are deduplicated.
+    """
+    by_id: dict[str, TokenEntry] = {}
+    delta_ids = {entry.model_call_id for entry in entries if entry.prompt_is_delta}
+    for entry in entries:
+        previous = by_id.setdefault(entry.model_call_id, entry)
+        if previous is not entry and previous.model_dump(exclude={"created_at"}) != entry.model_dump(
+            exclude={"created_at"}
+        ):
+            raise ValueError(f"conflicting capture records for call {entry.model_call_id}")
+        if entry.prompt_is_delta and (entry.parent_resolution != ParentResolutionStatus.RESOLVED or not entry.digest):
+            raise ValueError(f"unproven delta prompt for call {entry.model_call_id}")
+    materialized, broken = _materialize_delta_prompts(list(by_id.values()))
+    if broken:
+        raise ValueError(f"unreconstructable delta prompts: {sorted(broken)}")
+    by_id = {entry.model_call_id: entry for entry in materialized}
+    unresolved_parents = []
+    for entry in materialized:
+        cumulative = entry.prompt_token_ids + entry.generation_token_ids
+        if entry.cum_len is not None and entry.cum_len != len(cumulative):
+            raise ValueError(f"cumulative length mismatch on {entry.model_call_id}")
+        if entry.digest and entry.digest != compute_digest(cumulative):
+            raise ValueError(f"cumulative digest mismatch on {entry.model_call_id}")
+        if len(entry.generation_token_ids) != len(entry.generation_log_probs) or not all(
+            math.isfinite(value) for value in entry.generation_log_probs
+        ):
+            raise ValueError(f"invalid generated-token log probabilities on {entry.model_call_id}")
+        if entry.parent_resolution == ParentResolutionStatus.RESOLVED:
+            parent = by_id.get(entry.parent_call_id)
+            parent_tokens = parent.prompt_token_ids + parent.generation_token_ids if parent is not None else None
+            if parent_tokens is None or entry.prompt_token_ids[: len(parent_tokens)] != parent_tokens:
+                if entry.prefix_supplied or entry.model_call_id in delta_ids:
+                    raise ValueError(f"unverified supplied parent on {entry.model_call_id}")
+                # A message-level parent match is not proof of token continuity:
+                # text APIs can retokenize it. Keep the full captured context but
+                # do not infer a shared token prefix from this link.
+                unresolved_parents.append(entry.model_call_id)
+        elif entry.parent_resolution != ParentResolutionStatus.ROOT:
+            unresolved_parents.append(entry.model_call_id)
+
+    kept = [entry for entry in materialized if entry.generation_token_ids]
+    kept.sort(key=lambda entry: (entry.created_at, entry.model_call_id))
+    chains = [
+        Chain(
+            chain_id="main" if entry.model_call_id == terminal_call_id else f"call-{index}",
+            root_prompt=list(entry.prompt_token_ids),
+            links=[ChainLink(entry=entry, interstitial=[])],
+        )
+        for index, entry in enumerate(kept)
+    ]
+    captured = sum(len(entry.generation_token_ids) for entry in materialized)
+    delivered = sum(len(entry.generation_token_ids) for entry in kept)
+    return BuildOutput(
+        chains=chains,
+        quarantined=[],
+        notes=BuildNotes(
+            builder="independent_calls",
+            roots=len(chains),
+            chains=len(chains),
+            generated_tokens_captured=captured,
+            generated_tokens_delivered=delivered,
+            delivered_fraction=round(delivered / captured, 4) if captured else 0.0,
+            unresolved_retries=[],
+            empty_generation_calls=[entry.model_call_id for entry in materialized if not entry.generation_token_ids],
+            unresolved_parent_calls=unresolved_parents,
+            terminal_call_id=terminal_call_id,
+            terminal_chain=(
+                "delivered" if any(entry.model_call_id == terminal_call_id for entry in kept) else "not_captured"
+            )
+            if terminal_call_id
+            else "",
+        ),
+    )
+
+
 _BUILDERS: dict[str, Callable[..., BuildOutput]] = {
     "prefix_merging": prefix_merging,
+    "independent_calls": independent_calls,
 }
 
 
@@ -553,9 +641,7 @@ def run_builder(
     """
     if builder not in _BUILDERS:
         raise ValueError(f"unknown builder {builder!r}; known: {sorted(_BUILDERS)}")
-    if builder == "prefix_merging":
-        return prefix_merging(entries, terminal_call_id=terminal_call_id)
-    return _BUILDERS[builder](entries)
+    return _BUILDERS[builder](entries, terminal_call_id=terminal_call_id)
 
 
 # --- Projection to a contiguous, token-bearing response ---
@@ -604,6 +690,11 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
             if entry.routed_experts is not None:
                 item["routed_experts"] = entry.routed_experts
             items.append(item)
+        for item in generated if content_items else [item]:
+            for name in GENERATION_METADATA_FIELDS:
+                value = getattr(entry, name)
+                if value is not None:
+                    item[name] = value
         cumulative = cumulative + list(entry.generation_token_ids)
     return items
 
@@ -636,6 +727,46 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
         "output": output,
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
+
+
+def project_independent_call_responses(rollout_id: str, out: BuildOutput, model: str = "") -> list[dict]:
+    """Project singleton calls with one token carrier, preserving captured content.
+
+    Even older records with inline token fields emit each sampled action once.
+    The downstream trainer owns route-aware prefix sharing and loss-edge packing.
+    """
+    if out.notes.builder != "independent_calls":
+        raise ValueError("independent projection requires the independent_calls builder")
+    responses = []
+    for chain in out.chains:
+        if len(chain.links) != 1:
+            raise ValueError("independent projection requires singleton calls")
+        entry = chain.links[0].entry
+        items = [{key: value for key, value in item.items() if key not in TOKEN_FIELDS} for item in entry.output_items]
+        if not items:
+            items = [{"type": "message"}]
+        index = entry.token_item_index
+        if index is None:
+            index = len(items) - 1
+        if not 0 <= index < len(items):
+            raise ValueError(f"invalid token carrier index on {entry.model_call_id}")
+        for name in TOKEN_FIELDS:
+            value = getattr(entry, name)
+            if value is not None:
+                items[index][name] = value
+        responses.append(
+            {
+                "id": f"call-{rollout_id}-{entry.model_call_id}",
+                "model": model or entry.model,
+                "object": "response",
+                "output": items,
+                "usage": {
+                    "input_tokens": len(entry.prompt_token_ids),
+                    "output_tokens": len(entry.generation_token_ids),
+                },
+            }
+        )
+    return responses
 
 
 def assert_prefix_contiguity(response: dict) -> None:

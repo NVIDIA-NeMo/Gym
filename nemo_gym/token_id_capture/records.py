@@ -35,16 +35,32 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
-TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
+GENERATION_METADATA_FIELDS = (
+    "ng_generation_replica_id",
+    "ng_generation_weight_version",
+    "ng_generation_weight_version_end",
+    "ng_kv_cache_scheduler_block_size",
+    "ng_kv_cache_hash_block_size",
+    "ng_kv_cache_num_cached_tokens",
+)
+TOKEN_FIELDS = (
+    "prompt_token_ids",
+    "generation_token_ids",
+    "generation_log_probs",
+    "routed_experts",
+    *GENERATION_METADATA_FIELDS,
+)
 
-# Keep this at version 1 while the initial record contract is under development.
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
+# Versions 2-4 were used by the any-harness prototype for replica, cache, and
+# request-end version metadata. Version 5 also preserves upstream provenance
+# and delta-prompt fields. Missing fields in older full-prompt records default.
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 5
 
-# Version 1 is the only supported initial schema.
+# Older full-prompt records remain readable.
 TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
 
 # Increment this version when the digest encoding changes.
@@ -127,6 +143,12 @@ class TokenEntry(BaseModel):
     generation_token_ids: list[int]
     generation_log_probs: list[float]
     routed_experts: Any | None = None
+    ng_generation_replica_id: str | None = None
+    ng_generation_weight_version: int | None = None
+    ng_generation_weight_version_end: int | None = None
+    ng_kv_cache_scheduler_block_size: int | None = None
+    ng_kv_cache_hash_block_size: int | None = None
+    ng_kv_cache_num_cached_tokens: int | None = None
     # Preserve response output items without token arrays.
     output_items: list[dict] = Field(default_factory=list)
     # This index identifies the item that carried token arrays.
@@ -326,4 +348,8 @@ def extract_token_fields(response_json: dict) -> dict | None:
     missing = [field for field in required if source.get(field) is None]
     if missing:
         raise ValueError(f"partial token metadata is missing: {', '.join(missing)}")
-    return {field: source.get(field) for field in TOKEN_FIELDS}
+    return {
+        field: source.get(field)
+        for field in TOKEN_FIELDS
+        if field not in GENERATION_METADATA_FIELDS or source.get(field) is not None
+    }

@@ -1104,7 +1104,7 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
 
 def test_records_carry_a_schema_version():
     """Writer and reader are different processes and may be different repositories."""
-    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 1
+    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 5
     entry = TokenEntry(
         rollout_id="r",
         model_call_id="c",
@@ -1482,8 +1482,16 @@ async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     process = context.Process(target=_put_shared_file_entry, args=(str(tmp_path),))
     process.start()
-    process.join(timeout=10)
-    assert process.exitcode == 0
+    try:
+        # Spawn reimports this test module; network-backed environments can
+        # spend tens of seconds importing the server dependencies alone.
+        process.join(timeout=60)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        process.close()
 
     store = FileLineageStore(tmp_path)
     parent = await store.resolve(

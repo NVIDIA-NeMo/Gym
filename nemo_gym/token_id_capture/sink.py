@@ -105,6 +105,8 @@ class CaptureContext:
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
     request_items: list[dict] | None = None
+    # A trusted adapter settled this call without starting generation.
+    rejected_without_generation: bool = False
 
     @property
     def parent_call_id(self) -> str | None:
@@ -312,6 +314,31 @@ async def register_call_intent() -> None:
     await begin(context.rollout_id, context.model_call_id)
 
 
+async def record_call_rejection(*, reason: str) -> None:
+    """Settle a backend-confirmed pre-generation rejection, if the sink supports it.
+
+    Call only at a trusted backend validation boundary. A timeout, cancellation,
+    generic HTTP error or empty response is not evidence of zero generation.
+    Failure to persist the outcome leaves the intent unresolved and fails closed.
+    External staging retains its own ledger/failure semantics.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None or context.token_sink is None or context.external_staging:
+        return
+    reject = getattr(context.token_sink, "reject_call", None)
+    if reject is None:
+        logger.warning("Token sink %s cannot settle pre-generation rejections.", type(context.token_sink).__name__)
+        return
+    try:
+        if context.committed:
+            raise ValueError("Cannot reject a call that has already committed generated tokens")
+        await reject(context.rollout_id, context.model_call_id, reason=reason)
+    except Exception:
+        await _capture_failed(context, "record rejection")
+    else:
+        context.rejected_without_generation = True
+
+
 async def capture_tokens(
     response: Any,
     request_messages: list | None = None,
@@ -342,6 +369,12 @@ async def capture_tokens(
             await _capture_missing(context, f"the response is a {type(response).__name__}")
             return
         info = extract_token_fields(payload)
+        if context.rejected_without_generation:
+            # A synthetic length completion is not a generated TokenEntry.
+            # Contradictory token evidence must still poison the rollout.
+            if info is not None and info["generation_token_ids"]:
+                raise ValueError("A pre-generation rejection also returned generated tokens")
+            return
         if info is None:
             await _capture_missing(context, "the response carries no token ids")
             return
@@ -366,6 +399,12 @@ async def capture_tokens(
             generation_token_ids=info["generation_token_ids"],
             generation_log_probs=info["generation_log_probs"],
             routed_experts=info.get("routed_experts"),
+            ng_generation_replica_id=info.get("ng_generation_replica_id"),
+            ng_generation_weight_version=info.get("ng_generation_weight_version"),
+            ng_generation_weight_version_end=info.get("ng_generation_weight_version_end"),
+            ng_kv_cache_scheduler_block_size=info.get("ng_kv_cache_scheduler_block_size"),
+            ng_kv_cache_hash_block_size=info.get("ng_kv_cache_hash_block_size"),
+            ng_kv_cache_num_cached_tokens=info.get("ng_kv_cache_num_cached_tokens"),
             # Preserve content for text-based training penalties.
             output_items=content_items,
             token_item_index=token_item_index,

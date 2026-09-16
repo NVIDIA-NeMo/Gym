@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
 
 
@@ -326,6 +327,40 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     assert durable_call_counts == [0, 1, 1]
     [call] = read_model_call_records(store, "fast-rollout")
     assert call.client_session_id == "opencode-session"
+
+
+def test_capture_prefix_exposes_rollout_context_when_capture_is_disabled():
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    observed = []
+
+    async def app(scope, _receive, send):
+        observed.append((scope["path"], current_rollout_id()))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        pass
+
+    asyncio.run(
+        _CaptureMiddleware(app, store=None, model_server_name="srv")(
+            {
+                "type": "http",
+                "path": "/ng-rollout/rollout-7/v1/chat/completions",
+                "raw_path": b"/ng-rollout/rollout-7/v1/chat/completions",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert observed == [("/v1/chat/completions", "rollout-7")]
 
 
 def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):

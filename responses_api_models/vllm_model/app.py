@@ -21,7 +21,7 @@ import os
 from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
@@ -49,12 +49,14 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
     current_capture_context,
     mark_external_staging_committed,
+    record_call_rejection,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
@@ -76,6 +78,32 @@ from nemo_gym.token_id_capture.staging.records import (
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+
+
+def _is_pre_generation_context_rejection(error: ClientResponseError) -> bool:
+    """Recognize vLLM's structured input-length validation error, not a generic 400.
+
+    The input_tokens validation runs before the request enters engine generation.
+    Keep legacy/unstructured errors fail-closed rather than inferring from a
+    substring anywhere in an error body (which can contain echoed user content).
+    """
+    if error.status != 400:
+        return False
+    try:
+        payload = json.loads(error.response_content)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    detail = payload.get("error", payload)
+    return (
+        isinstance(detail, dict)
+        and detail.get("type") == "invalid_request_error"
+        and detail.get("param") == "input_tokens"
+        and isinstance(detail.get("message"), str)
+        and detail["message"].startswith("This model's maximum context length is ")
+    )
+
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -182,6 +210,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Return parsed reasoning in a structured Chat Completions field instead
+    # of reconstructing <think> tags. This is opt-in for compatible clients.
+    reasoning_response_field: Optional[Literal["reasoning_content", "reasoning"]] = None
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -616,42 +647,69 @@ class VLLMModel(SimpleResponsesAPIModel):
             if self.config.request_prompt_and_generation_token_ids:
                 body_dict["return_token_ids"] = True
 
-        if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
+        # Echoed capture metadata is for the trainer, never the chat template.
+        for message_dict in body_dict["messages"]:
+            for field_name in TOKEN_FIELDS:
+                message_dict.pop(field_name, None)
+
+        if self.config.uses_reasoning_parser:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
                     continue
 
-                content = message_dict["content"]
-                if isinstance(content, str):
+                explicit_reasoning_fields = [
+                    message_dict.get(field)
+                    for field in ("reasoning_content", "reasoning")
+                    if message_dict.get(field) is not None
+                ]
+                if explicit_reasoning_fields and any(
+                    value != explicit_reasoning_fields[0] for value in explicit_reasoning_fields[1:]
+                ):
+                    raise ValueError(f"Assistant message has conflicting reasoning fields: {message_dict}")
+                reasoning_content = explicit_reasoning_fields[0] if explicit_reasoning_fields else None
+
+                content = message_dict.get("content")
+                if not self.config.preserve_reasoning_in_assistant_content and isinstance(content, str):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
-                    if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-
-                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
-                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
-                        message_dict["reasoning"] = reasoning_matches[0]
-                elif isinstance(content, list):
-                    reasoning_content = None
+                    if reasoning_matches:
+                        if reasoning_content is not None and reasoning_content != reasoning_matches[0]:
+                            raise ValueError(
+                                f"Assistant message has conflicting tagged and structured reasoning: {message_dict}"
+                            )
+                        reasoning_content = reasoning_matches[0]
+                elif not self.config.preserve_reasoning_in_assistant_content and isinstance(content, list):
+                    tagged_reasoning = None
                     for content_item_dict in content:
                         reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(
                             content_item_dict["text"]
                         )
-                        assert reasoning_content is None or not reasoning_matches, (
+                        assert tagged_reasoning is None or not reasoning_matches, (
                             f"Found multiple reasoning matches in a single assistant message content item list!\nMessage: {message_dict}"
                         )
 
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
-                        if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
-                            # See the TODO wrt reasoning_content above
-                            message_dict["reasoning"] = reasoning_matches[0]
+                        if reasoning_matches:
+                            tagged_reasoning = reasoning_matches[0]
+                    if tagged_reasoning is not None:
+                        if reasoning_content is not None and reasoning_content != tagged_reasoning:
+                            raise ValueError(
+                                f"Assistant message has conflicting tagged and structured reasoning: {message_dict}"
+                            )
+                        reasoning_content = tagged_reasoning
                 elif not content:
                     # No content or content None is a no-op
                     pass
-                else:
+                elif not self.config.preserve_reasoning_in_assistant_content:
                     raise NotImplementedError
+
+                message_dict.pop("reasoning_content", None)
+                message_dict.pop("reasoning", None)
+                if reasoning_content is not None and self.config.uses_interleaved_reasoning:
+                    # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content compatibility field.
+                    message_dict["reasoning_content"] = reasoning_content
+                    message_dict["reasoning"] = reasoning_content
 
         # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
         # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
@@ -874,6 +932,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        replica_id = self._replica_id(client)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
@@ -942,6 +1001,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if _is_pre_generation_context_rejection(e):
+                    await record_call_rejection(reason="context_length_exceeded")
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
@@ -985,6 +1046,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         choice_dict = chat_completion_dict["choices"][0]
         self._verify_generation_prefix(body_dict, chat_completion_dict)
+        choice_dict["message"]["ng_generation_replica_id"] = replica_id
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
@@ -994,8 +1056,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 choice_dict["message"].pop("reasoning_content", None)
                 # See the TODO wrt reasoning_content above
                 choice_dict["message"].pop("reasoning", None)
-
-                if body_dict.get("continue_final_message", False):
+                if self.config.reasoning_response_field:
+                    choice_dict["message"][self.config.reasoning_response_field] = reasoning_content
+                elif body_dict.get("continue_final_message", False):
                     # by default, the response of continue_final_message will split into reasoning.
                     choice_dict["message"]["content"] = reasoning_content + (choice_dict["message"]["content"] or "")
                 else:
@@ -1393,6 +1456,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._validate_single_choice_token_request(completion_body)
 
         client = self._resolve_client(request)
+        replica_id = self._replica_id(client)
 
         try:
             completion_dict = await client.create_completion(**completion_body)
@@ -1402,6 +1466,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if _is_pre_generation_context_rejection(e):
+                    await record_call_rejection(reason="context_length_exceeded")
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
@@ -1422,7 +1488,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 tokenize_response = await client.create_tokenize(**tokenize_body)
                 choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
 
-        return self._completion_dict_to_chat_completion(completion_dict)
+        return self._completion_dict_to_chat_completion(completion_dict, replica_id=replica_id)
 
     def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
         """Convert a chat-style messages list into a flat prompt string.
@@ -1597,7 +1663,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
         return self._apply_sampling_overrides(out)
 
-    def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
+    def _completion_dict_to_chat_completion(
+        self, completion_dict: Dict[str, Any], *, replica_id: str | None = None
+    ) -> NeMoGymChatCompletion:
         """Wrap a /v1/completions response as a NeMoGymChatCompletion.
 
         vLLM /v1/completions returns ``choices[i].text``; we lift it into a
@@ -1614,6 +1682,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             "content": text,
             "tool_calls": None,
         }
+        if replica_id is not None:
+            message_dict["ng_generation_replica_id"] = replica_id
 
         if self.config.return_token_id_information:
             logprobs = choice_dict.get("logprobs")
@@ -1758,6 +1828,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
+        rollout_id = current_rollout_id()
+        if rollout_id is not None:
+            digest = hashlib.blake2b(
+                rollout_id.encode("utf-8"),
+                digest_size=8,
+                person=b"nemo-gym",
+            ).digest()
+            return self._clients[int.from_bytes(digest, "big") % len(self._clients)]
+
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps
@@ -1769,6 +1848,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._session_id_to_client[session_id]
 
         return client
+
+    def _replica_id(self, client: NeMoGymAsyncOpenAI) -> str:
+        """Return a stable, non-address-bearing identifier for an upstream."""
+        client_index = next(index for index, candidate in enumerate(self._clients) if candidate is client)
+        return f"vllm-{client_index}"
 
 
 if __name__ == "__main__":

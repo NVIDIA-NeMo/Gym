@@ -43,6 +43,7 @@ from nemo_gym.token_id_capture.protocols import TokenSource
 # Attach token-capture health to each rollout record.
 # It reports build losses and masking reasons.
 TOKEN_CAPTURE_KEY = "_ng_token_capture"
+TRAINING_RESPONSES_KEY = "_ng_training_responses"
 
 # A consumer reads this top-level field to exclude a rollout from the loss.
 # The field stays outside TOKEN_CAPTURE_KEY for direct access.
@@ -84,7 +85,9 @@ def _unusable(result: dict, error: str, message: str) -> dict:
     return {"rebuilt_response": None, MASK_SAMPLE_KEY: True, "error": error, "metrics": metrics}
 
 
-async def finalize_rollout_token_capture(result: dict, source: TokenSource | None) -> dict | None:
+async def finalize_rollout_token_capture(
+    result: dict, source: TokenSource | None, *, builder: str = "prefix_merging"
+) -> dict | None:
     """Rebuild one finished rollout record's ``response.output`` from its recorded token ids.
 
     Call this after the harness and verifier finish the record.
@@ -98,6 +101,11 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     A ``None`` source means this caller does not rebuild.
     A rollout that already carries token ids is left unchanged.
     Its redundant frozen capture remains eligible for retirement after handoff.
+
+    ``builder="independent_calls"`` also attaches exact model invocations for
+    segmented/tree-attention trainers. Native response tokens stay unchanged,
+    but capture failures mask this mode rather than falling back to a possibly
+    incomplete native transcript. Neither mode retires capture during finalize.
 
     The function never raises.
     Missing or ambiguous tokens cause masking.
@@ -121,7 +129,8 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             f"a rollout result carries a malformed id ({error}), so its recorded token ids could "
             "not be looked up and it will be token-less.",
         )
-    if rollout_carries_token_ids(result):
+    carries_token_ids = rollout_carries_token_ids(result)
+    if carries_token_ids and builder != "independent_calls":
         # Re-finalization must return the frozen snapshot.
         # The caller must be able to retire on every path.
         if rollout_id is None:
@@ -159,6 +168,7 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         built = await trajectories_from_source(
             rollout_id,
             source,
+            builder=builder,
             model=str(response.get("model") or ""),
             verified_response=response or None,
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
@@ -185,11 +195,16 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         )
 
     projected = built["rebuilt_response"]
-    if projected is not None:
+    if projected is not None and not carries_token_ids:
         if isinstance(result.get("response"), dict):
             result["response"]["output"] = projected["output"]
         else:
             result["response"] = projected
+
+    if builder == "independent_calls":
+        result.pop(TRAINING_RESPONSES_KEY, None)
+        if not built.get(MASK_SAMPLE_KEY) and built.get("rebuilt_responses"):
+            result[TRAINING_RESPONSES_KEY] = built["rebuilt_responses"]
 
     # Record build losses so partial trajectories remain visible.
     record_metrics = dict(built.get("metrics") or {})

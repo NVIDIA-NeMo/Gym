@@ -71,7 +71,7 @@ import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -114,6 +114,11 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Independent calls retain exact contexts for trainers with segmented/tree
+    # attention. The default remains the verified single-chain projection.
+    builder: Literal["prefix_merging", "independent_calls"] = "prefix_merging"
+    # Keep successfully handed-off snapshots for offline diagnostics.
+    retain_consumed: bool = False
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.

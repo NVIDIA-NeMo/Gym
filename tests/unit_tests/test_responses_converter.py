@@ -1138,6 +1138,28 @@ def test_postprocess_extracts_reasoning_when_enabled(converter: ResponsesConvert
     assert output[1].content[0].text == "the answer"
 
 
+def test_postprocess_extracts_structured_reasoning_when_enabled(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {"role": "assistant", "content": "the answer", "reasoning_content": "reasoning"}
+    )
+    assert isinstance(output[0], NeMoGymResponseReasoningItem)
+    assert output[0].summary[0].text == "reasoning"
+    assert isinstance(output[1], NeMoGymResponseOutputMessage)
+    assert output[1].content[0].text == "the answer"
+
+
+def test_postprocess_rejects_conflicting_structured_reasoning(converter: ResponsesConverter):
+    with pytest.raises(ValueError, match="conflicting reasoning fields"):
+        converter.postprocess_assistant_message_dict(
+            {
+                "role": "assistant",
+                "content": "the answer",
+                "reasoning_content": "first",
+                "reasoning": "second",
+            }
+        )
+
+
 def test_postprocess_keeps_think_inline_when_disabled():
     converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
     output = converter.postprocess_assistant_message_dict(

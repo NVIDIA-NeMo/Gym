@@ -168,6 +168,12 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    ng_generation_replica_id: Optional[str] = None
+    ng_generation_weight_version: Optional[int] = None
+    ng_generation_weight_version_end: Optional[int] = None
+    ng_kv_cache_scheduler_block_size: Optional[int] = None
+    ng_kv_cache_hash_block_size: Optional[int] = None
+    ng_kv_cache_num_cached_tokens: Optional[int] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -175,6 +181,12 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    ng_generation_replica_id: NotRequired[str]
+    ng_generation_weight_version: NotRequired[int]
+    ng_generation_weight_version_end: NotRequired[int]
+    ng_kv_cache_scheduler_block_size: NotRequired[int]
+    ng_kv_cache_hash_block_size: NotRequired[int]
+    ng_kv_cache_num_cached_tokens: NotRequired[int]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -965,6 +977,8 @@ def accumulate_response_usage(
 
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
+    # Override the pinned SDK response type together with the request type.
+    reasoning: Optional[Reasoning] = None
     usage: Optional[NeMoGymResponseUsage] = None
 
 
@@ -997,6 +1011,14 @@ NeMoGymChatCompletionMessageToolCallUnion = Annotated[
 
 class NeMoGymChatCompletionMessage(ChatCompletionMessage):
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnion]] = None
+    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
+    ng_generation_replica_id: Optional[str] = None
+    ng_generation_weight_version: Optional[int] = None
+    ng_generation_weight_version_end: Optional[int] = None
+    ng_kv_cache_scheduler_block_size: Optional[int] = None
+    ng_kv_cache_hash_block_size: Optional[int] = None
+    ng_kv_cache_num_cached_tokens: Optional[int] = None
 
 
 class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
@@ -1138,8 +1160,14 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
-    # Allow incoming responses with reasoning_content=None. This field should not be used.
-    reasoning_content: Annotated[None, Field(exclude=True)]
+    reasoning_content: Optional[str]
+    reasoning: Optional[str]
+    ng_generation_replica_id: Optional[str]
+    ng_generation_weight_version: Optional[int]
+    ng_generation_weight_version_end: Optional[int]
+    ng_kv_cache_scheduler_block_size: Optional[int]
+    ng_kv_cache_hash_block_size: Optional[int]
+    ng_kv_cache_num_cached_tokens: Optional[int]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

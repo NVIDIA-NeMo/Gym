@@ -101,6 +101,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
+    def _model_call_capture_enabled(self) -> bool:
+        """Whether eval model-call capture is enabled for this agent."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
 

@@ -310,6 +310,15 @@ CHAT_INCONVERTIBLE_TYPES = frozenset(
 )
 
 
+def _reasoning_item(text: str) -> dict:
+    return {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": text}],
+        "encrypted_content": None,
+    }
+
+
 NAMESPACE_TOOL = {
     "type": "namespace",
     "name": "mcp__weather",
@@ -529,32 +538,56 @@ class TestSynthesizeSSE:
     def test_event_sequence(self) -> None:
         response = _build_response([_message_item("hello")]).model_dump(mode="json")
         events = self._events("".join(synthesize_responses_sse(response)))
-        assert [e["type"] for e in events] == ["response.created", "response.output_item.done", "response.completed"]
+        assert [e["type"] for e in events] == [
+            "response.created",
+            "response.output_item.added",
+            "response.output_text.delta",
+            "response.output_item.done",
+            "response.completed",
+        ]
         assert events[0]["response"]["status"] == "in_progress"
         assert events[0]["response"]["output"] == []
         assert events[1]["output_index"] == 0
-        assert events[1]["item"]["content"][0]["text"] == "hello"
-        completed = events[2]["response"]
+        assert events[1]["item"]["status"] == "in_progress"
+        assert events[2]["delta"] == "hello"
+        assert events[3]["item"]["content"][0]["text"] == "hello"
+        completed = events[4]["response"]
         assert completed["id"] == response["id"]
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
+
+    def test_reasoning_item_has_complete_stream_lifecycle(self) -> None:
+        response = _build_response([_reasoning_item("thinking...")]).model_dump(mode="json")
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [e["type"] for e in events] == [
+            "response.created",
+            "response.output_item.added",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert events[1]["item"]["id"] == "rs_1"
+        assert events[3]["delta"] == "thinking..."
+        assert events[5]["item"]["id"] == "rs_1"
 
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
         events = self._events("".join(synthesize_responses_sse(response, ns_map)))
-        item = events[1]["item"]
+        item = events[2]["item"]
         assert item["namespace"] == "mcp__weather"
         assert item["name"] == "get_weather"
         # the terminal envelope carries the same rewritten item
-        assert events[2]["response"]["output"][0]["name"] == "get_weather"
+        assert events[3]["response"]["output"][0]["name"] == "get_weather"
 
     def test_unmapped_calls_left_alone(self) -> None:
         response = _build_response([_function_call_item("exec_command")]).model_dump(mode="json")
         events = self._events("".join(synthesize_responses_sse(response, {"other__tool": ("other", "tool")})))
-        assert events[1]["item"]["name"] == "exec_command"
+        assert events[2]["item"]["name"] == "exec_command"
         # Unmapped calls retain an unset `namespace` field.
-        assert events[1]["item"]["namespace"] is None
+        assert events[2]["item"]["namespace"] is None
 
     def test_failure_stream_is_terminal_response_failed(self) -> None:
         events = self._events("".join(synthesize_responses_failure_sse("boom", code="server_error")))
