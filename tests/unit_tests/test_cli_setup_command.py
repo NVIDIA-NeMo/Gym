@@ -531,3 +531,41 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+
+@pytest.mark.parametrize("log_enabled", [False, True])
+@pytest.mark.parametrize("suppressed_servers", [[], ["another_server"], ["test_server"]])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_server_console_suppression_preserves_logs_and_exit_status(
+    tmp_path: Path, log_enabled: bool, suppressed_servers: list[str], exit_code: int
+) -> None:
+    from omegaconf import OmegaConf
+
+    log_dir = tmp_path / "logs"
+    config = OmegaConf.create(
+        {
+            "uv_cache_dir": str(tmp_path / "cache"),
+            "nemo_gym_log_dir": str(log_dir) if log_enabled else None,
+            "nemo_gym_log_suppress_stdout_server_names": suppressed_servers,
+        }
+    )
+    with (tmp_path / "stdout").open("w+") as stdout_file, (tmp_path / "stderr").open("w+") as stderr_file:
+        process = run_command(
+            command=f"printf 'out\\n'; printf 'err\\n' >&2; exit {exit_code}",
+            working_dir_path=tmp_path,
+            server_name="test_server",
+            global_config_dict=config,
+            stdout_target=stdout_file,
+            stderr_target=stderr_file,
+        )
+        assert process.wait(timeout=10) == exit_code
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        if log_enabled:
+            assert (log_dir / "test_server.log").read_text() == "out\nerr\n"
+            assert stderr_file.read() == ""
+            assert stdout_file.read() == ("" if "test_server" in suppressed_servers else "out\nerr\n")
+        else:
+            assert not log_dir.exists()
+            assert stdout_file.read() == "out\n"
+            assert stderr_file.read() == "err\n"
