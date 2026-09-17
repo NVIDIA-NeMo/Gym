@@ -1370,7 +1370,7 @@ class TestAssetSelectors:
 class TestAgentSelector:
     """`--agent-type NAME[/FLAVOR]` resolves a named harness to its config and adds it to `+config_paths`."""
 
-    HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+    HERMES = "responses_api_agents/harness_agent/configs/hermes_agent.yaml"
 
     @pytest.mark.parametrize(
         "command",
