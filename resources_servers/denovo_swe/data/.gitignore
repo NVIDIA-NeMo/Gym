@@ -1,0 +1,5 @@
+# Training JSONL embeds document/test content from the Hub dataset -- large, regenerate with
+# prepare_denovo_swe.py rather than committing.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl
