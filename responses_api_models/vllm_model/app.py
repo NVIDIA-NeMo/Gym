@@ -351,6 +351,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         capture_config = token_id_capture_config(global_config) if global_config is not None else None
         self._external_capture_handler = None
         if capture_config is not None and capture_config.token_id_capture.external_staging:
+            overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
+            if overrides.get("stream"):
+                raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:

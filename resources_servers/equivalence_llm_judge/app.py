@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -43,6 +44,65 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
+
+
+# Aggregate parsing metric, also included in key_metrics.
+JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
+
+
+def _match_verdict_labels(text: str, equal_label: str, not_equal_label: str) -> list[str]:
+    """Return non-overlapping verdict labels in text order.
+
+    Consume each match so INCORRECT does not also count as CORRECT.
+    """
+    matches = []
+    i = 0
+    # Search by match position to avoid scanning each character in Python.
+    while i < len(text):
+        eq_at = text.find(equal_label, i) if equal_label else -1
+        neq_at = text.find(not_equal_label, i) if not_equal_label else -1
+        if eq_at < 0 and neq_at < 0:
+            break
+        if eq_at == neq_at:
+            # Prefer the longer label when both start here.
+            label = equal_label if len(equal_label) > len(not_equal_label) else not_equal_label
+            pos = eq_at
+        elif neq_at < 0 or (eq_at >= 0 and eq_at < neq_at):
+            label, pos = equal_label, eq_at
+        else:
+            label, pos = not_equal_label, neq_at
+        matches.append(label)
+        i = pos + len(label)
+    return matches
+
+
+def _parse_judge_verdict(
+    text: Optional[str], equal_label: str, not_equal_label: str, truncated: bool = False
+) -> tuple[Optional[str], list[str]]:
+    """Return the last verdict and any parsing issues."""
+    if text is None:
+        issues = ["unparseable_judge_output"]
+        if truncated:
+            issues.insert(0, "truncated_judge_output")
+        return None, issues
+
+    matches = _match_verdict_labels(text, equal_label, not_equal_label)
+    counts = Counter(matches)
+    eq_count, neq_count = counts[equal_label], counts[not_equal_label]
+    issues = []
+    if eq_count == 0 and neq_count == 0:
+        if truncated:
+            issues.append("truncated_judge_output")
+        issues.append("no_verdict")
+    else:
+        if eq_count > 0 and neq_count > 0:
+            issues.append("conflicting_verdicts")
+        if eq_count > 1 or neq_count > 1:
+            issues.append("repeated_verdict")
+
+    return matches[-1] if matches else None, issues
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -143,6 +203,16 @@ class JudgeEvaluation(BaseModel):
     # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
     # or JUDGE_ERROR_LABEL when the judge itself failed.
     verdict_label: Optional[str] = None
+    # Per-evaluation parsing issues; empty when none were detected.
+    judgement_parsing_issues: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_judgement_parsing_issues(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Omit empty parsing issues; older rollouts may also lack this field."""
+        data = handler(self)
+        if not data.get("judgement_parsing_issues"):
+            data.pop("judgement_parsing_issues", None)
+        return data
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
@@ -289,10 +359,6 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
 
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
@@ -513,23 +579,82 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Parse the last output; fall back to not-equal if unexpected.
         try:
             last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) != "message":
-                return False, eval_record
-            last_content = last_output.content[-1]
-            text = getattr(last_content, "text", "")
+            is_message = getattr(last_output, "type", None) == "message"
+            text = getattr(last_output.content[-1], "text", "") if is_message else None
         except Exception:
-            return False, eval_record
+            text = None
 
-        eq_pos = text.find(equal_label)
-        neq_pos = text.find(not_equal_label)
-        if eq_pos < 0 and neq_pos < 0:
-            eval_record.verdict_label = None
-            return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-            eval_record.verdict_label = equal_label
-            return True, eval_record
-        eval_record.verdict_label = not_equal_label
-        return False, eval_record
+        eval_record.verdict_label, eval_record.judgement_parsing_issues = _parse_judge_verdict(
+            text, equal_label, not_equal_label, truncated=judge_response.status == "incomplete"
+        )
+        return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Aggregate parsing issues, recovering missing diagnostics from saved responses.
+
+        Exclude service failures and records without diagnostics or a saved response.
+        Count each rollout once, including runs with multiple judge passes.
+        """
+        kind_counts: Counter[str] = Counter()
+        judged = 0
+        rollouts_with_issues = 0
+        for task in tasks:
+            for rollout in task:
+                issues: set[str] = set()
+                measured = False
+                for evaluation in rollout.get("judge_evaluations") or []:
+                    if not evaluation or evaluation.get("verdict_label") == JUDGE_ERROR_LABEL:
+                        continue
+                    parsing_issues = evaluation.get("judgement_parsing_issues")
+                    if parsing_issues is None:
+                        response = evaluation.get("response")
+                        if not isinstance(response, dict):
+                            continue
+                        # Preserve the verifier's last-output, last-content-block extraction.
+                        try:
+                            last_output = response["output"][-1]
+                            text = (
+                                last_output["content"][-1].get("text", "")
+                                if last_output.get("type") == "message"
+                                else None
+                            )
+                        except (KeyError, IndexError, TypeError, AttributeError):
+                            text = None
+                        _, parsing_issues = _parse_judge_verdict(
+                            text,
+                            self.config.judge_equal_label,
+                            self.config.judge_not_equal_label,
+                            truncated=response.get("status") == "incomplete",
+                        )
+                    measured = True
+                    issues.update(parsing_issues)
+
+                if measured:
+                    judged += 1
+                    rollouts_with_issues += bool(issues)
+                    kind_counts.update(issues)
+
+        if not judged:
+            return {}
+        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+        for kind, count in sorted(kind_counts.items()):
+            metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Add the parsing-issue rate to the default mean metrics."""
+        key = super().get_key_metrics(agent_metrics)
+        if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
+            key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
+        return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_hle_verified_server,
+    request_model=LLMJudgeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests/hle_verified_verifier_cases.jsonl",
+    invoke=invoke_hle_verified,
+)
 
 
 if __name__ == "__main__":

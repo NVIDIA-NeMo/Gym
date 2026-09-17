@@ -90,6 +90,10 @@ class _BaseExternalCaptureHandler(ABC):
         context = current_capture_context()
         if context is None or not context.external_staging:
             return request_payload
+        if request_payload.get("stream"):
+            raise ValueError("external staging requires non-streaming backend requests")
+        request_payload["stream"] = False
+        request_payload.pop("stream_options", None)
         admission = context.capture_admission
         if admission is None:
             return request_payload

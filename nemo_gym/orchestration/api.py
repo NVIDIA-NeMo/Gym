@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import re
 import warnings
 from typing import Annotated, Any, Literal
 
@@ -22,6 +24,49 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator,
 # Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
+# (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
+# of a literal, so the value is picked up from the job's actual environment at run time.
+RUNTIME_ENV_PREFIX = "runtime:"
+
+
+def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
+    """Resolve `lit:`/`host:`/`runtime:` prefixes on `env` values. Every value must use one
+    of these prefixes; a missing or misspelled prefix raises rather than being guessed at.
+
+    - `lit:VALUE` -> literal VALUE.
+    - `host:VAR` -> read from os.environ[VAR] on the machine running `gym eval submit`;
+      raises if VAR isn't set there.
+    - `runtime:VAR` -> left unresolved; canonicalized to `runtime:VAR` for executors to
+      pick up and reference from the job's own environment at run time.
+    """
+    resolved = {}
+    for key, raw in env.items():
+        if raw.startswith("lit:"):
+            resolved[key] = raw[len("lit:") :]
+        elif raw.startswith("host:"):
+            var = raw[len("host:") :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for host:{var}")
+            value = os.environ.get(var)
+            if value is None:
+                raise ValueError(
+                    f"env[{key!r}] references host:{var}, but {var!r} is not set in the submitting shell's environment"
+                )
+            resolved[key] = value
+        elif raw.startswith(RUNTIME_ENV_PREFIX):
+            var = raw[len(RUNTIME_ENV_PREFIX) :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for runtime:{var}")
+            resolved[key] = f"{RUNTIME_ENV_PREFIX}{var}"
+        else:
+            raise ValueError(
+                f"env[{key!r}]: {raw!r} must start with one of the prefixes 'lit:', 'host:', or 'runtime:'"
+            )
+    return resolved
 
 
 class HealthCheckConfig(_StrictModel):
@@ -36,6 +81,9 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
@@ -48,6 +96,11 @@ class BaseServiceConfig(_StrictModel):
     # service-specific extra_args (appended to that service's own command
     # line), this runs as its own statement(s) ahead of the command.
     pre_command: str = ""
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -166,10 +219,18 @@ class DriverConfig(_StrictModel):
     # at all, for a benchmark whose own config already declares a complete one.
     policy_model_type: str = "openai_model"
     benchmarks: dict[str, BenchmarkRunConfig]
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class JobConfig(_StrictModel):
