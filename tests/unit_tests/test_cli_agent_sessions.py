@@ -91,8 +91,8 @@ def params() -> NeMoGymResponseCreateParamsNonStreaming:
 def seed(rollout: str = "rollout") -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
         episode_id=EpisodeId(rollout_id=rollout, attempt=1),
-        task_id=TaskId(task_source="verifier", task_id="task"),
-        resources_access={"kind": "direct_http", "base_url": "http://verifier", "cookies": {"res": "private"}},
+        task_id=TaskId(taskset="verifier", task_id="task"),
+        resources_access={"direct_http": {"base_url": "http://verifier", "cookies": {"res": "private"}}},
     )
 
 
@@ -210,6 +210,9 @@ def test_http_cookie_isolation_and_single_activation(cli):
         a = first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).json()["agent_session_id"]
         b = second.post("/v1/agent_sessions", json=seed("b").model_dump(mode="json")).json()["agent_session_id"]
         assert a != b
+        assert first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).status_code == 409
+        assert second.post("/v1/agent_sessions/close", json={"agent_session_id": a}).status_code == 409
+        assert a in agent._agent_sessions
         route = f"/ng-rollout/{seed('a').episode_id.capture_key}/v1/responses"
         assert second.post(route, json=params().model_dump(mode="json")).status_code == 409
         assert first.post("/v1/responses", json=params().model_dump(mode="json")).status_code == 409
@@ -222,7 +225,7 @@ def test_http_cookie_isolation_and_single_activation(cli):
         assert second.post("/v1/agent_sessions/close", json={"agent_session_id": b}).status_code == 200
 
 
-@pytest.mark.parametrize("access", ["sandbox", "mcp"])
+@pytest.mark.parametrize("access", ["sandbox", "mcp", "http-and-mcp"])
 def test_unsupported_access_fails_before_activation(cli, access):
     agent, _, runner = cli
     mocked = mock_runner(agent, runner)
@@ -233,7 +236,9 @@ def test_unsupported_access_fails_before_activation(cli, access):
             "connection": {"kind": "direct", "provider_config_ref": "owner", "descriptor": {"sandbox_id": "owned"}},
         }
     else:
-        body["resources_access"] = {"kind": "mcp", "metadata": {"server_name": "owner", "headers": {}}}
+        resources_access = body["resources_access"] if access == "http-and-mcp" else {}
+        resources_access["mcp"] = {"server_name": "owner", "headers": {}}
+        body["resources_access"] = resources_access
     with TestClient(agent.setup_webserver()) as client:
         result = client.post("/v1/agent_sessions", json=body)
         assert result.status_code == 422

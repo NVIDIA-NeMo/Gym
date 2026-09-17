@@ -7,6 +7,7 @@ import asyncio
 import os
 import signal
 from abc import abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -14,10 +15,18 @@ from fastapi import Body, HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.episode import AgentSeedSessionRequest, MCPResourcesToolAccess
-from nemo_gym.episode_sessions import AgentCloseSessionResult, AgentSession
+from nemo_gym.episode import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+)
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
+from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+_AGENT_SESSION_ACTIVE_KEY = "nemo_gym_agent_session"
 
 
 def kill_cli_process_group(process: asyncio.subprocess.Process) -> None:
@@ -37,6 +46,13 @@ class CLIActivation:
     cancel_requested: bool = False
 
 
+@dataclass
+class _CLISession:
+    request: AgentSeedSessionRequest
+    state: CLIActivation
+    activation_started: bool = False
+
+
 class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
     """Opt local CLI harnesses into the agent session protocol.
 
@@ -46,25 +62,77 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
     callers keep the original Responses path without session interception.
     """
 
-    supports_agent_sessions: ClassVar[bool] = True
     observation_source: ClassVar[str]
     model_config = ConfigDict(arbitrary_types_allowed=True)
     sem: asyncio.Semaphore | None = None
+    _agent_sessions: dict[str, _CLISession]
 
     def model_post_init(self, context: object) -> None:
-        # Preserve multi-worker legacy /run deployments. These CLI classes had
-        # no superclass initialization; check worker affinity at native seed,
-        # rather than rejecting an otherwise unchanged legacy configuration.
+        super().model_post_init(context)
         self._agent_sessions = {}
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Create worker-local state without starting a harness."""
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id in self._agent_sessions:
+            raise HTTPException(409, f"Agent session already exists: {session_id}")
+        state = await self.initialize_agent_session_state(session_id, body)
+        self._agent_sessions[session_id] = _CLISession(request=body, state=state)
+        request.session[_AGENT_SESSION_ACTIVE_KEY] = True
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        """Retain session state until activation cleanup has succeeded."""
+        if body.agent_session_id != self.agent_session_id_from_request(request):
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        session = self.require_agent_session(body.agent_session_id)
+        observations = await self.close_agent_session_state(body.agent_session_id, session)
+        del self._agent_sessions[body.agent_session_id]
+        request.session.pop(_AGENT_SESSION_ACTIVE_KEY, None)
+        return AgentCloseSessionResponse(agent_session_id=body.agent_session_id, agent_observations=observations)
+
+    def require_agent_session(self, agent_session_id: str) -> _CLISession:
+        """Resolve a session owned by this worker."""
+        try:
+            return self._agent_sessions[agent_session_id]
+        except KeyError as error:
+            raise HTTPException(409, f"Unknown agent_session_id: {agent_session_id}") from error
+
+    def begin_agent_activation(self, agent_session_id: str, rollout_id: str) -> _CLISession:
+        """Validate correlation and reserve the session's single activation."""
+        session = self.require_agent_session(agent_session_id)
+        if rollout_id != session.request.episode_id.capture_key:
+            raise ValueError("Agent-session episode_id does not match the rollout route")
+        if session.activation_started:
+            raise ValueError("Agent session has already been activated")
+        session.activation_started = True
+        return session
+
+    @staticmethod
+    def agent_session_id_from_request(request: Request | None) -> str | None:
+        """Distinguish native sessions from direct Responses calls."""
+        if request is None:
+            return None
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping) or session.get(_AGENT_SESSION_ACTIVE_KEY) is not True:
+            return None
+        session_id = session.get(SESSION_ID_KEY)
+        return session_id if isinstance(session_id, str) else None
 
     async def initialize_agent_session_state(
         self, agent_session_id: str, body: AgentSeedSessionRequest
     ) -> CLIActivation:
+        """Validate supported access and workspace isolation before admission."""
+        # Multi-worker direct /run deployments remain valid; only native seed
+        # needs worker affinity for its in-memory session state.
         if self.config.num_workers not in (None, 1):
             raise HTTPException(422, "Native CLI sessions require num_workers=1")
         if body.sandbox_access is not None:
             raise HTTPException(422, f"{self.observation_source} does not support borrowed SandboxAccess yet")
-        if isinstance(body.resources_access, MCPResourcesToolAccess):
+        if body.resources_access is not None and body.resources_access.mcp is not None:
             raise HTTPException(422, f"{self.observation_source} native sessions do not support runtime MCP tools yet")
         # Persistent workspace overrides cannot provide episode isolation.
         for option in ("cwd", "repo_dir"):
@@ -131,7 +199,10 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
                 state.task.cancel()
             raise
 
-    async def close_agent_session_state(self, agent_session_id: str, session: AgentSession) -> AgentCloseSessionResult:
+    async def close_agent_session_state(
+        self, agent_session_id: str, session: _CLISession
+    ) -> AgentObservationBundle | None:
+        """Join activation cleanup and collect its observations for verification."""
         state = session.state
         if not isinstance(state, CLIActivation):
             raise TypeError("CLI session has invalid activation state")
@@ -164,4 +235,4 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
                     ],
                     gaps=[ObservationGap(code="agent_activation_interrupted")],
                 )
-        return AgentCloseSessionResult(agent_observations=state.observations)
+        return state.observations
