@@ -22,9 +22,16 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 from fastapi import HTTPException, Response
+from nooa import Agent, PredictStrategy, strategy
+from nooa.config import PredictConfig
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
@@ -35,13 +42,21 @@ from responses_api_agents.nooa_agent.app import (
     NOOAAgentRunRequest,
     _identity,
 )
-from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.runner import NOOARunResult
+from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
+from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunResult
+from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
 from responses_api_agents.nooa_agent.tests.test_runner import FailingAgent, WaitingAgent, policy_runner
 
 
 async def invoke(agent: object, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
     return agent, request
+
+
+async def invoke_text(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+    assert isinstance(request.input, list)
+    content = request.input[-1].content
+    assert isinstance(content, str)
+    return await agent.analyze(content)
 
 
 class FakeHTTPResponse:
@@ -65,6 +80,18 @@ class FakeHTTPResponse:
                 status=self.status,
                 message=f"HTTP {self.status}",
             )
+
+
+class StructuredAnswer(BaseModel):
+    result: str
+
+
+class StructuredRetryAgent(Agent):
+    @strategy(PredictStrategy(config=PredictConfig(max_retries=3)))
+    async def analyze(self, text: str) -> StructuredAnswer:
+        """Return a structured answer for the supplied text."""
+
+        ...
 
 
 def config(**overrides: object) -> NOOAAgentConfig:
@@ -168,6 +195,84 @@ def make_agent(*, verify_reward: float = 1.0) -> tuple[NOOAAgent, ServerClient]:
     agent.runner = MagicMock()
     agent.runner.run = AsyncMock(side_effect=runner_result)
     return agent, client
+
+
+def make_structured_retry_agent(outputs: list[str], *, max_policy_calls: int) -> tuple[NOOAAgent, list[object]]:
+    client = server_client()
+    model_calls: list[object] = []
+    remaining = iter(outputs)
+
+    async def post(*, server_name: str, url_path: str, json: object, **_: object) -> FakeHTTPResponse:
+        if server_name == "resources":
+            if url_path == "/seed_session":
+                return FakeHTTPResponse({})
+            assert url_path == "/verify"
+            assert isinstance(json, dict)
+            return FakeHTTPResponse(json | {"reward": 0.75})
+        assert server_name == "policy"
+        model_calls.append(json)
+        index = len(model_calls)
+        message = NeMoGymResponseOutputMessageForTraining(
+            id=f"msg-{index}",
+            content=[NeMoGymResponseOutputText(annotations=[], text=next(remaining), logprobs=[])],
+            prompt_token_ids=[index],
+            generation_token_ids=[index + 10],
+            generation_log_probs=[-0.1],
+        )
+        return FakeHTTPResponse(model_response(message, response_id=f"response-{index}"))
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=post))
+    invocation = NOOAInvocationConfig(
+        agent_class=f"{__name__}:StructuredRetryAgent",
+        invocation_adapter=f"{__name__}:invoke_text",
+    )
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=client,
+        model_server_name="policy",
+        resources_server_name="resources",
+        max_policy_calls=max_policy_calls,
+    )
+    return agent, model_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outputs", "max_policy_calls", "termination_reason", "expected_calls"),
+    [
+        pytest.param(["not json", '{"result":"done"}'], 3, None, 2, id="invalid-then-success"),
+        pytest.param(
+            ["not json", "still not json", "invalid again"],
+            3,
+            "invalid_policy_output",
+            3,
+            id="retries-exhausted",
+        ),
+        pytest.param(["not json"], 1, "policy_budget_exceeded", 1, id="budget-exhausted-during-retry"),
+    ],
+)
+async def test_real_structured_output_retries_are_counted_with_partial_evidence(
+    outputs: list[str],
+    max_policy_calls: int,
+    termination_reason: str | None,
+    expected_calls: int,
+) -> None:
+    agent, model_calls = make_structured_retry_agent(outputs, max_policy_calls=max_policy_calls)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0.75
+    assert NG_FAILURE_CLASS_KEY not in result.model_extra
+    assert result.model_extra.get(NOOA_TERMINATION_REASON_KEY) == termination_reason
+    assert len(model_calls) == expected_calls
+    trajectory = result.model_extra["ng_trajectory"]
+    assert len(trajectory["turns"]) == expected_calls
+    assert all(turn["answer"] for turn in trajectory["turns"])
+    assert [turn["model_calls"][0]["response_id"] for turn in trajectory["turns"]] == [
+        f"response-{index}" for index in range(1, expected_calls + 1)
+    ]
+    assert len(result.response.output) == expected_calls
 
 
 @pytest.mark.asyncio
