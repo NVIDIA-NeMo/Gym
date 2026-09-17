@@ -1,5 +1,7 @@
 *
 !Dockerfile
+!requirements.in
 !requirements.lock
-!inputs.json
-!smoke.py
+!sage-environment.yaml
+!sage-linux-64.lock
+!tools.md
