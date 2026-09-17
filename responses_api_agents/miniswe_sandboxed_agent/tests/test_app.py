@@ -16,9 +16,10 @@ from resources_servers.terminal_bench_4.handoff import SandboxedSeedResponse
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 
 
+@pytest.mark.parametrize("custom_directory", [False, True])
 @pytest.mark.parametrize("with_mcp,step_timeout", [(False, 600), (True, 30)])
 async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
-    tmp_path, monkeypatch, with_mcp, step_timeout
+    tmp_path, monkeypatch, with_mcp, step_timeout, custom_directory
 ):
     monkeypatch.chdir(tmp_path)
     client = MagicMock(spec=ServerClient)
@@ -128,10 +129,19 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
         ),
         server_client=client,
     )
+    directory = tmp_path / "custom" / "artifacts" if custom_directory else Path("results/agent/task")
     result = await server.run(
         SimpleNamespace(cookies={}),
-        module.MiniSWERunRequest(responses_create_params={"input": [], "tool_choice": "required"}),
+        module.MiniSWERunRequest(
+            responses_create_params={"input": [], "tool_choice": "required"},
+            artifact_directory=str(directory) if custom_directory else None,
+        ),
     )
+    assert (directory / "trajectory.json").is_file()
+    assert result.termination.artifacts == [str(directory / "trajectory.json")]
+    assert result.response.model == "model"
+    assert result.response.tool_choice == "required"
+    assert len(result.response.output) == 6
     assert result.reward == 1
     assert result.response.usage.total_tokens == 39
     assert result.termination.reason == "completed"
@@ -163,6 +173,8 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
         assert tool_outputs[0]["output"].endswith("MCP navigation succeeded")
         assert any("setsid --fork" in command and "server.sock" in command for command, _ in commands)
         assert sandbox.upload.await_count == 2
+        assert json.loads((directory / "mcp.json").read_text()) == seed.mcp_servers
+        assert sandbox.upload.await_args_list[1].args[0] == directory / "mcp.json"
 
 
 @pytest.mark.parametrize(

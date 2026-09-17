@@ -14,7 +14,9 @@ import json
 from pathlib import Path
 from shlex import quote
 from threading import Lock
+from time import time
 from typing import Any
+from uuid import uuid4
 
 import yaml
 from fastapi import Request
@@ -34,7 +36,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymChatCompletionMessageToolCall, NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from resources_servers.terminal_bench_4.agent import artifact_directory, empty_response, run_borrowed
+from resources_servers.terminal_bench_4.agent import run_borrowed
 from resources_servers.terminal_bench_4.handoff import AgentTermination, SandboxedVerifyResponse
 
 
@@ -66,6 +68,8 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
 
 class MiniSWERunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+
+    artifact_directory: str | None = Field(default=None, min_length=1)
 
 
 class WorkerBridge:
@@ -154,9 +158,16 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: MiniSWERunRequest) -> SandboxedVerifyResponse:
         extra_instruction = ""
         system_info = {}
+        directory = None
 
         async def setup(sandbox, seed):
-            nonlocal extra_instruction
+            nonlocal extra_instruction, directory
+            directory = (
+                Path(body.artifact_directory)
+                if body.artifact_directory is not None
+                else Path("results") / self.config.name / seed.session_id
+            )
+            directory.mkdir(parents=True, exist_ok=True)
             result = await sandbox.exec("command -v setsid", user=seed.user)
             if result.return_code:
                 raise RuntimeError("mini-SWE requires setsid for process cleanup")
@@ -169,7 +180,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             if seed.skills_dir:
                 extra_instruction += f"\nTask skills are in {seed.skills_dir}. Read the relevant SKILL.md files.\n"
             if seed.mcp_servers:
-                directory = artifact_directory(self.config.name, seed.session_id)
                 (directory / "mcp.json").write_text(json.dumps(seed.mcp_servers))
                 remote = f"/tmp/{seed.session_id}-mcp"
                 command = f"python3 -m venv {remote} && {remote}/bin/pip -q install mcp==1.29.0 httpx-aiohttp==0.2.0"
@@ -203,7 +213,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         async def execute(sandbox, seed, budget):
             bridge = WorkerBridge()
             responses = []
-            directory = artifact_directory(self.config.name, seed.session_id)
 
             async def query(messages):
                 params = body.responses_create_params.model_dump(exclude_none=True)
@@ -293,9 +302,17 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 bridge.close()
                 # Cancel pending I/O and join the synchronous loop before verification.
                 await asyncio.gather(worker, return_exceptions=True)
-            response = empty_response(body.responses_create_params, self.config.model_server.name)
-            response.output = [item for part in responses for item in part.output]
-            response.usage = NeMoGymResponseUsage.sum_from_list([r.usage for r in responses if r.usage])
+            response = NeMoGymResponse(
+                id="resp_" + uuid4().hex,
+                created_at=int(time()),
+                model=self.config.model_server.name,
+                object="response",
+                output=[item for part in responses for item in part.output],
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in responses if r.usage]),
+            )
             termination.artifacts = [str(directory / "trajectory.json")]
             return (
                 response,
