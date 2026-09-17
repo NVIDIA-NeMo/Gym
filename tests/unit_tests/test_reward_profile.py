@@ -645,14 +645,15 @@ class TestRewardProfile:
 
 
 class TestWriteToDisk:
-    def test_writes_three_files(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_writes_three_files(self, tmp_path: Path, compressed: bool) -> None:
         group_level_metrics = [{"_ng_task_index": 0, "mean/reward": 1.0}]
         agent_level_metrics = [{"agent_ref": {"name": "agent"}, "mean/reward": 1.0}]
         repeat_level_metrics = [
             {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 1.0},
             {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 1, "mean/reward": 1.0},
         ]
-        base_output_fpath = tmp_path / "rollouts.jsonl"
+        base_output_fpath = tmp_path / ("rollouts.jsonl.zst" if compressed else "rollouts.jsonl")
 
         reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
             group_level_metrics, agent_level_metrics, repeat_level_metrics, base_output_fpath

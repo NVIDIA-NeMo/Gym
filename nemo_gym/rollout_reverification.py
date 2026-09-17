@@ -29,7 +29,7 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, RolloutFileConfigMixin, UploadRolloutsConfigMixin
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -38,6 +38,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.jsonl_io import open_jsonl
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
@@ -70,7 +71,7 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 )
 
 
-class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class RolloutReverificationConfig(RolloutFileConfigMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
@@ -296,7 +297,7 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
     # builds) live in the main jsonl. They short-circuit dispatch.
     successful_keys: set[tuple[int, int]] = set()
     if output_fpaths.output.exists():
-        with output_fpaths.output.open("rb") as f:
+        with open_jsonl(output_fpaths.output, "rb") as f:
             successful_keys = {key for line in f if (key := _parse_output_line_key(line)) is not None}
 
     # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
@@ -393,10 +394,10 @@ def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> se
     afterward"""
     present: set[tuple[int, int]] = set()
     if output_fpath.exists():
-        with output_fpath.open("rb") as f:
+        with open_jsonl(output_fpath, "rb") as f:
             present = {key for line in f if (key := _parse_output_line_key(line)) is not None}
     seeded = 0
-    with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
+    with open_jsonl(successes_fpath, "rb") as src, open_jsonl(output_fpath, "ab") as dst:
         for line in src:
             if not line.strip():
                 continue
@@ -432,7 +433,7 @@ def _yield_inputs_and_rollouts_paired(
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
-    with open(rollouts_jsonl_fpath) as r_f:
+    with open_jsonl(rollouts_jsonl_fpath) as r_f:
         for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
             if limit is not None and n_yielded >= limit:
                 break
@@ -708,7 +709,7 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     ``{agent_ref, task_source}`` projection used only to route each result to its resources server
     (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
-    with output_fpath.open("rb") as f:
+    with open_jsonl(output_fpath, "rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
     rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
@@ -758,7 +759,7 @@ class RolloutReverificationHelper(BaseModel):
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
-        results_file = output_fpaths.output.open("ab")
+        results_file = open_jsonl(output_fpaths.output, "ab")
         failures_file = output_fpaths.failures.open("ab")
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)

@@ -501,6 +501,9 @@ class RewardProfiler:
         repeat_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
     ) -> Tuple[Path, Path, Path]:
+        from nemo_gym.path_utils import uncompressed_path
+
+        base_output_fpath = uncompressed_path(base_output_fpath)
         reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
             ".jsonl"
         )
