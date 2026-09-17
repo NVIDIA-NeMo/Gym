@@ -1,0 +1,17 @@
+# GPQA on simple_agent, routed through the legacy-agent compatibility processor instead of
+# straight to the agent. Rollout results must match `--benchmark gpqa` without this config.
+config_paths:
+  - benchmarks/gpqa/config.yaml
+  - episode_processors/legacy_agent/configs/legacy_agent.yaml
+
+episode_routing_mode: legacy
+episode_processor_name: gpqa_mcqa_simple_agent__processor
+
+# Named `<agent>__processor`, the convention the generated processors will use (#3462).
+gpqa_mcqa_simple_agent__processor:
+  _inherit_from: legacy_agent_episode_processor
+  episode_processors:
+    legacy_agent:
+      agent_server:
+        type: responses_api_agents
+        name: gpqa_mcqa_simple_agent
