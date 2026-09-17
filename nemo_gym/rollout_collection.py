@@ -17,6 +17,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import sys
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -576,6 +577,21 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
+    max_resident_rollout_tasks: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum number of rollout tasks resident in the driver at once. "
+            "When unset, no driver-side task admission limit is applied."
+        ),
+    )
+    retain_results_in_memory: bool = Field(
+        default=True,
+        description=(
+            "Retain completed rollout rows and results in driver memory and return the full ordered result list. "
+            "When false, completed results are persisted incrementally and run_from_config returns an empty list."
+        ),
+    )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
@@ -914,6 +930,11 @@ def _failure_rows_counted_as_zero(
     return counted
 
 
+def _read_jsonl(path: Path) -> List[Dict]:
+    with path.open("rb") as f:
+        return [orjson.loads(line) for line in f if line.strip()]
+
+
 def _coverage_report(expected: int, scored: int, failure_counts: Counter, failures_hint: Any) -> str:
     """State how much of the input the score covers, for the runs where it is not all of it.
 
@@ -929,6 +950,104 @@ def _coverage_report(expected: int, scored: int, failure_counts: Counter, failur
         f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
         f"\nMetrics cover: {scored} of {expected} rollouts"
     )
+
+
+class _BoundedCompletionIterator:
+    """Completion-order iterator with a bounded set of resident asyncio tasks."""
+
+    def __init__(self, awaitables: Iterator, *, max_resident_tasks: int, total: int):
+        if max_resident_tasks < 1:
+            raise ValueError("max_resident_tasks must be >= 1")
+
+        self._awaitables = iter(awaitables)
+        self._max_resident_tasks = max_resident_tasks
+        self._remaining = total
+        self._pending: set[asyncio.Task] = set()
+        self._ready: list[asyncio.Task] = []
+        self._lock = asyncio.Lock()
+        self._started = False
+        self._closed = False
+        self._progress = tqdm(
+            desc="Collecting rollouts",
+            miniters=10,
+            total=total,
+            maxinterval=60,
+        )
+
+    @property
+    def _resident_task_count(self) -> int:
+        return len(self._pending) + len(self._ready)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._remaining <= 0:
+            self._progress.close()
+            raise StopIteration
+
+        self._remaining -= 1
+        return self._next_completed()
+
+    def _admit(self) -> bool:
+        try:
+            awaitable = next(self._awaitables)
+        except StopIteration:
+            return False
+
+        self._pending.add(asyncio.create_task(awaitable))
+        return True
+
+    def _fill(self) -> None:
+        while len(self._pending) + len(self._ready) < self._max_resident_tasks and self._admit():
+            pass
+
+    async def _next_completed(self):
+        try:
+            async with self._lock:
+                if self._closed:
+                    raise asyncio.CancelledError
+
+                if not self._started:
+                    self._started = True
+                    self._fill()
+
+                if not self._ready:
+                    if not self._pending:
+                        raise RuntimeError("rollout completion iterator exhausted unexpectedly")
+
+                    done, self._pending = await asyncio.wait(
+                        self._pending,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    self._ready.extend(done)
+
+                task = self._ready.pop()
+                self._fill()
+                self._progress.update(1)
+
+            return await task
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+
+            self._closed = True
+            resident = [*self._pending, *self._ready]
+            self._pending.clear()
+            self._ready.clear()
+
+            for task in resident:
+                task.cancel()
+
+            if resident:
+                await asyncio.gather(*resident, return_exceptions=True)
+
+            self._progress.close()
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1177,19 +1296,32 @@ class RolloutCollectionHelper(BaseModel):
         return rows
 
     def _load_from_cache(
-        self, config: RolloutCollectionConfig
-    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        self,
+        config: RolloutCollectionConfig,
+        *,
+        retain_results_in_memory: bool = True,
+    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
-        with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
-        results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
-        # Successes (and any legacy '-failed' rows written by pre-fix Gym
-        # builds) live in the main jsonl. They short-circuit dispatch.
-        successes_seen = set(map(get_key, results))
+        results: List[Dict] = []
+        result_strs: List[List[bytes]] = []
+        successes_seen: set = set()
+
+        with Path(config.output_jsonl_fpath).open("rb") as f:
+            for line in tqdm(f, desc="Reading existing output rows"):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                result = orjson.loads(stripped)
+                successes_seen.add(get_key(result))
+
+                if retain_results_in_memory:
+                    results.append(result)
+                    result_strs.append([stripped])
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
@@ -1224,13 +1356,16 @@ class RolloutCollectionHelper(BaseModel):
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
 
-        key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
-        rows = [key_to_row[get_key(result)] for result in results]
+        if retain_results_in_memory:
+            key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
+            rows = [key_to_row[get_key(result)] for result in results]
+        else:
+            rows = []
 
         print(
             f"""Resumed from cache. Found:
 - {len(original_input_rows)} original input rows
-- {len(rows)} rows already done (in main jsonl)
+- {len(successes_seen)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
@@ -1269,7 +1404,10 @@ class RolloutCollectionHelper(BaseModel):
                 rows,
                 results,
                 result_strs,
-            ) = self._load_from_cache(config)
+            ) = self._load_from_cache(
+                config,
+                retain_results_in_memory=config.retain_results_in_memory,
+            )
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
@@ -1334,7 +1472,6 @@ class RolloutCollectionHelper(BaseModel):
             token_source = installed_token_source()
             if token_source is None and token_capture_dirs:
                 token_source = TokenCaptureStore(token_capture_dirs[0])
-            if isinstance(token_source, TokenCaptureStore):
                 owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
@@ -1381,195 +1518,250 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
+        exporters_enabled = bool(get_exporters())
+        upload_spool_fpath = output_fpath.with_suffix(output_fpath.suffix + ".upload.tmp")
+        upload_spool = None
+        if not config.retain_results_in_memory and config.upload_rollouts and exporters_enabled:
+            upload_spool = upload_spool_fpath.open("w+b")
+            if config.resume_from_cache and output_fpath.exists():
+                with output_fpath.open("rb") as existing_results:
+                    for line in existing_results:
+                        if line.strip():
+                            upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + bytes([10]))
         failure_counts: Counter = Counter()
-        for future in self._run_examples_with_metadata(
+        completed_count = 0
+        if config.retain_results_in_memory:
+            persisted_count = len(persisted_results)
+        else:
+            persisted_count = (
+                sum(1 for line in output_fpath.open("rb") if line.strip()) if output_fpath.exists() else 0
+            )
+
+        completion_iterator = self._run_examples_with_metadata(
             input_rows,
             semaphore=semaphore,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
-        ):
-            completed = await future
-            row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
+            max_resident_tasks=config.max_resident_rollout_tasks,
+        )
+        try:
+            for future in completion_iterator:
+                completed = await future
+                row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
 
-            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-            if TASK_SOURCE_KEY_NAME in row:
-                result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
-            if SKILLS_REF_KEY_NAME in row:
-                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-            if ATTEMPT_INDEX_KEY_NAME in row:
-                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
-            if ROLLOUT_ID_KEY_NAME in row:
-                # Capture readback recomputes the id from the finished record.
-                # Preserve an explicit id on the result just like the indices.
-                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
+                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                if TASK_SOURCE_KEY_NAME in row:
+                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
+                if SKILLS_REF_KEY_NAME in row:
+                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                if ATTEMPT_INDEX_KEY_NAME in row:
+                    result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+                if ROLLOUT_ID_KEY_NAME in row:
+                    # Capture readback recomputes the id from the finished record.
+                    # Preserve an explicit id on the result just like the indices.
+                    result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
-            # No rollout happened, so there is nothing to capture, tokenize or average.
-            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
+                no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+                failure_class = result.get(NG_FAILURE_CLASS_KEY)
+                # No rollout happened, so there is nothing to capture, tokenize or average.
+                no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
 
-            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-            # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs and not no_result:
-                merge_model_call_capture_into_record(
-                    result,
-                    capture_dirs,
-                    include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+                # when capture is off). Never alters the harness output/reward already in `result`.
+                if capture_dirs and not no_result:
+                    merge_model_call_capture_into_record(
+                        result,
+                        capture_dirs,
+                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                    )
+
+                if (
+                    "ng_model_call_capture" in result
+                    or "ng_agent_observations" in result
+                    or NG_TRAJECTORY_KEY in result
+                ):
+                    _attach_trajectory_record(row, result)
+
+                # Assembles ng_perf from ng_trajectory when observability is enabled.
+                _attach_ng_perf(
+                    result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms
                 )
 
-            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
-                _attach_trajectory_record(row, result)
+                # Freeze and rebuild tokens only for participating agents.
+                # This step does not retire the frozen snapshot.
+                # It leaves harness output and reward unchanged.
+                # Direct callers of run_examples finalize each record themselves.
+                token_capture_build = None
+                if not no_result and token_id_capture_enabled_for_agent(
+                    global_config,
+                    (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+                ):
+                    token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                    if token_capture_build is not None:
+                        finalized_count += 1
+                        if token_capture_build.get(MASK_SAMPLE_KEY):
+                            masked_count += 1
+                            # Aggregate available reasons for the abort message.
+                            build_metrics = token_capture_build.get("metrics") or {}
+                            if build_metrics.get("capture_incomplete"):
+                                mask_reasons["capture_incomplete"] += 1
+                            if build_metrics.get("unresolved_parent_calls"):
+                                mask_reasons["unresolved_parent_calls"] += 1
+                            build_error = token_capture_build.get("error") or build_metrics.get("error")
+                            if build_error:
+                                mask_reasons[str(build_error)] += 1
+                        settings = token_capture_config.token_id_capture
+                        if (
+                            settings.max_mask_fraction is not None
+                            and finalized_count >= settings.mask_fraction_min_samples
+                            and masked_count / finalized_count > settings.max_mask_fraction
+                        ):
+                            raise RuntimeError(
+                                f"{masked_count}/{finalized_count} finalized rollouts "
+                                f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                                f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                                f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                                "mostly token-less data."
+                            )
 
-            # Assembles ng_perf from ng_trajectory when observability is enabled.
-            _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+                completed_count += 1
+                if config.retain_results_in_memory:
+                    rows.append(row)
+                    results.append(result)
+                serialized = orjson.dumps(result)
+                if upload_spool is not None:
+                    upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
-            # Freeze and rebuild tokens only for participating agents.
-            # This step does not retire the frozen snapshot.
-            # It leaves harness output and reward unchanged.
-            # Direct callers of run_examples finalize each record themselves.
-            token_capture_build = None
-            if not no_result and token_id_capture_enabled_for_agent(
-                global_config,
-                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
-            ):
-                token_capture_build = await finalize_rollout_token_capture(result, token_source)
-                if token_capture_build is not None:
-                    finalized_count += 1
-                    if token_capture_build.get(MASK_SAMPLE_KEY):
-                        masked_count += 1
-                        # Aggregate available reasons for the abort message.
-                        build_metrics = token_capture_build.get("metrics") or {}
-                        if build_metrics.get("capture_incomplete"):
-                            mask_reasons["capture_incomplete"] += 1
-                        if build_metrics.get("unresolved_parent_calls"):
-                            mask_reasons["unresolved_parent_calls"] += 1
-                        build_error = token_capture_build.get("error") or build_metrics.get("error")
-                        if build_error:
-                            mask_reasons[str(build_error)] += 1
-                    settings = token_capture_config.token_id_capture
-                    if (
-                        settings.max_mask_fraction is not None
-                        and finalized_count >= settings.mask_fraction_min_samples
-                        and masked_count / finalized_count > settings.max_mask_fraction
-                    ):
-                        raise RuntimeError(
-                            f"{masked_count}/{finalized_count} finalized rollouts "
-                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
-                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
-                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
-                            "mostly token-less data."
-                        )
+                if no_persist:
+                    # kill_shaped: don't write anywhere. Set-difference on resume
+                    # naturally re-dispatches; per-task timeout bounds wallclock.
+                    pass
+                elif failure_class is not None:
+                    # Non-kill_shaped failure → sidecar. The aggregator only reads
+                    # the main jsonl, so this keeps win-rate uncontaminated.
+                    failure_counts[failure_class] += 1
+                    # Every dropped rollout says so as it happens, whichever layer classified it.
+                    # tqdm.write keeps the line off the progress bar it would otherwise collide with.
+                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    tqdm.write(
+                        "🚨 [rollout_collection] rollout dropped from the score: "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"class={failure_class} error={detail}"
+                    )
+                    failures_file.write(serialized + b"\n")
+                    failures_file.flush()
+                else:
+                    # Success → main jsonl.
+                    results_file.write(serialized + b"\n")
+                    results_file.flush()
+                    persisted_count += 1
+                    if config.retain_results_in_memory:
+                        persisted_rows.append(row)
+                        persisted_results.append(result)
+                    try:
+                        rollout_id = maybe_rollout_id_from_run_body(result)
+                    except (TypeError, ValueError) as error:
+                        # Preserve capture evidence when the rollout id is invalid.
+                        rollout_id = None
+                        if not warned_malformed_rollout_id:
+                            warned_malformed_rollout_id = True
+                            warnings.warn(
+                                f"a result carries a malformed rollout id ({error}); "
+                                "its token capture will not be retired.",
+                                stacklevel=2,
+                            )
+                    if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                        os.fsync(results_file.fileno())
+                        await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
-            rows.append(row)
-            results.append(result)
-            serialized = orjson.dumps(result)
+                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
-            elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
-                failure_counts[failure_class] += 1
-                # Every dropped rollout says so as it happens, whichever layer classified it.
-                # tqdm.write keeps the line off the progress bar it would otherwise collide with.
-                detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
-                tqdm.write(
-                    "🚨 [rollout_collection] rollout dropped from the score: "
-                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
-                    f"class={failure_class} error={detail}"
-                )
-                failures_file.write(serialized + b"\n")
-                failures_file.flush()
-            else:
-                # Success → main jsonl.
-                results_file.write(serialized + b"\n")
-                results_file.flush()
-                persisted_rows.append(row)
-                persisted_results.append(result)
-                try:
-                    rollout_id = maybe_rollout_id_from_run_body(result)
-                except (TypeError, ValueError) as error:
-                    # Preserve capture evidence when the rollout id is invalid.
-                    rollout_id = None
-                    if not warned_malformed_rollout_id:
-                        warned_malformed_rollout_id = True
-                        warnings.warn(
-                            f"a result carries a malformed rollout id ({error}); "
-                            "its token capture will not be retired.",
-                            stacklevel=2,
-                        )
-                if rollout_id is not None and capture_build_can_retire(token_capture_build):
-                    os.fsync(results_file.fileno())
-                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
-
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
-
-            agent_name = result["agent_ref"]["name"]
-            if not no_result:
-                # An infrastructure failure is not a score of zero, and not a sample either.
-                metrics = agent_name_to_metrics[agent_name]
-                metrics.update(
-                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
-                )
-                agent_name_to_counts[agent_name] += 1
-
-            current_pct = 100 * len(results) / len(input_rows)
-            if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
-
-                time_taken_s = time() - start_time
-                time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_min = len(results) / (time_taken_s / 60)
-                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
-
-                top_left = counts_left.most_common()
-                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                print_str += f"""Examples left:
-{top_left_str}
-"""
-                for agent_name in sorted(agent_name_to_metrics):
+                agent_name = result["agent_ref"]["name"]
+                if not no_result:
+                    # An infrastructure failure is not a score of zero, and not a sample either.
                     metrics = agent_name_to_metrics[agent_name]
-                    agent_total_samples = dispatched_per_agent[agent_name]
-                    agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
-                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
-                    print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
-{json.dumps(avg_metrics, indent=4)}
-"""
-                # Use tqdm.write here so we can print properly with tqdm being used.
-                tqdm.write(print_str)
+                    metrics.update(
+                        {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                    )
+                    agent_name_to_counts[agent_name] += 1
 
-                if get_exporters():
-                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
-                    for agent_name, metrics in agent_name_to_metrics.items():
-                        step_metrics[f"progress/{agent_name}/reward"] = round(
-                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
-                        )
-                        step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
-                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
-                        )
+                current_pct = 100 * completed_count / len(input_rows)
+                if pcts_to_print and current_pct >= pcts_to_print[0]:
+                    while pcts_to_print and current_pct >= pcts_to_print[0]:
+                        pcts_to_print.pop(0)
 
-                    export_metrics(step_metrics, step=int(current_pct))
+                    time_taken_s = time() - start_time
+                    time_taken = timedelta(seconds=int(time_taken_s))
+                    rollouts_per_min = completed_count / (time_taken_s / 60)
+                    print_str = f"Finished {completed_count} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
 
-        results_file.close()
-        failures_file.close()
+                    top_left = counts_left.most_common()
+                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                    print_str += f"""Examples left:
 
-        if input_rows and not persisted_results:
+    {top_left_str}
+    """
+                    for agent_name in sorted(agent_name_to_metrics):
+                        metrics = agent_name_to_metrics[agent_name]
+                        agent_total_samples = dispatched_per_agent[agent_name]
+                        agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
+                        avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                        print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
+        {json.dumps(avg_metrics, indent=4)}
+        """
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(print_str)
+
+                    if get_exporters():
+                        step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                        for agent_name, metrics in agent_name_to_metrics.items():
+                            step_metrics[f"progress/{agent_name}/reward"] = round(
+                                100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                            )
+                            step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
+                                100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]),
+                                2,
+                            )
+
+                        export_metrics(step_metrics, step=int(current_pct))
+
+        finally:
+            if isinstance(completion_iterator, _BoundedCompletionIterator):
+                await completion_iterator.aclose()
+            results_file.close()
+            failures_file.close()
+            if upload_spool is not None and sys.exc_info()[0] is not None:
+                upload_spool.close()
+                upload_spool_fpath.unlink(missing_ok=True)
+            if owned_token_source is not None:
+                await owned_token_source.close()
+
+        if input_rows and persisted_count == 0:
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
             )
-        if owned_token_source is not None:
-            await owned_token_source.close()
+        if not config.retain_results_in_memory and not config.disable_aggregation:
+            # Aggregation consumes only successful rows from the main artifact.
+            persisted_results = _read_jsonl(output_fpath)
 
-        if config.upload_rollouts and get_exporters():  # pragma: no cover
+        if config.upload_rollouts and exporters_enabled:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
-            export_rollouts([_rollout_for_export(result) for result in results])
+            if config.retain_results_in_memory:
+                upload_results = [_rollout_for_export(result) for result in results]
+                export_rollouts(upload_results)
+            else:
+                assert upload_spool is not None
+                try:
+                    upload_spool.seek(0)
+                    upload_results = [orjson.loads(line) for line in upload_spool if line.strip()]
+                    export_rollouts(upload_results)
+                finally:
+                    upload_spool.close()
+                    upload_spool_fpath.unlink(missing_ok=True)
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -1598,16 +1790,20 @@ class RolloutCollectionHelper(BaseModel):
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
+            aggregate_results = persisted_results + counted
+            aggregate_rows = persisted_rows + counted if config.retain_results_in_memory else aggregate_results
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                persisted_results + counted, persisted_rows + counted, output_fpath
+                aggregate_results,
+                aggregate_rows,
+                output_fpath,
             )
 
         expected_rollouts = (
             sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
             if config.materialized_jsonl_fpath.exists()
-            else len(input_rows) + len(persisted_results)
+            else len(input_rows) + persisted_count
         )
-        scored_rollouts = len(persisted_results) + len(counted)
+        scored_rollouts = persisted_count + len(counted)
         coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
         if get_exporters():  # pragma: no cover
             export_metrics(
@@ -1656,7 +1852,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not results:
             return None
 
-        # Group results by agent name
         agent_results: Dict[str, List[Dict]] = {}
         for row, result in zip(rows, results):
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
@@ -1898,6 +2093,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        *,
+        max_resident_tasks: Optional[int] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1943,8 +2140,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
                     )
 
+        awaitables = map(_post_subroutine, examples)
+        if max_resident_tasks is not None:
+            return _BoundedCompletionIterator(
+                awaitables,
+                max_resident_tasks=max_resident_tasks,
+                total=len(examples),
+            )
+
         return tqdm.as_completed(
-            map(_post_subroutine, examples),
+            awaitables,
             desc="Collecting rollouts",
             miniters=10,
             total=len(examples),
@@ -1957,6 +2162,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        *,
+        max_resident_tasks: Optional[int] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1984,6 +2191,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 route_failures_to_sidecar=route_failures_to_sidecar,
+                max_resident_tasks=max_resident_tasks,
             ),
         )
 

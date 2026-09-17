@@ -887,6 +887,271 @@ class TestRolloutCollection:
         with pytest.raises(type(error)):
             await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
+    async def test_run_examples_rejects_non_positive_resident_task_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+        ]
+
+        install_fake_server_client(monkeypatch, AsyncMock())
+
+        with pytest.raises(ValueError, match="max_resident_tasks must be >= 1"):
+            RolloutCollectionHelper().run_examples(rows, max_resident_tasks=0)
+
+    async def test_run_examples_bounds_resident_rollout_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        num_rows = 32
+        max_resident_tasks = 4
+        started = 0
+        peak_started = 0
+        release = asyncio.Event()
+
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(num_rows)
+        ]
+
+        async def post(*args, **kwargs):
+            nonlocal started, peak_started
+            started += 1
+            peak_started = max(peak_started, started)
+            await release.wait()
+            started -= 1
+            return FakeResponse(200)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(return_value={"reward": 1}),
+        )
+
+        futures = RolloutCollectionHelper().run_examples(
+            rows,
+            max_resident_tasks=max_resident_tasks,
+        )
+
+        first = asyncio.create_task(next(futures))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if peak_started == max_resident_tasks:
+                break
+
+        assert peak_started == max_resident_tasks
+        assert started == max_resident_tasks
+
+        release.set()
+        await first
+
+        for future in futures:
+            await future
+
+        assert started == 0
+
+    async def test_bounded_admission_is_independent_of_request_concurrency(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(16)
+        ]
+        release = asyncio.Event()
+        active_requests = 0
+        peak_active_requests = 0
+
+        async def post(*args, **kwargs):
+            nonlocal active_requests, peak_active_requests
+            active_requests += 1
+            peak_active_requests = max(peak_active_requests, active_requests)
+            await release.wait()
+            active_requests -= 1
+            return FakeResponse(200)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(return_value={"reward": 1}),
+        )
+
+        completions = RolloutCollectionHelper()._run_examples_with_metadata(
+            rows,
+            semaphore=asyncio.Semaphore(1),
+            max_resident_tasks=4,
+        )
+
+        first = asyncio.create_task(next(completions))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if completions._resident_task_count == 4 and active_requests == 1:
+                break
+
+        assert completions._resident_task_count == 4
+        assert active_requests == 1
+        assert peak_active_requests == 1
+
+        release.set()
+        await first
+
+        for future in completions:
+            await future
+
+        assert peak_active_requests == 1
+
+    async def test_bounded_admission_preserves_simultaneous_completions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        num_rows = 24
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(num_rows)
+        ]
+        release = asyncio.Event()
+        seen: list[int] = []
+
+        async def post(*args, **kwargs):
+            row = kwargs["json"]
+            await release.wait()
+            seen.append(row[TASK_INDEX_KEY_NAME])
+            return FakeResponse(200)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(return_value={"reward": 1}),
+        )
+
+        completions = RolloutCollectionHelper()._run_examples_with_metadata(
+            rows,
+            max_resident_tasks=8,
+        )
+
+        first = asyncio.create_task(next(completions))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if completions._resident_task_count == 8:
+                break
+
+        assert completions._resident_task_count == 8
+
+        release.set()
+
+        completed = [(await first).row[TASK_INDEX_KEY_NAME]]
+        for future in completions:
+            completed.append((await future).row[TASK_INDEX_KEY_NAME])
+
+        assert len(completed) == num_rows
+        assert len(set(completed)) == num_rows
+        assert sorted(completed) == list(range(num_rows))
+        assert sorted(seen) == list(range(num_rows))
+        assert completions._resident_task_count == 0
+
+    async def test_bounded_admission_aclose_cancels_only_resident_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        num_rows = 32
+        max_resident_tasks = 4
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(num_rows)
+        ]
+        started: set[int] = set()
+        cancelled: set[int] = set()
+        blocker = asyncio.Event()
+
+        async def post(*args, **kwargs):
+            row = kwargs["json"]
+            task_index = row[TASK_INDEX_KEY_NAME]
+            started.add(task_index)
+            try:
+                await blocker.wait()
+            except asyncio.CancelledError:
+                cancelled.add(task_index)
+                raise
+            return FakeResponse(200)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        completions = RolloutCollectionHelper()._run_examples_with_metadata(
+            rows,
+            max_resident_tasks=max_resident_tasks,
+        )
+
+        first = asyncio.create_task(next(completions))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if len(started) == max_resident_tasks:
+                break
+
+        assert len(started) == max_resident_tasks
+        assert completions._resident_task_count == max_resident_tasks
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        assert len(started) == max_resident_tasks
+        assert cancelled == started
+        assert completions._resident_task_count == 0
+
+    async def test_run_examples_bounded_admission_processes_each_row_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(17)
+        ]
+        seen: list[int] = []
+
+        async def post(*args, **kwargs):
+            row = kwargs["json"]
+            seen.append(row[TASK_INDEX_KEY_NAME])
+            await asyncio.sleep(0)
+            return FakeResponse(200)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(return_value={"reward": 1}),
+        )
+
+        completed = []
+        for future in RolloutCollectionHelper().run_examples(
+            rows,
+            max_resident_tasks=3,
+        ):
+            row, _ = await future
+            completed.append(row[TASK_INDEX_KEY_NAME])
+
+        assert sorted(seen) == list(range(17))
+        assert sorted(completed) == list(range(17))
+
     async def test_failure_row_survives_serialization(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The record has to cross the jsonl, pickle and Ray boundaries as plain data."""
         post = AsyncMock(return_value=FakeResponse(500))
@@ -1371,6 +1636,55 @@ class TestRolloutCollection:
         assert "Rollouts missing from the score: 1 of 3 materialized" in printed
         assert "Metrics cover: 2 of 3 rollouts" in printed
 
+    async def test_run_from_config_resume_progress_counts_only_dispatched_rollouts(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        output_fpath = tmp_path / "output.jsonl"
+        materialized_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for task_index in range(2)
+        ]
+        materialized_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in rows) + b"\n")
+        output_fpath.write_bytes(orjson.dumps({**rows[0], "reward": 1.0}) + b"\n")
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                assert examples == [rows[1]]
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=rows[1],
+                        result={"reward": 1.0},
+                        rollout_latency_ms=None,
+                    )
+                )
+                return [future]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=True,
+            disable_health_check=True,
+        )
+
+        await Helper().run_from_config(config)
+
+        printed = capsys.readouterr().out
+        assert "Finished 1 / 1 rollouts (100%)" in printed
+        assert "200%" not in printed
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"
@@ -1762,6 +2076,323 @@ class TestRolloutCollection:
         with pytest.warns(UserWarning, match="alpah_typo"):
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
+
+    async def test_run_from_config_processing_failure_cancels_bounded_resident_tasks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        window = 3
+        offered = 12
+        started: set[int] = set()
+        cancelled: set[int] = set()
+        release_first = asyncio.Event()
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                        "case": i,
+                    }
+                )
+                for i in range(offered)
+            )
+            + "\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            async def _post(self, row, semaphore=None, *, route_failures_to_sidecar=False):
+                del semaphore, route_failures_to_sidecar
+                case = row["case"]
+                started.add(case)
+                try:
+                    if case == 0:
+                        await release_first.wait()
+                        return _CompletedRollout(
+                            row=row,
+                            result={"reward": 1.0, "not_serializable": object()},
+                            rollout_latency_ms=None,
+                        )
+
+                    await asyncio.Event().wait()
+                    raise AssertionError("unreachable")
+                except asyncio.CancelledError:
+                    cancelled.add(case)
+                    raise
+
+            def _run_examples_with_metadata(
+                self,
+                examples,
+                semaphore=None,
+                *,
+                route_failures_to_sidecar=False,
+                max_resident_tasks=None,
+            ):
+                awaitables = map(
+                    lambda row: self._post(
+                        row,
+                        semaphore,
+                        route_failures_to_sidecar=route_failures_to_sidecar,
+                    ),
+                    examples,
+                )
+                return nemo_gym.rollout_collection._BoundedCompletionIterator(
+                    awaitables,
+                    max_resident_tasks=max_resident_tasks,
+                    total=len(examples),
+                )
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            max_resident_rollout_tasks=window,
+            disable_aggregation=True,
+            disable_health_check=True,
+            upload_rollouts=True,
+        )
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "export_rollouts",
+            lambda rows: pytest.fail("collection failure must prevent upload"),
+        )
+
+        async def release_after_window_is_resident():
+            while len(started) < window:
+                await asyncio.sleep(0)
+            release_first.set()
+
+        releaser = asyncio.create_task(release_after_window_is_resident())
+        try:
+            with pytest.raises(TypeError):
+                await Helper().run_from_config(config)
+        finally:
+            await releaser
+
+        assert 0 in started
+        assert len(started) <= window + 1
+        assert cancelled == started - {0}
+        assert len(started) < offered
+        assert not (tmp_path / "output.jsonl.upload.tmp").exists()
+
+    async def test_run_from_config_non_retaining_preserves_upload_semantics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        input_fpath = tmp_path / "input-upload.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                        "case": case,
+                    }
+                )
+                for case in ("success", "failure", "no-persist")
+            )
+            + "\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                results_by_case = {
+                    "success": {"reward": 1.0, "case": "success"},
+                    "failure": {
+                        "reward": 0.0,
+                        "case": "failure",
+                        NG_FAILURE_CLASS_KEY: "verify_failed",
+                    },
+                    "no-persist": {
+                        "reward": 0.0,
+                        "case": "no-persist",
+                        NG_NO_PERSIST_KEY: True,
+                    },
+                }
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=row,
+                            result=results_by_case[row["case"]].copy(),
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        exported: list[list[dict]] = []
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "export_rollouts",
+            lambda rows: exported.append(rows),
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", lambda *args, **kwargs: None)
+
+        async def run(*, retain: bool, output_fpath: Path, resume: bool = False) -> list[dict]:
+            config = RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_fpath),
+                output_jsonl_fpath=str(output_fpath),
+                retain_results_in_memory=retain,
+                route_failures_to_sidecar=True,
+                disable_aggregation=True,
+                disable_health_check=True,
+                upload_rollouts=True,
+                resume_from_cache=resume,
+            )
+            if resume:
+                materialized_rows = [
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                        "case": case,
+                        TASK_INDEX_KEY_NAME: task_index,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                    }
+                    for task_index, case in enumerate(("success", "failure", "no-persist"))
+                ]
+                config.materialized_jsonl_fpath.write_bytes(
+                    b"\n".join(orjson.dumps(row) for row in materialized_rows) + b"\n"
+                )
+                output_fpath.write_bytes(
+                    orjson.dumps(
+                        {
+                            **materialized_rows[0],
+                            "reward": 1.0,
+                        }
+                    )
+                    + b"\n"
+                )
+            await Helper().run_from_config(config)
+            assert len(exported) == 1
+            return exported.pop()
+
+        retaining = await run(retain=True, output_fpath=tmp_path / "retaining-upload.jsonl")
+        non_retaining = await run(retain=False, output_fpath=tmp_path / "non-retaining-upload.jsonl")
+
+        assert non_retaining == retaining
+        assert [result["case"] for result in non_retaining] == [
+            "success",
+            "failure",
+            "no-persist",
+        ]
+        assert not (tmp_path / "non-retaining-upload.jsonl.upload.tmp").exists()
+        assert [
+            orjson.loads(line)["case"] for line in (tmp_path / "non-retaining-upload.jsonl").read_bytes().splitlines()
+        ] == ["success"]
+
+        retaining_resume = await run(
+            retain=True,
+            output_fpath=tmp_path / "retaining-resume-upload.jsonl",
+            resume=True,
+        )
+        non_retaining_resume = await run(
+            retain=False,
+            output_fpath=tmp_path / "non-retaining-resume-upload.jsonl",
+            resume=True,
+        )
+
+        assert non_retaining_resume == retaining_resume
+
+    async def test_run_from_config_non_retaining_preserves_artifacts_without_reloading_results(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                        "case": case,
+                    }
+                )
+                for case in ("success", "failure", "no-persist")
+            )
+            + "\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                results_by_case = {
+                    "success": {"reward": 1.0, "case": "success"},
+                    "failure": {
+                        "reward": 0.0,
+                        "case": "failure",
+                        NG_FAILURE_CLASS_KEY: "verify_failed",
+                    },
+                    "no-persist": {
+                        "reward": 0.0,
+                        "case": "no-persist",
+                        NG_NO_PERSIST_KEY: True,
+                    },
+                }
+                futures = []
+                for row in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=row,
+                            result=results_by_case[row["case"]].copy(),
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        async def run(*, retain: bool, output_fpath: Path):
+            config = RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_fpath),
+                output_jsonl_fpath=str(output_fpath),
+                retain_results_in_memory=retain,
+                route_failures_to_sidecar=True,
+                disable_aggregation=True,
+                disable_health_check=True,
+                upload_rollouts=False,
+            )
+            return await Helper().run_from_config(config)
+
+        retaining_output = tmp_path / "retaining.jsonl"
+        retaining_results = await run(retain=True, output_fpath=retaining_output)
+        retaining_main = retaining_output.read_bytes()
+        retaining_failures = _failures_path_for(retaining_output).read_bytes()
+
+        def fail_if_reloaded(path: Path):
+            raise AssertionError(f"artifact-only non-retaining run reloaded {path}")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_read_jsonl", fail_if_reloaded)
+
+        non_retaining_output = tmp_path / "non-retaining.jsonl"
+        non_retaining_results = await run(retain=False, output_fpath=non_retaining_output)
+
+        assert [result["case"] for result in retaining_results] == [
+            "success",
+            "failure",
+            "no-persist",
+        ]
+        assert non_retaining_results == []
+        assert non_retaining_output.read_bytes() == retaining_main
+        assert _failures_path_for(non_retaining_output).read_bytes() == retaining_failures
+
+        main_rows = [orjson.loads(line) for line in retaining_main.splitlines()]
+        failure_rows = [orjson.loads(line) for line in retaining_failures.splitlines()]
+        assert [row["case"] for row in main_rows] == ["success"]
+        assert [row["case"] for row in failure_rows] == ["failure"]
+        assert b"no-persist" not in retaining_main
+        assert b"no-persist" not in retaining_failures
 
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -2352,6 +2983,71 @@ class TestRolloutCollection:
 
         with pytest.raises(ValueError, match="rollout-collector process"):
             await Helper().run_from_config(config)
+
+    async def test_run_from_config_closes_owned_token_source_on_processing_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        closed = False
+        original_close = TokenCaptureStore.close
+
+        async def tracked_close(store):
+            nonlocal closed
+            closed = True
+            await original_close(store)
+
+        monkeypatch.setattr(TokenCaptureStore, "close", tracked_close)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: None)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "dir": str(tmp_path / "captures"),
+                    "rebuild_response": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
+                }
+            },
+        )
+
+        input_fpath = tmp_path / "input-owned-source.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output-owned-source.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=example,
+                        result={"not_serializable": object()},
+                        rollout_latency_ms=None,
+                    )
+                )
+                return [future]
+
+        with pytest.raises(TypeError):
+            await Helper().run_from_config(config)
+
+        assert closed is True
 
     async def test_run_from_config_does_not_close_an_installed_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
