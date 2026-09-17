@@ -32,7 +32,7 @@ from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -246,6 +246,49 @@ class TestServerUtils:
 
         with raises(ValueError):
             ServerClient.load_from_global_config()
+
+    def _nothing_listening_on_the_head_server(self, monkeypatch: MonkeyPatch, host: str, port: int) -> ConnectionError:
+        """Make `load_from_global_config` take the fetch path and have the head server refuse the connection."""
+        global_config_dict = DictConfig({"head_server": {"host": host, "port": port}})
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+
+        refused = ConnectionError("[Errno 61] Connection refused")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=refused))
+        return refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_is_a_ConfigError(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # An unreachable head server is a user mistake (nothing started, or the wrong port), not a bug:
+        # it must be a ConfigError so `exit_cleanly_on_config_error` prints the message instead of a
+        # traceback (#2687), and still a ValueError for callers that already catch that.
+        refused = self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        assert isinstance(exc_info.value, ConfigError)
+        assert isinstance(exc_info.value, ValueError)
+        # The low-level cause is not lost, just kept off the user-facing message.
+        assert exc_info.value.__cause__ is refused
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_message_is_actionable(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Same wording as `gym env status`: name the address that was tried, then the fix for each of
+        # the two likely causes (nothing running -> `gym env start`; running elsewhere -> override).
+        self._nothing_listening_on_the_head_server(monkeypatch, host="10.0.0.5", port=9500)
+
+        with raises(HeadServerUnreachableError) as exc_info:
+            ServerClient.load_from_global_config()
+
+        message = str(exc_info.value)
+        assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
+        assert "Is the head server running? Start it with: `gym env start`." in message
+        assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
 
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
