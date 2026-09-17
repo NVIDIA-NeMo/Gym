@@ -56,6 +56,13 @@ SCHEMA_VERSION = 1
 # Readers look for exactly this.
 MANIFEST_NAME = "gym-job.json"
 
+# The fully-resolved submit config, written next to the manifest by every
+# executor via `BaseExecutor.persist()`. This is what was actually submitted
+# (interpolations resolved, overrides applied) rather than the config file on
+# disk, which may have changed since, or the overrides, which are meaningless
+# without the file they were applied to.
+RESOLVED_CONFIG_NAME = "resolved-config.yaml"
+
 
 class BenchmarkJob(BaseModel):
     """One benchmark's submission.

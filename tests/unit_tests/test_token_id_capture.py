@@ -1191,6 +1191,16 @@ def test_fingerprint_ignores_non_assistant_turns():
     assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
 
 
+@pytest.mark.parametrize("fingerprint", [assistant_fingerprint, conversation_digest])
+def test_fingerprint_preserves_namespaced_tool_identity(fingerprint):
+    call = {"type": "function_call", "call_id": "call-1", "name": "weather", "arguments": '{"city":"Paris"}'}
+    served = {**call, "namespace": "functions"}
+    backend = {**call, "name": "functions__weather"}
+    assert fingerprint([served]) == fingerprint([backend])
+    assert fingerprint([served]) != fingerprint([{**served, "namespace": "other"}])
+    assert fingerprint([served]) != fingerprint([call])
+
+
 def test_fingerprint_survives_tool_argument_reserialization():
     """Match tool arguments across equivalent JSON serializations."""
     compact = [
