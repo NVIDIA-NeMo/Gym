@@ -57,3 +57,10 @@ the same environment, and checks them with one `verifier.py`. Each task
 supplies only the path and content that differ. Keeping those shared
 definitions together makes results reproducible across compatible agents and
 models.
+
+## Future work
+
+Companion examples can introduce one additional concept at a time:
+
+- Reuse a Gym-provided verifier instead of a package-local verifier.
+- Declare an agent-facing MCP server and use it during a task.
