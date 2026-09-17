@@ -57,6 +57,10 @@ class _EpisodeTimeoutExceeded(TimeoutError):
         self.result = result
 
 
+class NOOACookieConflictError(ValueError):
+    """Raised when model and resources services return different values for one cookie."""
+
+
 def _identity(body: NOOAAgentRunRequest, rollout_id: str | None = None) -> dict[str, str]:
     row = body.model_dump()
     task_id = next(
@@ -119,6 +123,20 @@ def _merge_cookies(current: dict[str, str], response: Any) -> None:
     current.update({name: morsel.value for name, morsel in response.cookies.items()})
 
 
+def _merge_downstream_cookies(model_cookies: dict[str, str], resource_cookies: dict[str, str]) -> dict[str, str]:
+    conflicts = sorted(
+        name
+        for name in model_cookies.keys() & resource_cookies.keys()
+        if model_cookies[name] != resource_cookies[name]
+    )
+    if conflicts:
+        names = ", ".join(repr(name) for name in conflicts)
+        raise NOOACookieConflictError(
+            f"NOOA model and resources services returned conflicting values for cookie(s): {names}"
+        )
+    return model_cookies | resource_cookies
+
+
 class NOOAAgent(SimpleResponsesAPIAgent):
     """Embedded NOOA adapter that keeps Gym authoritative for every external interaction."""
 
@@ -169,7 +187,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         **_identity(run_body, request.path_params.get("rollout_id")),
                     )
                 )
-        for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
+        for name, value in _merge_downstream_cookies(run_result.model_cookies, run_result.resource_cookies).items():
             response.set_cookie(name, value)
         return run_result.episode.response
 
@@ -183,6 +201,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         try:
             async with self.sem:
                 result = await self._execute_rollout(request, body, record)
+        except NOOACookieConflictError:
+            raise
         # Preserve the terminal episode timeout: the generic classifier treats its
         # TimeoutError base class as transient.
         except _EpisodeTimeoutExceeded as error:
@@ -261,8 +281,12 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
                 result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
             result.update(_evidence(run_result, observations))
-            result["_response_cookies"] = run_result.model_cookies | run_result.resource_cookies
+            result["_response_cookies"] = _merge_downstream_cookies(
+                run_result.model_cookies, run_result.resource_cookies
+            )
             return NOOAAgentVerifyResponse.model_validate(result)
+        except NOOACookieConflictError:
+            raise
         except Exception as error:
             raise NOOARunFailure(error, run_result) from error
 
@@ -305,7 +329,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 partial.episode.observations, termination_reason=failure_class, termination_error=error
             )
             routing.update(_evidence(partial, observations))
-            routing["_response_cookies"] = partial.model_cookies | partial.resource_cookies
+            routing["_response_cookies"] = _merge_downstream_cookies(partial.model_cookies, partial.resource_cookies)
         return NOOAAgentVerifyResponse.model_validate(
             record | {"response": response.model_dump(mode="json"), "reward": 0.0} | routing
         )

@@ -40,10 +40,16 @@ from responses_api_agents.nooa_agent.app import (
     NOOA_TERMINATION_REASON_KEY,
     NOOAAgent,
     NOOAAgentRunRequest,
+    NOOACookieConflictError,
     _identity,
+    _merge_downstream_cookies,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunResult
+from responses_api_agents.nooa_agent.runner import (
+    EmbeddedNOOARunner,
+    NOOARunFailure,
+    NOOARunResult,
+)
 from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
 from responses_api_agents.nooa_agent.tests.test_runner import FailingAgent, WaitingAgent, policy_runner
 
@@ -155,6 +161,7 @@ def episode() -> AgentEpisode:
 
 
 def runner_result(run_request: object) -> NOOARunResult:
+    run_request.model_cookies["session"] = "tool-cookie"
     run_request.model_cookies["model"] = "model-cookie"
     run_request.resource_cookies["session"] = "tool-cookie"
     return NOOARunResult(
@@ -237,6 +244,52 @@ def make_structured_retry_agent(outputs: list[str], *, max_policy_calls: int) ->
     return agent, model_calls
 
 
+def test_merge_downstream_cookies_allows_distinct_names_and_identical_values() -> None:
+    assert _merge_downstream_cookies(
+        {"model": "one", "shared": "same"},
+        {"resource": "two", "shared": "same"},
+    ) == {"model": "one", "resource": "two", "shared": "same"}
+
+
+def test_merge_downstream_cookies_rejects_conflicting_values() -> None:
+    with pytest.raises(NOOACookieConflictError, match="conflicting values.*'shared'"):
+        _merge_downstream_cookies({"shared": "model"}, {"shared": "resource"})
+
+
+def conflicting_runner_result(run_request: object) -> NOOARunResult:
+    result = runner_result(run_request)
+    result.model_cookies["shared"] = "model"
+    result.resource_cookies["shared"] = "resource"
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["responses", "run"])
+async def test_agent_endpoints_reject_conflicting_downstream_cookies(endpoint: str) -> None:
+    agent, _ = make_agent()
+    agent.runner.run = AsyncMock(side_effect=conflicting_runner_result)
+
+    with pytest.raises(NOOACookieConflictError, match="'shared'"):
+        if endpoint == "responses":
+            await agent.responses(request(), Response(), body().responses_create_params)
+        else:
+            await agent.run(request(), Response(), body())
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_rejects_conflicting_downstream_cookies() -> None:
+    agent, _ = make_agent()
+
+    def fail_with_partial(run_request: object) -> None:
+        partial = conflicting_runner_result(run_request)
+        raise NOOARunFailure(RuntimeError("agent failed"), partial)
+
+    agent.runner.run = AsyncMock(side_effect=fail_with_partial)
+
+    with pytest.raises(NOOACookieConflictError, match="'shared'"):
+        await agent.run(request(), Response(), body())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("outputs", "max_policy_calls", "termination_reason", "expected_calls"),
@@ -300,7 +353,10 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
     assert result.reward == 1.0
     assert result.ng_agent_observations is not None
     assert result.ng_agent_observations.gaps[0].code == "non_trainable_terminal_output"
-    assert "session=tool-cookie" in outgoing.headers.get("set-cookie", "")
+    set_cookies = outgoing.headers.getlist("set-cookie")
+    assert any("model=model-cookie" in header for header in set_cookies)
+    assert any("session=tool-cookie" in header for header in set_cookies)
+    assert any("verified=yes" in header for header in set_cookies)
 
 
 @pytest.mark.asyncio
@@ -642,6 +698,7 @@ async def test_verifier_failure_preserves_completed_episode(failure: object) -> 
 async def test_agent_failure_preserves_completed_call_and_skips_verification() -> None:
     agent, client = make_agent()
     agent.runner, _ = policy_runner(FailingAgent)
+    object.__setattr__(client, "post", AsyncMock(return_value=FakeHTTPResponse({})))
 
     result = await agent.run(request(), Response(), body())
 
@@ -656,6 +713,7 @@ async def test_agent_failure_preserves_completed_call_and_skips_verification() -
 async def test_episode_timeout_preserves_completed_call() -> None:
     agent, client = make_agent()
     agent.runner, _ = policy_runner(WaitingAgent)
+    object.__setattr__(client, "post", AsyncMock(return_value=FakeHTTPResponse({})))
     agent.config.run_timeout_secs = 0.2
     WaitingAgent.ready = asyncio.Event()
     try:
