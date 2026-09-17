@@ -1,0 +1,5 @@
+Solve the following problem. Work step by step, check your result, and do not stop before giving a final answer. End with exactly one integer inside \boxed{{}}. The answer is graded from the boxed integer only.
+
+{}
+
+Let's think step-by-step:

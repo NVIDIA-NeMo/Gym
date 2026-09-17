@@ -1,0 +1,37 @@
+grpo:
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  overlong_filtering: false
+loss_fn:
+  reference_policy_kl_penalty: 0.01
+  reference_policy_kl_type: k3
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.2
+  token_level_loss: true
+policy:
+  max_total_sequence_length: 256
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  dtensor_cfg:
+    _v2: false
+    activation_checkpointing: true
+  optimizer:
+    kwargs:
+      lr: 5.0e-6
+      weight_decay: 0.01
+  generation:
+    temperature: 1.0
+    top_p: 1.0
+    vllm_cfg:
+      gpu_memory_utilization: 0.45
+      enforce_eager: true
+data:
+  train:
+    dataset_name: ResponseDataset
+    data_path: /testbed/train_math.jsonl
+    input_key: input
+    output_key: output
+  default:
+    prompt_file: examples/prompts/cot.txt
+    processor: math_hf_data_processor
+    env_name: math

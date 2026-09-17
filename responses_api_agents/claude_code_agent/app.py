@@ -266,6 +266,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     anthropic_base_url: Optional[str] = None
     max_turns: Optional[int] = 30  # None -> unlimited turns
     timeout: int = 300
+    cwd: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
@@ -481,6 +482,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=self.config.cwd,
             )
             communication = asyncio.create_task(proc.communicate())
             try:
