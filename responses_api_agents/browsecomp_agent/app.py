@@ -44,6 +44,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     accumulate_response_usage,
@@ -515,9 +516,18 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         f"status=bad_arguments_json error={tool_args_error}",
                         flush=True,
                     )
+                    # The malformed call is already in new_outputs. Left verbatim, the next
+                    # model call re-renders it server-side (vLLM json-decodes tool-call
+                    # arguments in the chat template) and fails with HTTP 400, which the
+                    # agent sees as a 500 and aborts the whole sample. Blank the stored
+                    # arguments so history stays renderable; the raw text goes back to the
+                    # model in the tool output below, so nothing is lost.
+                    self._sanitize_function_call_args(new_outputs, output_function_call)
+                    bad_args_excerpt = output_function_call.arguments[:500]
                     tool_output = (
                         f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
-                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
+                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments. "
+                        f"The arguments you sent were: {bad_args_excerpt}"
                     )
                 elif self.config.progress and output_function_call.name == "update_progress":
                     # Board writes are handled by the agent itself — the board is
@@ -887,6 +897,20 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 update={"output": "[Previous tool result hidden for context management]"}
             )
         return messages
+
+    @staticmethod
+    def _sanitize_function_call_args(
+        new_outputs: List[NeMoGymResponseOutputItem], function_call: NeMoGymResponseFunctionToolCall
+    ) -> None:
+        """Replace a malformed function_call's arguments with "{}" in the re-sent history.
+
+        Matched by call_id, so the paired function_call_output still lines up. Only
+        new_outputs is touched; full_trajectory keeps the original for forensics.
+        """
+        for i, item in enumerate(new_outputs):
+            if item.type == "function_call" and item.call_id == function_call.call_id:
+                new_outputs[i] = item.model_copy(update={"arguments": "{}"})
+                return
 
     def _extract_last_rounds(self, new_outputs, n=None):
         """

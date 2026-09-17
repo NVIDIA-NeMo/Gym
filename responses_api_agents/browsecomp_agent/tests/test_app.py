@@ -495,3 +495,33 @@ def test_prompt_tokens_from_tokenize_response_shapes():
 
     with pytest.raises(KeyError):
         _prompt_tokens_from_tokenize_response({"max_model_len": 131072})
+
+
+class TestMalformedToolCallHistory:
+    """A tool call whose arguments are not JSON must not poison the re-sent history."""
+
+    @fixture
+    def agent(self) -> BrowsecompAgent:
+        return BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+
+    def test_sanitize_blanks_only_the_matching_call(self, agent: BrowsecompAgent) -> None:
+        good = _make_fn_call("browse", call_id="c_good", args={"url": "x"})
+        good_out = _make_tool_output(call_id="c_good", output="ok")
+        bad = NeMoGymResponseFunctionToolCall(
+            id="fc_bad", call_id="c_bad", name="search", arguments='{"queries":["unterminated', type="function_call"
+        )
+        new_outputs = [good, good_out, bad]
+        agent._sanitize_function_call_args(new_outputs, bad)
+        assert new_outputs[2].arguments == "{}"
+        assert new_outputs[2].call_id == "c_bad" and new_outputs[2].name == "search"
+        assert new_outputs[0].arguments == json.dumps({"url": "x"})
+        assert new_outputs[1] is good_out
+
+    def test_sanitize_without_match_is_noop(self, agent: BrowsecompAgent) -> None:
+        good = _make_fn_call("search", call_id="c1", args={"queries": ["x"]})
+        absent = NeMoGymResponseFunctionToolCall(
+            id="fc_x", call_id="c_absent", name="search", arguments="bad", type="function_call"
+        )
+        new_outputs = [good]
+        agent._sanitize_function_call_args(new_outputs, absent)
+        assert new_outputs[0].arguments == json.dumps({"queries": ["x"]})
