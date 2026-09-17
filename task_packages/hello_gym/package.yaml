@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: hello-gym
+version: 1.0.0
+description: Create your first NeMo Gym environment
+tags:
+  - example
+license: Apache-2.0
+
+instruction: instruction.md
+episode_protocol: nemo_gym.episode_protocols.single_agent
+
+task_schema: task.schema.json
+tasksets:
+  example: tasksets/example.jsonl
+
+environment:
+  dockerfile: environment/Dockerfile
+  workdir: /workspace
+
+  # MCP services exposed to compatible agents.
+  mcp_servers: []
+
+verifier:
+  implementation: verifier.py:verify
+  verifier_input:
+    path: task_data.expected_path
+    content: task_data.expected_content
