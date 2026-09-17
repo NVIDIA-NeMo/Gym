@@ -140,6 +140,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                     **({"headers": execution_headers} if execution_headers is not None else {}),
                 ),
                 request=request,
+                checkpointable_model_wait=True,
             )
             await raise_for_status(model_response)
             response_json = await get_response_json(model_response)
