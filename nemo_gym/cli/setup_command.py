@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import re
 import shlex
 from os import environ
 from pathlib import Path
@@ -166,9 +167,17 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             else:
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                local_extras = re.findall(
+                    r"(?m)^\s*(?:-e\s+)?nemo[-_]gym\[([^]]+)\]\s*@\s*\.\./\.\.",
+                    (dir_path / "requirements.txt").read_text(),
+                )
+                extras = sorted({extra.strip() for group in local_extras for extra in group.split(",")})
+                extras_spec = f"[{','.join(extras)}]" if extras else ""
+                if package_core:
+                    package_core = f"-e {shlex.quote(f'{PARENT_DIR}{extras_spec}')}"
                 requirements_source = "grep -v -F '../..' requirements.txt"
                 if not package_core:
-                    requirements_source = f"(echo 'nemo-gym{version_spec}' && {requirements_source})"
+                    requirements_source = f"(echo 'nemo-gym{extras_spec}{version_spec}' && {requirements_source})"
                 core_flag = f"{package_core} " if package_core else ""
                 install_cmd = (
                     f"""{requirements_source} | """

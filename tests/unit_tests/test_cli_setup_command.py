@@ -265,15 +265,16 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate"
         assert expected_command == actual_command
 
+    @pytest.mark.parametrize("extras", ["", "[sandbox]", "[dev,sandbox]"])
     @pytest.mark.parametrize("dependency_file", ["requirements.txt", "pyproject.toml"])
     @pytest.mark.parametrize("package,editable_core", [(True, True), (True, False), (False, True)])
     def test_detached_package_uses_installed_core(
-        self, monkeypatch, tmp_path, dependency_file, package, editable_core
+        self, monkeypatch, tmp_path, dependency_file, package, editable_core, extras
     ):
         server_dir = tmp_path / "resources_servers/alpha"
         server_dir.mkdir(parents=True)
         (server_dir / dependency_file).write_text(
-            "-e ../../\npytest\n" if dependency_file == "requirements.txt" else ""
+            f"-e nemo-gym{extras} @ ../../\npytest\n" if dependency_file == "requirements.txt" else ""
         )
         if package:
             (tmp_path / "gym-package.json").write_text("{}")
@@ -300,13 +301,15 @@ uv() {{
 
         arguments = arguments_log.read_text().splitlines()
         requirements = requirements_log.read_text() if requirements_log.exists() else ""
+        expected_extras = extras if dependency_file == "requirements.txt" else ""
         if package and editable_core:
-            assert str(core) in arguments
-            assert arguments[arguments.index(str(core)) - 1] == "-e"
-            assert "nemo-gym==9.8.7" not in arguments + requirements.splitlines()
+            expected_core = f"{core}{expected_extras}"
+            assert expected_core in arguments
+            assert arguments[arguments.index(expected_core) - 1] == "-e"
+            assert f"nemo-gym{expected_extras}==9.8.7" not in arguments + requirements.splitlines()
         else:
             assert str(core) not in arguments
-            assert "nemo-gym==9.8.7" in arguments + requirements.splitlines()
+            assert f"nemo-gym{expected_extras}==9.8.7" in arguments + requirements.splitlines()
         if dependency_file == "requirements.txt":
             assert "pytest" in requirements.splitlines()
             assert "../.." not in requirements
