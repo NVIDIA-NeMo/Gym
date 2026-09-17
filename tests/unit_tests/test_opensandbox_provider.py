@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import gc
 import logging
 import sys
 from dataclasses import dataclass
@@ -43,7 +44,9 @@ TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
 @pytest.mark.parametrize(
     "outcome", ["success", "exit-124", "timeout", "cancel", "timeout-stream-error", "cancel-stream-error"]
 )
-async def test_session_execution_releases_session_before_cancelling(outcome: str) -> None:
+async def test_session_execution_releases_session_before_cancelling(outcome: str, monkeypatch) -> None:
+    unhandled_errors = []
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_exception_handler", unhandled_errors.append)
     started = asyncio.Event()
     stopped = asyncio.Event()
     calls = []
@@ -96,6 +99,11 @@ async def test_session_execution_releases_session_before_cancelling(outcome: str
     assert calls.count("delete") == 1
     if outcome in ("timeout", "cancel"):
         assert calls.index("delete") < calls.index("finished")
+    del task
+    # Let completed-task callbacks release their references before checking unhandled errors.
+    await asyncio.sleep(0)
+    gc.collect()
+    assert unhandled_errors == []
 
 
 @dataclass(frozen=True)

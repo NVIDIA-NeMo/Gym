@@ -3,7 +3,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -59,23 +59,18 @@ class TestApp:
         server.config.evaluation_timeout = timeout
         sandbox = MagicMock()
         sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="/app\n", stderr=None, return_code=0))
-        sandbox.exec_with_background_services = AsyncMock(
-            return_value=SimpleNamespace(stdout="served\n", stderr=None, return_code=0)
-        )
         sandbox.download = AsyncMock(side_effect=lambda remote_path, local_path: Path(local_path).write_text("1"))
         sandbox.stop = AsyncMock()
         server._create_sandbox = AsyncMock(return_value=sandbox)
         server._upload_folder = AsyncMock()
 
-        # Container creation and uploads are mocked; no benchmark checkout or image is needed.
         await server.verify(MagicMock(), _verify_request(tmp_path))
 
-        # The solution needs to leave its server running; the verifier only needs to check it.
-        # Forward the configured timeout unchanged, including None (no client deadline).
-        sandbox.exec_with_background_services.assert_awaited_once_with("bash /app/solve.sh", timeout_s=timeout)
-        plain_commands = [call.args[0] for call in sandbox.exec.await_args_list]
-        assert "bash /tests/test.sh" in plain_commands
-        assert not any("solve.sh" in command for command in plain_commands)
+        assert sandbox.exec.await_args_list == [
+            call("pwd"),
+            call("bash /app/solve.sh", timeout_s=timeout, preserve_background_services=True),
+            call("bash /tests/test.sh", timeout_s=timeout),
+        ]
 
     async def test_create_sandbox_uses_start_with_setup(self, monkeypatch, tmp_path: Path) -> None:
         sandbox = AsyncMock()

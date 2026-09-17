@@ -1761,7 +1761,7 @@ class OpenSandboxProvider:
             finally:
                 if not task.done():
                     task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+                await asyncio.gather(task, return_exceptions=True)
 
         try:
             done, _ = await asyncio.wait({task}, timeout=timeout_s)
