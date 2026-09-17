@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 import asyncio
 import json
 import os
@@ -24,9 +21,6 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 
 
-AUTHOR_MODEL = "nvidia/qwen/qwen3.8-27b"
-CLAUDE_CODE_MODEL_ALIAS = "claude-sonnet-4-6"
-INNER_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 NEMORL_REVISION = "1cee83587d0f0d2ba82e7cdeced9772641fddbe3"
 GYM_REVISION = "fd5e84d6b1c485c80e7ae61553bbd485611c03b4"
 INSTRUCTIONS = """Improve post-training by editing recipe.yaml and NeMo-RL/.

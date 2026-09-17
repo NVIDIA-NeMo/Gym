@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 import shutil
 import subprocess
 import sys
@@ -56,12 +53,14 @@ def source_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared_
 
 
 @pytest.mark.parametrize("research_seconds", [120, 3600])
+@pytest.mark.parametrize("model", ["nvidia/qwen/qwen3.8-27b", "Qwen/Qwen3.8-27B"])
 async def test_source_patch_replays_new_loss_and_gym_edits(
-    tmp_path: Path, source_repository: Path, research_seconds: int
+    tmp_path: Path, source_repository: Path, research_seconds: int, model: str
 ) -> None:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {}
     job = {
+        "model": {"model": model},
         "source_repository": str(source_repository),
         "train_seconds": 3600,
         "research_seconds": research_seconds,
@@ -72,6 +71,9 @@ async def test_source_patch_replays_new_loss_and_gym_edits(
     expected = object()
 
     async def create_response(author: ClaudeCodeAgent, body, *, rollout_id):
+        assert author.config.model == model
+        command = author._build_command(author.config.model, "test")
+        assert command[command.index("--model") + 1] == model
         assert author.config.max_turns == 200 and author.config.timeout == research_seconds
         assert author.config.token_id_capture is False and rollout_id is None
         assert "60-minute execution budget" in author.config.system_prompt

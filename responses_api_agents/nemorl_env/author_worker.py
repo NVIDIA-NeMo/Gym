@@ -1,8 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-"""Native author entrypoint, executed only inside the CPU sandbox."""
-
 import asyncio
 import io
 import json
@@ -17,7 +12,7 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, ServerClient, set_global_aiohttp_client
 from responses_api_agents.claude_code_agent.app import ClaudeCodeAgent, ClaudeCodeAgentConfig
-from responses_api_agents.nemorl_env.app import CLAUDE_CODE_MODEL_ALIAS, GYM_REVISION, INSTRUCTIONS, NEMORL_REVISION
+from responses_api_agents.nemorl_env.app import GYM_REVISION, INSTRUCTIONS, NEMORL_REVISION
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -64,7 +59,7 @@ async def author(job: dict, server_client: ServerClient):
                 entrypoint="app.py",
                 resources_server=ResourcesServerRef(name="nemorl_env", type="resources_servers"),
                 model_server=ModelServerRef(name="policy_model", type="responses_api_models"),
-                model=CLAUDE_CODE_MODEL_ALIAS,
+                model=job["model"]["model"],
                 token_id_capture=False,
                 anthropic_api_key="local",
                 max_turns=job["max_turns"],
@@ -105,7 +100,7 @@ async def main():
             port=8000,
             entrypoint="app.py",
             return_token_id_information=False,
-            **job.pop("model"),
+            **job["model"],
         ),
         server_client=client,
     )
