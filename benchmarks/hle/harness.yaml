@@ -1,10 +1,8 @@
 config_paths:
 - benchmarks/hle/config.yaml
 - responses_api_agents/harness_agent/configs/benchmark.yaml
-equivalence_llm_judge_simple_agent:
-  _delete_key: responses_api_agents
-hle_equivalence_llm_judge_simple_agent:
-  _delete_key: responses_api_agents, _inherit_from
+equivalence_llm_judge_simple_agent: null
+hle_equivalence_llm_judge_simple_agent: null, _inherit_from
 hle_harness_agent:
   _inherit_from: harness_benchmark_agent
   responses_api_agents:

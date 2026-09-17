@@ -741,3 +741,39 @@ async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config():
         mcp = json.loads(files["/work/agent_config.json"])["opencode_config"]["mcp"]
         assert mcp["search"]["headers"]["Authorization"] == identifier
         assert mcp["existing"] == {"enabled": False}
+
+
+@pytest.mark.parametrize("benchmark", ["apex_shortlist/opencode", "hle/opencode", "hle/opencode_search"])
+def test_benchmark_composition_has_no_empty_server_entries(benchmark, monkeypatch):
+    from omegaconf import DictConfig, OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+    for name in ("HARNESS_SANDBOX_IMAGE", "OPENSANDBOX_API_KEY", "TAVILY_API_KEY"):
+        monkeypatch.setenv(name, "test")
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {
+            "config_paths": [f"benchmarks/{benchmark}.yaml"],
+            "judge_model_name": "test",
+            "judge_base_url": "http://judge.example",
+            "judge_api_key": "test",
+        },
+    )
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    agents = []
+    for name, value in config.items():
+        if isinstance(value, DictConfig):
+            assert len(value), f"Empty server entry crashes the launcher: {name}"
+            if "responses_api_agents" in value:
+                agents.append(value.responses_api_agents)
+    assert len(agents) == 1
+    assert "harness_agent" in agents[0]

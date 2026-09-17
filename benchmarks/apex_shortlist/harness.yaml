@@ -1,10 +1,8 @@
 config_paths:
 - benchmarks/apex_shortlist/config.yaml
 - responses_api_agents/harness_agent/configs/benchmark.yaml
-math_with_judge_simple_agent:
-  _delete_key: responses_api_agents
-apex_shortlist_math_with_judge_simple_agent:
-  _delete_key: responses_api_agents, _inherit_from
+math_with_judge_simple_agent: null
+apex_shortlist_math_with_judge_simple_agent: null, _inherit_from
 apex_shortlist_harness_agent:
   _inherit_from: harness_benchmark_agent
   responses_api_agents:
