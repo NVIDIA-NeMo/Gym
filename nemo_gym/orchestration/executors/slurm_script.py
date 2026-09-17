@@ -28,6 +28,7 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors.resume_script import render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -45,6 +46,8 @@ from nemo_gym.orchestration.executors.utils import flatten_run_args
 _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
+
+{resume_prologue}
 
 {ray_prelude}
 
@@ -335,6 +338,17 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
+def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
+    """Auto-enable `gym eval run`'s own cache-based resume when the auto-resume chain is on.
+
+    A no-op on the chain's cold (first) run -- rollout_collection.py falls back to a fresh run
+    when the cache files don't exist yet -- and a no-op if the caller already set the key.
+    """
+    if resumable and "resume_from_cache" not in run:
+        return {**run, "resume_from_cache": True}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -343,6 +357,9 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+
+    resume = benchmark.resume_config
+    resume_prologue = render_resume_prologue(resume) if resume else ""
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
@@ -397,6 +414,7 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    run_args = _with_resume_flag(run_args, resume is not None)
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
@@ -426,6 +444,7 @@ def build_sbatch_script(
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
+        resume_prologue=resume_prologue,
         ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,

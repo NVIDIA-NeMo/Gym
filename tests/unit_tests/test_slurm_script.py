@@ -39,6 +39,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_service_command,
     _resolve_env,
     _with_default_capture_dir,
+    _with_resume_flag,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -729,8 +730,63 @@ def test_with_default_capture_dir_does_not_mutate_input():
 
 
 # ---------------------------------------------------------------------------
+# _with_resume_flag
+# ---------------------------------------------------------------------------
+
+
+def test_with_resume_flag_injects_when_resumable():
+    assert _with_resume_flag({"split": "benchmark"}, True) == {"split": "benchmark", "resume_from_cache": True}
+
+
+def test_with_resume_flag_no_injection_when_not_resumable():
+    run = {"split": "benchmark"}
+    assert _with_resume_flag(run, False) == run
+
+
+def test_with_resume_flag_explicit_value_wins():
+    run = {"resume_from_cache": False}
+    assert _with_resume_flag(run, True) == {"resume_from_cache": False}
+
+
+def test_with_resume_flag_does_not_mutate_input():
+    run = {"split": "benchmark"}
+    _with_resume_flag(run, True)
+    assert "resume_from_cache" not in run
+
+
+# ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_resumable_adds_prologue_and_resume_flag(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"resumable": {"max_retries": 5, "max_walltime": "10:00:00"}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "# --- Auto-resume chain ---" in script
+    assert '_this_script="$OUTPUT_DIR/job.sh"' in script
+    assert "_gym_accumulated >= 36000" in script
+    assert "-ge 5" in script
+    assert "+resume_from_cache=True" in script
+
+
+def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "Auto-resume chain" not in script
+    assert "resume_from_cache" not in script
 
 
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
