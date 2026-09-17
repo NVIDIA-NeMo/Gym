@@ -1407,6 +1407,8 @@ class RolloutCollectionHelper(BaseModel):
             ):
                 server_client = processor_server_client or self.setup_server_client()
                 self.resolve_task_sources(direct_source_rows, server_client.global_config_dict)
+            if processor_server_client is not None:
+                self._stamp_processor_agent_refs(input_rows, processor_server_client.global_config_dict)
 
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
@@ -2002,6 +2004,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
 
     @classmethod
+    def _stamp_processor_agent_refs(cls, examples: List[Dict[str, Any]], global_config_dict: DictConfig) -> None:
+        """Stamp compatibility-routed rows with the agent their processor is bound to.
+
+        These rows never reach ``resolve_task_sources``, so without this they carry no
+        ``agent_ref`` and results, aggregate metrics and reward profiling lose the agent
+        they ran on. A row that already names an agent is left alone; the name is validated
+        against the processor by ``_validate_episode_processors``. Materialized tasks are
+        skipped: they carry no agent by design, and their result projection is not the
+        legacy shape this key belongs to.
+        """
+        for row in examples:
+            if NG_EPISODE_PROCESSOR_KEY not in row or _materialized_taskset(row) is not None:
+                continue
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None:
+                continue
+            agent_name = cls._agent_name_for_row(row, global_config_dict)
+            if agent_name is not None:
+                row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+
+    @classmethod
     def _validate_episode_processors(
         cls,
         examples: List[Dict],
@@ -2130,6 +2152,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             for row in examples:
                 row[NG_EPISODE_PROCESSOR_KEY] = episode_processor_name
         self._validate_episode_processors(examples, server_client.global_config_dict, tasksets or {})
+        self._stamp_processor_agent_refs(examples, server_client.global_config_dict)
         direct_agent_examples = [row for row in examples if NG_EPISODE_PROCESSOR_KEY not in row]
         self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
