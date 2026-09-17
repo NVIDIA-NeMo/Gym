@@ -20,6 +20,7 @@ from typing import Any
 
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
+    RUNTIME_ENV_PREFIX,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
@@ -96,12 +97,20 @@ def _validate_env_key(key: str) -> None:
 
 
 def _resolve_env(env: dict[str, str]) -> str:
-    """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty."""
+    """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty.
+
+    A `runtime:VAR` value (see resolve_env_dict in api.py) is emitted as an unquoted `K=$VAR`
+    shell reference instead of a literal, so it's resolved from the job's own environment when
+    the command actually runs on the compute node, rather than baked in at script-generation time.
+    """
     if not env:
         return ""
     for k in env:
         _validate_env_key(k)
-    pairs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    pairs = " ".join(
+        f"{k}=${{{v[len(RUNTIME_ENV_PREFIX) :]}}}" if v.startswith(RUNTIME_ENV_PREFIX) else f"{k}={shlex.quote(v)}"
+        for k, v in env.items()
+    )
     return f"env {pairs} "
 
 
