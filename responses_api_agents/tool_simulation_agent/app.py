@@ -58,6 +58,7 @@ class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
     checkpoint_continuation_supported = True
+    checkpoint_resource_dependencies_supported = True
 
     async def responses(
         self,

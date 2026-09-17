@@ -25,6 +25,9 @@ from pytest import fixture, raises
 
 from nemo_gym._checkpoint import (
     AGENT_EXECUTION_GENERATION_HEADER,
+    AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE,
+    CHECKPOINT_CONTROL_TOKEN_ENV,
+    CONTROL_URL_PREFIX,
     RESOURCE_REQUEST_ID_HEADER,
     AgentBoundaryKind,
     AgentBoundaryRecord,
@@ -101,6 +104,21 @@ class TestApp:
             server_client_post_mock.side_effect = post_responses
         else:
             server_client_post_mock.return_value = post_responses[0]
+
+    async def test_advertises_resource_dependency_index(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock()
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+
+        capabilities = TestClient(agent_server.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities")
+
+        assert capabilities.status_code == 200
+        assert AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE in capabilities.json()["features"]
 
     async def test_responses(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
@@ -601,6 +619,7 @@ class TestApp:
         assert execution.boundary.boundary_kind == AgentBoundaryKind.PENDING_MODEL
         assert execution.boundary.last_committed_model_capture_key == rollout_id
         assert execution.boundary.last_committed_model_call_id == model_call_id
+        assert execution.boundary.resource_state_revisions == {}
         assert execution.boundary.pending_model is not None
         assert execution.boundary.pending_model.response == model_response
         assert participant.completion_receipt(rollout_id, 0).terminal_model_call_id == model_call_id
