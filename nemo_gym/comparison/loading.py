@@ -32,9 +32,9 @@ from nemo_gym.comparison.schema import RunFile
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
+    Stat,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -294,5 +294,5 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
         num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
-        has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
+        has_repeat_cis=any(key.startswith(Stat.CI_LOW_95.across_repeats_prefix) for key in agent_metrics),
     )

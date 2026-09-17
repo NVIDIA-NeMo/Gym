@@ -33,63 +33,35 @@ from nemo_gym.comparison.schema import (
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import (
     ACROSS_REPEATS_MARKER,
-    AVG_SAMPLE_STD_DEV_SUFFIX,
-    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
-    CI_HIGH_95_PREFIX,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
-    CI_LOW_95_PREFIX,
-    MAX_PREFIX,
-    MEAN_ACROSS_REPEATS_PREFIX,
-    MEAN_PREFIX,
-    MEDIAN_PREFIX,
-    MIN_PREFIX,
-    P25_PREFIX,
-    P75_PREFIX,
+    DISPERSION_PREFIXES,
+    PASS_MAJORITY_STAT_SUFFIXES,
     REWARD_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
-    SE_ACROSS_REPEATS_PREFIX,
-    SEM_PREFIX,
-    STD_DEV_ACROSS_RUNS_SUFFIX,
-    STD_ERR_ACROSS_RUNS_SUFFIX,
-    STD_PREFIX,
+    STAT_SEPARATOR,
     TASK_INDEX_KEY_NAME,
+    PassMajorityStat,
+    Stat,
 )
 
 
-# Dispersion companions of a `mean/<field>` metric. They are summary statistics of the same
-# underlying field, not metrics in their own right, so they never get their own row.
-DISPERSION_PREFIXES = (
-    MEDIAN_PREFIX,
-    STD_PREFIX,
-    MIN_PREFIX,
-    MAX_PREFIX,
-    P25_PREFIX,
-    P75_PREFIX,
-    SEM_PREFIX,
-    CI_LOW_95_PREFIX,
-    CI_HIGH_95_PREFIX,
-)
 # Suffix-form companion statistics, likewise not metrics of their own.
-STAT_SUFFIXES = (
-    "/ci_low_95",
-    "/ci_high_95",
-    "/ci_lower",
-    "/ci_upper",
+COMPARISON_UNWORTHY_SUFFIXES = (
+    f"{STAT_SEPARATOR}{Stat.CI_LOW_95}",
+    f"{STAT_SEPARATOR}{Stat.CI_HIGH_95}",
+    f"{STAT_SEPARATOR}ci_lower",
+    f"{STAT_SEPARATOR}ci_upper",
     "_ci_lower",
     "_ci_upper",
     "_ci95_lower",
     "_ci95_upper",
-    STD_DEV_ACROSS_RUNS_SUFFIX,
-    STD_ERR_ACROSS_RUNS_SUFFIX,
-    AVG_SAMPLE_STD_DEV_SUFFIX,
-)
+) + PASS_MAJORITY_STAT_SUFFIXES
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
 FLIP_FIELD = REWARD_KEY_NAME
-TASK_MEAN_KEY = f"{MEAN_PREFIX}{FLIP_FIELD}"
-TASK_MIN_KEY = f"{MIN_PREFIX}{FLIP_FIELD}"
-TASK_MAX_KEY = f"{MAX_PREFIX}{FLIP_FIELD}"
+TASK_MEAN_KEY = f"{Stat.MEAN.prefix}{FLIP_FIELD}"
+TASK_MIN_KEY = f"{Stat.MIN.prefix}{FLIP_FIELD}"
+TASK_MAX_KEY = f"{Stat.MAX.prefix}{FLIP_FIELD}"
 # A task "passes" when the majority of its repeats scored a pass.
 PASS_THRESHOLD = 0.5
 
@@ -102,7 +74,7 @@ def _numeric(value: Any) -> Optional[float]:
     return float(value) if _is_number(value) else None
 
 
-def is_comparable_metric(name: str) -> bool:
+def is_comparison_worthy_metric(name: str) -> bool:
     """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
     if name == "num_repeats":
         return False
@@ -110,7 +82,7 @@ def is_comparable_metric(name: str) -> bool:
         return False
     if ACROSS_REPEATS_MARKER in name:
         return False
-    return not name.endswith(STAT_SUFFIXES)
+    return not name.endswith(COMPARISON_UNWORTHY_SUFFIXES)
 
 
 def _ordered_metric_names(baseline: Dict[str, Any], candidates: Sequence[Dict[str, Any]]) -> List[str]:
@@ -131,11 +103,11 @@ def _metric_value(metrics: Dict[str, Any], name: str) -> Optional[MetricValue]:
         return None
     return MetricValue(
         value=value,
-        ci_low=_numeric(metrics.get(f"{CI_LOW_95_ACROSS_REPEATS_PREFIX}{name}")),
-        ci_high=_numeric(metrics.get(f"{CI_HIGH_95_ACROSS_REPEATS_PREFIX}{name}")),
-        se_across_repeats=_numeric(metrics.get(f"{SE_ACROSS_REPEATS_PREFIX}{name}")),
-        mean_across_repeats=_numeric(metrics.get(f"{MEAN_ACROSS_REPEATS_PREFIX}{name}")),
-        std_err_across_runs=_numeric(metrics.get(f"{name}{STD_ERR_ACROSS_RUNS_SUFFIX}")),
+        ci_low=_numeric(metrics.get(f"{Stat.CI_LOW_95.across_repeats_prefix}{name}")),
+        ci_high=_numeric(metrics.get(f"{Stat.CI_HIGH_95.across_repeats_prefix}{name}")),
+        se_across_repeats=_numeric(metrics.get(f"{Stat.SE.across_repeats_prefix}{name}")),
+        mean_across_repeats=_numeric(metrics.get(f"{Stat.MEAN.across_repeats_prefix}{name}")),
+        std_err_across_runs=_numeric(metrics.get(f"{name}{PassMajorityStat.STD_ERR_ACROSS_RUNS.suffix}")),
     )
 
 
@@ -164,7 +136,7 @@ def _welch_delta_confidence_interval(
     baseline: LoadedRun, candidate: LoadedRun, name: str
 ) -> Tuple[Optional[float], Optional[float]]:
     """Two-sided 95% Welch interval for candidate minus baseline."""
-    mean_across_repeats_name = f"{MEAN_ACROSS_REPEATS_PREFIX}{name}"
+    mean_across_repeats_name = f"{Stat.MEAN.across_repeats_prefix}{name}"
     if any(_numeric(run.agent_metrics.get(mean_across_repeats_name)) is None for run in (baseline, candidate)):
         return None, None
 
@@ -218,7 +190,7 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
 
     rows: List[MetricRow] = []
     for name in _ordered_metric_names(baseline_metrics, candidate_metrics):
-        if not is_comparable_metric(name):
+        if not is_comparison_worthy_metric(name):
             continue
         baseline_value = _metric_value(baseline_metrics, name)
         baseline_point = _comparison_value(baseline_value) if baseline_value else None
