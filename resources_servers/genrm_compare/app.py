@@ -41,6 +41,7 @@ from functools import lru_cache
 from math import isfinite
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
+from aiohttp import ClientResponseError
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -58,7 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -140,8 +141,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         default_score: Default neutral score when parsing fails
         default_ranking: Default neutral ranking when parsing fails
         debug_logging: Enable verbose logging for debugging
-        genrm_parse_retries: Number of retries on parse failures
-        genrm_parse_retry_sleep_s: Sleep duration between parse retries
+        genrm_parse_retries: Shared retry budget for parse failures and HTTP 408, 429, or 5xx
+        genrm_parse_retry_sleep_s: Sleep duration between retry attempts
         cohort_collection_timeout_s: Deadline to collect every logical rollout index
         cohort_evaluation_timeout_s: Separate deadline for all comparisons and aggregation
         judge_request_timeout_s: Deadline for each judge HTTP request, including transport retries
@@ -206,7 +207,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     # Debug logging
     debug_logging: bool = False
 
-    # Retry config for parse failures
+    # Shared retry budget for parse failures and transient judge HTTP errors
     genrm_parse_retries: int = 3
     genrm_parse_retry_sleep_s: float = 0.2
 
@@ -220,7 +221,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
     """Verify request with optional principle for cohort-based GenRM comparison."""
 
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True, serialize_by_alias=True)
 
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
     task_index: Optional[int] = Field(default=None, alias=TASK_INDEX_KEY_NAME)
@@ -952,27 +953,30 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     json=responses_create_params,
                 )
                 await raise_for_status(response)
-                return await response.json()
+                return await get_response_json(response)
 
         call_context = (
             f"GenRM judge {cfg.genrm_model_server.name} /v1/responses pair={pair_idx} "
             f"deadline={cfg.judge_request_timeout_s}s"
         )
 
-        async def call_with_diagnostics():
+        max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
+        saw_completed_answer = False
+        for attempt_idx in range(max_attempts):
             try:
-                return await call()
+                raw_response = await call()
             except Exception as error:
+                retryable = isinstance(error, ClientResponseError) and (
+                    error.status in (408, 429) or 500 <= error.status < 600
+                )
+                if retryable and attempt_idx < max_attempts - 1:
+                    await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
+                    continue
                 content = getattr(error, "response_content", b"")
                 if isinstance(content, bytes):
                     content = content[:1000].decode("utf-8", errors="replace")
                 detail = f"; response={str(content)[:1000]}" if content else ""
                 raise JudgeError(f"{call_context}: {type(error).__name__}: {str(error)[:1000]}{detail}") from error
-
-        max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
-        saw_completed_answer = False
-        for attempt_idx in range(max_attempts):
-            raw_response = await call_with_diagnostics()
             _, answer = extract_from_response_obj(raw_response)
             usable = (
                 isinstance(raw_response, dict)

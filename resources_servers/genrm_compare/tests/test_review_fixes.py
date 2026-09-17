@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 import warnings
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,7 +37,7 @@ def failing_judge(status):
     url = URL("http://judge/v1/responses")
     response.request_info = RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url)
     response.raise_for_status.side_effect = ClientResponseError(response.request_info, (), status=status)
-    response.json = AsyncMock()
+    response.read = AsyncMock()
     return response
 
 
@@ -48,10 +49,16 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
     assert all(isinstance(result, genrm.JudgeError) and "judge offline" in str(result) for result in results)
     cohort = next(iter(server._verify_cohorts.values()))
     assert cohort.phase == "failed" and not cohort.rewards
-    response.json.assert_not_awaited()
+    response.read.assert_not_awaited()
     with pytest.raises(genrm.JudgeError, match="judge offline"):
         await server.verify(member(0, response_id="regenerated-answer"))
-    assert server.server_client.post.await_count <= 2  # no parse retries on failed HTTP
+    calls_after_failure = server.server_client.post.await_count
+    max_calls = 2 * (1 if status == 401 else server.config.genrm_parse_retries + 1)
+    assert 1 <= calls_after_failure <= max_calls
+    server._run_compare = AsyncMock(return_value=([1.0, 2.0], {}, [], []))
+    recovered = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))
+    assert [result.reward for result in recovered] == [1.0, 2.0]
+    server._run_compare.assert_awaited_once()
 
 
 @pytest.mark.parametrize("error", [ConnectionError("offline"), TimeoutError("judge timeout")])
@@ -67,7 +74,7 @@ async def test_judge_transport_failure_never_defaults(server, error):
 )
 async def test_unsuccessful_http_200_judge_is_failure(server, payload):
     response = MagicMock(ok=True)
-    response.json = AsyncMock(return_value=payload)
+    response.read = AsyncMock(return_value=json.dumps(payload).encode())
     server.server_client.post = AsyncMock(return_value=response)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
     assert all(isinstance(r, genrm.JudgeError) for r in results)
@@ -84,8 +91,13 @@ async def test_nonempty_parse_retries_preserve_existing_fallback(server, recover
         return {"output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
 
     response = MagicMock(ok=True)
-    response.json = AsyncMock(
-        side_effect=[output("invalid"), output('{"score_1":4,"score_2":2,"ranking":1}' if recovers else "invalid")]
+    response.read = AsyncMock(
+        side_effect=[
+            json.dumps(payload).encode()
+            for payload in (
+                [output("invalid"), output('{"score_1":4,"score_2":2,"ranking":1}' if recovers else "invalid")]
+            )
+        ]
     )
     server.server_client.post = AsyncMock(return_value=response)
     result = await server._run_single_comparison([], {}, {})
@@ -182,7 +194,9 @@ async def test_empty_or_incomplete_judge_uses_configured_retries(server, first, 
     }
     failed = {"output": []} if first == "empty" else valid | {"status": "incomplete"}
     response = MagicMock(ok=True)
-    response.json = AsyncMock(side_effect=[failed, valid if recovers else failed])
+    response.read = AsyncMock(
+        side_effect=[json.dumps(payload).encode() for payload in ([failed, valid if recovers else failed])]
+    )
     server.server_client.post = AsyncMock(return_value=response)
     if recovers:
         assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
@@ -218,16 +232,18 @@ def test_response_digest_accepts_surrogates():
 
 async def test_null_judge_status_accepts_parseable_answer(server):
     response = MagicMock(ok=True)
-    response.json = AsyncMock(
-        return_value={
-            "status": None,
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
-                }
-            ],
-        }
+    response.read = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": None,
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
+                    }
+                ],
+            }
+        ).encode()
     )
     server.server_client.post = AsyncMock(return_value=response)
     assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
@@ -240,7 +256,11 @@ async def test_parse_fallback_does_not_depend_on_retry_order(server, malformed_f
     malformed = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "malformed"}]}]}
     empty = {"output": []}
     response = MagicMock(ok=True)
-    response.json = AsyncMock(side_effect=[malformed, empty] if malformed_first else [empty, malformed])
+    response.read = AsyncMock(
+        side_effect=[
+            json.dumps(payload).encode() for payload in ([malformed, empty] if malformed_first else [empty, malformed])
+        ]
+    )
     server.server_client.post = AsyncMock(return_value=response)
     assert await server._run_single_comparison([], {}, {}) == (3, 3, 3.5)
     assert server.server_client.post.await_count == 2
@@ -278,15 +298,60 @@ async def test_empty_batch_has_no_rewards(server):
 async def test_null_text_is_retried_as_unusable_judge_output(server):
     server.config.genrm_parse_retries = 1
     response = MagicMock(ok=True)
-    response.json = AsyncMock(
-        return_value={
-            "output": [
-                {"type": "reasoning", "summary": [{"text": None}]},
-                {"type": "message", "content": [{"type": "output_text", "text": None}]},
-            ]
-        }
+    response.read = AsyncMock(
+        return_value=json.dumps(
+            {
+                "output": [
+                    {"type": "reasoning", "summary": [{"text": None}]},
+                    {"type": "message", "content": [{"type": "output_text", "text": None}]},
+                ]
+            }
+        ).encode()
     )
     server.server_client.post = AsyncMock(return_value=response)
     with pytest.raises(genrm.JudgeError, match="no completed answer after 2 attempts"):
+        await server._run_single_comparison([], {}, {})
+    assert server.server_client.post.await_count == 2
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 503, 599])
+async def test_transient_judge_http_error_retries_within_existing_budget(server, status):
+    valid = MagicMock(ok=True)
+    valid.read = AsyncMock(
+        return_value=json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
+                    }
+                ]
+            }
+        ).encode()
+    )
+    server.server_client.post = AsyncMock(side_effect=[failing_judge(status), valid])
+    assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    assert server.server_client.post.await_count == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 429, 500, 503])
+async def test_http_retry_budget_exhaustion_never_becomes_default_score(server, status):
+    server.config.genrm_parse_retries = 2
+    server.server_client.post = AsyncMock(return_value=failing_judge(status))
+    with pytest.raises(genrm.JudgeError, match="judge offline"):
+        await server._run_single_comparison([], {}, {})
+    assert server.server_client.post.await_count == (3 if status in (408, 429, 500, 503) else 1)
+
+
+async def test_parse_and_http_failures_share_one_budget(server):
+    server.config.genrm_parse_retries = 1
+    malformed = MagicMock(ok=True)
+    malformed.read = AsyncMock(
+        return_value=json.dumps(
+            {"output": [{"type": "message", "content": [{"type": "output_text", "text": "invalid"}]}]}
+        ).encode()
+    )
+    server.server_client.post = AsyncMock(side_effect=[malformed, failing_judge(503)])
+    with pytest.raises(genrm.JudgeError, match="judge offline"):
         await server._run_single_comparison([], {}, {})
     assert server.server_client.post.await_count == 2

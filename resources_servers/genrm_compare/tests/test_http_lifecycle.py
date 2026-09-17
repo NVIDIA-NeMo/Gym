@@ -29,11 +29,12 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from omegaconf import OmegaConf
 
 import nemo_gym.server_utils as http
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -82,7 +83,14 @@ async def services(config, monkeypatch):
     config.cohort_evaluation_timeout_s = 3
     resource = GenRMCompareResourcesServer(config=config, server_client=client)
     state = SimpleNamespace(
-        policy_calls=0, judge_calls=0, judge_status=200, judge_empty=False, judge_release=asyncio.Event()
+        policy_calls=0,
+        judge_calls=0,
+        judge_status=200,
+        judge_statuses=[],
+        judge_empty=False,
+        judge_media_type="application/json",
+        judge_texts=[],
+        judge_release=asyncio.Event(),
     )
     state.judge_release.set()
     policy_app, judge_app = FastAPI(), FastAPI()
@@ -109,18 +117,21 @@ async def services(config, monkeypatch):
         assert payload["metadata"]["response_1"] == payload["metadata"]["response_2"] == "4"
         state.judge_calls += 1
         await state.judge_release.wait()
-        if state.judge_status != 200:
-            return JSONResponse({"error": "judge unavailable"}, status_code=state.judge_status)
-        return {
+        status = state.judge_statuses.pop(0) if state.judge_statuses else state.judge_status
+        if status != 200:
+            return JSONResponse({"error": "judge unavailable"}, status_code=status)
+        text = state.judge_texts.pop(0) if state.judge_texts else '{"score_1":4,"score_2":2,"ranking":1}'
+        response = {
             "output": []
             if state.judge_empty
             else [
                 {
                     "type": "message",
-                    "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
+                    "content": [{"type": "output_text", "text": text}],
                 }
             ]
         }
+        return Response(json.dumps(response), media_type=state.judge_media_type)
 
     agent_config = SimpleAgentConfig(
         host="127.0.0.1",
@@ -152,6 +163,7 @@ async def services(config, monkeypatch):
 async def run(services, index, *, group="group", attempt=0):
     payload = member(index, group=group, attempt=attempt).model_dump(mode="json", by_alias=True)
     del payload["response"]
+    payload["_ng_task_index"] = 0
     result = await services.client.post(server_name="agent", url_path="/run", json=payload)
     return result.status, await result.json()
 
@@ -177,8 +189,14 @@ def assert_judge_failure(status, body, reason):
 async def test_judge_failure_preserves_answer_and_diagnostics_through_run(services):
     services.judge_status = 500
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
-    for status, body in results:
+    for index, (status, body) in enumerate(results):
         assert_judge_failure(status, body, "judge unavailable")
+        assert body["_ng_group_id"] == "group" and body["_ng_group_attempt"] == 0
+        assert body["_ng_task_index"] == 0 and body["_ng_rollout_index"] == index
+        identity_fields = {"task_index", "rollout_index", "group_id", "group_attempt"}
+        assert identity_fields.isdisjoint(body)
+        metrics = RewardProfiler().rollout_info_from_result(body)
+        assert identity_fields.isdisjoint(metrics) and "_ng_group_attempt" not in metrics
         error = body["_ng_failure_judge_error"]
         assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
     assert len({body["response"]["id"] for _, body in results}) == 4
@@ -398,3 +416,45 @@ async def test_collector_resumes_failed_legacy_group_on_live_server(services, tm
     await collection.RolloutCollectionHelper().run_from_config(config)
     assert services.policy_calls == 8 and services.judge_calls == judge_calls
     assert [json.loads(line) for line in output_path.read_text().splitlines()] == rows
+
+
+@pytest.mark.parametrize("status", [408, 429, 503])
+async def test_transient_http_failure_recovers_without_regenerating_answers(services, status):
+    services.judge_statuses = [status]
+    services.judge_media_type = "text/plain"
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    assert all(code == 200 and body["reward"] == 3.0 for code, body in results)
+    assert all(
+        "_ng_failure_class" not in body and not (body.get("instance_config") or {}).get("mask_sample")
+        for _, body in results
+    )
+    assert services.policy_calls == 4 and services.judge_calls == 5
+    assert len({body["response"]["id"] for _, body in results}) == 4
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_nonfinite_judge_output_uses_parse_retries_over_http(services, value, recovers):
+    invalid = json.dumps({"score_1": value, "score_2": 2, "ranking": 1})
+    services.judge_texts = [invalid] * (1 if recovers else 16)
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
+    assert all("_ng_failure_class" not in body for _, body in results)
+    assert services.policy_calls == 4 and services.judge_calls == (5 if recovers else 16)
+
+
+async def test_explicit_judge_failure_requires_new_shared_attempt_over_http(services):
+    services.judge_status = 500
+    failures = await asyncio.gather(*(run(services, i) for i in range(4)))
+    calls = services.judge_calls
+    services.judge_status = 200
+    retries = await asyncio.gather(*(run(services, i) for i in range(4)))
+    assert services.judge_calls == calls
+    for original, retry in zip(failures, retries):
+        assert_judge_failure(*retry, "judge unavailable")
+        assert retry[1]["_ng_failure_judge_error"] == original[1]["_ng_failure_judge_error"]
+    recovered = await asyncio.gather(*(run(services, i, attempt=1) for i in range(4)))
+    assert all(
+        status == 200 and body["reward"] == 3.0 and "_ng_failure_class" not in body for status, body in recovered
+    )
+    assert services.judge_calls == calls + 4

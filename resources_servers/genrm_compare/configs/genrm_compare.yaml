@@ -35,7 +35,8 @@ genrm_compare_resources_server:
       # starts only when all members are present. Increase for long tool rollouts.
       cohort_collection_timeout_s: 1800
       cohort_evaluation_timeout_s: 1800
-      # Includes the HTTP client's connection retries for each judge call.
+      # Includes connection retries for each judge call. Size for queue wait plus
+      # generation time: 16384 tokens at 40 tokens/s already exceeds 300 seconds.
       judge_request_timeout_s: 300
 
       # Retain compact rewards/digests for idempotent late retries. The cache is also
@@ -84,7 +85,7 @@ genrm_compare_resources_server:
       # Debug logging
       debug_logging: false
       
-      # Parse retry configuration
+      # Shared retry budget for parse failures and judge HTTP 408, 429, or 5xx
       genrm_parse_retries: 3
       genrm_parse_retry_sleep_s: 0.2
       

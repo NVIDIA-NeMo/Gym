@@ -15,6 +15,7 @@
 """Tests for GenRM Compare Resources Server."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1014,15 +1015,17 @@ class TestRunSingleComparison:
         mock_server_client = MagicMock()
         # Return a well-formed GenRM score response
         mock_http_response = AsyncMock(ok=True)
-        mock_http_response.json = AsyncMock(
-            return_value={
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
-                    }
-                ]
-            }
+        mock_http_response.read = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                        }
+                    ]
+                }
+            ).encode()
         )
         mock_server_client.post = AsyncMock(return_value=mock_http_response)
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=mock_server_client)

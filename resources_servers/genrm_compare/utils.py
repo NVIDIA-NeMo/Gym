@@ -31,6 +31,7 @@ import itertools
 import json
 import logging
 import re
+from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -234,6 +235,8 @@ def parse_genrm_output(
             score_1 = float(parsed.get("score_1", default_score))
             score_2 = float(parsed.get("score_2", default_score))
             ranking = float(parsed.get("ranking", default_ranking))
+            if not all(isfinite(value) for value in (score_1, score_2, ranking)):
+                return None
             return score_1, score_2, ranking
         except (TypeError, ValueError):
             return None

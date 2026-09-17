@@ -67,16 +67,23 @@ max_terminal_cohorts: 4096
 
 Collection has a finite positive deadline starting at the first member. Duplicates do not extend it.
 Evaluation gets a separate finite deadline after all members arrive. Each judge HTTP request also has a
-deadline that includes connection retries. Increase these limits for your generation and judge latency;
-`null` no longer disables the collection deadline. The supplied YAML uses 16 members, so it requires 16
-slots and enough concurrency to admit them together.
+deadline that includes connection retries. Size it for queue wait plus generation time: at 40 tokens per
+second, a 16,384-token judge answer takes about 410 seconds before queueing, exceeding the supplied
+300-second request deadline. Increase the request and evaluation limits together for that workload;
+the evaluation deadline also bounds HTTP retries and their sleeps. `null` no longer disables the collection
+deadline. The supplied YAML uses 16 members, so it requires 16 slots and enough concurrency to admit them together.
 
 If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
 connection failures, expired deadlines, or exhausted retries for empty/unsuccessful judge responses also
-fail the group. Empty or truncated judge responses use the configured `genrm_parse_retries` before failure.
-If any retry produces a completed, nonempty answer but none can be parsed, the comparison retains the
-existing default-score fallback. If every reply is empty or unsuccessful, the comparison fails. An omitted
-or null response status is treated as completed for compatibility with Gym model adapters.
+fail the group. Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
+answers and HTTP 408, 429, or 5xx responses, with `genrm_parse_retry_sleep_s` between attempts. The default
+budget permits four attempts in total, not four attempts for each failure type. Other HTTP errors fail
+immediately; exhausted HTTP errors remain judge failures and never become default scores.
+
+NaN and infinity scores are malformed output and use the same parsing retries. If a completed, nonempty
+answer cannot be parsed and the last attempt also has an output-parsing failure, the comparison retains
+the existing default-score fallback. If every reply is empty or unsuccessful, the comparison fails. An
+omitted or null response status is treated as completed for compatibility with Gym model adapters.
 
 At `/verify`, incomplete membership, cancellation, and supersession release waiters with HTTP 503.
 Subsequent requests from a superseded attempt receive 409. Invalid coordinates receive 422.
@@ -102,7 +109,8 @@ cancelled and drained. During HTTP-server shutdown, requests may receive an upst
 connection; shutdown does not guarantee delivery of a 503 response. Each terminal transition logs a
 bounded group key, attempt, member count, and disposition; failures include a bounded reason. Judge
 transport diagnostics include the model server, path, pair, deadline, and bounded HTTP error content.
-Connection retries retain the existing HTTP-client policy; there is no additional cohort transport retry loop.
+Connection retries retain the existing HTTP-client policy. The bounded comparison retry loop described
+above additionally handles transient HTTP statuses; it does not restart the entire cohort.
 
 ## Replacement attempts and retention
 
@@ -147,13 +155,25 @@ gym eval run --no-serve --agent genrm_simple_agent \
 
 The collector supplies slots 0–15. Use a fresh output path for each independent check. This example does
 not implement group resume: the caller must coordinate a new complete attempt after failure, including
-when only some completed rewards reached disk. GenRM declares individual `gym eval reverify` unsupported
-because it cannot reconstruct a whole group and an identical completed request would replay cached rewards.
-Durable answer reuse and training checkpoint recovery require caller-side coordination beyond this server.
+when only some completed rewards reached disk. The collector's individual rollout resume counter does
+not coordinate a group attempt. A legacy run with no saved successes can regenerate the whole failed
+group on the same live server. This does not make partial resume safe: if only some rewards reached disk,
+the missing members cannot form a full group by themselves. Use caller-coordinated complete attempts
+for general recovery. Durable answer reuse and training checkpoint recovery require caller-side coordination.
 
-Gym's forced-unsafe reverification override does not add group recovery: depending on retained state and
-response identity, it can return cached rewards, reject conflicting responses, or time out waiting for
-missing group members. The collector's individual rollout resume counter does not coordinate a group
-attempt. A legacy run with no saved successes can regenerate the whole failed group on the same live
-server. This does not make partial resume safe: if only some rewards reached disk, the missing members
-cannot form a full group by themselves. Use caller-coordinated complete attempts for general recovery.
+## Reverification limits
+
+GenRM declares `REVERIFY_MODE=UNSUPPORTED` because individual reverification does not reconstruct a whole
+group, and an identical completed explicit-ID request replays cached rewards. Ordinary `gym eval reverify`
+checks this declaration unless forced. The `judge_failed_only` path currently **bypasses that guard**;
+this bypass does not provide group-aware scheduling or advance `_ng_group_attempt`.
+
+If all saved members of one failed legacy group are dispatched with enough concurrency, judge-only
+reverification can happen to score that group. Missing members or concurrency below the group size can
+instead trigger a collection timeout and abort reverification. A retained failed explicit-ID attempt
+returns its original failure without another judge call. To replace it, a caller must coordinate a newer
+attempt for every member. These cases are not a supported automatic group-recovery workflow.
+
+The forced-unsafe override also does not add group recovery: depending on retained state and response
+identity, it can return cached rewards, reject conflicting responses, or time out waiting for missing
+members. Successful command dispatch alone does not establish that fresh judging occurred.
