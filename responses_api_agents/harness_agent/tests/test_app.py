@@ -777,3 +777,19 @@ def test_benchmark_composition_has_no_empty_server_entries(benchmark, monkeypatc
                 agents.append(value.responses_api_agents)
     assert len(agents) == 1
     assert "harness_agent" in agents[0]
+
+
+def test_uvicorn_worker_import_exposes_application():
+    import runpy
+
+    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+
+    entrypoint = Path(__file__).resolve().parents[1] / "app.py"
+    application = object()
+    with (
+        patch("nemo_gym.server_utils.is_nemo_gym_fastapi_entrypoint", return_value=True),
+        patch.object(SimpleResponsesAPIAgent, "run_webserver", return_value=application) as start,
+    ):
+        namespace = runpy.run_path(str(entrypoint))
+    start.assert_called_once_with()
+    assert namespace["app"] is application
