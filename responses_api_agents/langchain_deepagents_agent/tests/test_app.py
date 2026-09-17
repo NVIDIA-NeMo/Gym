@@ -15,8 +15,10 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -27,7 +29,10 @@ from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent impo
     ReasoningSearchDeepAgent,
     ReasoningSearchDeepAgentConfig,
 )
-from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import GymResponsesChatModel
+from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
+    GymResponsesChatModel,
+    to_responses,
+)
 
 
 def _config(**kwargs) -> ReasoningSearchDeepAgentConfig:
@@ -193,3 +198,91 @@ async def test_responses_forwards_body_reasoning_as_plain_dict():
     model_reasoning = run_config["configurable"]["model_reasoning"]
     assert model_reasoning == {"summary": "auto"}
     assert isinstance(model_reasoning, dict)
+
+
+# --- deepagents summarization middleware --------------------------------------------------------------
+
+
+def _model_response(text: str, input_tokens: int = 0, output_tokens: int = 0):
+    """A model-server response carrying usage, so summarization's own extra model call is observable in
+    the accumulated total rather than having to be inferred from call counts alone."""
+    body = to_responses([AIMessage(content=text)], "policy_model")
+    body["usage"] = {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
+    response = MagicMock()
+    response.ok = True
+    response.cookies = {}
+    response.read = AsyncMock(return_value=orjson.dumps(body))
+    return response
+
+
+def _run_config(usage_holder: dict) -> RunnableConfig:
+    return {
+        "configurable": {
+            "model_url_path": "/v1/responses",
+            "model_cookies": {"cookies": None},
+            "model_usage": usage_holder,
+            "model_reasoning": None,
+        }
+    }
+
+
+def _long_history(turns: int = 12) -> list:
+    """Enough distinct messages for summarization to have something to partition — a single huge message
+    is not enough, since deepagents bails out when its computed cutoff index is <= 0."""
+    messages: list = []
+    for i in range(turns):
+        messages.append(HumanMessage(content=f"user turn {i}: " + "lorem ipsum dolor sit amet " * 12))
+        messages.append(AIMessage(content=f"assistant turn {i}: " + "consectetur adipiscing elit " * 12))
+    return messages
+
+
+async def _invoke_with_limit(max_input_tokens: int, usage_holder: dict | None = None) -> int:
+    """Drive a real create_deep_agent() graph over a fixed history; return how many model calls it made."""
+    agent = _make_agent(max_input_tokens=max_input_tokens)
+    post = AsyncMock(side_effect=[_model_response("ok", input_tokens=100, output_tokens=10) for _ in range(30)])
+    agent.server_client.post = post
+
+    await agent.agent.ainvoke({"messages": _long_history()}, config=_run_config(usage_holder or {"usage": None}))
+    return post.call_count
+
+
+@pytest.mark.asyncio
+async def test_max_input_tokens_controls_deepagents_summarization():
+    """`create_deep_agent()` always installs a SummarizationMiddleware, and there's no kwarg to configure
+    it — it reads the context window off `model.profile["max_input_tokens"]` and triggers at a fraction of
+    it. With no profile it would instead fall back to a fixed 170k-token threshold with no relationship to
+    the configured model, which is the failure this config field exists to prevent.
+
+    Same history both times, so the only variable is the configured limit: under a tiny limit deepagents
+    summarizes (costing an extra model call through the same GymResponsesChatModel), under a large one it
+    doesn't."""
+    calls_small_limit = await _invoke_with_limit(200)
+    calls_large_limit = await _invoke_with_limit(1_000_000)
+
+    assert calls_large_limit == 1, "history fits well within the limit, so nothing should be summarized"
+    assert calls_small_limit > calls_large_limit, (
+        "a small max_input_tokens must make deepagents summarize, which costs an extra model call; "
+        "if this fails, the profile is no longer reaching SummarizationMiddleware"
+    )
+
+
+@pytest.mark.asyncio
+async def test_summarization_extra_model_call_is_included_in_usage_accounting():
+    """Summarization issues its own model call through the same GymResponsesChatModel. That call's tokens
+    must land in the rollout's accumulated usage — otherwise a rollout under-reports what it actually
+    spent, by an amount that grows with how often compaction fires."""
+    usage_holder: dict = {"usage": None}
+    call_count = await _invoke_with_limit(200, usage_holder)
+
+    assert call_count > 1, "expected summarization to add a model call on top of the agent's own turn"
+    usage = usage_holder["usage"]
+    assert usage is not None
+    # every mocked call reports the same 100 in / 10 out, so a correct total is exactly per-call * calls
+    assert usage.input_tokens == 100 * call_count
+    assert usage.output_tokens == 10 * call_count
