@@ -35,6 +35,53 @@ under `ng_model_call_capture` and `ng_agent_observations`.
 See [Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token
 fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`.
 
+## ATIF export
+
+`gym eval export --format atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
+NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exactly one
+captured model call per turn, text-only output (including ordered multipart tool results), and unambiguous function-call and
+function-result relationships. Model calls may be joined by `model_call_id` or by a unique `(model_ref, response_id)`
+pair. It rejects later user/system turns and source records when their status, evidence gaps, content type, invocation
+structure, tool correlation, or provider completion evidence would require dropping or guessing information. This strict
+boundary means an accepted conversion is complete for the supported source profile; it does not claim that the original
+agent harness observed every action outside Gym.
+
+Responses message `phase` values such as `commentary` and `final_answer` are rejected because ATIF v1.7 has no equivalent
+field. Namespaced Responses function calls are also rejected because the standard ATIF tool-call fields cannot retain the
+separate namespace identity. A missing or null phase or namespace is accepted because it carries no additional source meaning.
+Provider-native hosted tools, shell and patch calls, tool search, compaction records, approvals, and additional-tool records
+remain outside the initial generic function-call profile and are rejected rather than flattened.
+
+The semantic profile maps ordered messages, reasoning, function calls and results, turn identity and resolution, tool timing,
+normalized model identity, and normalized token counts. Training token IDs, log probabilities, and routed-expert metadata are
+outside the initial profile and fail conversion rather than being copied into an extension. Captured provider request and
+response values are retained opaquely under step-level `extra.nemo_gym.model_call` metadata because ATIF's standard step
+fields do not carry those provider-specific payloads. The converter does not parse those raw payloads or use them to
+reconstruct the canonical trajectory; the producer-owned `response_metadata` and `token_stats` fields supply completion,
+model, and usage evidence. Per-step token fields are preserved when available. Final prompt, completion, and cached-token
+totals are emitted only when every model call provides the corresponding field, so unavailable values are never counted as
+zero. Each agent step retains the normalized model identity. The root agent model is populated only when
+every model-backed step uses the same known model; routed or fallback trajectories keep their model identities on the
+individual steps instead.
+
+The strict ATIF reverify path additionally requires complete prompt and completion counts when any supported usage is
+present because one Gym response cannot represent partial standard usage. A partial-metric export remains valid ATIF for
+other consumers, but Gym reverify rejects it instead of dropping the known counts or reporting a false complete aggregate.
+
+The ATIF `agent.name` comes from each rollout row's `agent_ref.name`. The initial batch exporter accepts one agent identity
+per input file because the caller supplies one corresponding agent implementation version. Conversion provenance is kept under the ATIF root's
+`extra.nemo_gym` namespace rather than overloading the agent identity fields:
+
+| Metadata | Value | Purpose |
+| --- | --- | --- |
+| Exporter | NeMo Gym and its package version | Identifies the implementation that created the ATIF file. |
+| Source | Gym rollout and `ng_trajectory` schema version | Records the format that was converted. |
+| Conversion status | `complete` | Confirms that the supported normalized `ng_trajectory` profile was mapped without omission; it does not attest to the contents of opaque provider payloads. |
+| Conversion warnings | Not emitted by strict v1 | Reserved for a future best-effort mode that can describe information it could not represent. |
+
+The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
+A future best-effort mode would need an explicit `partial` status and structured warnings rather than reusing `complete`.
+
 ## Acceptance criteria
 
 | ID | Criterion |
