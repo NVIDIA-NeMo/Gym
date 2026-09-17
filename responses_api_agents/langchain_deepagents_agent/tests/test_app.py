@@ -291,6 +291,54 @@ async def test_summarization_extra_model_call_is_included_in_usage_accounting():
     assert usage.output_tokens == 10 * call_count
 
 
+# --- verify-body regression (tool-using rollout) -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_responses_result_is_what_verify_receives_for_a_tool_using_rollout():
+    """SimpleAgent.run() (inherited, unmodified) forwards this method's return value verbatim as
+    `body.response` on the `/verify` request (see simple_agent/app.py's `model_response_json`). So the
+    NeMoGymResponse asserted on here is exactly what a resources server's verify() sees for a tool-using
+    rollout: one function_call, one function_call_output, and the final assistant text — not just the
+    final text alone. Regression test for cwing-nvidia's PR #2929 review comment (now fixed): `to_responses()`
+    used to discard the whole tool-call/tool-result trace.
+
+    Deliberately does not assert on resources-server session state/metrics: this agent's tools (e.g.
+    TavilySearch in reasoning_search_agent.py; `ls` here, deepagents' built-in filesystem tool, so this
+    test needs no network) execute inside the agent harness and never touch a resources server's own
+    session — there is nothing on that side for a test at this level to observe. See README.md's "Tool
+    ownership" section."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    call_id = "call_1"
+    agent.server_client.post = AsyncMock(
+        side_effect=[
+            _model_response(AIMessage(content="", tool_calls=[{"name": "ls", "args": {}, "id": call_id}])),
+            _model_response("final answer"),
+        ]
+    )
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {}
+    body = MagicMock()
+    body.input = "list files"
+
+    result = await agent.responses(request, Response(), body)
+
+    function_calls = [item for item in result.output if item.type == "function_call"]
+    function_call_outputs = [item for item in result.output if item.type == "function_call_output"]
+    messages = [item for item in result.output if item.type == "message"]
+
+    assert len(function_calls) == 1
+    assert function_calls[0].name == "ls"
+    assert len(function_call_outputs) == 1
+    assert function_call_outputs[0].call_id == call_id
+    assert len(messages) == 1
+    assert messages[0].content[0].text == "final answer"
+
+
 # --- offloaded-history correlation (thread_id) ---------------------------------------------------------
 
 _HISTORY_PATH_RE = re.compile(r"/conversation_history/[\w\-]+\.md")
