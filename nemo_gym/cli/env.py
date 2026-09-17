@@ -1345,7 +1345,7 @@ def publish_environment_manifest() -> None:
     validation = validate_environment(entry.manifest_path, entry.config_path)
     verifier = _run_manifest_verifier(entry, update_expected=False, validation=validation)
     report = finalize_publication(entry, validation, verifier)
-    package_path = registry_reference = None
+    package_path = registry_reference = hub_submission = None
     if command_config.package_registry or command_config.package_output:
         from nemo_gym.environment.artifacts import build_environment_package, push_environment_package
 
@@ -1355,12 +1355,24 @@ def publish_environment_manifest() -> None:
         package_path = build_environment_package(entry, output)
         if command_config.package_registry:
             registry_reference = push_environment_package(package_path, command_config.package_registry)
+            from nemo_gym.environment.artifacts import HUB_REGISTRY, submit_environment_package
+
+            if registry_reference.startswith(HUB_REGISTRY + "/"):
+                try:
+                    hub_submission = submit_environment_package(registry_reference)
+                except ConfigError as error:
+                    raise ConfigError(
+                        f"Package published: {registry_reference}\nHub submission failed: {error}\n"
+                        f"Retry without uploading again: gym env submit {registry_reference}"
+                    ) from error
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = report.to_dict()
         if package_path is not None:
             payload["package_path"] = str(package_path)
         if registry_reference is not None:
             payload["registry_reference"] = registry_reference
+        if hub_submission is not None:
+            payload["hub_submission"] = hub_submission
         print(json.dumps(payload))
         return
     annotation = f"catalog status={report.status} " if report.status else ""
@@ -1372,6 +1384,8 @@ def publish_environment_manifest() -> None:
         print(f"Package: {package_path}")
     if registry_reference is not None:
         print(f"Published: {registry_reference}")
+    if hub_submission is not None:
+        print(f"Submitted for review: {hub_submission}")
 
 
 def _run_manifest_verifier(

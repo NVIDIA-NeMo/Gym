@@ -168,7 +168,9 @@ def test_pull_rejects_runtime_overrides(monkeypatch, capsys):
     assert "does not accept Hydra overrides" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("registry", [None, "registry.test/alice/alpha:1.0.0"])
+@pytest.mark.parametrize(
+    "registry", [None, "registry.test/alice/alpha:1.0.0", artifacts.HUB_REGISTRY + "/alice/alpha:1.0.0"]
+)
 @pytest.mark.parametrize("json_output", [True, False])
 def test_publish_packages_only_after_checks(monkeypatch, tmp_path, capsys, registry, json_output):
     output = tmp_path / "alpha.tar.gz"
@@ -184,7 +186,9 @@ def test_publish_packages_only_after_checks(monkeypatch, tmp_path, capsys, regis
     report = EnvironmentPublicationReport("alpha", "1.0.0", "environment", None, "manifest.yaml", 3)
     steps.finalize.return_value = report
     steps.build.return_value = output
-    immutable = "registry.test/alice/alpha@sha256:123"
+    immutable = (registry.rsplit(":", 1)[0] if registry else "registry.test/alice/alpha") + "@sha256:123"
+    is_hub = bool(registry and registry.startswith(artifacts.HUB_REGISTRY + "/"))
+    steps.submit.return_value = "https://hub.example/development.html#alice%2Falpha"
     steps.push.return_value = immutable
     for owner, method, replacement in [
         (cli_env, "validate_environment", steps.validate),
@@ -192,6 +196,7 @@ def test_publish_packages_only_after_checks(monkeypatch, tmp_path, capsys, regis
         (cli_env, "finalize_publication", steps.finalize),
         (artifacts, "build_environment_package", steps.build),
         (artifacts, "push_environment_package", steps.push),
+        (artifacts, "submit_environment_package", steps.submit),
     ]:
         monkeypatch.setattr(owner, method, replacement)
 
@@ -199,7 +204,7 @@ def test_publish_packages_only_after_checks(monkeypatch, tmp_path, capsys, regis
 
     assert [call[0] for call in steps.mock_calls] == ["validate", "verify", "finalize", "build"] + (
         ["push"] if registry else []
-    )
+    ) + (["submit"] if is_hub else [])
     steps.build.assert_called_once_with(entry, output)
     if registry:
         steps.push.assert_called_once_with(output, registry)
@@ -208,6 +213,7 @@ def test_publish_packages_only_after_checks(monkeypatch, tmp_path, capsys, regis
         payload = json.loads(result)
         assert payload["package_path"] == str(output)
         assert payload.get("registry_reference") == (immutable if registry else None)
+        assert payload.get("hub_submission") == (steps.submit.return_value if is_hub else None)
     else:
         assert f"Package: {output}" in result
         assert (f"Published: {immutable}" in result) is bool(registry)
@@ -231,3 +237,66 @@ def test_failed_verifier_prevents_packaging(monkeypatch, tmp_path):
         cli_env.publish_environment_manifest()
 
     build.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_submit_retries_without_upload(monkeypatch, capsys, fails):
+    submit = Mock(
+        side_effect=ConfigError("SSH unavailable") if fails else None, return_value="https://hub/development"
+    )
+    push = Mock()
+    monkeypatch.setattr(artifacts, "submit_environment_package", submit)
+    monkeypatch.setattr(artifacts, "push_environment_package", push)
+    monkeypatch.setattr(sys, "argv", ["gym", "env", "submit", "alice/alpha:1.0.0"])
+    if fails:
+        with pytest.raises(SystemExit, match="2"):
+            cli_main.main()
+        assert "SSH unavailable" in capsys.readouterr().err
+    else:
+        cli_main.main()
+        assert "https://hub/development" in capsys.readouterr().out
+    submit.assert_called_once_with("alice/alpha:1.0.0")
+    push.assert_not_called()
+
+
+def test_publish_reports_uploaded_package_when_hub_fails(monkeypatch, tmp_path, capsys):
+    registry = artifacts.HUB_REGISTRY + "/alice/alpha:1.0.0"
+    immutable = registry.rsplit(":", 1)[0] + "@sha256:" + "a" * 64
+    monkeypatch.setattr(
+        cli_env,
+        "_command_overrides",
+        lambda: OmegaConf.create(
+            {
+                "onboarding_name": "alpha",
+                "package_registry": registry,
+            }
+        ),
+    )
+    monkeypatch.setattr(cli_env, "_manifest_entry", Mock(return_value=Mock(manifest_path=tmp_path / "manifest.yaml")))
+    monkeypatch.setattr(cli_env, "validate_environment", Mock())
+    monkeypatch.setattr(cli_env, "_run_manifest_verifier", Mock())
+    monkeypatch.setattr(
+        cli_env,
+        "finalize_publication",
+        Mock(
+            return_value=EnvironmentPublicationReport(
+                "alpha",
+                "1.0.0",
+                "environment",
+                None,
+                "manifest.yaml",
+                3,
+            )
+        ),
+    )
+    monkeypatch.setattr(artifacts, "build_environment_package", Mock(return_value=tmp_path / "alpha.tar.gz"))
+    push = Mock(return_value=immutable)
+    monkeypatch.setattr(artifacts, "push_environment_package", push)
+    monkeypatch.setattr(artifacts, "submit_environment_package", Mock(side_effect=ConfigError("SSH unavailable")))
+    with pytest.raises(SystemExit, match="1"):
+        cli_env.publish_environment_manifest()
+    push.assert_called_once()
+    output = capsys.readouterr()
+    rendered = "".join((output.out + output.err).split())
+    assert "".join(f"Package published: {immutable}".split()) in rendered
+    assert "".join(f"gym env submit {immutable}".split()) in rendered

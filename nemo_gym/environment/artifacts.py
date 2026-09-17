@@ -33,6 +33,9 @@ LAYER_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 PACKAGE_METADATA = "gym-package.json"
 MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
 MAX_PACKAGE_FILES = 10000
+HUB_REGISTRY = "gitlab-master.nvidia.com:5005/cmunley/gym_environments_hub"
+HUB_REPOSITORY = "ssh://git@gitlab-master.nvidia.com:12051/cmunley/gym_environments_hub.git"
+HUB_URL = "https://gym-environments-hub-c2d724.gitlab-master-pages.nvidia.com/development.html"
 ORAS_VERSION = "1.3.4"
 # Official release checksums: https://github.com/oras-project/oras/releases/tag/v1.3.4
 ORAS_CHECKSUMS = {
@@ -360,3 +363,83 @@ def pull_environment_package(reference: str, output: Path | None = None) -> Path
             shutil.copytree(extracted, staged)
             staged.rename(destination)
     return destination
+
+
+def submit_environment_package(reference: str) -> str:
+    """Submit an existing registry package to the hub's shared review queue."""
+    reference, repository = _oci_reference(reference)
+    identity = repository.removeprefix(HUB_REGISTRY + "/")
+    if not repository.startswith(HUB_REGISTRY + "/") or not re.fullmatch(
+        r"[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*", identity
+    ):
+        raise ConfigError(f"Hub submissions require {HUB_REGISTRY}/publisher/name:version.")
+    digest = _oras("resolve", reference).stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ConfigError("Registry did not return a valid sha256 digest.")
+    immutable = f"{repository}@{digest}"
+    package = pull_environment_package(immutable)
+    metadata = _verify_package(package)
+    manifest = load_manifest(package / metadata["manifest_path"])
+    tag = f"{repository}:{manifest.version}"
+    if _oras("resolve", tag).stdout.strip() != digest:
+        raise ConfigError("The package version tag does not match the submitted digest.")
+    url = HUB_URL + "#" + identity.replace("/", "%2F")
+    run = {"model_type": "openai_model"}
+    example = next((item.name for item in manifest.datasets if item.type.value == "example"), None)
+    if example:
+        run["sample_split"] = example
+    defaults = {
+        "id": identity,
+        "title": manifest.name.replace("_", " ").title(),
+        "description": manifest.description,
+        "tags": [manifest.domain.value],
+        "kind": manifest.kind.value,
+        "run": run,
+        "documentation_url": "",
+        "comments": [],
+        "runs": [],
+    }
+    try:
+        with TemporaryDirectory(prefix="gym-hub-submit-") as temporary:
+            root = Path(temporary)
+            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+            env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+
+            def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ["git", *args], cwd=root, env=env, capture_output=True, text=True, timeout=120, check=check
+                )
+
+            git("clone", "--depth", "1", "--single-branch", "--branch", "drafts", HUB_REPOSITORY, ".")
+            path = root / "submissions" / (identity.replace("/", "--") + ".json")
+            for attempt in range(3):
+                if attempt:
+                    git("fetch", "origin", "drafts")
+                    git("reset", "--hard", "FETCH_HEAD")
+                if path.parent.is_symlink() or path.is_symlink():
+                    raise ConfigError("Hub submissions cannot use symbolic links.")
+                record = json.loads(path.read_text()) if path.exists() else dict(defaults)
+                if not isinstance(record, dict) or record.get("id") != identity:
+                    raise ConfigError("Hub submission path belongs to a different environment.")
+                if record.get("digest_reference") == immutable:
+                    return url
+                record = {**defaults, **record}
+                record.update(
+                    status="submitted",
+                    version=manifest.version,
+                    tag=tag,
+                    digest_reference=immutable,
+                )
+                for key in ("archive_sha256", "reviewed_draft_commit", "published_by", "published_at"):
+                    record.pop(key, None)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+                git("add", "--", str(path.relative_to(root)))
+                git("commit", "-s", "-m", f"Submit {identity} {manifest.version} for review [skip ci]")
+                pushed = git("push", "origin", "HEAD:drafts", check=False)
+                if pushed.returncode == 0:
+                    return url
+            raise ConfigError(f"Hub submission push failed: {pushed.stderr.strip()}")
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        detail = getattr(error, "stderr", None) or str(error)
+        raise ConfigError(f"Could not submit to the hub using GitLab SSH access: {detail}") from error

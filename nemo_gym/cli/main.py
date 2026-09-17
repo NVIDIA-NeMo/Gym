@@ -557,6 +557,18 @@ def _env_pull(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
 
 
+def _env_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.environment.artifacts import submit_environment_package
+
+    if overrides != (["+verbose=true"] if args.verbose else []):
+        args._parser.error("env submit does not accept Hydra overrides")
+    try:
+        print(f"Submitted for review: {submit_environment_package(args.reference)}")
+    except ConfigError as exc:
+        args._parser.error(str(exc))
+
+
 def _merge_config_paths(overrides: list[str]) -> list[str]:
     """Coalesce all `+config_paths=[...]` tokens (from --config and asset selectors) into one (Hydra rejects dupes)."""
     prefix = "+config_paths=["
@@ -956,7 +968,7 @@ COMMANDS = {
     ),
     "env publish": Command(
         target="nemo_gym.cli.env:publish_environment_manifest",
-        summary="Check an environment, optionally package it and publish to an OCI registry.",
+        summary="Check and publish an environment package; hub uploads are submitted to Development for review.",
         flags=(
             ONBOARDING_NAME,
             CATALOG_KIND,
@@ -967,6 +979,11 @@ COMMANDS = {
             ),
             _value_flag("output", "package_output", "Write the environment package to this .tar.gz path.", quote=True),
         ),
+    ),
+    "env submit": Command(
+        target=_env_submit,
+        summary="Submit an existing registry package to the hub Development review queue.",
+        flags=(Flag(register=lambda p: p.add_argument("reference", help="Published environment tag or digest.")),),
     ),
     "env pull": Command(
         target=_env_pull,
