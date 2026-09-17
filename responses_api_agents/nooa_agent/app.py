@@ -99,10 +99,14 @@ def _is_transient_infrastructure_error(error: BaseException) -> bool:
 
 
 class NOOAAgentRunRequest(BaseRunRequest):
+    """Run request that preserves benchmark-specific fields for the NOOA agent."""
+
     model_config = ConfigDict(extra="allow")
 
 
 class NOOAAgentVerifyResponse(BaseVerifyResponse):
+    """Verification response containing NOOA agent observations and benchmark fields."""
+
     model_config = ConfigDict(extra="allow")
 
     ng_agent_observations: AgentObservationBundle | None = Field(
