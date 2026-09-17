@@ -26,7 +26,6 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
     --language-model-only
 )
 VLLM_PREFILL_ARGS=(
