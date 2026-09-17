@@ -19,12 +19,76 @@ The manifest is the place to read this declaration, but not every field is autho
 
 | Field group | Authority |
 | --- | --- |
-| Identity and catalog metadata: `name`, `version`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
+| Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
 | Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
 
 When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
+
+The repository's reference environment is [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/blob/main/environments/example_single_tool_call/manifest.yaml):
+
+```yaml
+name: example_single_tool_call
+version: 0.1.0
+experimental: false
+kind: environment
+integration_profile: custom-gym-verifier
+domain: agent
+description: Single-step environment that rewards invoking the get_weather tool.
+modality: text
+licensing: Apache-2.0
+authors:
+- fsiino-nvidia
+- bxyu-nvidia
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: example_single_tool_call
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active
+```
+
+New manifests are `experimental: true` by default. The NeMo Gym team can manually set this field to `false`. This flag does not imply certificate-backed validation, which applies to the specific workload version and configuration covered by a certificate. Unknown keys are validation errors at every manifest level.
+
+### Field Reference
+
+| Field | Type | Requirement and allowed values |
+| --- | --- | --- |
+| `name` | string | Required; non-empty and must match the catalog path |
+| `version` | string | Required; non-empty, with Semantic Versioning recommended |
+| `experimental` | boolean | Optional; defaults to `true` |
+| `kind` | string | Required; `environment` or `benchmark` |
+| `integration_profile` | string | Required; one of the profiles below |
+| `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other` |
+| `description` | string | Required; non-empty |
+| `modality` | string | Required; non-empty |
+| `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
+| `authors` | list of strings | Required; non-empty and unique |
+| `reward` | object | Required; `range` is two finite increasing numbers and `higher_is_better` is boolean |
+| `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
+| `resources_server` | string | Required; mirrored from config |
+| `agent_server` | string | Required; mirrored from config |
+| `datasets` | list of objects | Required and non-empty; dataset names must be unique |
+| `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
+| `rollout_driver` | string or null | Required only for `external-rollout-driver`; Python `module:function` form |
+| `grading_mode` | string or null | Optional resources-server-specific selector |
+| `session_model` | string or null | Optional; `episode` or `step` |
+| `state` | string or null | Optional; `none` or `per_session` |
+| `sandbox` | string or null | Optional sandbox requirement |
+| `canonical_split` | string or null | Required for benchmarks |
+| `standard_prompt_config` | string or null | Required for benchmarks |
+| `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
+| `lifecycle` | string | Optional; `active` (default) or `deprecated` |
+
+Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `prompt_config` is optional, and `num_repeats` defaults to `1`.
 
 ### Integration Profiles
 
@@ -81,10 +145,10 @@ gym env init --benchmark my_benchmark --profile custom-gym-verifier \
 
 Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable. The manifest is the registry record, so this structural check is idempotent and does not commit or push changes.
 
-`gym list environments` and unqualified `gym search` read manifests and legacy runnable configs together. Manifest-backed entries are `experimental`; unmigrated entries are labeled `no-manifest`. Reusable resources-server components without agent composition and datasets remain available through `gym list resources-servers` and are not environment entries.
+`gym list environments` and unqualified `gym search` read manifests and legacy runnable configs together. Entries with `experimental: true` carry an `experimental` annotation; entries with `experimental: false` have no status annotation. Unmigrated entries are labeled `no-manifest`. Reusable resources-server components without agent composition and datasets remain available through `gym list resources-servers` and are not environment entries.
 
 <Note>
-Publication currently records readiness as `experimental`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed `validated` status, and a hosted catalog index are not yet automated.
+Publication includes an `experimental` annotation only when the manifest's flag is `true`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not yet automated.
 </Note>
 
 ## Verifier Fixture Contract
@@ -100,7 +164,7 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent work must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
@@ -130,8 +194,8 @@ Contributing a resources server follows this sequence:
 | 1 | Curate Tasks | Collect or generate training tasks and create example data |
 | 2 | Implementation | Build resources server with verification logic |
 | 3 | Testing | Write and run unit tests |
-| 4 | Example Rollouts | Optionally capture runtime evidence |
-| 5 | Reward Profiling | Optionally inspect reward distribution |
+| 4 | Smoke Rollouts | For behavior changes, run a representative model rollout and inspect agent and verifier behavior |
+| 5 | Reward Profiling | Optionally inspect reward distribution for training environments; benchmarks require profiling |
 | 6 | Training Validation | Optionally test training utility |
 | 7 | Submit PR | Submit pull request with all required information |
 | 8 | Review | Address feedback on the required local checks and contribution metadata |
@@ -162,16 +226,27 @@ Write and run tests for your resources server:
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
 
-### 4. Generate Example Rollouts (Optional)
+### 4. Generate Example Rollouts (Required for Behavior Changes)
 
-When a policy endpoint and compute are available, generate example rollouts as additional runtime evidence:
+When environment or agent work changes runtime behavior, configure a model endpoint, run a representative rollout, and inspect the agent and verifier results. For example:
 
-- Document the command used to start your server, for example, `gym env start --resources-server my_server`
-- If useful for review, save representative outputs to `data/example_rollouts.jsonl`
+```bash
+gym env start \
+  --resources-server my_server \
+  --model-type openai_model
 
-This evidence is not required to publish or merge the environment.
+gym eval run --no-serve \
+  --agent your_agent \
+  --input path/to/example.jsonl \
+  --output results/my_server_smoke.jsonl \
+  --limit 1
+```
 
-### 5. Reward Profiling (Optional)
+Document the commands and observed behavior in the PR. For a manifest-backed workload, saving the output under `data/example_rollouts.jsonl` is optional. A standalone legacy resources-server contribution must retain the five-row `data/example_rollouts.jsonl` artifact required by its data validator until that validator is migrated. Metadata-only catalog or manifest changes and docs-only changes do not require model compute.
+
+### 5. Reward Profiling (Optional for Training Environments)
+
+Fixed evaluation benchmarks must follow the reward-profiling requirements in [Adding A Benchmark](/contribute/environments/adding-a-benchmark). For training environments, profiling remains optional:
 
 Run inference to inspect reward distribution:
 
@@ -206,7 +281,7 @@ After submitting your PR:
 2. Address any feedback from reviewers
 3. After approval, maintainers merge the contribution
 
-Reviewers may inspect optional rollout or training evidence when provided, but do not need to reproduce a compute-heavy run for the contribution to merge.
+Reviewers inspect the required smoke-rollout evidence for behavior-changing work and may inspect optional full evaluation or training evidence when provided. They do not need to reproduce a compute-heavy run for the contribution to merge.
 
 ## Recommended Technical Design
 

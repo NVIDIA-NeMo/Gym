@@ -1297,12 +1297,11 @@ Found global config dict yaml:
         )
 
         with open_dict(global_config_dict):
-            # Populate head server defaults
-            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-                global_config_dict[HEAD_SERVER_KEY_NAME] = {
-                    "host": default_host,
-                    "port": DEFAULT_HEAD_SERVER_PORT,
-                }
+            # Head server defaults, filled per key so a config may pin just one.
+            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
+            head_server.setdefault("host", default_host)
+            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
+            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
