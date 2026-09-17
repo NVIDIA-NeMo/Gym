@@ -36,6 +36,7 @@ def test_default_logger_preserves_tool_arguments(arguments, capsys):
     assert message.model_dump() == before
     if arguments != '{"cmd":"echo ok"}':
         assert "Cannot format tool arguments as JSON" in output
+        assert "Run a command" in output
         assert "raw arguments" in output
     else:
         assert "Cannot format" not in output

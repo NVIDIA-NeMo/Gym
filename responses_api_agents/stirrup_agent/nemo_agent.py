@@ -141,6 +141,7 @@ class _NeMoAgentLogger(AgentLogger):
             # Stirrup's display formatter parses arguments before tool execution.
             # Leave the original message intact so the tool can report its error.
             LOGGER.warning("Cannot format tool arguments as JSON on turn %s/%s", turn, max_turns)
+            LOGGER.warning("Assistant content: %s", str(assistant_message.content)[:500])
             for tool_call in assistant_message.tool_calls or []:
                 LOGGER.warning("Tool %s raw arguments: %r", tool_call.name, tool_call.arguments[:1000])
 
