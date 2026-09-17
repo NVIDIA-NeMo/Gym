@@ -1,70 +1,93 @@
 # OpenCode Sandboxed Agent
-
-## Prerequisites
-
-Complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
-for sandbox credentials, endpoint configuration, and resource limits before launching.
-
-## First evaluation
-
-From the repository root, with Gym installed and model/sandbox access configured, use the
-[SWE-bench Verified recipe](../../benchmarks/swebench/verified/opencode.yaml), which binds
-the agent to its resources server.
-
 ```bash
-# Prepare the input before starting servers (downloads SWE-bench Verified).
-gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
-
 # In terminal 1
 gym env start \
-    --model-type vllm_model \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-    --config benchmarks/swebench/verified/opencode.yaml
+    --config responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml \
+    --config resources_servers/swebench/configs/swebench.yaml
 
-# In terminal 2, with the same Gym environment activated
-gym eval run --no-serve \
-    --agent swebench_verified_opencode_sandboxed_agent \
-    --input benchmarks/swebench/data/swebench_verified_benchmark.jsonl \
-    --output results/opencode_smoke/rollouts.jsonl \
-    --limit 1 \
-    --num-repeats 1 \
-    --concurrency 1
+# In terminal 2
+python responses_api_agents/opencode_sandboxed_agent/client.py \
+    +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
 ```
 
-For an end-to-end evaluation, keep OpenCode execution enabled so `/run` executes
-the agent and calls the SWE-bench verifier. Skipping execution limits the test to
-the surrounding infrastructure.
-This one-task run uses the configured timeout defaults and consumes model and sandbox resources.
+For E2E functional testing, run as above and remove the actual opencode run command from the exec.
 
-## OpenCode binary: online or pre-staged
+## Prefetch OpenCode binary and upload to S3
+```bash
+curl -L https://opencode.ai/install -o opencode_install.sh
 
-By default, the agent downloads the [OpenCode installer](https://opencode.ai/install)
-and the configured version inside each task sandbox. This needs installation tools
-(Bash, curl and archive extraction), a writable home directory, and network access
-to OpenCode and GitHub release assets.
+APP=opencode
+archive_ext=".tar.gz"
+os=linux
+arch=x64
+target="$os-$arch"
+requested_version=1.17.11
+filename="$APP-$target$archive_ext"
+url="https://github.com/anomalyco/opencode/releases/download/v${requested_version}/$filename"
+curl -L $url -o $filename
+tar -xzf "$filename" -C "./"
 
-For sandboxes without that network access, provide a compatible installer and binary
-through a mount, task image, or custom resources-server upload before the agent runs.
-For S3-hosted files, arrange a mount or transfer into each task sandbox.
-For the SWE-bench recipe above, configure OpenSandbox
-[volume options](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#sandboxspec-provider-options)
-under `swebench_verified_opencode_resources_server.resources_servers.swebench.sandbox_config.provider_options`;
-the resources server creates the task sandbox.
+aws s3 cp opencode_install.sh /path/to/folder/opencode/install.sh
 
-Set both paths to existing files inside that sandbox;
-setting only one leaves online installation enabled.
-Save this as `offline-assets.yaml` and add `--config offline-assets.yaml` to server startup:
+aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 
-```yaml
-swebench_verified_opencode_sandboxed_agent:
-  responses_api_agents:
-    opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /opt/gym-assets/opencode/1.17.11/install.sh
-      remote_opencode_binary_path: /opt/gym-assets/opencode/1.17.11/opencode-linux-x64
-      remote_opencode_musl_binary_path: null
+# Double check they are uploaded properly.
+aws s3 ls /path/to/folder/opencode/
 ```
 
-The staged binary determines the installed version and must match the sandbox's
-architecture and libc. Keep `remote_opencode_musl_binary_path: null` with the upstream
-installer; the dual-binary mode requires a custom installer supporting
-`--glibc-binary` and `--musl-binary`.
+## Python and search benchmark variants (development)
+
+`benchmarks/apex_shortlist/opencode.yaml`, `benchmarks/hle/opencode.yaml`, and
+`benchmarks/hle/opencode_search.yaml` compose this agent with the existing graders.
+They use a preinstalled image, deny public network egress, disable compaction, and
+use the remaining-context plugin. APEX repeats each question 16 times; HLE uses
+one repeat. Standard benchmark preparation determines the question set. Keep
+collection repeats at one.
+
+Set `OPENCODE_SANDBOX_IMAGE` to a verified image digest, `OPENSANDBOX_DOMAIN` to
+your assigned HTTPS API endpoint, and `OPENSANDBOX_API_KEY` in the trusted runtime.
+Search additionally needs `TAVILY_API_KEY` (one key or comma-separated keys).
+Use `OPENCODE_ARTIFACTS_DIR` for durable result paths. Tool calls and returned
+text are captured in the normal OpenCode transcript and Gym observability.
+The image Dockerfile and lock are in `image/`.
+
+The agent supports `preinstalled_opencode`, `output_token_policy`,
+`tool_servers`, `network_access`, `artifacts_dir`, and the
+existing sandbox/OpenCode config mappings. `sandbox_config.files` maps remote
+paths to text contents, not local filenames. Image, working directory and
+entrypoint are configurable. `remaining_context` removes the output request cap;
+it cannot recover history that already exceeds the model's context window.
+
+OpenCode configuration overlays are deep-merged so model settings do not discard
+Gym's model route. Request temperature/top-p reach the build agent. Use only
+`permission`; combining it with legacy `tools` raises a configuration error.
+Execution/proxy/rollout limits should agree at four hours for this recipe. Sandbox
+creation and individual Bash command timeouts are separate operational limits.
+
+Search uses the resource server's native authenticated MCP endpoint and a
+per-rollout token. No custom SSH gateway or Tavily key is installed in the sandbox.
+The Gym model and tool servers must advertise hosts reachable from Kubernetes;
+loopback/wildcard advertised hosts are rejected for restricted-network runs.
+`model_only` and `model_and_search` create new sandboxes with explicit allowlists;
+externally supplied sandboxes are rejected because their policy cannot be verified.
+
+These variants are not yet certified: run a real model canary through normal Gym
+execution, inspect trajectories/grader artifacts, and verify interruption/resume and
+sandbox cleanup before promotion. Unit tests and an image smoke are insufficient.
+
+The benchmark variants set `execution_failure_reward_zero=true`: completed
+execution failures (including errors in the OpenCode export) produce reward zero
+and explicit failure/exit fields without calling the judge. A generation receipt
+is written before verification. For request/setup/judge failures, enable Gym's
+`route_failures_to_sidecar` so unrelated rollouts continue; unresolved sidecar
+rows are missing from the main metric and must not be reported as full coverage.
+
+The benchmark variants reuse standard CoT dataset preparation and graders. APEX
+uses the standard math user template with its boxed-answer request. HLE places
+the standard Explanation/Answer/Confidence instructions after the question in a
+single user message, since OpenCode's CLI receives only the user turn. OpenCode
+keeps its default agent prompt plus the short network/tool availability notice.
+This adapts the current text benchmarks; a general benchmark-to-harness adapter
+is not implemented.

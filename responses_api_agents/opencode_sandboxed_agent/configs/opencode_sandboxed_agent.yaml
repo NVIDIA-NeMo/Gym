@@ -25,6 +25,9 @@ opencode_sandboxed_agent:
       opencode_config:
         permission:
           "*": allow
+          webfetch: deny
+          websearch: deny
+          skill: deny
 
           edit:
             "**": allow
@@ -127,19 +130,6 @@ opencode_sandboxed_agent:
             "*curl *github.io*": deny
             "*wget *github.io*": deny
 
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
 
       sandbox_timeout: 10800  # 3hr default for harness execution
 

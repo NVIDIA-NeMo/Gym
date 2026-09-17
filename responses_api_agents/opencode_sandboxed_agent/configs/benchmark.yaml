@@ -1,0 +1,56 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+opencode_benchmark_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      opencode_version: 1.17.11
+      opencode_max_context_window: 262144
+      preinstalled_opencode: true
+      execution_failure_reward_zero: true
+      output_token_policy: remaining_context
+      sandbox_timeout: 14400
+      sandbox_provider: sandbox
+      network_access: model_only
+      token_id_capture: false
+      artifacts_dir: ${oc.env:OPENCODE_ARTIFACTS_DIR,results/opencode}
+      opencode_config:
+        instructions:
+        - /tmp/nemo-gym-environment.txt
+        compaction:
+          auto: false
+          prune: false
+        agent:
+          build:
+            steps: 400
+        permission:
+          '*': allow
+          webfetch: deny
+          websearch: deny
+          task: deny
+      sandbox_config:
+        image: ${oc.env:OPENCODE_SANDBOX_IMAGE}
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        workdir: /workspace
+        files:
+          /tmp/nemo-gym-environment.txt: |
+            Internet access is disabled on this machine.
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+          EXECD_API_GRACE_SHUTDOWN: 50ms

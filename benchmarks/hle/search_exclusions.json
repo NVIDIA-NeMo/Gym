@@ -1,0 +1,168 @@
+{
+  "notices": [
+    {
+      "properties": [
+        {
+          "type": "domain",
+          "value": "huggingface.co"
+        },
+        {
+          "type": "domain",
+          "value": "hf.co"
+        },
+        {
+          "type": "domain",
+          "value": "promptfoo.dev"
+        },
+        {
+          "type": "domain",
+          "value": "lastexam.ai"
+        },
+        {
+          "type": "domain",
+          "value": "agi.safe.ai"
+        },
+        {
+          "type": "domain",
+          "value": "askfilo.com"
+        },
+        {
+          "type": "domain",
+          "value": "studocu.com"
+        },
+        {
+          "type": "domain",
+          "value": "coursehero.com"
+        },
+        {
+          "type": "domain",
+          "value": "qiita.com"
+        },
+        {
+          "type": "url_substring",
+          "value": "://scale.com"
+        },
+        {
+          "type": "url_substring",
+          "value": ".scale.com"
+        },
+        {
+          "type": "url_substring",
+          "value": "last-exam"
+        },
+        {
+          "type": "url_substring",
+          "value": "hle-exam"
+        },
+        {
+          "type": "url_substring",
+          "value": "2501.14249"
+        },
+        {
+          "type": "url_substring",
+          "value": "2507.05241"
+        },
+        {
+          "type": "url_substring",
+          "value": "2508.10173"
+        },
+        {
+          "type": "url_substring",
+          "value": "2510.08959"
+        },
+        {
+          "type": "url_substring",
+          "value": "nature.com/articles/s41586-025-09962-4"
+        },
+        {
+          "type": "url_substring",
+          "value": "openreview.net/pdf?id=46UGfq8kMI"
+        },
+        {
+          "type": "url_substring",
+          "value": "openreview.net/pdf/a94b1a66a55ab89d0e45eb8ed891b115db8bf760.pdf"
+        },
+        {
+          "type": "url_substring",
+          "value": "researchgate.net/publication/394488269_Benchmark-Driven_Selection_of_AI_Evidence_from_DeepSeek-R1"
+        },
+        {
+          "type": "url_substring",
+          "value": "researchgate.net/scientific-contributions/Petr-Spelda-2170307851"
+        },
+        {
+          "type": "url_substring",
+          "value": "scribd.com/document/866099862"
+        },
+        {
+          "type": "url_substring",
+          "value": "x.com/tbenst/status/1951089655191122204"
+        },
+        {
+          "type": "url_substring",
+          "value": "x.com/andrewwhite01/status/1948056183115493745"
+        },
+        {
+          "type": "url_substring",
+          "value": "news.ycombinator.com/item?id=44694191"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/supaihq/hle"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/centerforaisafety/hle"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/deepwriter-ai/hle-gemini-3-0"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/RUC-NLPIR/WebThinker/blob/main/data/HLE"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/hanjanghoon/DEER"
+        },
+        {
+          "type": "url_substring",
+          "value": "github.com/repos/hanjanghoon/DEER"
+        },
+        {
+          "type": "url_substring",
+          "value": "mveteanu/HLE_PDF"
+        },
+        {
+          "type": "url_substring",
+          "value": "medium.com/@82deutschmark/o3-quiet-breakthrough-1bf9f0fobafc84"
+        },
+        {
+          "type": "url_substring",
+          "value": "rahulpowar.medium.com/deepseek-triggers-1-trillion-slump-but-paves-a-bigger-future-for-ai"
+        },
+        {
+          "type": "url_substring",
+          "value": "bincial.com/news/tzTechnology/421026"
+        },
+        {
+          "type": "url_substring",
+          "value": "36kr.com/p/3481854274280581"
+        },
+        {
+          "type": "url_substring",
+          "value": "jb243.github.io/pages/1438"
+        },
+        {
+          "type": "url_substring",
+          "value": "xiaowenz.com/episodes/humanity-last-exam-and-agi"
+        },
+        {
+          "type": "url_substring",
+          "value": "research-collection.ethz.ch/server/api/core/bitstreams/1902b5a9-4209-4529-b278-c258aad557ba/content"
+        }
+      ]
+    }
+  ]
+}
