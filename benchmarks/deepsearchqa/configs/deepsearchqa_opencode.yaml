@@ -14,7 +14,7 @@ deepsearchqa:
         max_output_tokens: 32768
         temperature: null
         top_p: null
-deepsearchqa_opencode_benchmark:
+deepsearchqa_agent:
   responses_api_agents:
     harness_exa_search:
       entrypoint: app.py
