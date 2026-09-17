@@ -12,8 +12,8 @@ deepsearchqa:
       judge_responses_create_params:
         input: []
         max_output_tokens: 32768
-        temperature: 0.0
-        top_p: 1.0
+        temperature: null
+        top_p: null
 deepsearchqa_hermes_benchmark:
   responses_api_agents:
     harness_exa_search:
@@ -49,7 +49,7 @@ deepsearchqa_hermes_benchmark:
         resources:
           memory_mib: 8192
       sandbox_model_base_url: null
-      exa_api_key: null
+      exa_api_key: ${oc.env:EXA_API_KEY}
       token_id_capture: false
       datasets:
         - name: deepsearchqa

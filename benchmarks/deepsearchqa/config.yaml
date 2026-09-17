@@ -12,8 +12,8 @@ deepsearchqa:
       judge_responses_create_params:
         input: []
         max_output_tokens: 32768
-        temperature: 0.0
-        top_p: 1.0
+        temperature: null
+        top_p: null
 deepsearchqa_claude_code_benchmark:
   responses_api_agents:
     harness_exa_search:
@@ -29,11 +29,12 @@ deepsearchqa_claude_code_benchmark:
         name: deepsearchqa
       agent: claude_code
       agent_kwargs:
-        model: nvidia/qwen/qwen3.8-27b
-        max_turns: 30
-        timeout: 900
-        bare: true
-        system_prompt: You must call an Exa MCP search tool before answering. Use Exa to research the question on the web, do not substitute local file searches for web research.
+        model: ${policy_model_name}
+        max_turns: 12
+        timeout: 600
+        bare: false
+        system_prompt: >-
+          Research the question using Exa MCP web search tools, then give the final answer. Work directly: do not delegate to subagents or use planning/team tools. Limit yourself to at most four web searches.
         claude_code_version: null
       image: nikolaik/python-nodejs:python3.13-nodejs22-slim
       setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/4b30acc3eb3a316e5d6e0475e6959606c8512cbf.zip && npm install -g @anthropic-ai/claude-code
@@ -41,7 +42,7 @@ deepsearchqa_claude_code_benchmark:
       sandbox_spec:
         ttl_s: 1800
       sandbox_model_base_url: null
-      exa_api_key: null
+      exa_api_key: ${oc.env:EXA_API_KEY}
       token_id_capture: false
       datasets:
         - name: deepsearchqa

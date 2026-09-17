@@ -12,8 +12,8 @@ deepsearchqa:
       judge_responses_create_params:
         input: []
         max_output_tokens: 32768
-        temperature: 0.0
-        top_p: 1.0
+        temperature: null
+        top_p: null
 deepsearchqa_claude_code_benchmark:
   responses_api_agents:
     harness_exa_search:
@@ -32,7 +32,7 @@ deepsearchqa_claude_code_benchmark:
         model: ${policy_model_name}
         max_turns: 200
         timeout: 7200
-        bare: true
+        bare: false
         disallowed_tools: Read
         system_prompt: You must call an Exa MCP search tool before answering. Research the request on the web and return a complete final answer.
         claude_code_version: null
@@ -47,7 +47,7 @@ deepsearchqa_claude_code_benchmark:
           CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1048576"
           DISABLE_COMPACT: "1"
       sandbox_model_base_url: null
-      exa_api_key: null
+      exa_api_key: ${oc.env:EXA_API_KEY}
       token_id_capture: false
       datasets:
         - name: deepsearchqa

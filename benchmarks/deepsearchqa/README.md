@@ -20,7 +20,10 @@ Five prepared tasks and their example rollouts are checked in under the
 
 ## Run
 
-The benchmark config defaults to `nvidia/qwen/qwen3.8-27b` in Claude Code.
+The benchmark config defaults to Claude Code using your configured policy model.
+Export `EXA_API_KEY`; the environment reads it automatically. Agent and judge
+defaults ship with the environment, so no environment-specific `env.yaml` block
+is needed. The judge uses the same model as the policy unless overridden.
 Use `--limit 1` for a quick end-to-end check before running the full benchmark.
 
 Complete long-run config copies for all supported harnesses are in
@@ -44,7 +47,7 @@ gym eval run \
   --limit 1
 ```
 
-Set `exa_api_key` in the selected config before running it. The available
+The available
 copies are Claude Code, Codex, OpenCode, Pi, Hermes, OpenClaw, Kilocode, Cline,
 Prime Agent, Simple Strands, and NeMo Fabric DeepAgents.
 
