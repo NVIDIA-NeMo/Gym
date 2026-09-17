@@ -3,6 +3,8 @@
 GYM_MODEL_PARAMS=(
 )
 
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -14,7 +16,7 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser qwen3
     --enable-chunked-prefill
     --enable-prefix-caching
-    --max-model-len 262144
+    --no-enable-flashinfer-autotune
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
