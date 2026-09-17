@@ -56,6 +56,18 @@ async def test_command_failure_is_reported_not_raised(tmp_path: Path) -> None:
     assert result.stdout.strip() == "out" and result.stderr.strip() == "err"
 
 
+async def test_relative_cwd_resolves_against_workspace(tmp_path: Path) -> None:
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+    nested = handle.raw["workspace"] / "nested"
+    nested.mkdir()
+
+    result = await provider.exec(handle, "pwd", cwd="nested")
+
+    assert result.return_code == 0
+    assert Path(result.stdout.strip()).resolve() == nested.resolve()
+
+
 async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())

@@ -4,6 +4,11 @@
 import json
 from pathlib import Path
 
+from nemo_gym.agents.openclaw_observability import (
+    build_openclaw_observation_tree,
+    build_openclaw_observations,
+    discover_openclaw_session_tree,
+)
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import (
@@ -11,11 +16,6 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
-)
-from responses_api_agents.openclaw_agent.observability import (
-    build_openclaw_observation_tree,
-    build_openclaw_observations,
-    discover_openclaw_session_tree,
 )
 
 
@@ -138,7 +138,7 @@ def test_conflicting_parent_is_reported_once_across_tree_passes(tmp_path: Path) 
 
 def test_tree_reports_missing_invocation(monkeypatch) -> None:
     monkeypatch.setattr(
-        "responses_api_agents.openclaw_agent.observability.build_openclaw_observations",
+        "nemo_gym.agents.openclaw_observability.build_openclaw_observations",
         lambda *args, **kwargs: AgentObservationBundle(source="openclaw"),
     )
 

@@ -62,7 +62,7 @@ hermes_agent:
       model: served-model-name
       enabled_toolsets: [terminal, file, code_execution]
       max_turns: 30
-      concurrency: 32
+      concurrency: 1
       temperature: 1.0
       system_prompt: |
         your system prompt here.
@@ -74,7 +74,7 @@ hermes_agent:
 | `disabled_toolsets` | `null` | forwarded to `AIAgent(disabled_toolsets=...)` |
 | `model` | `null` | served model id; defaults to `model_server.name` for backward compatibility |
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
-| `concurrency` | `32` | max simultaneous `run()` calls |
+| `concurrency` | `1` | fixed at one because the pinned Hermes interrupt state is process-global |
 | `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
 | `terminal_backend` | `local` | sets `TERMINAL_ENV` (process-global); `local`, `docker`, `daytona`, `modal`, `ssh` |
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
