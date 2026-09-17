@@ -36,8 +36,23 @@ def _get_local_dp_ranks(placement_groups: list[PlacementGroup]) -> list[int]:
     return local_dp_ranks
 
 
+def _import_vllm_api_server_module():
+    """Return the module that defines vLLM's ``run_server`` (and binds ``serve_http``).
+
+    vLLM >= 0.29 moved it to ``vllm.entrypoints.launchers.api_server.entry``; the old
+    ``vllm.entrypoints.openai.api_server`` is a deprecation shim there, and patching a
+    name on the shim would not affect what ``run_server`` actually calls.
+    """
+    try:
+        import vllm.entrypoints.launchers.api_server.entry as api_server_module
+    except ImportError:  # pragma: no cover - vLLM < 0.29
+        import vllm.entrypoints.openai.api_server as api_server_module
+
+    return api_server_module
+
+
 def _vllm_asyncio_task(server_args: Namespace):
-    from vllm.entrypoints.openai.api_server import run_server
+    run_server = _import_vllm_api_server_module().run_server
 
     asyncio.run(run_server(server_args))
 
@@ -88,13 +103,13 @@ class LocalVLLMModelActor:
         # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
         # This may be vLLM version specific!
         #
-        # api_server.py uses `from vllm.entrypoints.launcher import serve_http`,
-        # so we must patch the name in api_server's namespace (not launcher's).
+        # The api-server entry module does `from ..launcher import serve_http`, so we
+        # must patch the name in *that* module's namespace (not the launcher's).
 
         import signal
         from asyncio import get_running_loop
 
-        import vllm.entrypoints.openai.api_server as api_server
+        api_server = _import_vllm_api_server_module()
 
         original_serve_http = api_server.serve_http
 
