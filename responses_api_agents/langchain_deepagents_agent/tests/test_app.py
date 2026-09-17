@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -203,10 +204,12 @@ async def test_responses_forwards_body_reasoning_as_plain_dict():
 # --- deepagents summarization middleware --------------------------------------------------------------
 
 
-def _model_response(text: str, input_tokens: int = 0, output_tokens: int = 0):
+def _model_response(text_or_message: "str | AIMessage", input_tokens: int = 0, output_tokens: int = 0):
     """A model-server response carrying usage, so summarization's own extra model call is observable in
-    the accumulated total rather than having to be inferred from call counts alone."""
-    body = to_responses([AIMessage(content=text)], "policy_model")
+    the accumulated total rather than having to be inferred from call counts alone. Accepts a whole
+    AIMessage (not just text) so a mocked turn can carry tool calls and keep the agent loop going."""
+    message = AIMessage(content=text_or_message) if isinstance(text_or_message, str) else text_or_message
+    body = to_responses([message], "policy_model")
     body["usage"] = {
         "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": 0},
@@ -286,3 +289,166 @@ async def test_summarization_extra_model_call_is_included_in_usage_accounting():
     # every mocked call reports the same 100 in / 10 out, so a correct total is exactly per-call * calls
     assert usage.input_tokens == 100 * call_count
     assert usage.output_tokens == 10 * call_count
+
+
+# --- offloaded-history correlation (thread_id) ---------------------------------------------------------
+
+_HISTORY_PATH_RE = re.compile(r"/conversation_history/[\w\-]+\.md")
+
+
+def _file_text(entry) -> str:
+    """StateBackend stores each virtual file as either a plain string or a small object with `.content`,
+    depending on its configured file_format."""
+    return str(entry if isinstance(entry, str) else getattr(entry, "content", entry))
+
+
+def _looping_post(counters: dict, pointed_at: list[set[str]], tool_turns: int):
+    """Mocked model server for a rollout that summarizes repeatedly: summarization calls (recognised by
+    deepagents' own "Context Extraction Assistant" prompt) get summary text, agent turns get an `ls` tool
+    call so the loop keeps running and history keeps growing back past the tiny max_input_tokens. `ls` is a
+    deepagents built-in over the in-state virtual filesystem, so nothing here touches the network.
+
+    Records, per agent turn, which offloaded-history paths that turn's request pointed the model at."""
+
+    async def fake_post(**kwargs):
+        blob = orjson.dumps(kwargs["json"]).decode()
+        if "Context Extraction Assistant" in blob:
+            return _model_response("summary")
+        counters["agent_turns"] += 1
+        pointed_at.append(set(_HISTORY_PATH_RE.findall(blob)))
+        if counters["agent_turns"] <= tool_turns:
+            call_id = f"call_{counters['agent_turns']}"
+            return _model_response(
+                AIMessage(content="listing", tool_calls=[{"name": "ls", "args": {}, "id": call_id}])
+            )
+        return _model_response("final answer")
+
+    return fake_post
+
+
+async def _rollout_with_repeated_summarization(thread_id: str | None, tool_turns: int = 5):
+    """Drive a real create_deep_agent() graph through several summarizations in one rollout, invoking the
+    graph directly so the thread_id can be varied (responses() always sets one).
+
+    Returns the set of history paths the model was pointed at on each agent turn, plus the final virtual
+    filesystem."""
+    agent = _make_agent(max_input_tokens=200)
+    counters = {"agent_turns": 0}
+    pointed_at: list[set[str]] = []
+    agent.server_client.post = AsyncMock(side_effect=_looping_post(counters, pointed_at, tool_turns))
+    configurable = dict(_run_config({"usage": None})["configurable"])
+    if thread_id is not None:
+        configurable["thread_id"] = thread_id
+
+    final_state = await agent.agent.ainvoke({"messages": _long_history()}, config={"configurable": configurable})
+    return pointed_at, (final_state.get("files") or {})
+
+
+@pytest.mark.asyncio
+async def test_responses_propagates_rollout_id_as_langgraph_thread_id():
+    """deepagents' SummarizationMiddleware names its offloaded-history file after `configurable.thread_id`,
+    so the rollout id has to reach it for offloaded history to correlate with the rollout."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {"rollout_id": "abc123"}
+    request.url.path = "/ng-rollout/abc123/v1/responses"
+
+    await agent.responses(request, Response(), MagicMock(input="hello"))
+
+    run_config = agent.agent.ainvoke.call_args.kwargs["config"]
+    assert run_config["configurable"]["thread_id"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_responses_thread_id_falls_back_to_unscoped_without_a_rollout_id():
+    """Matches SimpleAgent.responses()'s own `rollout_id or "unscoped"` fallback. Safe to share one constant
+    across rollouts because the graph is compiled without a checkpointer and the default StateBackend keeps
+    the virtual filesystem in per-ainvoke graph state."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {}
+    request.url.path = "/v1/responses"
+
+    await agent.responses(request, Response(), MagicMock(input="hello"))
+
+    run_config = agent.agent.ainvoke.call_args.kwargs["config"]
+    assert run_config["configurable"]["thread_id"] == "unscoped"
+
+
+@pytest.mark.asyncio
+async def test_rollout_id_reaches_the_offloaded_history_path_end_to_end():
+    """End-to-end over the whole chain the propagation exists for: a request carrying a rollout_id must
+    make every summarization in that rollout offload to one path named for the rollout. Asserted on the
+    paths the model is actually handed in its requests, which is the only place the pointer appears —
+    responses() returns messages, not the virtual filesystem."""
+    from fastapi import Response
+
+    agent = _make_agent(max_input_tokens=200)
+    counters = {"agent_turns": 0}
+    pointed_at: list[set[str]] = []
+    agent.server_client.post = AsyncMock(side_effect=_looping_post(counters, pointed_at, tool_turns=5))
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {"rollout_id": "abc123"}
+    request.url.path = "/ng-rollout/abc123/v1/responses"
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {"input": [{"type": "message", "role": "user", "content": m.content} for m in _long_history()]}
+    )
+
+    await agent.responses(request, Response(), body)
+
+    assert len(pointed_at) > 2, "expected several agent turns, each preceded by a summarization"
+    assert set().union(*pointed_at) == {"/conversation_history/abc123.md"}
+
+
+@pytest.mark.asyncio
+async def test_stable_thread_id_keeps_offloaded_history_in_one_appended_log():
+    """The point of propagating thread_id, asserted on behaviour rather than on the config key.
+
+    SummarizationMiddleware re-reads `/conversation_history/{thread_id}.md` and appends to it on every
+    summarization, so one rollout should accumulate one running log. Without a thread_id it instead
+    generates a fresh `session_<uuid>` *per summarization event*: the read-back finds nothing to append to,
+    each eviction lands in its own file, and the path the model is handed — under a prompt claiming the
+    full history was saved there — only ever covers the most recent eviction, with everything older left
+    in files the model is never told about."""
+    with_id_pointers, with_id_files = await _rollout_with_repeated_summarization("rollout-abc123")
+    without_id_pointers, without_id_files = await _rollout_with_repeated_summarization(None)
+
+    # Guard the setup itself: this only tests anything if summarization actually fired repeatedly.
+    assert len(with_id_pointers) > 2, "expected several agent turns, each preceded by a summarization"
+
+    with_id_paths = set().union(*with_id_pointers)
+    without_id_paths = set().union(*without_id_pointers)
+
+    assert len(with_id_paths) == 1, f"one rollout should mean one history log, got {sorted(with_id_paths)}"
+    assert with_id_paths == {"/conversation_history/rollout-abc123.md"}, "log should be named for the rollout"
+    assert len(with_id_files) == 1
+
+    assert len(without_id_paths) > 1, (
+        "characterises the behaviour this fix exists to prevent: without a thread_id every summarization "
+        "points the model at a different file. If this ever fails, deepagents changed and the propagation "
+        "in responses() may no longer be load-bearing"
+    )
+
+    # The decisive difference: the first summarization is what evicts the original task context, so the
+    # accumulated log must still contain it at the end of the rollout.
+    log_text = _file_text(next(iter(with_id_files.values())))
+    assert "user turn 0" in log_text and "user turn 11" in log_text
+
+    scattered_latest = _file_text(without_id_files[sorted(without_id_pointers[-1])[0]])
+    assert "user turn 0" not in scattered_latest, (
+        "without a stable thread_id the file the model is finally pointed at has lost the original context"
+    )

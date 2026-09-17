@@ -28,6 +28,7 @@ and named to match how `deepagents`' own docs/examples name the object `create_d
 """
 
 from abc import abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import Body, Request, Response
@@ -110,11 +111,24 @@ class DeepAgentsAgent(SimpleAgent):
         # responses_langchain_bridge.py. `model_usage` similarly accumulates usage from every internal
         # model call so the final agent response reports the whole rollout.
         model_usage = {"usage": None}
+        # Same extraction SimpleAgent.responses() does, including the "unscoped" fallback.
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         run_config: RunnableConfig = {
             "configurable": {
                 "model_url_path": self.url_path_for_request("/v1/responses", request),
                 "model_cookies": {"cookies": None},
                 "model_usage": model_usage,
+                # deepagents' SummarizationMiddleware offloads evicted history to
+                # `/conversation_history/{thread_id}.md`, appending to that same path on each later
+                # summarization so a rollout accumulates one running log. Without this key it falls back to
+                # a *freshly generated* `session_<uuid>` per summarization event: every eviction lands in a
+                # new file, and the pointer it hands the model — under a prompt claiming the full history
+                # was saved there — only ever covers the most recent one, orphaning everything older.
+                # Safe to share the "unscoped" fallback across rollouts even though `thread_id` is
+                # LangGraph's checkpointing key: the graph is compiled without a checkpointer, and the
+                # default StateBackend keeps its virtual filesystem in per-`ainvoke` graph state.
+                "thread_id": rollout_id or "unscoped",
                 # Forwarded verbatim to every internal model call (see GymResponsesChatModel._agenerate()),
                 # so a caller requesting e.g. {"summary": "auto"} gets reasoning summaries back on every
                 # turn — unlike SimpleAgent, which forwards this for free via body.model_copy(), this agent
