@@ -195,6 +195,44 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_prior_outputs_matches_unique_assistant_text() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    llm, _, state = make_llm(model_response(output))
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+    items = [{"role": "assistant", "content": "Cold"}]
+
+    state.restore_prior_outputs(items)
+
+    assert items[0]["id"] == "msg-1"
+    assert items[0]["content"][0]["logprobs"] == []
+
+
+@pytest.mark.asyncio
+async def test_restore_prior_outputs_leaves_unmatched_assistant_text_unchanged() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    llm, _, state = make_llm(model_response(output))
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+    items = [{"role": "assistant", "content": "Warm"}]
+
+    state.restore_prior_outputs(items)
+
+    assert items == [{"role": "assistant", "content": "Warm"}]
+    assert state.gaps == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
