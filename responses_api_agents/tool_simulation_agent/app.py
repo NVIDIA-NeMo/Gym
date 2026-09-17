@@ -66,10 +66,13 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
-            json=body,
+        model_response = await self.retry_checkpoint_refusal(
+            lambda: self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path=self.url_path_for_request("/v1/responses", request),
+                json=body,
+            ),
+            request=request,
         )
 
         # Model calls are expected to always succeed.
