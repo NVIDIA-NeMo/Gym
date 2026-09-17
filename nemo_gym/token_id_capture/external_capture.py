@@ -297,20 +297,21 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Megatron token capture requires n=1")
-        request_metadata = request_payload.get("request_metadata")
-        if request_metadata is None:
-            request_metadata = {}
-            request_payload["request_metadata"] = request_metadata
-        if not isinstance(request_metadata, dict):
-            raise ValueError("Megatron request_metadata must be an object")
-        request_metadata[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
+        # Megatron Inference forwards ``offload_params`` opaquely to its prompt preparer and
+        # payload stager; the admission rides inside it. The prefix itself is resolved on the
+        # worker from ``staging_chain``, so no prefix token ids travel on the request.
+        offload_params = request_payload.get("offload_params")
+        if offload_params is None:
+            offload_params = {}
+            request_payload["offload_params"] = offload_params
+        if not isinstance(offload_params, dict):
+            raise ValueError("Megatron offload_params must be an object")
+        offload_params[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         request_payload.update(
             logprobs=True,
             top_logprobs=0,
             return_tokenized_data=True,
         )
-        if admission.mode == "token_in":
-            request_payload["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
         return request_payload
 
 

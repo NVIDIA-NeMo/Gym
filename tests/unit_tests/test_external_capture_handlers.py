@@ -92,11 +92,11 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     ("handler", "request_payload", "metadata_field", "token_return_field"),
     [
         (VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
-        (MegatronWorkerCaptureHandler(), {}, "request_metadata", "return_tokenized_data"),
+        (MegatronWorkerCaptureHandler(), {}, "offload_params", "return_tokenized_data"),
         (
             MegatronWorkerCaptureHandler(),
-            {"request_metadata": {"caller_metadata": "preserved"}},
-            "request_metadata",
+            {"offload_params": {"caller_metadata": "preserved"}},
+            "offload_params",
             "return_tokenized_data",
         ),
     ],
@@ -134,7 +134,7 @@ def test_handler_prepares_worker_staged_request(
     ("request_payload", "error"),
     [
         ({"n": 2}, "requires n=1"),
-        ({"request_metadata": []}, "request_metadata must be an object"),
+        ({"offload_params": []}, "offload_params must be an object"),
     ],
 )
 def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict[str, Any], error: str) -> None:
