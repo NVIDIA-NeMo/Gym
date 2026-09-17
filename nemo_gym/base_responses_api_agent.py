@@ -273,7 +273,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def setup_agent_checkpoint(self, app: FastAPI) -> None:
         auth_token = self.checkpoint_control_auth_token()
-        if auth_token is None or not self.checkpoint_continuation_supported:
+        if auth_token is None:
             return
         install_agent_checkpoint(
             app,
@@ -284,16 +284,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()
-        if self.checkpoint_control_auth_token() is not None and self.checkpoint_continuation_supported:
+        if self.checkpoint_control_auth_token() is not None:
             capabilities.checkpoint_mode = "export_restore"
             capabilities.concurrency_contract = "serialized_per_session"
-            capabilities.features = [
-                COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
-                AGENT_CONTINUATION_INDEX_FEATURE,
-                DISCARD_RESTORED_CONTINUATION_FEATURE,
-            ]
-            if self.checkpoint_resource_dependencies_supported:
-                capabilities.features.append(AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE)
+            capabilities.features = [COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE]
+            if self.checkpoint_continuation_supported:
+                capabilities.features.extend(
+                    [
+                        AGENT_CONTINUATION_INDEX_FEATURE,
+                        DISCARD_RESTORED_CONTINUATION_FEATURE,
+                    ]
+                )
+                if self.checkpoint_resource_dependencies_supported:
+                    capabilities.features.append(AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE)
         return capabilities
 
     def checkpoint_execution(self, request: Optional[Request] = None) -> Optional[AgentExecution]:

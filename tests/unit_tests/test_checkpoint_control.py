@@ -321,7 +321,10 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     body = TestClient(agent.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert body["component"] == "responses_api_agents"
     assert body["name"] == "agent"
-    assert body["checkpoint_mode"] == "stateless"
+    assert body["checkpoint_mode"] == "export_restore"
+    assert body["concurrency_contract"] == "serialized_per_session"
+    assert body["features"] == ["completed_result_acknowledgement"]
+    assert agent._checkpoint_participant is not None
 
     class _WhiteboxAgent(_Agent):
         checkpoint_continuation_supported = True
