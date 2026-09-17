@@ -181,7 +181,7 @@ def test_render_service_command_backgrounded():
 
 def test_render_service_command_log_file():
     out = _render_service_command("my_service", "img:latest", "cmd")
-    assert "--output=logs/my_service.log" in out
+    assert "--output=logs/my_service-$SLURM_JOB_ID.log" in out
 
 
 # ---------------------------------------------------------------------------
@@ -887,7 +887,7 @@ def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir, run_ar
     benchmark.run.update(run_args)
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "--output=logs/driver.log" in script
+    assert "--output=logs/driver-$SLURM_JOB_ID.log" in script
     assert f"+require_complete={expected}" in script
     assert f"+require_complete={not expected}" not in script
 
@@ -1134,8 +1134,8 @@ def test_render_service_command_no_pre_command_by_default():
     out = _render_service_command("svc", "img:latest", "vllm serve model")
     assert "bash -c" not in out
     assert (
-        "srun --overlap --no-container-mount-home --container-image=img:latest --output=logs/svc.log vllm serve model &"
-        in out
+        "srun --overlap --no-container-mount-home --container-image=img:latest "
+        "--output=logs/svc-$SLURM_JOB_ID.log vllm serve model &" in out
     )
 
 
@@ -1235,7 +1235,7 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
     service_lines = [
         line
         for line in script.splitlines()
-        if "srun" in line and "--output=logs/driver.log" not in line and "--output=logs/otel_collector.log" not in line
+        if "srun" in line and "--output=logs/driver-$SLURM_JOB_ID.log" not in line and "--output=logs/otel_collector.log" not in line
     ]
     assert service_lines, "expected at least one service srun line"
     for line in service_lines:
@@ -1611,7 +1611,7 @@ def test_driver_can_write_its_artifacts_into_the_job_directory():
 
     script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
 
-    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
     assert f"{bench_dir}:{bench_dir}" in driver_line
     # the caller's own mounts must survive alongside the injected one
     assert "/host/cache:/cache" in driver_line
@@ -1635,7 +1635,7 @@ def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
 
     script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
 
-    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
     assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line
 
 

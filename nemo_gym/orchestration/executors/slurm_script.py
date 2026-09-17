@@ -197,6 +197,9 @@ def _render_service_command(
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
+    # $SLURM_JOB_ID suffixes the log file so a resumed job (same job dir, new
+    # job id -- see resume_script.py) doesn't overwrite the previous attempt's
+    # log; a plain (non-resumable) job just gets one file named after its own id.
     # Without a container the command runs directly on the node: no image, mounts or workdir flags.
     container_flags = (
         f" --no-container-mount-home{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)}"
@@ -205,7 +208,7 @@ def _render_service_command(
     )
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -920,7 +923,7 @@ def build_sbatch_script(
     driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver.log {entrypoint}"
+        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
