@@ -1012,7 +1012,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self._external_capture_enabled:
-            await self._finalize_external_capture(chat_completion_dict)
+            await self._finalize_external_capture(
+                chat_completion_dict,
+                served_response_items=self._served_response_items_for_capture(request, choice_dict),
+            )
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1080,7 +1083,31 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
-    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
+    def _served_response_items_for_capture(
+        self,
+        request: Request,
+        choice: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        """Return the representation that a Responses client receives.
+
+        Chat-backed Responses requests split inline reasoning into a standalone
+        reasoning item before returning the result. Lineage must fingerprint
+        that final representation rather than the intermediate Chat message.
+        Direct Chat requests keep using the Chat payload itself.
+        """
+        if not request.url.path.rstrip("/").endswith("/v1/responses"):
+            return None
+        return [
+            item.model_dump(mode="json")
+            for item in self._converter.postprocess_assistant_message_dict(choice["message"])
+        ]
+
+    async def _finalize_external_capture(
+        self,
+        payload: Dict[str, Any],
+        *,
+        served_response_items: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Validate and record a response staged by the inference worker.
 
         The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
@@ -1138,7 +1165,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if not response_id:
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
-            response_items, _ = strip_token_fields(response_to_output_items(payload))
+            response_items, _ = strip_token_fields(
+                response_to_output_items(payload) if served_response_items is None else served_response_items
+            )
             # Compute one fingerprint for the response items.
             # Compute another for the request and response items together.
             # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.

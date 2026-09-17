@@ -64,6 +64,9 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.lineage import RolloutLineage
+from nemo_gym.token_id_capture.records import ParentResolutionStatus
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -784,6 +787,91 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
+
+    def test_capture_fingerprints_the_served_responses_representation(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._converter.uses_reasoning_parser = True
+        request = MagicMock()
+        request.url.path = "/ng-rollout/r0/training-token-capture/v1/responses"
+        choice = {
+            "message": {
+                "role": "assistant",
+                "content": "<think>private plan</think>",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": '{"id": 1}'},
+                    }
+                ],
+            }
+        }
+
+        served_items = server._served_response_items_for_capture(request, choice)
+
+        assert served_items is not None
+        assert [item["type"] for item in served_items] == ["reasoning", "function_call"]
+        echoed_items = [
+            {
+                "id": "reasoning-next-turn",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "private plan"}],
+            },
+            {
+                "id": "call-1",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "lookup",
+                "arguments": '{"id": 1}',
+            },
+        ]
+        assert assistant_fingerprint(served_items) == assistant_fingerprint(echoed_items)
+        assert assistant_fingerprint([choice["message"]]) != assistant_fingerprint(echoed_items)
+
+        request.url.path = "/v1/chat/completions"
+        assert server._served_response_items_for_capture(request, choice) is None
+
+    def test_reasoning_only_served_response_resolves_as_parent(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._converter.uses_reasoning_parser = True
+        request = MagicMock()
+        request.url.path = "/ng-rollout/r0/training-token-capture/v1/responses"
+        choice = {"message": {"role": "assistant", "content": "<think>private plan</think>"}}
+        request_items = [
+            {"role": "user", "content": "question", "type": "message"},
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "earlier answer"}],
+                "type": "message",
+            },
+        ]
+
+        served_items = server._served_response_items_for_capture(request, choice)
+
+        assert served_items is not None
+        assert [item["type"] for item in served_items] == ["reasoning"]
+        lineage = RolloutLineage()
+        lineage.record(
+            "c1",
+            request_items + served_items,
+            [1, 2, 3],
+            "digest-c1",
+            context_len=len(request_items),
+        )
+        next_request_items = request_items + [
+            {
+                "id": "reasoning-id-returned-to-agent",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "private plan"}],
+            }
+        ]
+
+        status, parent, reason = lineage.resolve_node(next_request_items)
+
+        assert status == ParentResolutionStatus.RESOLVED
+        assert parent is not None
+        assert parent.call_id == "c1"
+        assert reason == ""
 
     @mark.parametrize("propagate", [False, True])
     def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
