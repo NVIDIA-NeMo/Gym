@@ -92,3 +92,32 @@ live state before closing the browser. Model tool arguments are not repaired.
 Both task-image readers allow 32 MiB, including the maintained task image
 that exceeds the previous 25 MiB default; input images are not resized to
 work around that limit.
+
+## Full-population validation
+
+Run `2026-09-15-visualwebarena-full-908-r1` completed at 20:26 UTC on
+September 16, 2026, or 04:26 Beijing time on September 17, using Gym commit
+`301c577eb61457057d5cd34807073a4f4506b8fe`.
+
+- **Model:** Nano Omni tuned checkpoint `iter_0004622`, not the public standard
+  Nano Omni v3 checkpoint. The run used the reference nano-tokenizer and
+  keep-history chat template.
+- **Result:** 219 successful tasks out of 908, for a final SR of **24.12%**.
+- **Completeness:** 908 unique tasks with valid evaluator scores; zero missing
+  tasks, duplicate valid results, unresolved invalid executions, malformed
+  records, or unexpected task IDs.
+- **Recovery:** three infrastructure-related timeout attempts were retained
+  and their tasks rerun. All three retries produced valid scores. No valid
+  result was rerun or replaced; historical failed attempts remain auditable.
+
+The run used fresh owned site replicas, executing 492 non-state-changing tasks
+before 416 state-changing tasks, with per-site serialization and cross-site
+barriers. It retained the original questions, input images, and evaluator
+semantics, without repairing model tool arguments. The serving context was
+64000 tokens, with no additional request-level output-token cap and no automatic
+text-history compaction.
+
+Final reconciliation and per-task results are archived under the run ID above;
+deployment details and large artifacts are maintained separately from Gym.
+This is evidence for this checkpoint and recipe, not a public-v3 baseline or
+proof of score parity with another deployment.
