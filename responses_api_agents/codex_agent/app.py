@@ -515,6 +515,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+            elif not stdout.strip():
+                LOG.warning("codex produced no output: %s", stderr.decode(errors="replace")[:500])
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
             return stdout.decode(errors="replace"), model
@@ -588,7 +590,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
         ):
-            LOG.warning("codex produced no assistant message; padding empty output")
+            event_shapes = []
+            for line in stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                item = event.get("item") or {}
+                event_shapes.append((event.get("type"), item.get("type")))
+            LOG.warning("codex produced no assistant message; event shapes: %s", event_shapes[:20])
             output_items.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
