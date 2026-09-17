@@ -22,14 +22,17 @@ flowchart LR
 
 ## Enable Collection
 
-Set these fields on the model servers and rollout collector:
+Set these top-level fields in the shared global configuration used by the agent servers, model
+servers, and rollout collector, not inside an individual server's configuration:
 
 ```yaml
 observability_enabled: true
 model_call_capture_dir: /absolute/shared/path/model-calls
 ```
 
-Both must use the same shared directory. Compatible agents route model calls through
+Agent processes also need `observability_enabled: true` to propagate rollout prefixes and collect
+supported agent-side evidence. The model servers and rollout collector must use the same shared
+capture directory. Compatible agents route model calls through
 `/ng-rollout/<rollout_id>` on the Gym Model Server. Unprefixed and direct-provider calls bypass capture.
 Use a separate directory for each evaluation job: rollout IDs do not contain a run ID.
 
