@@ -3248,7 +3248,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             messages, tools = self._materialize_trajectory(data)
             out.append(
                 {
-                    "session_id": sess_id,
+                    "session_id": str(sess_id),
                     "parent_session_id": data.get("parent_session_id"),
                     "segment_index": segment_index,
                     "segment_boundary_reason": data.get("segment_boundary_reason"),
