@@ -267,14 +267,11 @@ class Environment:
             user=user,
         )
 
-    async def main_connection(self):
-        descriptor = await self.main.serialize(scope="operate")
-        if "sandbox_id" not in descriptor:
-            raise ValueError("TB4 requires an ID-based connectable provider")
+    async def agent_workdir(self):
         cwd = await self.exec("pwd", timeout_sec=30, user=self.task.config.agent.user)
         if cwd.return_code:
             raise RuntimeError("Unable to determine the task working directory")
-        return {"provider": self.pool, "sandbox_id": descriptor["sandbox_id"], "workdir": cwd.stdout.strip()}
+        return cwd.stdout.strip()
 
     async def healthcheck(self):
         hc = self.settings.healthcheck

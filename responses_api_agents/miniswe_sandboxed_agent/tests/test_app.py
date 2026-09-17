@@ -7,18 +7,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from omegaconf import OmegaConf
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
-from resources_servers.terminal_bench_4.handoff import SandboxedSeedResponse
-from responses_api_agents.miniswe_sandboxed_agent import app as module
+from responses_api_agents.miniswe_sandboxed_agent import harness as module
 
 
 @pytest.mark.parametrize("custom_directory", [False, True])
 @pytest.mark.parametrize("with_mcp,step_timeout", [(False, 600), (True, 30)])
-async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
+async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     tmp_path, monkeypatch, with_mcp, step_timeout, custom_directory
 ):
     monkeypatch.chdir(tmp_path)
@@ -68,8 +66,6 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
     async def decode(r):
         return r.value
 
-    monkeypatch.setattr(module, "get_response_json", decode)
-    monkeypatch.setattr(module, "raise_for_status", AsyncMock())
     commands = []
     schemas = {
         "browser": [{"name": "navigate", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}]
@@ -89,11 +85,10 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
         return SandboxExecResult(json.dumps(schemas), "", 0)
 
     sandbox = SimpleNamespace(exec=execute, upload=AsyncMock())
-    seed = SandboxedSeedResponse(
+    seed = module.HarnessContext(
         session_id="task",
-        sandbox={"provider": "cpu", "sandbox_id": "box"},
+        workdir="/task",
         instruction="Official task instruction",
-        agent_timeout_sec=900,
         setup_timeout_sec=5,
         skills_dir="/skills",
         mcp_servers=[{"name": "browser", "transport": "streamable-http", "url": "http://sidecar/mcp"}]
@@ -101,48 +96,28 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
         else [],
     )
 
-    async def lifecycle(agent, request, body, *, setup, execute):
-        await setup(sandbox, seed)
-        response, termination, extra = await execute(sandbox, seed, 900)
-        assert extra["harness_version"] == "2.4.6"
-        return {
-            **body.model_dump(),
-            "response": response.model_dump(),
-            "session_id": "task",
-            "termination": termination.model_dump(),
-            "reward": 1,
-            "evaluation_completed": True,
-            **extra,
-        }
+    async def query(params):
+        return NeMoGymResponse.model_validate(await decode(await client.post(json=params)))
 
-    monkeypatch.setattr(module, "run_borrowed", lifecycle)
-    server = module.MiniSWESandboxedAgent(
-        config=module.MiniSWESandboxedConfig(
-            name="agent",
-            host="localhost",
-            port=1,
-            entrypoint="app.py",
-            resources_server={"type": "resources_servers", "name": "resources"},
-            model_server={"type": "responses_api_models", "name": "model"},
-            sandbox_providers={},
-            step_timeout_sec=step_timeout,
-        ),
-        server_client=client,
-    )
     directory = tmp_path / "custom" / "artifacts" if custom_directory else Path("results/agent/task")
-    result = await server.run(
-        SimpleNamespace(cookies={}),
-        module.MiniSWERunRequest(
-            responses_create_params={"input": [], "tool_choice": "required"},
-            artifact_directory=str(directory) if custom_directory else None,
-        ),
+    harness = module.MiniSWEHarness(
+        sandbox=sandbox,
+        context=seed,
+        config=module.MiniSWEConfig(step_timeout_sec=step_timeout),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[], tool_choice="required"),
+        query=query,
+        model_name="model",
+        directory=directory,
     )
+    await harness.setup()
+    response, termination, extra = await harness.execute(900)
+    assert extra["harness_version"] == "2.4.6"
+    result = SimpleNamespace(response=response, termination=termination)
     assert (directory / "trajectory.json").is_file()
     assert result.termination.artifacts == [str(directory / "trajectory.json")]
     assert result.response.model == "model"
     assert result.response.tool_choice == "required"
     assert len(result.response.output) == 6
-    assert result.reward == 1
     assert result.response.usage.total_tokens == 39
     assert result.termination.reason == "completed"
     requests = [call.kwargs["json"] for call in client.post.await_args_list]
@@ -164,6 +139,7 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
     assert [item["id"] for item in requests[-1]["input"] if item.get("type") == "reasoning"] == ["rs_0", "rs_1"]
     actions = [(command, kwargs) for command, kwargs in commands if command.startswith("setsid --wait")]
     assert len(actions) == 3
+    assert all(kwargs["cwd"] == "/task" for _, kwargs in actions)
     assert all(kwargs["timeout_s"] == step_timeout for _, kwargs in actions)
     assert all(kwargs["env"] == module.MINI_CONFIG["environment"]["env"] for _, kwargs in actions)
     if with_mcp:
@@ -175,16 +151,3 @@ async def test_real_default_agent_loop_uses_gym_model_and_borrowed_commands(
         assert sandbox.upload.await_count == 2
         assert json.loads((directory / "mcp.json").read_text()) == seed.mcp_servers
         assert sandbox.upload.await_args_list[1].args[0] == directory / "mcp.json"
-
-
-@pytest.mark.parametrize(
-    "overrides,steps,timeout", [({}, 500, 30), ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45}, 0, 45)]
-)
-def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
-    root = Path(module.__file__).resolve().parents[2]
-    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
-    agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
-    assert agent.step_limit == steps
-    assert agent.step_timeout_sec == timeout
-    assert agent.datasets[0].num_repeats == 1
-    assert module.MiniSWESandboxedConfig.model_fields["step_timeout_sec"].default == 600

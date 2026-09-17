@@ -1,12 +1,18 @@
 # Sandboxed mini-SWE
 
-Generic mini-SWE 2.4.6 `DefaultAgent` execution on an environment owned by a Gym
-resources server. It uses the sandbox seed/start/verify contract. It has no SWE-bench image, patch, dataset, or grading assumptions.
+Generic mini-SWE 2.4.6 `DefaultAgent` execution on a caller-owned `AsyncSandbox`.
+`harness.py` exposes `MiniSWEHarness`, `HarnessContext`, `MiniSWEConfig`, and
+`HarnessOutcome`. The caller supplies the sandbox, task instruction, execution
+user and working directory, setup budget, optional MCP/skills configuration,
+artifact directory, and an async model-query callback. The harness imports no
+benchmark code and has no dataset, provisioning, verification, or ownership logic.
 
-The existing synchronous mini-SWE loop uses an explicit bridge to Gym's async
-Responses model client and sandbox operations. Cancellation closes pending I/O
-and joins the loop before requesting verification. The worker releases its
-connection; resources retain destruction ownership and the authoritative budget.
+The synchronous mini-SWE loop uses a bridge to async model and sandbox operations.
+Cancellation closes pending I/O and joins the worker before returning its outcome,
+response, and trajectory metadata. The caller owns subsequent collection and
+cleanup. `app.py` is a thin Gym collector adapter: it forwards `/run` to the
+configured resources runner, preserving session identity and model-call capture
+routing, and returns its verification response.
 
 The adapter loads system and instance prompts from the pinned package's `mini.yaml`
 and exposes mini-SWE's native `bash` tool through Gym's Responses API. The version
@@ -14,7 +20,7 @@ and prompts follow [Artificial Analysis's TB4 methodology](https://artificialana
 The prompt defines completion as a successful command whose first output
 line is `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, matching mini-SWE's convention.
 The Python defaults remain `step_limit=0`, `step_timeout_sec=600`, and `cost_limit=0`;
-resources bound total execution time. The TB4 benchmark sets a 500-step limit and
+the caller bounds total execution time. The TB4 benchmark sets a 500-step limit and
 30-second command timeout, overridable with `++tb4_max_steps=...` and
 `++tb4_step_timeout_sec=...`. Commands receive the environment defaults from `mini.yaml`;
 system information in the prompt comes from the task sandbox.

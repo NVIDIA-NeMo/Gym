@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
+from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig
 
 
 def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
@@ -38,3 +41,17 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
         preparation.prepare(category="missing")
     with pytest.raises(ValueError, match="empty"):
         preparation.prepare(task_names=[])
+
+
+@pytest.mark.parametrize(
+    "overrides,steps,timeout", [({}, 500, 30), ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45}, 0, 45)]
+)
+def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
+    root = Path(preparation.__file__).resolve().parents[2]
+    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
+    agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
+    harness = config.terminal_bench_4.resources_servers.terminal_bench_4.harness
+    assert harness.step_limit == steps
+    assert harness.step_timeout_sec == timeout
+    assert agent.datasets[0].num_repeats == 1
+    assert MiniSWEConfig.model_fields["step_timeout_sec"].default == 600

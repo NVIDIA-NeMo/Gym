@@ -51,8 +51,8 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for one deployment. For the
 established split deployment, set `OPENSANDBOX_DOMAIN_CPU`,
 `OPENSANDBOX_API_KEY_CPU`, `OPENSANDBOX_DOMAIN_GPU`, and
 `OPENSANDBOX_API_KEY_GPU`, then use `++tb4_split_sandbox_endpoints=true`.
-Credentials resolve in server configuration; handoffs carry only a provider
-alias, sandbox ID, and working directory. Keep resolved configs private.
+Credentials resolve only in the resources runner. The harness receives the live
+sandbox object in the same process. Keep resolved configs private.
 
 Agent and verifier select the endpoint independently from their official GPU
 requirements. The selected GPU deployment must supply H100s; its unsupported
@@ -81,7 +81,9 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the agent worker and calls the Gym model server.
+mini-SWE's loop runs in the resources process, using its existing sandbox and
+calling the Gym model server. The agent endpoint forwards the collector's run
+request and returns the result; it does not manage task environments.
 MCP tasks also need Python venv/pip
 for its pinned task-local `mcp==1.29.0` client.
 
@@ -114,7 +116,8 @@ Infrastructure failures carry `infrastructure_error` and `_ng_failure_class` and
 must be excluded from model-negative aggregates.
 
 The standalone smoke runner starts real Gym HTTP agent, resources, and model
-servers on loopback. mini-SWE calls the Gym model server.
+servers on loopback. The resources process runs the complete episode and calls
+the Gym model server through the mini-SWE harness.
 It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 
 ```sh

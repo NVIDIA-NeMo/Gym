@@ -385,11 +385,9 @@ class AsyncSandbox:
         spec: SandboxSpec | None = None,
         *,
         owns_provider: bool = True,
-        owns_sandbox: bool = True,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self._owns_provider = owns_provider
-        self._owns_sandbox = owns_sandbox
         self._spec = spec
         self._handle: SandboxHandle | None = None
         self._stopped = True
@@ -544,9 +542,6 @@ class AsyncSandbox:
         return resolved
 
     async def stop(self) -> None:
-        if not self._owns_sandbox:
-            await self.release()
-            return
         if self._closed:
             return
         try:
@@ -558,21 +553,6 @@ class AsyncSandbox:
                 await self._provider.aclose()
                 self._closed = True
         self._closed = True
-
-    async def release(self) -> None:
-        """Close this client's transport without destroying the remote sandbox.
-
-        Use for borrowed attachments. The resources owner retains its independent
-        provider, renewal tasks and responsibility for remote destruction.
-        """
-        if self._closed:
-            return
-        try:
-            if self._owns_provider:
-                await self._provider.aclose()
-        finally:
-            self._stopped = True
-            self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.
@@ -597,12 +577,7 @@ class AsyncSandbox:
 
     @classmethod
     async def connect(
-        cls,
-        descriptor: Mapping[str, Any] | Any,
-        *,
-        provider: SandboxProvider,
-        owns_provider: bool = True,
-        owns_sandbox: bool = True,
+        cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
     ) -> "AsyncSandbox":
         """Rebuild a sandbox in this process from a descriptor produced by
         :meth:`serialize`, using ``provider`` (which must support connect)."""
@@ -614,12 +589,7 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
-        sandbox = cls(
-            provider,
-            SandboxSpec(workdir=workdir, ports=ports),
-            owns_provider=owns_provider,
-            owns_sandbox=owns_sandbox,
-        )
+        sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
         return sandbox

@@ -1,31 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Agent/resources handoff. Provider aliases are resolved privately by each worker."""
+"""TB4 episode results and persisted verification records."""
 
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyRequest, BaseVerifyResponse
-
-
-class SandboxConnection(BaseModel):
-    provider: str
-    # Provider credentials and connection settings never belong in this descriptor.
-    sandbox_id: str
-    workdir: str | None = None
-
-
-class SandboxedSeedResponse(BaseSeedSessionResponse):
-    session_id: str
-    sandbox: SandboxConnection
-    instruction: str
-    user: str | int | None = None
-    agent_timeout_sec: float = Field(gt=0)
-    setup_timeout_sec: float = Field(gt=0)
-    mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
-    skills_dir: str | None = None
+from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
 
 
 class SessionRequest(BaseModel):

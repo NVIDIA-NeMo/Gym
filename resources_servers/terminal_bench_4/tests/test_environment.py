@@ -143,13 +143,13 @@ async def test_cpu_compose_services_follow_gpu_verifier_deployment(tmp_path, mon
         assert spec.resources.gpu is None
 
 
-async def test_single_start_descriptor_env_user_quiescence_cleanup(tmp_path, monkeypatch):
+async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkeypatch):
     env, box, create, _ = make_environment(tmp_path, monkeypatch)
     await env.start()
     box.start.assert_awaited_once()
     assert create.call_args.args[1].image == "public/agent"
-    descriptor = await env.main_connection()
-    assert descriptor == {"provider": "default", "sandbox_id": "owned-box", "workdir": "/app"}
+    assert await env.agent_workdir() == "/app"
+    box.serialize.assert_not_awaited()
     assert box.exec.await_args.kwargs["user"] == "task-user"
     await env.exec("echo test", env={"TASK": "changed"}, user="another", timeout_sec=12)
     assert box.exec.await_args.kwargs["env"] == {"TASK": "changed"}
@@ -250,7 +250,7 @@ async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
     upload.assert_awaited_once_with(box, env.environment_dir, "/app")
 
 
-@pytest.mark.parametrize("failure", ["logs", "descriptor_id", "descriptor_pwd", "quiesce", "delete", "unavailable"])
+@pytest.mark.parametrize("failure", ["logs", "workdir", "quiesce", "delete", "unavailable"])
 async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, monkeypatch, failure):
     env, box, _, _ = make_environment(tmp_path, monkeypatch)
     if failure == "unavailable":
@@ -266,14 +266,10 @@ async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, mo
             await env.start()
     else:
         await env.start()
-    if failure == "descriptor_id":
-        box.serialize.return_value = {}
-        with pytest.raises(ValueError):
-            await env.main_connection()
-    if failure == "descriptor_pwd":
+    if failure == "workdir":
         box.exec.return_value.return_code = 1
         with pytest.raises(RuntimeError):
-            await env.main_connection()
+            await env.agent_workdir()
     if failure == "quiesce":
         box.exec.return_value.return_code = 1
         with pytest.raises(RuntimeError):

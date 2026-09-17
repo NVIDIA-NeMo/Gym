@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run real split-server smoke checks in CPU, Compose, GPU order.
+"""Run real single-runner smoke checks in CPU, Compose, GPU order.
 
 Uses loopback HTTP between Gym services. mini-SWE routes model calls through
 the local Gym model server.
@@ -57,8 +57,7 @@ async def main(args):
         source_root / path
         for path in [
             "nemo_gym/sandbox/api.py",
-            "resources_servers/terminal_bench_4/agent.py",
-            "resources_servers/terminal_bench_4/handoff.py",
+            "resources_servers/terminal_bench_4/models.py",
             "nemo_gym/sandbox/adapters/docker_compose.py",
             "nemo_gym/sandbox/providers/opensandbox/provider.py",
             "benchmarks/terminal_bench_4/resources.yaml",
@@ -74,6 +73,7 @@ async def main(args):
             "resources_servers/terminal_bench_4/collection.py",
             "resources_servers/terminal_bench_4/verifier.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
+            "responses_api_agents/miniswe_sandboxed_agent/harness.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
         ]
     ]
