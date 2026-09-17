@@ -3,9 +3,11 @@
 
 import json
 import os
-import re
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import torch
@@ -36,104 +38,160 @@ AutoTokenizer.from_pretrained(model_name, revision=model_revision, trust_remote_
 del state, reference
 
 
-cfg = OmegaConf.load(repo / "examples/configs/grpo_math_1B.yaml")
-cfg.grpo.num_prompts_per_step = 8
-cfg.grpo.num_generations_per_prompt = 8
-cfg.grpo.max_num_steps = 1
-cfg.grpo.val_period = 0
-cfg.grpo.val_at_start = True
-cfg.grpo.val_at_end = False
-cfg.grpo.stop_at_validation_metric = "accuracy"
-cfg.grpo.stop_at_validation_threshold = 0.0
-cfg.grpo.max_val_samples = 62
-cfg.grpo.val_batch_size = 2
-cfg.grpo.val_num_generations_per_prompt = 1
-cfg.policy.model_name = str(model_dir)
-cfg.policy.tokenizer.name = str(model_dir)
-cfg.policy.train_global_batch_size = 64
-cfg.policy.train_micro_batch_size = 1
-cfg.policy.logprob_batch_size = 1
-cfg.policy.dtensor_cfg._v2 = False
-cfg.policy.dtensor_cfg.activation_checkpointing = True
-cfg.policy.max_total_sequence_length = 32768
-cfg.policy.generation.max_new_tokens = 32768
-cfg.policy.generation.vllm_cfg.max_model_len = 32768
-cfg.policy.generation.vllm_cfg.gpu_memory_utilization = 0.2
-cfg.policy.generation.vllm_cfg.enforce_eager = True
-cfg.policy.generation.temperature = cfg.policy.generation.val_temperature = 0.0
-cfg.policy.generation.top_p = cfg.policy.generation.val_top_p = 1.0
-cfg.policy.generation.top_k = cfg.policy.generation.val_top_k = -1
-cfg.loss_fn.reference_policy_kl_penalty = 0.0
-cfg.loss_fn.force_on_policy_ratio = True
-cfg.data.validation = [
-    {
-        "dataset_name": "ResponseDataset",
-        "data_path": "/root/math_eval.jsonl",
-        "input_key": "input",
-        "output_key": "output",
-        "split_validation_size": 0,
-        "prompt_file": "examples/prompts/cot.txt",
+cfg = {
+    "config_paths": [
+        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+        "resources_servers/math_with_judge/configs/math_with_judge.yaml",
+    ],
+    "math_with_judge_simple_agent": {
+        "responses_api_agents": {
+            "simple_agent": {
+                "datasets": [
+                    {
+                        "name": "inner_eval",
+                        "type": "validation",
+                        "license": "TBD",
+                        "jsonl_fpath": str(work / "eval_inputs.jsonl"),
+                        "num_repeats": 1,
+                    }
+                ]
+            }
+        }
     },
-    {
-        "dataset_name": "ResponseDataset",
-        "data_path": "/root/aime25.jsonl",
-        "input_key": "question",
-        "output_key": "expected_answer",
-        "split_validation_size": 0,
-        "prompt_file": "/testbed/cot_prompt.txt",
-    },
-]
-
-cfg.data.train = cfg.data.validation[0]
-cfg.checkpointing.enabled = False
-cfg.checkpointing.checkpoint_dir = "/testbed/eval_checkpoints"
-cfg.checkpointing.checkpoint_must_save_by = None
-cfg.checkpointing.model_save_format = None
-cfg.checkpointing.save_optimizer = False
-cfg.cluster.gpus_per_node = 1
-cfg.cluster.num_nodes = 1
-cfg.logger.log_dir = "/testbed/results/logs"
-cfg.logger.wandb_enabled = "WANDB_API_KEY" in os.environ
-cfg.logger.wandb.project = os.environ.get("WANDB_PROJECT", "cmunley-rlenv")
-cfg.logger.wandb.name = os.environ.get("WANDB_NAME", "nemorl-env-inner-eval")
-for path, count in (("/root/math_eval.jsonl", 32), ("/root/aime25.jsonl", 30)):
-    if len(Path(path).read_text().splitlines()) != count:
-        raise ValueError(f"evaluation dataset must contain exactly {count} rows: {path}")
-OmegaConf.save(cfg, work / "resolved_aime25.yaml")
-eval_log = work / "aime25.log"
-with eval_log.open("w") as stream:
-    subprocess.run(
-        [sys.executable, str(repo / "examples/run_grpo.py"), "--config", str(work / "resolved_aime25.yaml")],
-        cwd=repo,
+    "policy_model": {"responses_api_models": {"vllm_model": {"uses_reasoning_parser": False}}},
+}
+tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
+prompt = "Solve the following math problem. Work step by step and put your final answer inside \\boxed{}.\n\n"
+questions = {}
+inputs = []
+for benchmark, count, input_key, answer_key in (
+    ("math_eval", 32, "input", "output"),
+    ("aime25", 30, "question", "expected_answer"),
+):
+    rows = [json.loads(line) for line in Path(f"/root/{benchmark}.jsonl").read_text().splitlines()]
+    if len(rows) != count:
+        raise ValueError(f"{benchmark} must contain exactly {count} rows")
+    for row in rows:
+        question = row[input_key]
+        if question in questions:
+            raise ValueError("evaluation questions must be unique")
+        questions[question] = benchmark
+        messages = [{"role": "user", "content": prompt + question}]
+        output_tokens = 32768 - len(tokenizer.apply_chat_template(messages, add_generation_prompt=True))
+        if output_tokens <= 0:
+            raise ValueError("evaluation prompt exceeds model context")
+        inputs.append(
+            {
+                "question": question,
+                "expected_answer": str(row[answer_key]),
+                "responses_create_params": {"input": messages, "max_output_tokens": output_tokens},
+            }
+        )
+(work / "eval_inputs.jsonl").write_text("".join(json.dumps(row) + "\n" for row in inputs))
+OmegaConf.save(OmegaConf.create(cfg), work / "gym_eval.yaml")
+rollout_file = work / "eval_rollouts.jsonl"
+with (work / "aime25.log").open("w") as stream:
+    server = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            str(model_dir),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8000",
+            "--max-model-len",
+            "32768",
+            "--max-num-seqs",
+            "2",
+            "--gpu-memory-utilization",
+            "0.85",
+            "--enforce-eager",
+        ],
         stdout=stream,
         stderr=subprocess.STDOUT,
-        check=True,
     )
-sample_counts = re.findall(r"• Samples processed:\s*([0-9]+)", eval_log.read_text())
-if not sample_counts or int(sample_counts[-1]) != 62:
-    raise RuntimeError("evaluation did not report all 32 math and 30 AIME25 samples")
-rollout_file = max(work.glob("results/logs/exp_*/val_data_step*.jsonl"), key=lambda path: path.stat().st_mtime)
+    try:
+        deadline = time.monotonic() + 600
+        while True:
+            if server.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError("evaluation vLLM failed to become ready; see aime25.log")
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5):
+                    break
+            except (urllib.error.URLError, TimeoutError):
+                time.sleep(2)
+        subprocess.run(
+            [
+                str(repo / ".venv/bin/gym"),
+                "eval",
+                "run",
+                "--config",
+                str(work / "gym_eval.yaml"),
+                "--model",
+                str(model_dir),
+                "--model-url",
+                "http://127.0.0.1:8000/v1",
+                "--model-api-key",
+                "EMPTY",
+                "--split",
+                "validation",
+                "--num-repeats",
+                "1",
+                "--concurrency",
+                "2",
+                "--temperature",
+                "0",
+                "--top-p",
+                "1",
+                "--output",
+                str(rollout_file),
+            ],
+            cwd=repo / "3rdparty/Gym-workspace/Gym",
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
 rows = [json.loads(line) for line in rollout_file.read_text().splitlines()]
-rewards = [float(row["rewards"][0]) for row in rows]
-if len(rewards) != 62 or any(reward not in (0.0, 1.0) for reward in rewards):
-    raise RuntimeError("evaluation must contain exactly 62 binary math rewards")
-math_accuracy = sum(rewards[:32]) / 32
-aime_accuracy = sum(rewards[32:]) / 30
+for row in rows:
+    row["question"] = row["responses_create_params"]["input"][0]["content"].removeprefix(prompt)
+failures = rollout_file.with_name("eval_rollouts_failures.jsonl")
+if failures.exists() and failures.read_text().strip():
+    raise RuntimeError("Gym evaluation reported failed rollouts")
+if len(rows) != 62 or {row["question"] for row in rows} != set(questions):
+    raise RuntimeError("Gym evaluation must return every held-out question exactly once")
+if any(row["reward"] not in (0.0, 1.0) for row in rows):
+    raise RuntimeError("Gym evaluation must return binary math rewards")
+math_accuracy = sum(row["reward"] for row in rows if questions[row["question"]] == "math_eval") / 32
+aime_accuracy = sum(row["reward"] for row in rows if questions[row["question"]] == "aime25") / 30
 wandb_url = ""
-if cfg.logger.wandb_enabled:
+if "WANDB_API_KEY" in os.environ:
     import wandb
 
     run = wandb.init(
         entity=os.environ.get("WANDB_ENTITY"),
-        project=cfg.logger.wandb.project,
-        name=f"{cfg.logger.wandb.name}-rollouts",
+        project=os.environ.get("WANDB_PROJECT", "cmunley-rlenv"),
+        name=f"{os.environ.get('WANDB_NAME', 'nemorl-env-inner-eval')}-rollouts",
         job_type="evaluation",
     )
     run.log(
         {
             "aime25/rollouts": wandb.Table(
-                columns=["idx", "reward", "conversation"],
-                data=[[row["idx"], row["rewards"], json.dumps(row["content"])] for row in rows[32:]],
+                columns=["question", "reward", "response"],
+                data=[
+                    [row["question"], row["reward"], json.dumps(row["response"])]
+                    for row in rows
+                    if questions[row["question"]] == "aime25"
+                ],
             ),
             "math_eval/accuracy": math_accuracy,
             "aime25/accuracy": aime_accuracy,

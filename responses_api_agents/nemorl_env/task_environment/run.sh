@@ -13,6 +13,7 @@ if [[ "$mode" == execute ]]; then
   export INNER_TRAIN_STARTED_AT=$(date +%s)
 fi
 export NEMORL_ROOT=/testbed/NeMo-RL
+export PATH="/opt/conda/bin:$PATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 show_failure_logs() {
@@ -53,8 +54,12 @@ if [[ "$mode" != execute ]]; then
   /opt/conda/bin/python -m pip install -q --upgrade uv==0.12.9
 fi
 cd "$NEMORL_ROOT"
+sync_args=(--frozen)
+if [[ "$stage" == eval ]]; then
+  sync_args+=(--extra vllm --extra nemo_gym)
+fi
 for attempt in {1..5}; do
-  /opt/conda/bin/uv sync --frozen \
+  /opt/conda/bin/uv sync "${sync_args[@]}" \
     --no-install-package nvidia-cutlass-dsl-libs-base \
     --no-install-package deep-ep \
     --no-install-package deep-gemm \

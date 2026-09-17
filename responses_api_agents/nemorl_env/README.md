@@ -7,8 +7,9 @@ A native Gym agent for evaluating agent-authored post-training code.
 2. A one-GPU sandbox applies the patch and trains Qwen2.5-1.5B-Instruct with
    GRPO: 8 prompts × 8 responses. Training, authored builds, and checkpoint export
    share a hard 60-minute budget after pristine setup.
-3. A fresh, unpatched GPU sandbox evaluates tensor weights on 32 held-out math
-   examples and 30 AIME25 problems, using a 32K output budget and boxed answers.
+3. A fresh, unpatched GPU sandbox serves tensor weights with vLLM and runs
+   `gym eval run` on 32 held-out math examples and 30 AIME25 problems with boxed
+   answers. Generation gets the model's 32K context minus the prompt tokens.
 
 Reward is `(math accuracy + AIME25 accuracy) / 2`. Held-out data and evaluator
 credentials never enter author/training sandboxes. Infrastructure failures are

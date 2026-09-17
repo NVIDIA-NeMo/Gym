@@ -6,11 +6,18 @@ import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from omegaconf import OmegaConf
+
+from nemo_gym.config_types import DatasetConfig
+from nemo_gym.global_config import GlobalConfigDictParser
 
 
 TASK = Path(__file__).parents[1] / "task_environment"
@@ -122,6 +129,7 @@ def test_bootstrap_separates_pristine_setup_from_authored_execution(tmp_path, mo
     assert ("apt-get " in commands) is (mode != "execute")
     assert ("sed -i " in commands) is (mode != "setup")
     assert "uv sync --frozen" in commands
+    assert ("--extra vllm --extra nemo_gym" in commands) is (stage == "eval")
     applies_patch = stage == "train" and mode != "setup"
     assert ("apply --check /root/change.diff" in commands) is applies_patch
     if mode == "setup":
@@ -176,41 +184,100 @@ def test_real_timeout_checker_counts_model_initialization(tmp_path, monkeypatch,
     ]
 
 
-def test_evaluation_config_is_pristine_and_has_no_resume(base_config):
-    tree = ast.parse((TASK / "evaluate.py").read_text())
+@pytest.mark.parametrize("failure", [None, "missing", "duplicate", "reward", "sidecar", "subprocess"])
+def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeypatch, capsys, failure):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    for benchmark, count, question_key, answer_key in (
+        ("math_eval", 32, "input", "output"),
+        ("aime25", 30, "question", "expected_answer"),
+    ):
+        (tmp_path / f"{benchmark}.jsonl").write_text(
+            "".join(json.dumps({question_key: f"{benchmark}-{i}", answer_key: "42"}) + "\n" for i in range(count))
+        )
+    tree = ast.parse((TASK / "evaluate.py").read_text().replace("/root/", str(tmp_path) + "/"))
     start = next(
         i
         for i, node in enumerate(tree.body)
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "cfg"
     )
-    stop = next(i for i in range(start, len(tree.body)) if isinstance(tree.body[i], ast.For))
+    server = MagicMock()
+    server.poll.return_value = None
+    tokenizer = MagicMock()
+    tokenizer.apply_chat_template.return_value = [1] * 100
+
+    def run_gym(command, **kwargs):
+        assert command[:3] == [str(tmp_path / ".venv/bin/gym"), "eval", "run"]
+        assert kwargs["cwd"] == tmp_path / "3rdparty/Gym-workspace/Gym"
+        assert kwargs["check"]
+        assert command[command.index("--num-repeats") + 1] == "1"
+        assert command[command.index("--split") + 1] == "validation"
+        assert "--model-type" not in command
+        assert "--max-output-tokens" not in command
+        if failure == "subprocess":
+            raise subprocess.CalledProcessError(1, command)
+        rows = [json.loads(line) for line in (tmp_path / "eval_inputs.jsonl").read_text().splitlines()]
+        assert len(rows) == 62
+        assert all(row["responses_create_params"]["max_output_tokens"] == 32668 for row in rows)
+        assert all("\\boxed{}" in row["responses_create_params"]["input"][0]["content"] for row in rows)
+        for row in rows:
+            row["reward"] = float(row.pop("question").startswith("aime25"))
+            row["response"] = {"output": []}
+        rows.reverse()
+        if failure == "missing":
+            rows.pop()
+        elif failure == "duplicate":
+            rows[-1] = rows[0]
+        elif failure == "reward":
+            rows[0]["reward"] = 0.5
+        elif failure == "sidecar":
+            (tmp_path / "eval_rollouts_failures.jsonl").write_text('{"error":"timeout"}\n')
+        (tmp_path / "eval_rollouts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+
     namespace = {
         "OmegaConf": OmegaConf,
-        "repo": Path("/pristine/NeMo-RL"),
-        "model_dir": Path("/testbed/eval_model"),
+        "repo": tmp_path,
+        "work": tmp_path,
+        "model_dir": tmp_path / "eval_model",
+        "AutoTokenizer": SimpleNamespace(from_pretrained=MagicMock(return_value=tokenizer)),
+        "Path": Path,
+        "json": json,
         "os": os,
+        "sys": sys,
+        "time": time,
+        "urllib": urllib,
+        "subprocess": subprocess,
     }
-    with patch.object(OmegaConf, "load", return_value=base_config) as load:
-        exec(compile(ast.Module(body=tree.body[start:stop], type_ignores=[]), "evaluate.py", "exec"), namespace)
-    load.assert_called_once_with(Path("/pristine/NeMo-RL/examples/configs/grpo_math_1B.yaml"))
-    cfg = namespace["cfg"]
-    assert [data.data_path for data in cfg.data.validation] == ["/root/math_eval.jsonl", "/root/aime25.jsonl"]
-    assert all(data.split_validation_size == 0 for data in cfg.data.validation)
-    assert [data.prompt_file for data in cfg.data.validation] == [
-        "examples/prompts/cot.txt",
-        "/testbed/cot_prompt.txt",
-    ]
-    assert cfg.data.train.split_validation_size == 0
-    assert cfg.data.default.system_prompt_file is None
-    assert cfg.grpo.val_at_start and cfg.grpo.stop_at_validation_threshold == 0.0
-    assert cfg.grpo.max_val_samples == 62 and cfg.grpo.val_batch_size == 2
-    assert not cfg.checkpointing.enabled and cfg.checkpointing.checkpoint_must_save_by is None
-    assert cfg.policy.model_name == cfg.policy.tokenizer.name == "/testbed/eval_model"
-    generation = cfg.policy.generation
-    assert generation.max_new_tokens == generation.vllm_cfg.max_model_len == 32768
-    assert generation.temperature == generation.val_temperature == 0.0
-    assert generation.top_p == generation.val_top_p == 1.0
-    assert generation.top_k == generation.val_top_k == -1
+    with (
+        patch.object(subprocess, "Popen", return_value=server) as popen,
+        patch.object(subprocess, "run", side_effect=run_gym),
+        patch.object(urllib.request, "urlopen", return_value=MagicMock()),
+    ):
+        code = compile(ast.Module(body=tree.body[start:], type_ignores=[]), "evaluate.py", "exec")
+        if failure:
+            expected = subprocess.CalledProcessError if failure == "subprocess" else RuntimeError
+            with pytest.raises(expected):
+                exec(code, namespace)
+        else:
+            exec(code, namespace)
+    server.terminate.assert_called_once()
+    server.wait.assert_called_once_with(timeout=30)
+    assert popen.call_args.args[0][:3] == [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
+    _, configs = GlobalConfigDictParser().load_extra_config_paths([str(tmp_path / "gym_eval.yaml")])
+    cfg = OmegaConf.merge(*configs)
+    assert not cfg.policy_model.responses_api_models.vllm_model.uses_reasoning_parser
+    assert cfg.policy_model.responses_api_models.vllm_model.entrypoint == "app.py"
+    assert not cfg.math_with_judge.resources_servers.math_with_judge.should_use_judge
+    datasets = cfg.math_with_judge_simple_agent.responses_api_agents.simple_agent.datasets
+    assert len(datasets) == 1
+    dataset = DatasetConfig.model_validate(OmegaConf.to_container(datasets[0]))
+    assert dataset.type == "validation" and dataset.num_repeats == 1
+    assert dataset.jsonl_fpath == str(tmp_path / "eval_inputs.jsonl")
+    output = capsys.readouterr().out
+    if failure:
+        assert "NEMORL_ENV_RESULT=" not in output
+    else:
+        result = json.loads(output.split("NEMORL_ENV_RESULT=")[1])
+        assert result == {"reward": 0.5, "math_eval_exact": 0.0, "aime25_exact": 1.0, "completed": 1, "wandb_url": ""}
 
 
 def test_legacy_checkpoint_exports_only_bfloat16_safetensors(tmp_path, capsys):
