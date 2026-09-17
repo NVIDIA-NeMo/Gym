@@ -15,11 +15,13 @@ from time import time
 from typing import Any, Optional
 from uuid import uuid4
 
+import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -168,12 +170,14 @@ class SimpleStrandsAgentVerifyResponse(BaseVerifyResponse):
     finished_naturally: bool = False
 
 
-class SimpleStrandsAgent(SimpleResponsesAPIAgent):
+class SimpleStrandsAgent(CLIResponsesAPIAgent):
     config: SimpleStrandsAgentConfig
+    observation_source = "simple_strands"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
 
     def _workspace(self) -> Path:
@@ -229,7 +233,18 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         return result
 
     @staticmethod
-    async def _terminate_process(process, communication: asyncio.Task) -> None:
+    async def _terminate_process(
+        process: asyncio.subprocess.Process, communication: asyncio.Task[tuple[bytes, bytes]]
+    ) -> None:
+        # The runner's bash tool starts a new process group. Snapshot its
+        # descendants before stopping the runner so those commands cannot be
+        # orphaned and outlive agent-session close.
+        descendants: list[psutil.Process] = []
+        with suppress(psutil.NoSuchProcess):
+            descendants = psutil.Process(process.pid).children(recursive=True)
+        for child in reversed(descendants):
+            with suppress(psutil.NoSuchProcess):
+                child.kill()
         if process.returncode is None:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGTERM)
@@ -239,8 +254,13 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             await communication
+        _, alive = await asyncio.to_thread(psutil.wait_procs, descendants, timeout=3)
+        for child in alive:
+            with suppress(psutil.NoSuchProcess):
+                if child.status() != psutil.STATUS_ZOMBIE:
+                    raise RuntimeError(f"SSA child process {child.pid} is still running after cleanup")
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

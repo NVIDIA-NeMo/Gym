@@ -36,8 +36,8 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -80,7 +80,7 @@ def _process_groups_with_env(key: str, value: str, proc_root: Path = Path("/proc
     marker = f"{key}={value}".encode()
     process_groups: list[int] = []
     try:
-        entries = proc_root.iterdir()
+        entries = list(proc_root.iterdir())
     except OSError:
         return process_groups
 
@@ -278,12 +278,14 @@ class PrimeAgentVerifyResponse(BaseVerifyResponse):
     finished_naturally: bool = False
 
 
-class PrimeAgent(SimpleResponsesAPIAgent):
+class PrimeAgent(CLIResponsesAPIAgent):
     config: PrimeAgentConfig
+    observation_source = "prime"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if command == "prime-agent":
@@ -421,7 +423,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             shutil.rmtree(work_dir, ignore_errors=True)
             shutil.rmtree(socket_dir, ignore_errors=True)
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

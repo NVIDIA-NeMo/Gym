@@ -449,6 +449,9 @@ class TestModelServer:
 
 
 class TestSetup:
+    def test_process_discovery_handles_missing_proc_filesystem(self, tmp_path: Path) -> None:
+        assert _process_groups_with_env("PRIME_AGENT_CODING_AGENT_DIR", "isolated", tmp_path / "absent") == []
+
     def test_existing_version_matches_pin(self) -> None:
         result = CompletedProcess(["prime-agent", "--version"], 0, stdout="0.7.0\n", stderr="")
         with (

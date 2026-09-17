@@ -3,11 +3,14 @@
 
 import asyncio
 import json
+import os
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import psutil
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -193,6 +196,10 @@ async def test_run_ssa_terminates_on_cancellation(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
     monkeypatch.setattr("responses_api_agents.simple_strands_agent.app.os.killpg", killpg)
+    monkeypatch.setattr(
+        "responses_api_agents.simple_strands_agent.app.psutil.Process",
+        MagicMock(return_value=SimpleNamespace(children=lambda recursive: [])),
+    )
     agent = SimpleNamespace(
         config=SimpleNamespace(timeout=60),
         _terminate_process=SimpleStrandsAgent._terminate_process,
@@ -203,3 +210,42 @@ async def test_run_ssa_terminates_on_cancellation(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(asyncio.CancelledError):
         await task
     assert process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Process groups require POSIX")
+async def test_termination_reaps_shell_in_separate_process_group(tmp_path: Path) -> None:
+    child_file = tmp_path / "child.pid"
+    worker = (
+        "import subprocess, sys; from pathlib import Path; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True); "
+        f"Path({str(child_file)!r}).write_text(str(child.pid)); child.wait()"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        worker,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    communication = asyncio.create_task(process.communicate())
+    child = None
+    try:
+        async with asyncio.timeout(10):
+            while not child_file.exists():
+                await asyncio.sleep(0.01)
+        child = psutil.Process(int(child_file.read_text()))
+        assert os.getpgid(child.pid) != process.pid
+        await asyncio.wait_for(SimpleStrandsAgent._terminate_process(process, communication), timeout=5)
+        assert process.returncode is not None
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+    finally:
+        if child is not None and child.is_running():
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(asyncio.shield(communication), timeout=5)
