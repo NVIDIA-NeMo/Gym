@@ -396,8 +396,11 @@ class TestObservability:
 
 
 class TestRunClaudeCode:
-    def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
-        agent = _make_agent(mcp_config="/path/to/mcp.json")
+    @pytest.mark.parametrize("model_name", ["claude-sonnet-4-6", "nvidia/qwen/qwen3.8-27b", "Qwen/Qwen3.8-27B"])
+    def test_wires_command_env_and_cleans_up(self, tmp_path: Path, model_name: str) -> None:
+        agent = _make_agent(
+            mcp_config="/path/to/mcp.json", model=model_name, anthropic_base_url="http://localhost:8000"
+        )
         captured: dict = {}
 
         class FakeProc:
@@ -412,6 +415,15 @@ class TestRunClaudeCode:
 
         async def fake_exec(*cmd, **kwargs):
             env = kwargs["env"]
+            for key in (
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "CLAUDE_CODE_SUBAGENT_MODEL",
+            ):
+                assert env[key] == model_name
+            assert cmd[cmd.index("--model") + 1] == model_name
             config_dir = env["CLAUDE_CONFIG_DIR"]
             captured["cmd"] = list(cmd)
             captured["config_dir"] = config_dir
@@ -434,7 +446,7 @@ class TestRunClaudeCode:
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
         assert output_items == []
-        assert model == "claude-sonnet-4-6"
+        assert model == model_name
         assert metadata["status"] == "completed"
 
     def test_skills_staged_and_bare_dropped(self, tmp_path: Path) -> None:

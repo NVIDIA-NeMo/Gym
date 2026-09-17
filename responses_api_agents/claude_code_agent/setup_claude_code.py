@@ -15,6 +15,7 @@
 
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -26,13 +27,22 @@ LOG = logging.getLogger(__name__)
 
 _CLAUDE_PKG = "@anthropic-ai/claude-code"
 _NODE_VERSION = "22.15.0"
-_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.xz"
-_LOCAL_PREFIX = Path(__file__).parent / ".claude_node"
+_NODE_ARCH = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+if _NODE_ARCH is None:
+    raise RuntimeError(f"Unsupported Node.js architecture: {platform.machine()}")
+_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
+_LOCAL_PREFIX = Path(__file__).parent / f".claude_node_{_NODE_ARCH}"
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
     pkg = f"{_CLAUDE_PKG}@{version}" if version else f"{_CLAUDE_PKG}@latest"
-    subprocess.run([npm_bin, "install", "-g", pkg], check=True)
+    npm_cache = _LOCAL_PREFIX / ".npm-cache"
+    npm_cache.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [npm_bin, "install", "-g", pkg],
+        check=True,
+        env={**os.environ, "NPM_CONFIG_CACHE": str(npm_cache)},
+    )
 
 
 def _install_node_locally() -> Path:

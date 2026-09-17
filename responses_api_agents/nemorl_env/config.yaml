@@ -1,0 +1,66 @@
+nemorl_env:
+  responses_api_agents:
+    nemorl_env:
+      entrypoint: app.py
+      domain: coding
+      description: Train models to train models.
+      value: Post-training evaluation and training.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      sandbox_provider: train_sandbox
+      author_sandbox_provider: author_sandbox
+      author_image: ${oc.env:NEMORL_ENV_AUTHOR_IMAGE}
+      author_image_auth:
+        username: ${oc.env:NEMORL_ENV_REGISTRY_USER}
+        password: ${oc.env:NEMORL_ENV_REGISTRY_PASSWORD}
+      image: pytorch/pytorch@sha256:1ba3f20399f5e4f9835cde308a4de86c3e63ba098caee367e490ec5455afc02a
+      aime25_path: benchmarks/aime25/data/aime25_benchmark.jsonl
+      train_seconds: 3600
+      research_seconds: 3600
+      max_turns: 200
+      concurrency: 32
+      eval_concurrency: 30
+      token_id_capture: false
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/nemorl_env/data/train.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/nemorl_env/data/example.jsonl
+
+author_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_CPU_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_CPU_API_KEY}
+      protocol: http
+      use_server_proxy: true
+      request_timeout_s: 300
+      keepalive_expiry_s: 3
+      transport_backend: aiohttp
+    create:
+      timeout_s: 1500
+      request_timeout_s: 1200
+      retries: 0
+    operations:
+      background_exec: true
+
+train_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_GPU_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_GPU_API_KEY}
+      protocol: http
+      use_server_proxy: true
+      request_timeout_s: 300
+      keepalive_expiry_s: 3
+      transport_backend: aiohttp
+    create:
+      timeout_s: 1500
+      request_timeout_s: 1200
+      retries: 0
+    operations:
+      background_exec: true
