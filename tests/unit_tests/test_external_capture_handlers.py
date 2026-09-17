@@ -57,7 +57,7 @@ def _transport_payload(**fields: Any) -> dict[str, Any]:
         "generation_token_ids": [12],
         "generation_log_probs": [-0.2],
         "routed_experts": {"data": "unused"},
-        # Megatron ``return_tokenized_data`` echo, absent from vLLM payloads.
+        # Megatron prompt-form echo, absent from vLLM payloads; stripped defensively.
         "compact_prompt_token_ids": [10, 11],
     }
     message.update(fields)
@@ -92,12 +92,12 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     ("handler", "request_payload", "metadata_field", "token_return_field"),
     [
         (VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
-        (MegatronWorkerCaptureHandler(), {}, "offload_params", "return_tokenized_data"),
+        (MegatronWorkerCaptureHandler(), {}, "offload_params", None),
         (
             MegatronWorkerCaptureHandler(),
             {"offload_params": {"caller_metadata": "preserved"}},
             "offload_params",
-            "return_tokenized_data",
+            None,
         ),
     ],
     ids=["vllm", "megatron", "megatron-existing-metadata"],
@@ -123,11 +123,13 @@ def test_handler_prepares_worker_staged_request(
         assert "ng_capture" not in payload
     assert payload["logprobs"] is True
     assert payload["top_logprobs"] == 0
-    assert payload[token_return_field] is True
-    other_token_return_field = (
-        "return_tokenized_data" if token_return_field == "return_tokens_as_token_ids" else "return_tokens_as_token_ids"
-    )
-    assert other_token_return_field not in payload
+    if token_return_field is None:
+        # Megatron stages the delta on the worker; Gym asks for no token echo.
+        assert "return_tokenized_data" not in payload
+        assert "return_tokens_as_token_ids" not in payload
+    else:
+        assert payload[token_return_field] is True
+        assert "return_tokenized_data" not in payload
 
 
 @pytest.mark.parametrize(

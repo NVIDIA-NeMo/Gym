@@ -37,8 +37,9 @@ from nemo_gym.token_id_capture.staging.records import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Megatron's ``return_tokenized_data`` echoes the exact prompt token form it
-# uses for lossless multi-turn prefix stitching alongside ``TOKEN_FIELDS``.
+# Megatron may echo the exact prompt token form it uses for lossless
+# multi-turn prefix stitching. Gym does not request or read it, but strips it
+# defensively alongside ``TOKEN_FIELDS`` so it never reaches the agent hop.
 _MEGATRON_TRANSPORT_FIELDS = ("compact_prompt_token_ids",)
 
 
@@ -307,11 +308,9 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         if not isinstance(offload_params, dict):
             raise ValueError("Megatron offload_params must be an object")
         offload_params[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
-        request_payload.update(
-            logprobs=True,
-            top_logprobs=0,
-            return_tokenized_data=True,
-        )
+        # The worker stages the token delta itself, so Gym requests no token
+        # echo (``return_tokenized_data``) on the HTTP path.
+        request_payload.update(logprobs=True, top_logprobs=0)
         return request_payload
 
 

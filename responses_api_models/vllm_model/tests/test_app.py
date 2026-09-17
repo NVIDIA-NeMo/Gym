@@ -856,11 +856,14 @@ class TestApp:
         finally:
             reset_token_sink(token)
 
-        assert outbound["return_tokenized_data"] is True
-        assert outbound["required_prefix_token_ids"] == [10, 11, 12]
+        # The prefix contract travels only inside the admission in offload_params;
+        # the worker resolves it from staging_chain, so the body carries no prefix
+        # copy and requests no token echo.
+        assert "return_tokenized_data" not in outbound
+        assert "required_prefix_token_ids" not in outbound
         assert outbound["logprobs"] is True
         assert outbound["top_logprobs"] == 0
-        assert outbound["request_metadata"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+        assert outbound["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
         assert "ng_capture" not in outbound
         assert "return_tokens_as_token_ids" not in outbound
 
@@ -956,8 +959,8 @@ class TestApp:
             reset_token_sink(token)
 
         outbound = client.create_chat_completion.await_args.kwargs
-        assert outbound["return_tokenized_data"] is True
-        assert outbound["request_metadata"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+        assert "return_tokenized_data" not in outbound
+        assert outbound["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
         assert "ng_capture" not in outbound
         assert context.committed is True
         manifest = await lineage_store.manifest("rollout-1")
