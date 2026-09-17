@@ -469,7 +469,7 @@ class KiloCodeAgent(CLIResponsesAPIAgent):
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def legacy_responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

@@ -664,7 +664,7 @@ class PiAgent(CLIResponsesAPIAgent):
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
-    async def legacy_responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

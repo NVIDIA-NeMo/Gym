@@ -73,10 +73,10 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
         return CLIActivation()
 
     @abstractmethod
-    async def legacy_responses(
+    async def _execute_responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
-        """Run the existing CLI path, including its original observation hooks."""
+        """Execute the harness for native and compatibility calls, including observation hooks."""
         raise NotImplementedError
 
     async def responses(
@@ -84,7 +84,7 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self.agent_session_id_from_request(request)
         if session_id is None:
-            return await self.legacy_responses(request, body)
+            return await self._execute_responses(request, body)
         rollout_id = request.path_params.get("rollout_id")
         if not isinstance(rollout_id, str):
             raise HTTPException(409, "Native CLI activation requires a rollout-prefixed Responses route")
@@ -100,7 +100,7 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
             if self.sem is None:
                 raise RuntimeError("CLI concurrency semaphore is not initialized")
             async with self.sem:
-                response = await self.legacy_responses(request, body)
+                response = await self._execute_responses(request, body)
             response = response.model_copy(deep=True)
             raw = (response.model_extra or {}).get("_ng_agent_observations")
             if raw is not None:

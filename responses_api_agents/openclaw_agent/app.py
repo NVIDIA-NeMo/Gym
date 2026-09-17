@@ -753,7 +753,7 @@ class OpenClawAgent(CLIResponsesAPIAgent):
             ),
         )
 
-    async def legacy_responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
