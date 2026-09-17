@@ -592,8 +592,8 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
         transport = provider._build_transport()
         assert isinstance(transport, httpx.AsyncHTTPTransport)
 
-    # keepalive_expiry_s=null disables transport injection entirely.
-    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    # SDK transport defaults are sufficient when certificate verification is enabled.
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None, "tls_verify": True})
     config = provider._connection_config()
     assert "transport" not in config.kwargs
 
@@ -626,6 +626,47 @@ async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensa
 
     await provider.aclose()
     assert transport.aclosed
+    assert provider._transport is None
+
+
+@pytest.mark.parametrize("backend", ["httpx", "aiohttp"])
+@pytest.mark.parametrize("verify", [True, False])
+@pytest.mark.parametrize(
+    "keepalive_expiry_s,disable_pooling", [(None, False), (3.0, False), (None, True), (3.0, True)]
+)
+async def test_connection_tls_is_independent_of_pool_settings(
+    fake_opensandbox_sdk: None,
+    backend: str,
+    verify: bool,
+    keepalive_expiry_s: float | None,
+    disable_pooling: bool,
+) -> None:
+    import ssl
+
+    if backend == "aiohttp":
+        pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": backend,
+            "tls_verify": verify,
+            "keepalive_expiry_s": keepalive_expiry_s,
+            "disable_connection_pooling": disable_pooling,
+        }
+    )
+    try:
+        config = provider._connection_config()
+        if verify and keepalive_expiry_s is None and not disable_pooling:
+            # The SDK verifies certificates by default; no custom transport is needed.
+            assert "transport" not in config.kwargs
+            assert provider._transport is None
+        else:
+            transport = config.kwargs["transport"]
+            context = transport.ssl_context if backend == "aiohttp" else transport._pool._ssl_context
+            assert context.verify_mode == (ssl.CERT_REQUIRED if verify else ssl.CERT_NONE)
+            assert context.check_hostname is verify
+            assert provider._connection_config().kwargs["transport"] is transport
+    finally:
+        await provider.aclose()
     assert provider._transport is None
 
 

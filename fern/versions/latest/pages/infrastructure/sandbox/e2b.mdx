@@ -21,9 +21,25 @@ For a package install, use:
 pip install "nemo-gym[sandbox]"
 ```
 
-The provider requires `e2b>=2.36.0,<3.0.0`. Set `E2B_API_KEY` for the hosted service. For a
-compatible gateway, also set `E2B_API_URL` and `E2B_SANDBOX_URL` to the endpoints supplied by
-the gateway operator.
+The provider requires `e2b>=2.36.0,<3.0.0`.
+
+### Get service access
+
+For **hosted E2B**, follow the [API-key quickstart](https://docs.e2b.dev/quickstart)
+and get a key from the [E2B console](https://console.e2b.dev/?tab=keys). For shared
+accounts, confirm membership and template access with the administrator.
+Check sandbox creation/cleanup permissions, template-build permissions if needed,
+and [plan limits](https://e2b.dev/pricing) for concurrency, lifetime, and cost.
+
+Set `E2B_API_KEY` in the host environment through your secret manager; it is
+separate from model and registry credentials. Leave `E2B_API_URL` and
+`E2B_SANDBOX_URL` unset for hosted E2B unless instructed otherwise.
+
+For an **E2B-compatible gateway**, obtain credentials, API/sandbox URLs, network
+requirements, template permissions, and quota from its operator. Gateway access
+uses the operator's authentication settings. Set `E2B_API_URL` and
+`E2B_SANDBOX_URL` to the supplied endpoints; the operator may also require
+`connection.api_headers`. Keep secret values out of checked-in YAML.
 
 ## Provider Config
 
