@@ -392,7 +392,7 @@ class RunHelper:  # pragma: no cover
         initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
-        escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
+        config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -430,11 +430,13 @@ class RunHelper:  # pragma: no cover
             dir_path = _resolve_server_dir(Path(first_key, second_key))
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+    && python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            extra_env = {
+                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
+                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
+            }
+            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
