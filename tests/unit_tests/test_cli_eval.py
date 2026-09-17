@@ -12,12 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import sys
 from pathlib import Path
 
 import pytest
+import requests
 from omegaconf import DictConfig
+from pytest import MonkeyPatch
 
+import nemo_gym.global_config
+import nemo_gym.server_utils
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
+from nemo_gym.cli.main import main
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 
 
@@ -102,3 +109,57 @@ class TestValidatePreparedSplitFileExists:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(ConfigError, match=r"none"):
             _validate_prepared_split_file_exists(missing_dir / "train.jsonl", "train", missing_dir)
+
+
+class TestEvalRunNoServeWithoutHeadServer:
+    """`gym eval run --no-serve` collects against servers that are already running, so nothing listening
+    on the head server port is the user's most likely mistake (#2687). Driven through the real `main()`
+    so the whole path is exercised: the config is parsed, the rows are materialized, and the head server
+    fetch is the only thing faked (it refuses the connection, exactly as a closed port does)."""
+
+    def _arrange_no_serve_run_against_a_closed_port(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(json.dumps({"responses_create_params": {"input": "hi"}}) + "\n")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "gym",
+                "eval",
+                "run",
+                "--no-serve",
+                "--agent",
+                "simple_agent",
+                "-i",
+                str(input_path),
+                "-o",
+                str(tmp_path / "out.jsonl"),
+            ],
+        )
+        # A clean cwd so no repo-local env.yaml is merged in, and a fresh parse of the argv above.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        # Rich soft-wraps at 80 columns when stdout is not a TTY, which would split the message mid-sentence.
+        monkeypatch.setenv("COLUMNS", "1000")
+
+        # `requests.exceptions.ConnectionError` is what `ServerClient.load_from_global_config` catches; it is
+        # unrelated to the builtin `ConnectionError`, which would sail straight through.
+        def refuse(*args, **kwargs):
+            raise requests.exceptions.ConnectionError("[Errno 61] Connection refused")
+
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", refuse)
+
+    def test_exits_one_with_a_single_error_line_and_no_traceback(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        self._arrange_no_serve_run_against_a_closed_port(tmp_path, monkeypatch)
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: Could not connect to the head server at http://127.0.0.1:11000." in captured.out
+        assert "Start it with: `gym env start`." in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        assert "ValueError" not in captured.out + captured.err
