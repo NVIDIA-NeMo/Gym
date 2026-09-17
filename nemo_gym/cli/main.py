@@ -564,39 +564,17 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
             )
 
 
-def _validate_submit_config(config_path: Path, resolved: dict):
-    """`SubmitConfig.model_validate`, returning the model or raising a `ConfigError` that names the file.
-
-    `SubmitConfig` is an orchestration model, not a `BaseNeMoGymCLIConfig`, so main()'s friendly handler
-    would re-raise its `ValidationError` as a traceback. That handler's "+key=<value>" hint would also be
-    wrong here: the fields live in the YAML file, not on the command line.
-    """
-    from pydantic import ValidationError
-
-    from nemo_gym.config_types import ConfigError
-    from nemo_gym.orchestration.api import SubmitConfig
-
-    try:
-        return SubmitConfig.model_validate(resolved)
-    except ValidationError as e:
-        missing, invalid = _describe_validation_errors(e)
-        parts: list[str] = []
-        if missing:
-            parts.append(f"missing required configuration: {', '.join(missing)}")
-        if invalid:
-            parts.append(f"invalid configuration: {'; '.join(invalid)}")
-        raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
-
-
 @exit_cleanly_on_config_error
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     import rich
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
+    from pydantic import ValidationError
     from rich.markup import escape
 
     from nemo_gym.config_types import ConfigError
+    from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -617,9 +595,20 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
-    config = _validate_submit_config(
-        config_path, {key: value for key, value in resolved.items() if key not in scratch_keys}
-    )
+    # SubmitConfig is an orchestration model: report schema errors against its YAML file
+    # rather than using the generic CLI handler's +key=<value> hint.
+    try:
+        config = SubmitConfig.model_validate(
+            {key: value for key, value in resolved.items() if key not in scratch_keys}
+        )
+    except ValidationError as e:
+        missing, invalid = _describe_validation_errors(e)
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing required configuration: {', '.join(missing)}")
+        if invalid:
+            parts.append(f"invalid configuration: {'; '.join(invalid)}")
+        raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
 
     record = submit(config, dry_run=args.dry_run)
     if record is None:
