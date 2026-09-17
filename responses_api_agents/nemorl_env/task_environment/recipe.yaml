@@ -1,7 +1,12 @@
+defaults: NeMo-RL/examples/configs/grpo_math_1B.yaml
+
 grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8
   normalize_rewards: true
   use_leave_one_out_baseline: true
   overlong_filtering: false
+  max_val_samples: null
 loss_fn:
   reference_policy_kl_penalty: 0.01
   reference_policy_kl_type: k3
@@ -9,7 +14,9 @@ loss_fn:
   ratio_clip_max: 0.2
   token_level_loss: true
 policy:
-  max_total_sequence_length: 256
+  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  train_global_batch_size: 64
+  max_total_sequence_length: 2048
   train_micro_batch_size: 1
   logprob_batch_size: 1
   dtensor_cfg:
@@ -20,18 +27,49 @@ policy:
       lr: 5.0e-6
       weight_decay: 0.01
   generation:
+    max_new_tokens: 1024
     temperature: 1.0
     top_p: 1.0
+    top_k: null
     vllm_cfg:
-      gpu_memory_utilization: 0.45
+      async_engine: true
+      expose_http_server: true
+      skip_tokenizer_init: false
+      gpu_memory_utilization: 0.2
       enforce_eager: true
 data:
+  _override_: true
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  use_multiple_dataloader: false
   train:
-    dataset_name: ResponseDataset
-    data_path: /testbed/train_math.jsonl
-    input_key: input
-    output_key: output
+    data_path: /testbed/gym_train.jsonl
+    split_validation_size: 0
+  validation: null
   default:
-    prompt_file: examples/prompts/cot.txt
-    processor: math_hf_data_processor
-    env_name: math
+    dataset_name: NemoGymDataset
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+    env_name: nemo_gym
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: false
+    math_with_judge_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          datasets: []
+cluster:
+  num_nodes: 1
+  gpus_per_node: 1

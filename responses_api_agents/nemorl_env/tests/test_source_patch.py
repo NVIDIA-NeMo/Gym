@@ -15,7 +15,7 @@ from responses_api_agents.nemorl_env import author_worker
 
 
 @pytest.fixture
-def source_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def source_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared_task_environment) -> Path:
     monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.invalid")

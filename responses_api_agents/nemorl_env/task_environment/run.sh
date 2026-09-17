@@ -54,12 +54,8 @@ if [[ "$mode" != execute ]]; then
   /opt/conda/bin/python -m pip install -q --upgrade uv==0.12.9
 fi
 cd "$NEMORL_ROOT"
-sync_args=(--frozen)
-if [[ "$stage" == eval ]]; then
-  sync_args+=(--extra vllm --extra nemo_gym)
-fi
 for attempt in {1..5}; do
-  /opt/conda/bin/uv sync "${sync_args[@]}" \
+  /opt/conda/bin/uv sync --frozen --extra vllm --extra nemo_gym \
     --no-install-package nvidia-cutlass-dsl-libs-base \
     --no-install-package deep-ep \
     --no-install-package deep-gemm \

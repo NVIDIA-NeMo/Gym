@@ -21,7 +21,7 @@ from responses_api_agents.nemorl_env.app import NeMoRLEnvAgent, NeMoRLEnvConfig,
 
 
 @pytest.fixture
-def agent():
+def agent(prepared_task_environment):
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = OmegaConf.create(
         {

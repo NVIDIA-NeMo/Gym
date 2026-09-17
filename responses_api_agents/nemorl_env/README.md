@@ -5,7 +5,8 @@ A native Gym agent for evaluating agent-authored post-training code.
 1. Claude Code edits a recipe and pinned NeMo RL/Gym sources in a CPU sandbox
    (60 minutes, 200 turns, 256K context). Core loss and data-processing changes are accepted.
 2. A one-GPU sandbox applies the patch and trains Qwen2.5-1.5B-Instruct with
-   GRPO: 8 prompts × 8 responses. Training, authored builds, and checkpoint export
+   NeMo RL + NeMo Gym GRPO: 8 prompts × 8 responses, with Gym's math verifier.
+   Training, authored builds, and checkpoint export
    share a hard 60-minute budget after pristine setup.
 3. A fresh, unpatched GPU sandbox serves tensor weights with vLLM and runs
    `gym eval run` on 32 held-out math examples and 30 AIME25 problems with boxed
@@ -25,13 +26,24 @@ Configure `policy_model` with an OpenAI-compatible author endpoint. Set:
 - `NEMORL_ENV_AUTHOR_IMAGE`, `NEMORL_ENV_REGISTRY_USER`, and `NEMORL_ENV_REGISTRY_PASSWORD`
   for the author image, which must provide Python at `/agent_deps_mount/bin/python`, uv, and Git.
 
-Prepare AIME25 with `gym eval prepare --benchmark aime25`.
+Generate local datasets (not checked into Git):
+
+```bash
+python responses_api_agents/nemorl_env/prepare.py
+gym eval prepare --benchmark aime25
+```
+
 `app.py` orchestrates the sandboxes; `author_worker.py` runs Claude Code.
 `task_environment/` contains the recipe, training data, runner, and evaluator.
+`recipe.yaml` explicitly inherits NeMo RL's full `grpo_math_1B.yaml`; it is an
+editable override, not a standalone config. The launcher writes the complete
+`/testbed/resolved_grpo.yaml` before training. Data/environment edits are retained;
+model, batch size, GPU/time budget, and held-out evaluation remain fixed.
 `data/train.jsonl` contains eight author prompts; `data/math_eval.jsonl` is held out.
 Checkpoint transfers are serialized and buffered in memory; provision driver
 memory for one transfer and disk for queued checkpoints.
 
 Math data: the first 512 training rows of NVIDIA's
 [OpenMathInstruct-2](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2)
-(CC-BY-4.0), split 480/32 with `problem`/`expected_answer` renamed to `input`/`output`.
+(CC-BY-4.0), split 480/32 with seed 42 and `problem`/`expected_answer` renamed
+to `input`/`output`. Preparation pins the source revision and preserves the existing split.

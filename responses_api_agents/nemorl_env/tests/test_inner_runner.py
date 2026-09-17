@@ -67,8 +67,13 @@ def test_training_has_no_benchmark_data_or_validation(base_config, monkeypatch, 
     else:
         monkeypatch.setenv("INNER_TRAIN_SECONDS", str(budget))
     authored = OmegaConf.load(TASK / "recipe.yaml")
-    authored.data.default.system_prompt_file = "/root/aime25.jsonl"
-    authored.env = {"math": {"math_verify_impl": "wrong_verifier"}}
+    authored.pop("defaults")
+    authored.data.pop("_override_")
+    authored.env.pop("_override_")
+    base_config.data = authored.data
+    base_config.env = authored.env
+    authored.policy.optimizer.kwargs.lr = 1e-5
+    authored.data.train.data_path = "/testbed/custom_gym_train.jsonl"
     tree = ast.parse((TASK / "launch_inner.py").read_text())
     stop = next(
         i
@@ -76,19 +81,31 @@ def test_training_has_no_benchmark_data_or_validation(base_config, monkeypatch, 
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "train_log"
     )
     nodes = [node for node in tree.body[:stop] if not isinstance(node, (ast.Import, ast.ImportFrom))]
-    namespace = {"OmegaConf": OmegaConf, "Path": Path, "os": os}
-    with patch.object(OmegaConf, "load", side_effect=[base_config, authored]), patch.object(OmegaConf, "save"):
+    namespace = {
+        "OmegaConf": OmegaConf,
+        "Path": Path,
+        "os": os,
+        "load_config": MagicMock(return_value=OmegaConf.merge(base_config, authored)),
+    }
+    with patch.object(OmegaConf, "save"):
         exec(compile(ast.Module(body=nodes, type_ignores=[]), "launch_inner.py", "exec"), namespace)
     cfg = namespace["cfg"]
     assert cfg.grpo.num_prompts_per_step == cfg.grpo.num_generations_per_prompt == 8
     assert cfg.policy.train_global_batch_size == 64
     assert namespace["seconds"] == (3600 if budget is None else budget)
     assert cfg.checkpointing.checkpoint_must_save_by == checkpoint_deadline
-    assert cfg.data.train.data_path == "/testbed/train_math.jsonl"
+    namespace["load_config"].assert_called_once_with(Path("/testbed/recipe.yaml"))
+    assert cfg.policy.optimizer.kwargs.lr == 1e-5
+    assert cfg.data.train.data_path == "/testbed/custom_gym_train.jsonl"
     assert cfg.data.train.split_validation_size == 0 and cfg.data.validation is None
     assert cfg.grpo.val_period == 0 and not cfg.grpo.val_at_start and not cfg.grpo.val_at_end
     assert cfg.data.default.system_prompt_file is None
-    assert cfg.env.math.math_verify_impl == "hf_math_verify"
+    assert cfg.env.should_use_nemo_gym
+    assert cfg.data.default.dataset_name == "NemoGymDataset"
+    assert cfg.data.default.processor == "nemo_gym_data_processor"
+    assert cfg.policy.generation.vllm_cfg.async_engine
+    assert cfg.policy.generation.vllm_cfg.expose_http_server
+    assert not cfg.policy.generation.vllm_cfg.skip_tokenizer_init
     assert cfg.checkpointing.model_save_format is None
 
 
@@ -129,7 +146,7 @@ def test_bootstrap_separates_pristine_setup_from_authored_execution(tmp_path, mo
     assert ("apt-get " in commands) is (mode != "execute")
     assert ("sed -i " in commands) is (mode != "setup")
     assert "uv sync --frozen" in commands
-    assert ("--extra vllm --extra nemo_gym" in commands) is (stage == "eval")
+    assert "--extra vllm --extra nemo_gym" in commands
     applies_patch = stage == "train" and mode != "setup"
     assert ("apply --check /root/change.diff" in commands) is applies_patch
     if mode == "setup":
@@ -142,6 +159,56 @@ def test_bootstrap_separates_pristine_setup_from_authored_execution(tmp_path, mo
             assert commands.index("git apply /root/change.diff") < commands.index("uv sync --frozen")
 
 
+def test_training_rows_use_native_gym_schema(tmp_path):
+    tree = ast.parse((TASK / "launch_inner.py").read_text())
+    start = next(i for i, node in enumerate(tree.body) if isinstance(node, ast.With))
+    originals = [{"input": "Compute 1 + 1", "output": "2"}, {"input": "Compute 2 + 3", "output": 5}]
+    (tmp_path / "train_math.jsonl").write_text("".join(json.dumps(row) + "\n" for row in originals))
+    exec(
+        compile(ast.Module(body=[tree.body[start]], type_ignores=[]), "launch_inner.py", "exec"),
+        {"work": tmp_path, "json": json},
+    )
+    rows = [json.loads(line) for line in (tmp_path / "gym_train.jsonl").read_text().splitlines()]
+    assert len(rows) == len(originals)
+    for row, original in zip(rows, originals, strict=True):
+        assert row["agent_ref"] == {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
+        assert row["question"] == original["input"]
+        assert row["expected_answer"] == str(original["output"])
+        assert row["responses_create_params"]["input"][0]["content"].endswith(original["input"])
+        assert "\\boxed{}" in row["responses_create_params"]["input"][0]["content"]
+
+
+@pytest.mark.parametrize("available", [511, 513])
+def test_prepare_generates_disjoint_splits_and_author_tasks(tmp_path, monkeypatch, available):
+    from responses_api_agents.nemorl_env import prepare
+
+    load = MagicMock(return_value=iter({"problem": f"Problem {i}", "expected_answer": i} for i in range(available)))
+    monkeypatch.setattr(prepare, "load_dataset", load)
+    monkeypatch.setattr(prepare, "ROOT", tmp_path)
+    if available < 512:
+        with pytest.raises(ValueError, match="Expected at least 512"):
+            prepare.prepare()
+        assert not list(tmp_path.rglob("*.jsonl"))
+        return
+    prepare.prepare()
+    train = [json.loads(line) for line in (tmp_path / "task_environment/train_math.jsonl").read_text().splitlines()]
+    evaluation = [json.loads(line) for line in (tmp_path / "data/math_eval.jsonl").read_text().splitlines()]
+    authors = [json.loads(line) for line in (tmp_path / "data/train.jsonl").read_text().splitlines()]
+    assert len(train) == 480 and len(evaluation) == 32
+    assert {row["input"] for row in train}.isdisjoint(row["input"] for row in evaluation)
+    assert sorted(train + evaluation, key=lambda row: int(row["output"])) == [
+        {"input": f"Problem {i}", "output": str(i)} for i in range(512)
+    ]
+    assert [row["output"] for row in evaluation[:3]] == ["176", "51", "152"]
+    assert len(authors) == 8
+    for row in authors:
+        assert row["agent_ref"] == {"type": "responses_api_agents", "name": "nemorl_env"}
+        assert row["responses_create_params"]["input"] == []
+        assert row["responses_create_params"]["metadata"]["problem_statement"]
+    assert load.call_args.kwargs["streaming"] is True
+    assert load.call_args.kwargs["revision"]
+
+
 @pytest.mark.parametrize("anchored", [True, False])
 def test_real_timeout_checker_counts_model_initialization(tmp_path, monkeypatch, anchored):
     timer = pytest.importorskip("nemo_rl.utils.timer")
@@ -150,8 +217,8 @@ def test_real_timeout_checker_counts_model_initialization(tmp_path, monkeypatch,
     else:
         monkeypatch.delenv("INNER_TRAIN_STARTED_AT", raising=False)
     monkeypatch.setenv("PYTHONPATH", str(Path(timer.__file__).parents[2]))
-    (tmp_path / "examples").mkdir()
-    (tmp_path / "examples/run_grpo.py").write_text(
+    (tmp_path / "examples/nemo_gym").mkdir(parents=True)
+    (tmp_path / "examples/nemo_gym/run_grpo_nemo_gym.py").write_text(
         "import json, sys\n"
         "from unittest.mock import patch\n"
         "from nemo_rl.utils.timer import TimeoutChecker\n"
@@ -178,7 +245,7 @@ def test_real_timeout_checker_counts_model_initialization(tmp_path, monkeypatch,
     assert payload["start"] == (1000 if anchored else 1180)
     assert payload["due"] is anchored
     assert payload["argv"] == [
-        str(tmp_path / "examples/run_grpo.py"),
+        str(tmp_path / "examples/nemo_gym/run_grpo_nemo_gym.py"),
         "--config",
         str(tmp_path / "resolved_grpo.yaml"),
     ]

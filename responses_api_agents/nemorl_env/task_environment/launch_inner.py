@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import torch
+from nemo_rl.utils.config import load_config
 from omegaconf import OmegaConf
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
@@ -17,13 +18,9 @@ from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 repo = Path(os.environ.get("NEMORL_ROOT", "/testbed/NeMo-RL"))
 work = Path("/testbed")
 seconds = int(os.environ.get("INNER_TRAIN_SECONDS", "3600"))
-base = OmegaConf.load(repo / "examples/configs/grpo_math_1B.yaml")
-authored = OmegaConf.load(work / "recipe.yaml")
-cfg = OmegaConf.merge(base, authored)
+cfg = load_config(work / "recipe.yaml")
 
 
-cfg.data = base.data
-cfg.env = base.env
 cfg.grpo.num_prompts_per_step = 8
 cfg.grpo.num_generations_per_prompt = 8
 cfg.grpo.max_num_steps = 1_000_000
@@ -34,16 +31,6 @@ cfg.grpo.val_period = 0
 cfg.policy.model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 cfg.policy.tokenizer.name = cfg.policy.model_name
 cfg.policy.train_global_batch_size = 64
-cfg.data.train = OmegaConf.create(
-    {
-        "dataset_name": "ResponseDataset",
-        "data_path": "/testbed/train_math.jsonl",
-        "input_key": "input",
-        "output_key": "output",
-        "split_validation_size": 0,
-        "seed": 42,
-    }
-)
 cfg.data.validation = None
 
 
@@ -54,7 +41,6 @@ cfg.policy.dtensor_cfg._v2 = False
 cfg.policy.generation.val_temperature = cfg.policy.generation.temperature
 cfg.policy.generation.val_top_p = cfg.policy.generation.top_p
 cfg.policy.generation.val_top_k = cfg.policy.generation.top_k
-cfg.policy.generation.vllm_cfg.gpu_memory_utilization = 0.2
 cfg.loss_fn.force_on_policy_ratio = True
 cfg.checkpointing.enabled = True
 cfg.checkpointing.checkpoint_dir = "/testbed/results/grpo"
@@ -75,7 +61,34 @@ cfg.logger.log_dir = "/testbed/results/logs"
 OmegaConf.save(cfg, work / "resolved_grpo.yaml")
 
 train_log = work / "train.log"
-train_command = [sys.executable, str(repo / "examples/run_grpo.py"), "--config", str(work / "resolved_grpo.yaml")]
+with (work / "gym_train.jsonl").open("w") as stream:
+    for line in (work / "train_math.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        stream.write(
+            json.dumps(
+                {
+                    "agent_ref": {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"},
+                    "question": row["input"],
+                    "expected_answer": str(row["output"]),
+                    "responses_create_params": {
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": "Solve the following math problem. Work step by step and put your final answer inside \\boxed{}.\n\n"
+                                + row["input"],
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+train_command = [
+    sys.executable,
+    str(repo / "examples/nemo_gym/run_grpo_nemo_gym.py"),
+    "--config",
+    str(work / "resolved_grpo.yaml"),
+]
 if "INNER_TRAIN_STARTED_AT" in os.environ:
     train_command[1:1] = [
         "-c",
