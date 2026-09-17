@@ -253,6 +253,29 @@ The selected agent sandbox requires access to Gym's policy proxy, and the
 separate verifier sandbox requires access to the configured judge endpoint.
 See the benchmark README for provider-specific proxy routing.
 
+### Policy request retries
+
+The native and custom Harbor LAB agents retry transport failures, request
+timeouts, HTTP 408/429, and 5xx responses up to **three attempts total**, waiting
+one then two seconds between attempts. Each attempt has its own configured request
+timeout. Retries reuse the same conversation and do not repeat completed tools
+or consume another agent turn. Exhausted requests retain the existing failure
+reporting and whole-task retry behavior. Judge retries are configured separately.
+
+HTTP 404 is not retried by default, including when Gym wraps a numeric upstream
+404 code in a 500 response. For providers that transiently return model-not-found
+errors, opt in with `model_retry_404: true`: under `agent_kwargs` for the native
+runner, or `harbor_agent_kwargs` for the custom Harbor agent. For benchmark runs,
+the corresponding command-line overrides are:
+
+```bash
+# --benchmark legal_agent_bench
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.model_retry_404=true
+
+# --benchmark legal_agent_bench/config_harbor
++legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent.harbor_agent_kwargs.model_retry_404=true
+```
+
 ### Output, context, and timeout limits
 
 LAB does not define one model-independent output-token limit. Upstream harness

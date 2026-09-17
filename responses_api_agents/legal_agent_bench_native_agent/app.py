@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.legal_agent_bench_native_agent.model_retry import retry_model_request
 
 
 INITIAL_EMPTY_RESPONSE_NUDGE = (
@@ -64,6 +65,7 @@ class LegalAgentBenchNativeAgentConfig(BaseResponsesAPIAgentConfig):
     shell_timeout: int = Field(default=60, ge=1)
     preflight_timeout_seconds: int = Field(default=120, ge=1)
     model_timeout_seconds: int = Field(default=1800, ge=1)
+    model_retry_404: bool = False
     max_output_chars: int = Field(default=16_384, ge=1)
 
 
@@ -304,19 +306,23 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
 
         for _turn in range(self.config.max_turns):
             model_input = body.model_copy(update={"input": list(body.input) + trajectory})
-            try:
-                raw_response = await asyncio.wait_for(
-                    self.server_client.post(
-                        server_name=self.config.model_server.name,
-                        url_path=self.url_path_for_request("/v1/responses", request),
-                        json=model_input,
-                        cookies=model_cookies,
-                    ),
-                    timeout=self.config.model_timeout_seconds,
+
+            async def model_call():
+                raw_response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=self.url_path_for_request("/v1/responses", request),
+                    json=model_input,
+                    cookies=model_cookies,
                 )
                 await raise_for_status(raw_response)
-                model_response = NeMoGymResponse.model_validate(await get_response_json(raw_response))
-                model_cookies = raw_response.cookies
+                return NeMoGymResponse.model_validate(await get_response_json(raw_response)), raw_response.cookies
+
+            try:
+                model_response, model_cookies = await retry_model_request(
+                    model_call,
+                    timeout_seconds=self.config.model_timeout_seconds,
+                    retry_404=self.config.model_retry_404,
+                )
             except TimeoutError:
                 return _failed_response(
                     body=body,

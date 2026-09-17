@@ -10,10 +10,12 @@ import threading
 import time
 from asyncio import Semaphore
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from omegaconf import OmegaConf
 
@@ -47,9 +49,16 @@ from resources_servers.legal_agent_bench.verifier import (
     score_rubric,
 )
 from responses_api_agents.harbor_agent.app import HarborAgentConfig
+from responses_api_agents.legal_agent_bench_native_agent import model_retry
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_delay(monkeypatch):
+    monkeypatch.setattr(model_retry, "AsyncRetrying", partial(model_retry.AsyncRetrying, sleep=AsyncMock()))
+    monkeypatch.setattr("harness.adapters.openai_compatible.is_global_aiohttp_client_setup", lambda: True)
 
 
 @pytest.mark.parametrize("use_stdin", [False, True])
@@ -226,54 +235,29 @@ async def test_container_hydration_uploads_configured_skills_and_documents(tmp_p
 
 @pytest.mark.asyncio
 async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
-    observed = {}
-
-    class Response:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        def raise_for_status(self):
-            return None
-
-        async def json(self):
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "done",
-                            "tool_calls": [
-                                {
-                                    "id": "call-1",
-                                    "type": "function",
-                                    "function": {"name": "read", "arguments": '{"path":"input.docx"}'},
-                                }
-                            ],
+    monkeypatch.setattr("harness.adapters.openai_compatible.is_global_aiohttp_client_setup", lambda: False)
+    setup_client = MagicMock()
+    monkeypatch.setattr("harness.adapters.openai_compatible.set_global_aiohttp_client", setup_client)
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": "done",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": '{"path":"input.docx"}'},
                         }
-                    }
-                ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+                    ],
+                }
             }
-
-    class Session:
-        def __init__(self, *, timeout, headers):
-            observed["timeout"] = timeout.total
-            observed["headers"] = headers
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        def post(self, url, *, json):
-            observed["url"] = url
-            observed["payload"] = json
-            return Response()
-
-    monkeypatch.setattr("harness.adapters.openai_compatible.ClientSession", Session)
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+    raw = SimpleNamespace(ok=True, read=AsyncMock(return_value=json.dumps(payload).encode()), release=MagicMock())
+    request = AsyncMock(return_value=raw)
+    monkeypatch.setattr("harness.adapters.openai_compatible.request", request)
     adapter = OpenAICompatibleAdapter(
         model="policy-model",
         base_url="http://policy/v1",
@@ -283,10 +267,13 @@ async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
 
     response = await adapter.chat([{"role": "user", "content": "work"}], [])
 
-    assert observed["url"] == "http://policy/v1/chat/completions"
-    assert observed["timeout"] == 30
-    assert observed["headers"] == {"Authorization": "Bearer EMPTY"}
-    assert observed["payload"]["reasoning_effort"] == "high"
+    args = request.await_args
+    assert args.args == ("POST", "http://policy/v1/chat/completions")
+    assert args.kwargs["timeout"].total == 30
+    assert args.kwargs["headers"] == {"Authorization": "Bearer EMPTY"}
+    assert args.kwargs["json"]["reasoning_effort"] == "high"
+    raw.release.assert_called_once()
+    setup_client.assert_called_once()
     assert response.text == "done"
     assert response.input_tokens == 10
     assert response.output_tokens == 2
@@ -310,6 +297,83 @@ async def test_policy_adapter_timeout(monkeypatch) -> None:
 
     with pytest.raises(TimeoutError, match="agent model request exceeded timeout"):
         await _chat_with_timeout(adapter, [], [])
+
+
+@pytest.mark.parametrize("status,retry_404,succeeds", [(503, False, True), (404, False, False), (404, True, True)])
+async def test_harbor_model_retry_preserves_tool_work(monkeypatch, tmp_path, status, retry_404, succeeds):
+    from copy import deepcopy
+
+    adapter = OpenAICompatibleAdapter(model="policy", base_url="http://policy/v1", timeout_seconds=1)
+    tool_reply = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call-1", "function": {"name": "read", "arguments": '{"file_path":"input.txt"}'}}
+                    ],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+    error = aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=status)
+    replies = iter([tool_reply, error, {"choices": [{"message": {"content": "Done"}}]}])
+    requests = []
+
+    async def completion(payload):
+        requests.append(deepcopy(payload))
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(adapter, "_create_chat_completion", completion)
+    executor = SimpleNamespace(execute=AsyncMock(return_value="document text"), get_metrics=lambda: {})
+    result = await _run_agent_async(
+        adapter=adapter,
+        system_prompt="Read the document",
+        tool_executor=executor,
+        tools=[],
+        max_turns=2,
+        transcript_path=tmp_path / "transcript.jsonl",
+        retry_404=retry_404,
+    )
+
+    executor.execute.assert_awaited_once_with("read", '{"file_path":"input.txt"}')
+    assert result["finished_cleanly"] is succeeds
+    assert result["turn_count"] == 2
+    assert result["input_tokens"] == 10
+    assert result["output_tokens"] == 2
+    assert len(requests) == (3 if succeeds else 2)
+    if succeeds:
+        assert requests[1] == requests[2]
+        assert requests[2]["messages"][-1]["content"] == "document text"
+        assert result["model_error"] is None
+    else:
+        assert result["model_error_type"] == "ClientResponseError"
+
+
+async def test_policy_adapter_preserves_wrapped_upstream_error_and_releases_response(monkeypatch):
+    provider_body = json.dumps({"error": {"code": "404", "message": "model not found"}}).encode()
+    body = json.dumps(f"Hit an exception in policy calling an inner server: {provider_body}").encode()
+    error = aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=500)
+    raw = SimpleNamespace(
+        ok=False,
+        content=SimpleNamespace(read=AsyncMock(return_value=body)),
+        raise_for_status=MagicMock(side_effect=error),
+        release=MagicMock(),
+    )
+    request = AsyncMock(return_value=raw)
+    monkeypatch.setattr("harness.adapters.openai_compatible.request", request)
+    adapter = OpenAICompatibleAdapter(model="policy", base_url="http://policy/v1")
+
+    with pytest.raises(aiohttp.ClientResponseError) as caught:
+        await _chat_with_timeout(adapter, [], [])
+
+    assert caught.value.response_content == body
+    request.assert_awaited_once()
+    raw.release.assert_called_once()
 
 
 @pytest.mark.asyncio

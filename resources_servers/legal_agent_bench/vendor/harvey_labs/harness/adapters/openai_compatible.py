@@ -7,9 +7,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientTimeout
 
 from harness.adapters.base import ModelAdapter, ModelResponse, ToolCall
+from nemo_gym.server_utils import (
+    GlobalAIOHTTPAsyncClientConfig,
+    get_response_json,
+    is_global_aiohttp_client_setup,
+    raise_for_status,
+    request,
+    set_global_aiohttp_client,
+)
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -108,12 +116,19 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     async def _create_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Call the selected Gym model server without loading config in the Ray worker."""
+        if not is_global_aiohttp_client_setup():
+            # Harbor's persistent Ray worker loop does not run Gym webserver startup.
+            set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         timeout = ClientTimeout(total=self.timeout_seconds)
         headers = {"Authorization": f"Bearer {self.api_key or 'EMPTY'}"}
-        async with ClientSession(timeout=timeout, headers=headers) as client:
-            async with client.post(self._chat_completions_endpoint(), json=payload) as response:
-                response.raise_for_status()
-                return await response.json()
+        response = await request(
+            "POST", self._chat_completions_endpoint(), json=payload, timeout=timeout, headers=headers
+        )
+        try:
+            await raise_for_status(response)
+            return await get_response_json(response)
+        finally:
+            response.release()
 
     def _chat_completions_endpoint(self) -> str:
         base_url = self.base_url.rstrip("/")

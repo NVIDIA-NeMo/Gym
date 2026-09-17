@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -19,7 +20,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.legal_agent_bench_native_agent import app
+from responses_api_agents.legal_agent_bench_native_agent import app, model_retry
 
 
 _REAL_PREFLIGHT = app.LabToolExecutor.preflight
@@ -107,6 +108,7 @@ def _agent(*, max_turns: int = 60) -> app.LegalAgentBenchNativeAgent:
 @pytest.fixture(autouse=True)
 def _successful_preflight(monkeypatch) -> None:
     monkeypatch.setattr(app.LabToolExecutor, "preflight", AsyncMock())
+    monkeypatch.setattr(model_retry, "AsyncRetrying", partial(model_retry.AsyncRetrying, sleep=AsyncMock()))
 
 
 async def test_tool_loop_returns_full_responses_trajectory_and_usage(monkeypatch) -> None:
@@ -208,6 +210,8 @@ async def test_model_timeout_sets_structured_failure_metadata(monkeypatch) -> No
         side_effect=[
             _raw_response(_model_response([_function_call()])),
             TimeoutError(),
+            TimeoutError(),
+            TimeoutError(),
         ]
     )
     monkeypatch.setattr(app.LabToolExecutor, "execute", AsyncMock(return_value="file.txt"))
@@ -223,6 +227,39 @@ async def test_model_timeout_sets_structured_failure_metadata(monkeypatch) -> No
     assert result.metadata == {app.AGENT_FAILURE_CLASS_METADATA_KEY: "agent_timed_out"}
     assert any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in result.output)
     assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in result.output)
+    assert agent.server_client.post.await_count == 4
+
+
+@pytest.mark.parametrize("status", [503, 404])
+async def test_model_retry_preserves_history_cookies_and_does_not_repeat_tools(monkeypatch, status) -> None:
+    agent = _agent(max_turns=2)
+    agent.config.model_retry_404 = status == 404
+    first = _raw_response(_model_response([_function_call()]))
+    first.cookies = {"session": "policy-session"}
+    agent.server_client.post = AsyncMock(
+        side_effect=[
+            first,
+            app.aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=status),
+            _raw_response(_model_response([_assistant_message()])),
+        ]
+    )
+    execute = AsyncMock(return_value="file.txt")
+    monkeypatch.setattr(app.LabToolExecutor, "execute", execute)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task")
+
+    result = await agent.responses(SimpleNamespace(path_params={}), body)
+
+    assert result.status == "completed"
+    assert result.error is None
+    assert result.usage.total_tokens == 10
+    assert len(result.output) == 3
+    execute.assert_awaited_once()
+    requests = agent.server_client.post.await_args_list
+    assert len(requests) == 3
+    assert requests[1].kwargs == requests[2].kwargs
+    assert requests[2].kwargs["cookies"] == first.cookies
+    assert requests[2].kwargs["json"].input[-1].output == "file.txt"
+    assert body.input == "Do the task"
 
 
 @pytest.mark.parametrize(

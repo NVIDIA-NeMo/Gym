@@ -21,6 +21,7 @@ from resources_servers.legal_agent_bench.prepare import (
     resolve_repo_path,
     validate_harness_skills,
 )
+from responses_api_agents.legal_agent_bench_native_agent.model_retry import retry_model_request
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -224,6 +225,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         self.temperature = 1.0 if temperature is None else float(temperature)
         self.reasoning_effort = kwargs.pop("reasoning_effort", _reasoning_effort(responses_create_params))
         self.max_turns = int(kwargs.pop("max_turns", 60))
+        self.model_retry_404 = kwargs.pop("model_retry_404", False)
         self.shell_timeout = int(kwargs.pop("shell_timeout", 60))
         self.skills = kwargs.pop("skills", None)
         self.skills_dir = resolve_repo_path(kwargs.pop("skills_dir", DEFAULT_SKILLS_DIR))
@@ -286,6 +288,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             tools=tools,
             max_turns=self.max_turns,
             transcript_path=transcript_path,
+            retry_404=self.model_retry_404,
         )
 
         await environment.download_dir("/workspace/output", output_artifact)
@@ -364,6 +367,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             "task_dir": str(task_dir),
             "run_id": self._run_id(task_id),
             "max_turns": self.max_turns,
+            "model_retry_404": self.model_retry_404,
             "temperature": self.temperature,
             "shell_timeout": self.shell_timeout,
             "reasoning_effort": self.reasoning_effort,
@@ -390,6 +394,7 @@ async def _run_agent_async(
     tools: list[dict],
     max_turns: int,
     transcript_path: Path,
+    retry_404: bool = False,
 ) -> dict:
     messages = [adapter.make_system_message(system_prompt), adapter.make_user_message(INITIAL_USER_PROMPT)]
     total_input_tokens = 0
@@ -410,7 +415,7 @@ async def _run_agent_async(
             turn_count = turn + 1
             _log_model_input(transcript_file, turn_count, messages, tools, total_input_tokens, total_output_tokens)
             try:
-                response = await _chat_with_timeout(adapter, messages, tools)
+                response = await _chat_with_timeout(adapter, messages, tools, retry_404=retry_404)
             except Exception as exc:
                 err_msg = str(exc)
                 _log_model_error(transcript_file, turn_count, exc)
@@ -476,15 +481,18 @@ async def _run_agent_async(
 
 
 async def _chat_with_timeout(
-    adapter: OpenAICompatibleAdapter, messages: list[dict], tools: list[dict]
+    adapter: OpenAICompatibleAdapter, messages: list[dict], tools: list[dict], *, retry_404: bool = False
 ) -> ModelResponse:
     timeout_seconds = getattr(adapter, "timeout_seconds", None)
-    chat_call = adapter.chat(messages, tools)
-    if not timeout_seconds:
-        return await chat_call
     try:
-        return await asyncio.wait_for(chat_call, timeout=float(timeout_seconds))
+        return await retry_model_request(
+            lambda: adapter.chat(messages, tools),
+            timeout_seconds=float(timeout_seconds) if timeout_seconds else None,
+            retry_404=retry_404,
+        )
     except asyncio.TimeoutError as exc:
+        if not timeout_seconds:
+            raise
         raise TimeoutError(f"agent model request exceeded timeout of {float(timeout_seconds):g}s") from exc
 
 
