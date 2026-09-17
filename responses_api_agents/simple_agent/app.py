@@ -505,11 +505,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resource_revision,
                 )
             model_response = model_response.model_copy(
-                update={
-                    _INTERNAL_RESOURCE_REVISIONS_KEY: {
-                        self.config.resources_server.name: resource_revision
-                    }
-                }
+                update={_INTERNAL_RESOURCE_REVISIONS_KEY: {self.config.resources_server.name: resource_revision}}
             )
         return model_response
 
