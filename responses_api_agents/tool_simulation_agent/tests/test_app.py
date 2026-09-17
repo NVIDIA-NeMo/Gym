@@ -511,10 +511,9 @@ class TestApp:
             await asyncio.wait_for(wait_until_parked(), timeout=1)
 
             await participant.retire(rollout_id, 0)
-            with raises((asyncio.CancelledError, RuntimeError)) as cancelled:
-                await run_task
-            if isinstance(cancelled.value, RuntimeError):
-                assert str(cancelled.value) == "No response returned."
+            response = await asyncio.wait_for(run_task, timeout=1)
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "stale_attempt"
 
         await asyncio.sleep(0)
         assert model_calls == 1
