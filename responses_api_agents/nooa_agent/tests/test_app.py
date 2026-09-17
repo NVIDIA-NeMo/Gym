@@ -33,6 +33,7 @@ from responses_api_agents.nooa_agent.app import (
     NOOA_TERMINATION_REASON_KEY,
     NOOAAgent,
     NOOAAgentRunRequest,
+    _identity,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.runner import NOOARunResult
@@ -44,11 +45,11 @@ async def invoke(agent: object, request: NeMoGymResponseCreateParamsNonStreaming
 
 
 class FakeHTTPResponse:
-    ok = True
-
     def __init__(self, payload: dict, *, status: int = 200, cookie: tuple[str, str] | None = None) -> None:
         self._payload = json.dumps(payload).encode()
         self.status = status
+        self.ok = status < 400
+        self.content = SimpleNamespace(read=self.read)
         self.cookies = SimpleCookie()
         if cookie:
             self.cookies[cookie[0]] = cookie[1]
@@ -58,7 +59,12 @@ class FakeHTTPResponse:
 
     def raise_for_status(self) -> None:
         if not self.ok:
-            raise RuntimeError(f"HTTP {self.status}")
+            raise aiohttp.ClientResponseError(
+                request_info=MagicMock(real_url="http://resources.test"),
+                history=(),
+                status=self.status,
+                message=f"HTTP {self.status}",
+            )
 
 
 def config(**overrides: object) -> NOOAAgentConfig:
@@ -168,20 +174,24 @@ def make_agent(*, verify_reward: float = 1.0) -> tuple[NOOAAgent, ServerClient]:
 async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> None:
     agent, client = make_agent()
     outgoing = Response()
+    responses = iter(client.post.side_effect)
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    async def post(**kwargs: object) -> FakeHTTPResponse:
+        requests.append((str(kwargs["url_path"]), dict(kwargs["cookies"])))
+        return next(responses)
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=post))
 
     result = await agent.run(request(), outgoing, body(customer_id="customer-42"))
 
     run_request = agent.runner.run.await_args.args[0]
     assert run_request.responses_create_params == body().responses_create_params
     assert run_request.resource_cookies == {"session": "tool-cookie", "verified": "yes"}
-    assert client.post.await_args_list[0].kwargs["cookies"] == {
-        "session": "tool-cookie",
-        "verified": "yes",
-    }
-    assert client.post.await_args_list[1].kwargs["cookies"] == {
-        "session": "tool-cookie",
-        "verified": "yes",
-    }
+    assert requests == [
+        ("/seed_session", {"session": "incoming"}),
+        ("/verify", {"session": "tool-cookie"}),
+    ]
     assert result.reward == 1.0
     assert result.ng_agent_observations is not None
     assert result.ng_agent_observations.gaps[0].code == "non_trainable_terminal_output"
@@ -225,6 +235,52 @@ async def test_direct_responses_returns_atif_episode_without_verifier_fallback()
 
 
 @pytest.mark.asyncio
+async def test_direct_responses_forwards_model_and_resource_cookies() -> None:
+    agent, _ = make_agent()
+    outgoing = Response()
+
+    await agent.responses(request(), outgoing, body().responses_create_params)
+
+    set_cookies = outgoing.headers.getlist("set-cookie")
+    assert any("model=model-cookie" in header for header in set_cookies)
+    assert any("session=tool-cookie" in header for header in set_cookies)
+
+
+@pytest.mark.parametrize(
+    ("row", "rollout_id", "expected"),
+    [
+        (
+            {
+                "task_id": "task",
+                "problem_id": "problem",
+                "instance_id": "instance",
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 4,
+                "_ng_rollout_id": "body-rollout",
+            },
+            "path-rollout",
+            {"task_id": "task", "rollout_id": "path-rollout"},
+        ),
+        (
+            {
+                "task_id": None,
+                "problem_id": "problem",
+                "instance_id": "instance",
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 4,
+            },
+            None,
+            {"task_id": "problem", "rollout_id": "3-4"},
+        ),
+    ],
+)
+def test_identity_uses_explicit_field_precedence(
+    row: dict[str, object], rollout_id: str | None, expected: dict[str, str]
+) -> None:
+    assert _identity(body(**row), rollout_id) == expected
+
+
+@pytest.mark.asyncio
 async def test_unexpected_harness_failure_remains_legitimate() -> None:
     agent, _ = make_agent()
     agent.runner.run = AsyncMock(side_effect=RuntimeError("model unavailable"))
@@ -262,6 +318,38 @@ async def test_downstream_infrastructure_failure_is_transient(error: Exception) 
     assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
     assert NG_TERMINAL_KEY not in result.model_extra
     agent.runner.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_http_failure_is_transient_and_skips_episode() -> None:
+    client = server_client()
+    object.__setattr__(client, "post", AsyncMock(return_value=FakeHTTPResponse({"error": "down"}, status=503)))
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = MagicMock()
+    agent.runner.run = AsyncMock()
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert "HTTP 503" in result.model_extra["error"]
+    agent.runner.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verify_http_failure_preserves_completed_episode() -> None:
+    agent, client = make_agent()
+    object.__setattr__(
+        client,
+        "post",
+        AsyncMock(side_effect=[FakeHTTPResponse({}), FakeHTTPResponse({"error": "down"}, status=503)]),
+    )
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert result.response.output == []
+    assert result.ng_agent_observations is not None
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/verify"]
 
 
 @pytest.mark.asyncio
@@ -385,6 +473,46 @@ async def test_skip_verification_and_aggregate_metrics_proxy() -> None:
     # Skip mode uses Gym's local aggregate implementation and must not make another server call.
     await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
     assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aggregate_metrics_proxies_success() -> None:
+    client = server_client()
+    response = FakeHTTPResponse(
+        {
+            "group_level_metrics": [{"task_id": "task-1", "reward": 1.0}],
+            "agent_metrics": {"mean_reward": 1.0},
+            "key_metrics": {"mean_reward": 1.0},
+        }
+    )
+    object.__setattr__(client, "post", AsyncMock(return_value=response))
+    agent = NOOAAgent(config=config(), server_client=client)
+    request_body = AggregateMetricsRequest(verify_responses=[{"_ng_task_index": 0, "reward": 1.0}])
+
+    result = await agent.aggregate_metrics(request_body)
+
+    assert result.agent_metrics == {"mean_reward": 1.0}
+    assert result.key_metrics == {"mean_reward": 1.0}
+    client.post.assert_awaited_once_with(
+        server_name="resources",
+        url_path="/aggregate_metrics",
+        json=request_body,
+    )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_metrics_enforces_timeout() -> None:
+    client = server_client()
+
+    async def delayed_post(**_: object) -> FakeHTTPResponse:
+        await asyncio.sleep(1)
+        return FakeHTTPResponse({})
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=delayed_post))
+    agent = NOOAAgent(config=config(run_timeout_secs=0.001), server_client=client)
+
+    with pytest.raises(TimeoutError):
+        await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
 
 @pytest.mark.asyncio

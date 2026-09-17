@@ -115,9 +115,8 @@ class NOOAAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-def _merge_cookies(current: dict[str, str], response: Any) -> dict[str, str]:
+def _merge_cookies(current: dict[str, str], response: Any) -> None:
     current.update({name: morsel.value for name, morsel in response.cookies.items()})
-    return current
 
 
 class NOOAAgent(SimpleResponsesAPIAgent):
