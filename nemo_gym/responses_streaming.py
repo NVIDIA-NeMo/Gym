@@ -241,6 +241,17 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n"
 
 
+def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> list[dict]:
+    """Restore the client-visible tool names before capture finalization and SSE output."""
+    restored = []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in ns_map:
+            namespace, name = ns_map[item["name"]]
+            item = {**item, "namespace": namespace, "name": name}
+        restored.append(item)
+    return restored
+
+
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
@@ -249,12 +260,7 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     so those two are the required minimum; ``response.created`` is included for clients that wait
     for an acknowledgement before reading items.
     """
-    output_items = []
-    for item in response_json.get("output") or []:
-        if ns_map and isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in ns_map:
-            namespace, name = ns_map[item["name"]]
-            item = {**item, "namespace": namespace, "name": name}
-        output_items.append(item)
+    output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
 
     yield _sse_event(
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}

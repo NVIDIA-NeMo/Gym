@@ -712,6 +712,9 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
+# Coverage uses this precision for both display and fail_under comparisons.
+# Without it, 94.97% rounds to 95% and incorrectly satisfies a 95% gate.
+precision = 2
 fail_under = 95.0
 exclude_also = [
     "def __repr__",
