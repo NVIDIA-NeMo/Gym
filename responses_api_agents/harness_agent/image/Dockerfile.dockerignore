@@ -1,0 +1,12 @@
+**
+!pyproject.toml
+!uv.lock
+!responses_api_agents/
+!responses_api_agents/harness_agent/
+!responses_api_agents/harness_agent/image/
+!responses_api_agents/harness_agent/image/package.json
+!responses_api_agents/harness_agent/image/package-lock.json
+
+!responses_api_agents/harness_agent/image/opencode
+!responses_api_agents/harness_agent/image/opencode/package.json
+!responses_api_agents/harness_agent/image/opencode/package-lock.json

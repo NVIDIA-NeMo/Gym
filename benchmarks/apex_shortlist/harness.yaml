@@ -1,0 +1,21 @@
+config_paths:
+- benchmarks/apex_shortlist/config.yaml
+- responses_api_agents/harness_agent/configs/benchmark.yaml
+math_with_judge_simple_agent:
+  _delete_key: responses_api_agents
+apex_shortlist_math_with_judge_simple_agent:
+  _delete_key: responses_api_agents, _inherit_from
+apex_shortlist_harness_agent:
+  _inherit_from: harness_benchmark_agent
+  responses_api_agents:
+    harness_agent:
+      resources_server:
+        type: resources_servers
+        name: apex_shortlist_math_with_judge_resources_server
+      datasets:
+      - name: apex_shortlist
+        type: benchmark
+        jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/math.yaml
+        prepare_script: benchmarks/apex_shortlist/prepare.py
+        num_repeats: 16

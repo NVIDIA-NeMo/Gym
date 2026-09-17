@@ -3,7 +3,7 @@
 // Let vLLM choose the output budget from the remaining context.
 export const RemainingContext = async () => ({
   "chat.params": async (input, output) => {
-    if (input.model.providerID === "nemo_gym") {
+    if (input.model.providerID === "nemo") {
       delete output.maxOutputTokens;
     }
   },

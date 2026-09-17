@@ -553,3 +553,39 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "opencode"
+
+
+def test_remaining_context_preserves_sampling_and_gym_route(tmp_path):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    agent = _make_agent(
+        output_token_policy="remaining_context",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+    with patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://proxy/ng-rollout/run-1/v1"):
+        agent._write_opencode_config(tmp_path, "run-1", sampling={"temperature": 0.0, "top_p": 1.0})
+    config = json.loads((tmp_path / "opencode.json").read_text())
+    assert config["provider"]["nemo"]["options"]["baseURL"] == "http://proxy/ng-rollout/run-1/v1"
+    assert config["agent"]["build"] == {"temperature": 0.0, "top_p": 1.0}
+    assert config["provider"]["nemo"]["models"][agent.config.model]["temperature"] is True
+    # Gym carries reasoning in assistant content, not an extra request field.
+    assert "interleaved" not in config["provider"]["nemo"]["models"][agent.config.model]
+    if not shutil.which("node"):
+        pytest.skip("node required to execute the OpenCode plugin")
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text((tmp_path / "remaining-context.js").read_text())
+    script = f"""
+import {{ RemainingContext }} from {json.dumps(plugin.as_uri())};
+const hook=(await RemainingContext())["chat.params"];
+const output={{maxOutputTokens:65536,temperature:0}};
+await hook({{model:{{providerID:'nemo'}}}},output);
+if ('maxOutputTokens' in output || output.temperature !== 0) process.exit(1);
+const other={{maxOutputTokens:123}};
+await hook({{model:{{providerID:'other'}}}},other);
+if (other.maxOutputTokens !== 123) process.exit(2);
+"""
+    result = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

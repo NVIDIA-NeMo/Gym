@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import shlex
 import sqlite3
@@ -23,7 +22,7 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import MonkeyPatch, fixture, mark
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -521,7 +520,6 @@ class TestOpenCodeSandboxedAgent:
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
             assert url_path == "/verify"
-            assert (tmp_path / "results/session-1/generation.json").is_file()
             return Response(
                 json
                 | {
@@ -586,164 +584,3 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
-
-
-class TestBenchmarkLifecycle:
-    _create_config = TestOpenCodeSandboxedAgent._create_config
-
-    async def test_config_overlay_keeps_model_route_and_remaining_budget(self, monkeypatch):
-        config = self._create_config()
-        config.sandbox_timeout = 14400
-        config.output_token_policy = "remaining_context"
-        config.opencode_config = {"provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"output": 65536}}}}}}
-        config.opencode_config["agent"] = {"build": {"prompt": "Custom instructions."}}
-        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
-        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model.example:8000")
-        monkeypatch.setattr(
-            OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
-        )
-        request = MagicMock()
-        request.json = AsyncMock(return_value={})
-        result = await server._create_opencode_config(request)
-        assert result["provider"]["nemo_gym"]["options"]["baseURL"] == "http://model.example:8000/v1"
-        assert result["provider"]["nemo_gym"]["options"]["chunkTimeout"] == 14400000
-        assert result["agent"]["build"]["prompt"] == "Custom instructions."
-        assert result["plugin"] == ["file:///tmp/nemo-gym-remaining-context.js"]
-        assert "plugin" not in config.opencode_config
-        config.opencode_config = {"tools": {"websearch": True}, "permission": {"websearch": "deny"}}
-        with raises(ValueError, match="legacy tools"):
-            await server._create_opencode_config(request)
-
-    async def test_image_files_and_network_policy(self, monkeypatch):
-        sandbox = MagicMock(start=AsyncMock())
-        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-        monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
-        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
-        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
-        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
-        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://10.0.0.2:8000")
-        config = self._create_config()
-        config.network_access = "model_only"
-        config.output_token_policy = "remaining_context"
-        config.sandbox_config = {
-            "image": "registry/image@sha256:abc",
-            "workdir": "/workspace",
-            "files": {"/tmp/test": "contents"},
-        }
-        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
-        await server._start_sandbox()
-        spec = sandbox.start.await_args.args[0]
-        assert spec.image == "registry/image@sha256:abc"
-        assert spec.workdir == "/workspace"
-        assert spec.files["/tmp/test"] == "contents"
-        assert "delete output.maxOutputTokens" in spec.files["/tmp/nemo-gym-remaining-context.js"]
-        assert spec.provider_options["network_policy"] == {
-            "defaultAction": "deny",
-            "egress": [{"action": "allow", "target": "10.0.0.2"}],
-        }
-        assert config.sandbox_config.get("provider_options") is None
-        config.network_access = "model_and_search"
-        with raises(ValueError, match="tool_servers"):
-            await server._start_sandbox()
-
-    @mark.parametrize("error", [RuntimeError("generation failed"), asyncio.CancelledError()])
-    async def test_generation_failure_and_cancellation_cleanup(self, monkeypatch, error):
-        seed = MagicMock(cookies={})
-        seed.json = AsyncMock(return_value={})
-        client = MagicMock(spec=ServerClient)
-        client.post = AsyncMock(return_value=seed)
-        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
-        sandbox = MagicMock(stop=AsyncMock())
-        server._start_sandbox = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(side_effect=error))
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
-        request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
-        body = OpenCodeSandboxedAgentRunRequest(
-            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
-        )
-        server._sandbox_id_to_run_result["trial"] = {"partial": "evidence"}
-        with raises(type(error)):
-            await server.run(request, body)
-        sandbox.stop.assert_awaited_once()
-        assert not server._sandbox_id_to_sandbox
-        assert not server._sandbox_id_to_run_result
-
-    async def test_native_mcp_uses_per_session_headers(self, monkeypatch):
-        client = MagicMock(spec=ServerClient)
-        seeded = MagicMock()
-        seeded.json = AsyncMock(
-            return_value={"mcp": {"url_path": "/mcp", "headers": {"X-NeMo-Gym-Session-Token": "scoped-token"}}}
-        )
-        client.post = AsyncMock(return_value=seeded)
-        config = self._create_config()
-        config.sandbox_timeout = 14400
-        config.tool_servers = [ResourcesServerRef(type="resources_servers", name="tavily")]
-        server = OpenCodeSandboxedAgent(config=config, server_client=client)
-        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://10.0.0.3:63123")
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
-        request = MagicMock(cookies={"session": "original"})
-        body = OpenCodeSandboxedAgentRunRequest(
-            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
-        )
-        entries = await server._seed_tool_servers(request, body)
-        assert entries == {
-            "tavily": {
-                "type": "remote",
-                "url": "http://10.0.0.3:63123/mcp",
-                "headers": {"X-NeMo-Gym-Session-Token": "scoped-token"},
-                "enabled": True,
-                "timeout": 14400000,
-            }
-        }
-        assert client.post.await_args.kwargs["cookies"] == request.cookies
-        seeded.json = AsyncMock(return_value={})
-        with raises(ValueError, match="authenticated MCP"):
-            await server._seed_tool_servers(request, body)
-
-    async def test_completed_execution_failure_scores_zero_without_judge(self, monkeypatch):
-        config = self._create_config()
-        config.execution_failure_reward_zero = True
-        seed = MagicMock(cookies={})
-        seed.json = AsyncMock(return_value={})
-        client = MagicMock(spec=ServerClient)
-        client.post = AsyncMock(return_value=seed)
-        server = OpenCodeSandboxedAgent(config=config, server_client=client)
-        sandbox = MagicMock(stop=AsyncMock())
-        server._start_sandbox = AsyncMock(return_value=sandbox)
-        response = NeMoGymResponse(
-            id="failed",
-            created_at=0,
-            model="test",
-            object="response",
-            output=[],
-            tool_choice="auto",
-            tools=[],
-            parallel_tool_calls=True,
-        )
-
-        async def failed_response(*args):
-            server._sandbox_id_to_run_result["trial"] = {
-                "opencode_results_fpath": "",
-                "opencode_run_stdout": "",
-                "opencode_run_stderr": "",
-                "opencode_finished": False,
-                "opencode_export_found": False,
-                "opencode_failed": True,
-                "opencode_error_type": "TimeoutError",
-                "opencode_exit_code": None,
-            }
-            return response
-
-        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", failed_response)
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
-        request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
-        request.state = SimpleNamespace()
-        body = OpenCodeSandboxedAgentRunRequest(
-            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
-        )
-        result = await server.run(request, body)
-        assert result.reward == 0.0
-        assert result.opencode_failed
-        assert result.opencode_error_type == "TimeoutError"
-        assert client.post.await_count == 1
-        sandbox.stop.assert_awaited_once()

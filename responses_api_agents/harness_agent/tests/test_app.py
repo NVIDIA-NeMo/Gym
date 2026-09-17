@@ -156,15 +156,16 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     assert url == "http://model-host:8000"
 
 
-def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
+def test_sandbox_model_url_uses_gym_proxy_instead_of_backend():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client.global_config_dict = MagicMock()
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://gym-proxy:8000")
     with patch(
         "responses_api_agents.harness_agent.app.get_first_server_config_dict",
         return_value={"base_url": "http://vllm-node:9000/v1"},
     ):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://vllm-node:9000"
+    assert url == "http://gym-proxy:8000"
 
 
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
@@ -186,6 +187,7 @@ def test_sandbox_model_url_uses_explicit_override(hostname):
 
 def test_sandbox_model_url_preserves_training_rollout_prefix():
     agent = _make_agent()
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model:8000")
     agent.server_client.global_config_dict = MagicMock()
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
     token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
@@ -230,6 +232,7 @@ async def test_run_preserves_rollout_path_and_verifier_fields():
     ):
         result = await agent.run(MagicMock(cookies={}), body)
     path.assert_called_once_with("", body)
+    assert seen.pop("rollout_id")
     assert seen == {
         "sandbox_descriptor": {"sandbox_id": "box-1"},
         "url_prefix": "/ng-rollout/rollout-1/training-token-capture",
@@ -410,12 +413,13 @@ async def test_setup_failure_closes_sandbox():
 async def test_local_provider_provisions_in_its_workspace(tmp_path):
     server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    agent = _make_agent()
+    agent = _make_agent(sandbox_spec={"files": {"/work/environment.txt": "Network disabled."}})
     agent._provider = LocalProvider(workspace_root=str(tmp_path))
     agent._gym_tar = None
     try:
         handle = await agent._provision_box("", {"/work/request.json": "{}"}, f"http://127.0.0.1:{port}")
         assert (handle.raw["workspace"] / "work" / "request.json").read_text() == "{}"
+        assert (handle.raw["workspace"] / "work" / "environment.txt").read_text() == "Network disabled."
         await agent._close_box(handle)
         assert not handle.raw["workspace"].exists()
     finally:
@@ -549,3 +553,191 @@ def test_gym_source_prebuilt_path_and_url():
         assert remote._gym_tar is None
         assert remote._gym_source_url == "https://example.com/gym.tar.gz"
         build.assert_not_called()
+
+
+@pytest.mark.parametrize("target", ["http://127.0.0.1:8000", "http://[::1]:8000", "http://localhost:8000"])
+async def test_restricted_network_rejects_loopback_before_creation(target):
+    agent = _make_agent(network_access="model_only")
+    agent._provider.name = "opensandbox"
+    agent._provider.create = AsyncMock()
+    with pytest.raises(ValueError, match="sandbox-reachable"):
+        await agent._provision_box("image", {}, target)
+    agent._provider.create.assert_not_awaited()
+
+
+async def test_restricted_network_overrides_permissive_policy_without_mutating_config():
+    spec = {
+        "provider_options": {"network_policy": {"defaultAction": "allow"}},
+        "resources": {"cpu": 2, "memory_mib": 8192},
+    }
+    agent = _make_agent(network_access="model_only", sandbox_spec=spec)
+    agent._provider.name = "opensandbox"
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.create = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("", "", 0))
+    agent._provider.upload_file = AsyncMock()
+    await agent._provision_box("science-image", {}, "https://gym-proxy.example")
+    created = agent._provider.create.await_args.args[0]
+    assert created.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "gym-proxy.example"}],
+    }
+    assert created.resources.memory_mib == 8192
+    assert agent.config.sandbox_spec == spec
+
+
+async def test_restricted_network_rejects_unverifiable_resource_sandbox():
+    agent = _make_agent(network_access="model_only")
+    agent._provider.connect = AsyncMock()
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": {"sandbox_id": "box"}})
+    try:
+        with pytest.raises(ValueError, match="Cannot verify"):
+            await agent._provision_box("image", {}, "https://gym-proxy.example")
+    finally:
+        _RUN_CONTEXT.reset(token)
+    agent._provider.connect.assert_not_awaited()
+
+
+async def test_restricted_network_rejects_provider_without_enforcement():
+    agent = _make_agent(network_access="model_only")
+    agent._provider.name = "local"
+    with pytest.raises(ValueError, match="network-policy provider"):
+        await agent._provision_box("image", {}, "https://gym-proxy.example")
+
+
+@pytest.mark.parametrize("status,failed", [("completed", False), ("failed", True), ("incomplete", True)])
+async def test_generation_preserves_observations_and_receipt_before_judging(tmp_path, status, failed):
+    from hashlib import sha256
+
+    from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
+
+    agent = _make_agent(artifacts_dir=str(tmp_path), execution_failure_reward_zero=True)
+    handle = MagicMock(provider_name="opensandbox", sandbox_id="box-test")
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[SandboxExecResult("", "", 0), SandboxExecResult("RUNNER_DONE", "", 0)]
+    )
+    agent._provider.close = AsyncMock()
+    response = _response() | {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "id": "answer",
+                "content": [{"type": "output_text", "text": "42", "annotations": []}],
+            }
+        ]
+    }
+    response["_ng_agent_observations"] = AgentObservationBundle(
+        source="pi",
+        records=[AgentInvocation(invocation_id="rollout-id", status=status)],
+        gaps=[ObservationGap(code="no_sandbox_runtime")],
+    ).model_dump(mode="json")
+
+    async def download(_, remote, local):
+        local.write_text("runner logs" if remote.endswith("runner.out") else json.dumps(response))
+
+    agent._provider.download_file = AsyncMock(side_effect=download)
+    # Deliberately path-like ID: the receipt must stay in artifacts_dir.
+    context = {"rollout_id": "../../rollout-id"}
+    token = _RUN_CONTEXT.set(context)
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="https://gym-proxy.example"):
+            result = await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert "_ng_agent_observations" not in result.model_dump()
+    assert context["harness_failed"] is failed
+    assert all(gap.code != "no_sandbox_runtime" for gap in context["observations"].gaps)
+    assert context["observations"].records[-1].sandbox_id == "box-test"
+    dest = tmp_path / sha256(b"../../rollout-id").hexdigest()
+    assert json.loads((dest / "generation.json").read_text())["harness_failed"] is failed
+    assert (dest / "runner.log").read_text() == "runner logs"
+    agent._provider.close.assert_awaited_once_with(handle)
+
+
+async def test_completed_harness_failure_skips_judge():
+    agent = _make_agent(execution_failure_reward_zero=True)
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+    async def failed_response(_, __, ___):
+        _RUN_CONTEXT.get()["harness_failed"] = True
+        return NeMoGymResponse.model_validate(_response())
+
+    with (
+        patch.object(HarnessAgent, "responses", new=failed_response),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(return_value={})),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == 0 and result.harness_failed
+    assert agent.server_client.post.await_count == 1
+    assert agent.server_client.post.await_args.kwargs["url_path"] == "/seed_session"
+
+
+async def test_tool_session_requires_authenticated_metadata_and_preserves_cookies():
+    agent = _make_agent(tool_servers=[{"type": "resources_servers", "name": "search"}])
+    seeded = MagicMock()
+    seeded.read = AsyncMock(
+        return_value=json.dumps({"mcp": {"url_path": "/mcp", "headers": {"Authorization": "test-token"}}}).encode()
+    )
+    agent.server_client.post = AsyncMock(return_value=seeded)
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    with patch.object(agent, "_tool_server_url", return_value="https://tools.example"):
+        result = await agent._seed_tool_servers(body, {"session": "one"})
+    assert result["search"]["url"] == "https://tools.example/mcp"
+    assert result["search"]["headers"] == {"Authorization": "test-token"}
+    assert agent.server_client.post.await_args.kwargs["cookies"] == {"session": "one"}
+    seeded.read.return_value = b'{"mcp": {"url_path": "/mcp"}}'
+    with pytest.raises(ValueError, match="authenticated MCP"):
+        await agent._seed_tool_servers(body, {})
+
+
+async def test_restricted_tools_allow_only_model_and_tool_hosts():
+    agent = _make_agent(
+        network_access="model_and_tools", tool_servers=[{"type": "resources_servers", "name": "search"}]
+    )
+    agent._provider.name = "opensandbox"
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("", "", 0))
+    agent._provider.upload_file = AsyncMock()
+    with patch.object(agent, "_tool_server_url", return_value="https://tools.example"):
+        await agent._provision_box("image", {}, "https://model.example")
+    policy = agent._provider.create.await_args.args[0].provider_options["network_policy"]
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "model.example"}, {"action": "allow", "target": "tools.example"}],
+    }
+    with patch.object(agent, "_tool_server_url", return_value="http://127.0.0.1:80"):
+        with pytest.raises(ValueError, match="sandbox-reachable"):
+            await agent._provision_box("image", {}, "https://model.example")
+
+
+async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config():
+    agent = _make_agent(agent="opencode", agent_kwargs={"opencode_config": {"mcp": {"existing": {"enabled": False}}}})
+    agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("RUNNER_DONE", "", 0))
+    agent._provider.close = AsyncMock()
+    agent._download_json = AsyncMock(return_value=_response())
+
+    async def run_one(identifier):
+        token = _RUN_CONTEXT.set(
+            {"rollout_id": identifier, "mcp": {"search": {"headers": {"Authorization": identifier}}}}
+        )
+        try:
+            await asyncio.sleep(0)
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input=identifier))
+        finally:
+            _RUN_CONTEXT.reset(token)
+
+    with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
+        await asyncio.gather(run_one("one"), run_one("two"))
+    assert agent.config.agent_kwargs == {"opencode_config": {"mcp": {"existing": {"enabled": False}}}}
+    for call in agent._provision_box.await_args_list:
+        files = call.args[1]
+        identifier = json.loads(files["/work/runner_config.json"])["rollout_id"]
+        mcp = json.loads(files["/work/agent_config.json"])["opencode_config"]["mcp"]
+        assert mcp["search"]["headers"]["Authorization"] == identifier
+        assert mcp["existing"] == {"enabled": False}

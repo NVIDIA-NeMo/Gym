@@ -1,0 +1,12 @@
+# Development plumbing preset. Pi's token-budget/compaction policy is not yet
+# equivalent to the OpenCode benchmark preset; do not compare benchmark scores.
+harness_benchmark_agent:
+  responses_api_agents:
+    harness_agent:
+      agent: pi
+      agent_kwargs:
+        model: benchmark-model
+        pi_version: 0.85.1
+        timeout: 14400
+        context_window: 262144
+        system_prompt: Internet access is disabled on this machine.

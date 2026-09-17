@@ -1,0 +1,33 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+harness_benchmark_agent:
+  responses_api_agents:
+    harness_agent:
+      entrypoint: app.py
+      num_workers: 4
+      agent: ???
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 512
+      sandbox_provider: sandbox
+      sandbox_image: ${oc.env:HARNESS_SANDBOX_IMAGE}
+      sandbox_python: /opt/gym-runtime/bin/python
+      network_access: model_only
+      rollout_timeout: 14400
+      eval_timeout: 14400
+      execution_failure_reward_zero: true
+      artifacts_dir: ${oc.env:HARNESS_ARTIFACTS_DIR,results/harness}
+      sandbox_spec:
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        workdir: /workspace
+        entrypoint: [sleep, infinity]
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms

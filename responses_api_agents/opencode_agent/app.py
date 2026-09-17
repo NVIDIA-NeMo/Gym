@@ -25,7 +25,7 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
@@ -500,6 +500,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
+    output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
 
     @property
     def command_parts(self) -> list[str]:
@@ -580,15 +581,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
             nemo["models"] = {self.config.model: model}
         return config
 
-    def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:
+    def _write_opencode_config(
+        self, work_dir: Path, rollout_id: Optional[str] = None, *, sampling: dict[str, float] | None = None
+    ) -> None:
         config = self._build_opencode_config(rollout_id)
+        if sampling:
+            config.setdefault("agent", {}).setdefault("build", {}).update(sampling)
+            if "temperature" in sampling and self.config.model_server:
+                # Custom OpenCode models otherwise default to rejecting temperature.
+                config["provider"]["nemo"]["models"][self.config.model].setdefault("temperature", True)
+        if config.get("tools") and config.get("permission"):
+            raise ValueError("Use permission only; legacy tools can override permission denies")
+        if self.config.output_token_policy == "remaining_context":
+            plugin = work_dir / "remaining-context.js"
+            plugin.write_text(Path(__file__).with_name("remaining-context.js").read_text())
+            config.setdefault("plugin", []).append(plugin.as_uri())
         if not config:
             return
         (work_dir / "opencode.json").write_text(json.dumps(config, indent=2))
@@ -617,6 +630,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
+        sampling: dict[str, float] | None = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
@@ -624,7 +638,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         project_dir = self._repo_dir(work_dir)
         data_home = work_dir / ".opencode-data"
         data_home.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(project_dir, rollout_id)
+        self._write_opencode_config(project_dir, rollout_id, sampling=sampling)
         env = self._env(str(data_home), rollout_id)
 
         cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
@@ -712,6 +726,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
             collect_observations=collect_observations,
             trajectory=trajectory,
+            sampling={
+                key: value for key in ("temperature", "top_p") if (value := getattr(body, key, None)) is not None
+            },
         )
         if collect_observations:
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))

@@ -214,6 +214,13 @@ def _build_pi_observations(
                 if last_model_call is None:
                     gaps.append(gap("compaction_after_model_call_unavailable"))
             compactions_waiting_for_call.clear()
+        elif event_type == "_ng_process_exit":
+            # Appended by the adapter after draining stdout, so a partial
+            # assistant answer cannot hide a CLI failure or enclosing timeout.
+            if event.get("timed_out"):
+                invocation_status = "incomplete"
+            elif event.get("return_code") not in (0, None):
+                invocation_status = "failed"
         elif event_type == "agent_end":
             terminal_messages = event.get("messages")
             if isinstance(terminal_messages, list):
@@ -552,6 +559,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     if proc.returncode is None:
                         proc.kill()
                     (_, events), _, _ = await output_task
+                    events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
             else:
@@ -565,6 +573,7 @@ class PiAgent(SimpleResponsesAPIAgent):
 
             if proc.returncode not in (0, None):
                 LOG.warning("pi exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                events.append((time(), {"type": "_ng_process_exit", "return_code": proc.returncode}))
             output_items, usage = parse_pi_events(stdout)
             return output_items, usage, self.config.model, events
         finally:

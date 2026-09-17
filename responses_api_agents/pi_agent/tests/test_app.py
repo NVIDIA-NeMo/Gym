@@ -519,3 +519,20 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "pi"
+
+
+@pytest.mark.parametrize(
+    "process_event,expected",
+    [
+        ({"type": "_ng_process_exit", "return_code": 1}, "failed"),
+        ({"type": "_ng_process_exit", "timed_out": True}, "incomplete"),
+    ],
+)
+def test_process_failure_overrides_partial_answer_status(process_event, expected):
+    events = [
+        (1.0, {"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "stop"}]}),
+        (2.0, process_event),
+    ]
+    bundle = _build_pi_observations(events, "run-1", None, [])
+    invocations = _records(bundle, AgentInvocation)
+    assert invocations[0].status == expected

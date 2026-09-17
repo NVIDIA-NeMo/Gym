@@ -13,11 +13,11 @@ tavily:
       max_cached_page_chars: 200000
       max_scroll_words: 2000
       verified: false
-hle_opencode_agent:
+hle_harness_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
-      network_access: model_and_search
-      sandbox_config:
+    harness_agent:
+      network_access: model_and_tools
+      sandbox_spec:
         files:
           /tmp/nemo-gym-environment.txt: |
             Direct internet access is disabled on this machine. Tavily search and browsing tools are available if useful for the task.

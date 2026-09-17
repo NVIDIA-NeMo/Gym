@@ -62,9 +62,12 @@ def main() -> None:
     )
     sc._build_server_base_url = lambda _: model_url
     agent = agent_class(config=cfg, server_client=sc)
+    # The host already included the rollout/capture prefix in this URL. Carry
+    # the rollout ID to observations without adding that prefix a second time.
+    object.__setattr__(agent, "resolve_model_base_url", lambda *_: model_url.rstrip("/") + "/v1")
 
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
-    request = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))
+    request = SimpleNamespace(path_params={"rollout_id": rc.get("rollout_id")}, url=SimpleNamespace(path=""))
     resp = asyncio.run(agent.responses(request, params))
     (WORK_DIR / "response.json").write_text(resp.model_dump_json())
     print("RUNNER_DONE", file=sys.__stdout__, flush=True)
