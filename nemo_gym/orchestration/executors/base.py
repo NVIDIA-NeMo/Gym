@@ -16,6 +16,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -24,6 +25,11 @@ from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, Sub
 
 
 class BaseExecutor(ABC):
+    # Whether this executor can auto-resubmit a benchmark that gets killed by
+    # the scheduler (time limit, preemption, node failure). False means asking
+    # for `resumable` on this executor is a config error, not a silent no-op.
+    supports_resumable: ClassVar[bool] = False
+
     @abstractmethod
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         """Submit `config` and return the record describing it.

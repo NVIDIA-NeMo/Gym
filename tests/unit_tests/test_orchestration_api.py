@@ -379,3 +379,31 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# resumable / ResumeConfig
+# ---------------------------------------------------------------------------
+
+
+def test_resumable_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    benchmark = config.driver.benchmarks["gsm8k"]
+    assert benchmark.resumable is False
+    assert benchmark.resume_config is None
+
+
+def test_resumable_true_uses_resume_config_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": True}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 3
+    assert resume.max_walltime is None
+
+
+def test_resumable_object_overrides_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": {"max_retries": 7, "max_walltime": "48:00:00"}}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 7
+    assert resume.max_walltime == "48:00:00"
