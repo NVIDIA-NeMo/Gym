@@ -5,6 +5,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 import torch
@@ -59,34 +60,33 @@ cfg = {
 }
 tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
 prompt = "Solve the following math problem. Work step by step and put your final answer inside \\boxed{}.\n\n"
-questions = {}
+questions = set()
 inputs = []
-for benchmark, count, input_key, answer_key in (
-    ("math_eval", 32, "input", "output"),
-    ("aime25", 30, "question", "expected_answer"),
-):
-    rows = [json.loads(line) for line in Path(f"/root/{benchmark}.jsonl").read_text().splitlines()]
-    if len(rows) != count:
-        raise ValueError(f"{benchmark} must contain exactly {count} rows")
-    for row in rows:
-        question = row[input_key]
-        if question in questions:
-            raise ValueError("evaluation questions must be unique")
-        questions[question] = benchmark
-        messages = [{"role": "user", "content": prompt + question}]
-        output_tokens = 32768 - len(tokenizer.apply_chat_template(messages, add_generation_prompt=True))
-        if output_tokens <= 0:
-            raise ValueError("evaluation prompt exceeds model context")
-        inputs.append(
-            {
-                "question": question,
-                "expected_answer": str(row[answer_key]),
-                "responses_create_params": {"input": messages, "max_output_tokens": output_tokens},
-            }
-        )
+rows = [json.loads(line) for line in Path("/root/aime25.jsonl").read_text().splitlines()]
+if len(rows) != 30:
+    raise ValueError("AIME25 must contain exactly 30 rows")
+for row in rows:
+    question = row["question"]
+    if question in questions:
+        raise ValueError("evaluation questions must be unique")
+    questions.add(question)
+    messages = [{"role": "user", "content": prompt + question}]
+    output_tokens = 32768 - len(tokenizer.apply_chat_template(messages, add_generation_prompt=True))
+    if output_tokens <= 0:
+        raise ValueError("evaluation prompt exceeds model context")
+    inputs.append(
+        {
+            "question": question,
+            "expected_answer": str(row["expected_answer"]),
+            "responses_create_params": {"input": messages, "max_output_tokens": output_tokens},
+        }
+    )
 (work / "eval_inputs.jsonl").write_text("".join(json.dumps(row) + "\n" for row in inputs))
 OmegaConf.save(OmegaConf.create(cfg), work / "gym_eval.yaml")
 rollout_file = work / "eval_rollouts.jsonl"
+concurrency = int(os.environ.get("NEMORL_ENV_EVAL_CONCURRENCY", "30"))
+if concurrency < 1:
+    raise ValueError("Evaluation concurrency must be positive")
 with (work / "aime25.log").open("w") as stream:
     server = subprocess.Popen(
         [
@@ -102,7 +102,7 @@ with (work / "aime25.log").open("w") as stream:
             "--max-model-len",
             "32768",
             "--max-num-seqs",
-            "2",
+            str(concurrency),
             "--gpu-memory-utilization",
             "0.85",
             "--enforce-eager",
@@ -136,11 +136,11 @@ with (work / "aime25.log").open("w") as stream:
                 "--split",
                 "validation",
                 "--num-repeats",
-                "1",
+                "8",
                 "--concurrency",
-                "2",
+                str(concurrency),
                 "--temperature",
-                "0",
+                "0.7",
                 "--top-p",
                 "1",
                 "--output",
@@ -164,12 +164,11 @@ for row in rows:
 failures = rollout_file.with_name("eval_rollouts_failures.jsonl")
 if failures.exists() and failures.read_text().strip():
     raise RuntimeError("Gym evaluation reported failed rollouts")
-if len(rows) != 62 or {row["question"] for row in rows} != set(questions):
-    raise RuntimeError("Gym evaluation must return every held-out question exactly once")
+if Counter(row["question"] for row in rows) != Counter({question: 8 for question in questions}):
+    raise RuntimeError("Gym evaluation must return exactly eight answers for each of the 30 AIME25 questions")
 if any(row["reward"] not in (0.0, 1.0) for row in rows):
     raise RuntimeError("Gym evaluation must return binary math rewards")
-math_accuracy = sum(row["reward"] for row in rows if questions[row["question"]] == "math_eval") / 32
-aime_accuracy = sum(row["reward"] for row in rows if questions[row["question"]] == "aime25") / 30
+aime_accuracy = sum(row["reward"] for row in rows) / 240
 wandb_url = ""
 if "WANDB_API_KEY" in os.environ:
     import wandb
@@ -184,14 +183,10 @@ if "WANDB_API_KEY" in os.environ:
         {
             "aime25/rollouts": wandb.Table(
                 columns=["question", "reward", "response"],
-                data=[
-                    [row["question"], row["reward"], json.dumps(row["response"])]
-                    for row in rows
-                    if questions[row["question"]] == "aime25"
-                ],
+                data=[[row["question"], row["reward"], json.dumps(row["response"])] for row in rows],
             ),
-            "math_eval/accuracy": math_accuracy,
             "aime25/accuracy": aime_accuracy,
+            "aime25/avg@8": aime_accuracy,
         }
     )
     wandb_url = run.url
@@ -200,9 +195,9 @@ print(
     "NEMORL_ENV_RESULT="
     + json.dumps(
         {
-            "reward": (math_accuracy + aime_accuracy) / 2,
-            "math_eval_exact": math_accuracy,
+            "reward": aime_accuracy,
             "aime25_exact": aime_accuracy,
+            "aime25_avg_at_8": aime_accuracy,
             "completed": 1,
             "wandb_url": wandb_url,
         }

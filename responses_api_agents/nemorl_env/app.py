@@ -29,7 +29,7 @@ including new loss functions, are accepted. Wire changes into training and test 
 After you finish, we automatically train Qwen/Qwen2.5-1.5B-Instruct on one GPU
 within a {train_minutes}-minute execution budget, including authored dependency builds, startup, training and export.
 Training uses 8 prompts × 8 responses per step; then clean code evaluates the weights.
-Reward is mean held-out math/AIME25 accuracy (32K generation, boxed answers).
+Reward is AIME25 avg@8 accuracy (eight sampled answers per problem, 32K context, boxed answers).
 Use train_math.jsonl; do not obtain or train on evaluation examples.
 The model architecture, 8×8 batch, GPU/time budget, and evaluator are fixed.
 You have {research_minutes} minutes and 200 turns. Changes outside recipe.yaml and NeMo-RL/ are ignored."""
@@ -48,6 +48,7 @@ class NeMoRLEnvConfig(BaseResponsesAPIAgentConfig):
     research_seconds: int = Field(default=3600, ge=60, le=3600)
     max_turns: int = Field(default=200, ge=1, le=200)
     concurrency: int = 1
+    eval_concurrency: int = Field(default=30, ge=1)
 
 
 class NeMoRLEnvRunRequest(BaseRunRequest):
@@ -56,7 +57,7 @@ class NeMoRLEnvRunRequest(BaseRunRequest):
 
 class NeMoRLEnvResponse(BaseVerifyResponse):
     aime25_exact: float = 0.0
-    math_eval_exact: float = 0.0
+    aime25_avg_at_8: float = 0.0
     train_reward: float = 0.0
     completed: int = 0
     inner_steps: int = 0
@@ -167,7 +168,6 @@ class NeMoRLEnvAgent(SimpleResponsesAPIAgent):
     def _sandbox_spec(self, extra: dict[str, str], *, evaluation: bool = False) -> SandboxSpec:
         files = self._task_files()
         if evaluation:
-            files["/root/math_eval.jsonl"] = (Path(__file__).parent / "data/math_eval.jsonl").read_text()
             files.pop("/testbed/launch_inner.py")
             files.pop("/testbed/recipe.yaml")
         else:
@@ -180,6 +180,7 @@ class NeMoRLEnvAgent(SimpleResponsesAPIAgent):
             env={
                 "NEMORL_ROOT": "/testbed/NeMo-RL",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+                **({"NEMORL_ENV_EVAL_CONCURRENCY": str(self.config.eval_concurrency)} if evaluation else {}),
                 **{
                     name: os.environ[name]
                     for name in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_PROJECT", "WANDB_NAME")

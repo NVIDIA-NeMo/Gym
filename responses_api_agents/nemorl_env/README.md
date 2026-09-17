@@ -1,49 +1,49 @@
 # NeMo RL environment
 
-A native Gym agent for evaluating agent-authored post-training code.
+A Gym environment for training models to train models.
 
-1. Claude Code edits a recipe and pinned NeMo RL/Gym sources in a CPU sandbox
-   (60 minutes, 200 turns, 256K context). Core loss and data-processing changes are accepted.
-2. A one-GPU sandbox applies the patch and trains Qwen2.5-1.5B-Instruct with
+1. The model runs in Claude Code to edit a recipe and pinned NeMo RL/Gym sources in a CPU sandbox
+   (60 minutes, 200 turns, 256K context). Core changes such as loss fn, advantage estimation or
+   data-processing changes are accepted.
+2. A GPU sandbox applies the patch and trains Qwen2.5-1.5B-Instruct with
    NeMo RL + NeMo Gym GRPO: 8 prompts × 8 responses, with Gym's math verifier.
-   Training, authored builds, and checkpoint export
-   share a hard 60-minute budget after pristine setup.
-3. A fresh, unpatched GPU sandbox serves tensor weights with vLLM and runs
-   `gym eval run` on 32 held-out math examples and 30 AIME25 problems with boxed
-   answers. Generation gets the model's 32K context minus the prompt tokens.
+3. A fresh, unpatched GPU sandbox serves model with vLLM and runs
+   `gym eval run` on AIME25 with a 32K context budget, including the prompt.
 
-Reward is `(math accuracy + AIME25 accuracy) / 2`. Held-out data and evaluator
-credentials never enter author/training sandboxes. Infrastructure failures are
-errors, not zero rewards; an empty patch receives zero. Outer training/token
-capture is not enabled. Full end-to-end evaluation validation is still pending.
+Reward is AIME25 avg@8: mean accuracy over eight sampled answers per problem
+(30 problems, 240 answers; temperature 0.7).
 
 ## Setup
 
-Configure `policy_model` with an OpenAI-compatible author endpoint. Set:
+Configure `policy_model` and the sandbox connections in `config.yaml`. CPU/GPU
+domains and API keys, author image, and registry credentials are declared there
+using environment-variable references. The author image must provide Python at
+`/agent_deps_mount/bin/python`, uv, and Git.
 
-- `OPENSANDBOX_CELL3_DOMAIN` and `OPENSANDBOX_CELL3_API_KEY` for CPU authoring.
-- `OPENSANDBOX_CELL4_DOMAIN` and `OPENSANDBOX_CELL4_API_KEY` for GPU execution.
-- `NEMORL_ENV_AUTHOR_IMAGE`, `NEMORL_ENV_REGISTRY_USER`, and `NEMORL_ENV_REGISTRY_PASSWORD`
-  for the author image, which must provide Python at `/agent_deps_mount/bin/python`, uv, and Git.
-
-Generate local datasets (not checked into Git):
+Generate datasets:
 
 ```bash
 python responses_api_agents/nemorl_env/prepare.py
 gym eval prepare --benchmark aime25
 ```
 
-`app.py` orchestrates the sandboxes; `author_worker.py` runs Claude Code.
+`app.py` orchestrates the sandboxes, `author_worker.py` runs Claude Code.
 `task_environment/` contains the recipe, training data, runner, and evaluator.
-`recipe.yaml` explicitly inherits NeMo RL's full `grpo_math_1B.yaml`; it is an
+`recipe.yaml` explicitly inherits NeMo RL's full `grpo_math_1B.yaml`, it is an
 editable override, not a standalone config. The launcher writes the complete
-`/testbed/resolved_grpo.yaml` before training. Data/environment edits are retained;
+`/testbed/resolved_grpo.yaml` before training. Data/environment edits are retained,
 model, batch size, GPU/time budget, and held-out evaluation remain fixed.
-`data/train.jsonl` contains eight author prompts; `data/math_eval.jsonl` is held out.
-Checkpoint transfers are serialized and buffered in memory; provision driver
-memory for one transfer and disk for queued checkpoints.
+`data/train.jsonl` contains one stable author prompt; `data/example.jsonl` contains
+five independently identified copies. Use repeated rollouts for exploration.
+`eval_concurrency` in `config.yaml` controls simultaneous AIME25 answers (default 30).
+
+With the author model configured, record real example rollouts with:
+
+```bash
+gym env start --config responses_api_agents/nemorl_env/config.yaml --model-type vllm_model
+gym eval run --no-serve --agent nemorl_env --input responses_api_agents/nemorl_env/data/example.jsonl --output responses_api_agents/nemorl_env/data/example_rollouts.jsonl
+```
 
 Math data: the first 512 training rows of NVIDIA's
 [OpenMathInstruct-2](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2)
-(CC-BY-4.0), split 480/32 with seed 42 and `problem`/`expected_answer` renamed
-to `input`/`output`. Preparation pins the source revision and preserves the existing split.
+(CC-BY-4.0)

@@ -22,13 +22,9 @@ def prepared_task_environment(tmp_path, monkeypatch):
         source / "task_environment", task / "task_environment", ignore=shutil.ignore_patterns("*.jsonl", "__pycache__")
     )
     (task / "data").mkdir()
-    for name, start, count in (("task_environment/train_math.jsonl", 0, 480), ("data/math_eval.jsonl", 480, 32)):
-        (task / name).write_text(
-            "".join(
-                json.dumps({"input": f"Compute {i} + 1", "output": str(i + 1)}) + "\n"
-                for i in range(start, start + count)
-            )
-        )
+    (task / "task_environment/train_math.jsonl").write_text(
+        "".join(json.dumps({"input": f"Compute {i} + 1", "output": str(i + 1)}) + "\n" for i in range(512))
+    )
     monkeypatch.setattr(app, "PARENT_DIR", root)
     monkeypatch.setattr(app, "__file__", str(task / "app.py"))
     monkeypatch.setattr(author_worker, "__file__", str(task / "author_worker.py"))

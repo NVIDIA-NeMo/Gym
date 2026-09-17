@@ -45,10 +45,8 @@ def agent(prepared_task_environment):
             author_image="author:test",
             aime25_path="aime25.jsonl",
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-            sandbox_provider={"opensandbox": {"connection": {"domain": "cell4", "api_key": "gpu-control-only"}}},
-            author_sandbox_provider={
-                "opensandbox": {"connection": {"domain": "cell3", "api_key": "cpu-control-only"}}
-            },
+            sandbox_provider={"opensandbox": {"connection": {"domain": "gpu", "api_key": "gpu-control-only"}}},
+            author_sandbox_provider={"opensandbox": {"connection": {"domain": "cpu", "api_key": "cpu-control-only"}}},
             author_image_auth={"username": "test", "password": "registry-only"},
         ),
         server_client=client,
@@ -107,7 +105,7 @@ async def test_run_isolates_author_and_sets_256k(agent, response, monkeypatch, u
     ):
         result = await agent.run(body)
     provider, spec = create.call_args.args
-    assert provider["opensandbox"]["connection"]["domain"] == "cell3"
+    assert provider["opensandbox"]["connection"]["domain"] == "cpu"
     assert spec.resources.gpu is None
     assert spec.ttl_s == 5400
     assert sandbox.exec.await_args.kwargs["timeout_s"] == 4200
@@ -133,16 +131,16 @@ def test_training_token_capture_fails_closed(agent):
         NeMoRLEnvAgent(config=cfg, server_client=agent.server_client)
 
 
-def test_shipped_config_resolves_separate_cells_and_one_hour(monkeypatch):
+def test_shipped_config_resolves_cpu_gpu_providers_and_one_hour(monkeypatch):
     for name in (
-        "OPENSANDBOX_CELL3_API_KEY",
-        "OPENSANDBOX_CELL4_API_KEY",
+        "OPENSANDBOX_CPU_API_KEY",
+        "OPENSANDBOX_GPU_API_KEY",
         "NEMORL_ENV_REGISTRY_USER",
         "NEMORL_ENV_REGISTRY_PASSWORD",
         "NEMORL_ENV_AUTHOR_IMAGE",
     ):
         monkeypatch.setenv(name, "test-only")
-    for name in ("OPENSANDBOX_CELL3_DOMAIN", "OPENSANDBOX_CELL4_DOMAIN"):
+    for name in ("OPENSANDBOX_CPU_DOMAIN", "OPENSANDBOX_GPU_DOMAIN"):
         monkeypatch.setenv(name, name.lower())
     merged = OmegaConf.load(Path(__file__).parents[1] / "config.yaml")
     cfg = OmegaConf.to_container(merged.nemorl_env.responses_api_agents.nemorl_env, resolve=True)
@@ -151,9 +149,10 @@ def test_shipped_config_resolves_separate_cells_and_one_hour(monkeypatch):
         server_client=ServerClient.model_construct(global_config_dict=merged),
     )
     assert env.config.train_seconds == 3600
+    assert env.config.eval_concurrency == 30
     assert env.config.research_seconds == 3600 and env.config.max_turns == 200
-    assert env._author_provider["opensandbox"]["connection"]["domain"] == "opensandbox_cell3_domain"
-    assert env._provider["opensandbox"]["connection"]["domain"] == "opensandbox_cell4_domain"
+    assert env._author_provider["opensandbox"]["connection"]["domain"] == "opensandbox_cpu_domain"
+    assert env._provider["opensandbox"]["connection"]["domain"] == "opensandbox_gpu_domain"
     assert not env._token_id_capture_enabled()
 
 
@@ -199,19 +198,18 @@ async def test_source_training_is_separate_from_trusted_evaluation(agent, tmp_pa
     assert events == ["start:train", "close:train", "start:eval", "close:eval"]
     assert score == {"reward": 0.25, "completed": 1, "inner_steps": 26, "train_reward": 0.5}
     train, evaluation = [call.args[1] for call in create.call_args_list]
-    assert all(call.args[0]["opensandbox"]["connection"]["domain"] == "cell4" for call in create.call_args_list)
+    assert all(call.args[0]["opensandbox"]["connection"]["domain"] == "gpu" for call in create.call_args_list)
     assert train.resources.gpu == evaluation.resources.gpu == 1
     assert train.files["/root/change.diff"] == "source and recipe patch"
     assert "WANDB_API_KEY" not in train.env
     assert evaluation.env["WANDB_API_KEY"] == "test-only-secret"
-    for path in ("/root/aime25.jsonl", "/root/math_eval.jsonl", "/testbed/evaluate.py"):
+    for path in ("/root/aime25.jsonl", "/testbed/evaluate.py"):
         assert path not in train.files and path in evaluation.files
     for path in ("/root/change.diff", "/testbed/recipe.yaml", "/testbed/launch_inner.py"):
         assert path in train.files and path not in evaluation.files
     train_rows = [json.loads(line) for line in train.files["/testbed/train_math.jsonl"].splitlines()]
-    eval_rows = [json.loads(line) for line in evaluation.files["/root/math_eval.jsonl"].splitlines()]
-    assert len(train_rows) == 480 and len(eval_rows) == 32
-    assert not {row["input"] for row in train_rows} & {row["input"] for row in eval_rows}
+    assert len(train_rows) == 512
+    assert "/root/math_eval.jsonl" not in train.files and "/root/math_eval.jsonl" not in evaluation.files
     sandboxes[0].download.assert_awaited_once()
     sandboxes[1].upload.assert_awaited_once()
     for stage, sandbox in zip(("train", "eval"), sandboxes, strict=True):

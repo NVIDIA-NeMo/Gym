@@ -85,7 +85,7 @@ async def test_source_patch_replays_new_loss_and_gym_edits(
         assert not (gym / ".git").exists()
         assert not (gym / "untracked_answers.json").exists()
         assert "dirty source" not in (source / "nemo_rl/core.py").read_text()
-        assert len((work / "train_math.jsonl").read_text().splitlines()) == 480
+        assert len((work / "train_math.jsonl").read_text().splitlines()) == 512
         assert not (work / "run.sh").exists()
         assert not (work / "launch_inner.py").exists()
         shutil.copytree(work, clean, ignore=shutil.ignore_patterns(".git"))
@@ -123,7 +123,7 @@ async def test_source_patch_replays_new_loss_and_gym_edits(
     source = clean / "NeMo-RL"
     assert not (source / "nemo_rl/obsolete.py").exists()
     assert (source / "nemo_rl/fixture.bin").read_bytes() == b"\x00new\xffloss\x00"
-    assert len((clean / "train_math.jsonl").read_text().splitlines()) == 480
+    assert len((clean / "train_math.jsonl").read_text().splitlines()) == 512
     for filename in ("run.sh", "launch_inner.py", "evaluation_data.json"):
         assert not (clean / filename).exists()
     for repo, expression in (

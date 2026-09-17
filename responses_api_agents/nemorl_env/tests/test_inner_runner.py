@@ -6,6 +6,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -176,7 +177,7 @@ def test_training_rows_use_native_gym_schema(tmp_path):
 
 
 @pytest.mark.parametrize("available", [511, 513])
-def test_prepare_generates_disjoint_splits_and_author_tasks(tmp_path, monkeypatch, available):
+def test_prepare_generates_512_training_rows_and_author_tasks(tmp_path, monkeypatch, available):
     from responses_api_agents.nemorl_env import prepare
 
     load = MagicMock(return_value=iter({"problem": f"Problem {i}", "expected_answer": i} for i in range(available)))
@@ -189,16 +190,15 @@ def test_prepare_generates_disjoint_splits_and_author_tasks(tmp_path, monkeypatc
         return
     prepare.prepare()
     train = [json.loads(line) for line in (tmp_path / "task_environment/train_math.jsonl").read_text().splitlines()]
-    evaluation = [json.loads(line) for line in (tmp_path / "data/math_eval.jsonl").read_text().splitlines()]
     authors = [json.loads(line) for line in (tmp_path / "data/train.jsonl").read_text().splitlines()]
-    assert len(train) == 480 and len(evaluation) == 32
-    assert {row["input"] for row in train}.isdisjoint(row["input"] for row in evaluation)
-    assert sorted(train + evaluation, key=lambda row: int(row["output"])) == [
-        {"input": f"Problem {i}", "output": str(i)} for i in range(512)
-    ]
-    assert [row["output"] for row in evaluation[:3]] == ["176", "51", "152"]
-    assert len(authors) == 8
-    for row in authors:
+    assert train == [{"input": f"Problem {i}", "output": str(i)} for i in range(512)]
+    assert not (tmp_path / "data/math_eval.jsonl").exists()
+    examples = [json.loads(line) for line in (tmp_path / "data/example.jsonl").read_text().splitlines()]
+    assert len(authors) == 1 and len(examples) == 5
+    assert authors == examples[:1]
+    assert len({row["responses_create_params"]["metadata"]["instance_id"] for row in examples}) == 5
+    assert {row["responses_create_params"]["metadata"]["problem_statement"] for row in examples} == {prepare.PROMPT}
+    for row in authors + examples:
         assert row["agent_ref"] == {"type": "responses_api_agents", "name": "nemorl_env"}
         assert row["responses_create_params"]["input"] == []
         assert row["responses_create_params"]["metadata"]["problem_statement"]
@@ -251,13 +251,10 @@ def test_real_timeout_checker_counts_model_initialization(tmp_path, monkeypatch,
 @pytest.mark.parametrize("failure", [None, "missing", "duplicate", "reward", "sidecar", "subprocess"])
 def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeypatch, capsys, failure):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
-    for benchmark, count, question_key, answer_key in (
-        ("math_eval", 32, "input", "output"),
-        ("aime25", 30, "question", "expected_answer"),
-    ):
-        (tmp_path / f"{benchmark}.jsonl").write_text(
-            "".join(json.dumps({question_key: f"{benchmark}-{i}", answer_key: "42"}) + "\n" for i in range(count))
-        )
+    monkeypatch.setenv("NEMORL_ENV_EVAL_CONCURRENCY", "30")
+    (tmp_path / "aime25.jsonl").write_text(
+        "".join(json.dumps({"question": f"aime25-{i}", "expected_answer": "42"}) + "\n" for i in range(30))
+    )
     tree = ast.parse((TASK / "evaluate.py").read_text().replace("/root/", str(tmp_path) + "/"))
     start = next(
         i
@@ -273,19 +270,23 @@ def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeyp
         assert command[:3] == [str(tmp_path / ".venv/bin/gym"), "eval", "run"]
         assert kwargs["cwd"] == tmp_path / "3rdparty/Gym-workspace/Gym"
         assert kwargs["check"]
-        assert command[command.index("--num-repeats") + 1] == "1"
+        assert command[command.index("--num-repeats") + 1] == "8"
+        assert command[command.index("--concurrency") + 1] == "30"
+        assert command[command.index("--temperature") + 1] == "0.7"
         assert command[command.index("--split") + 1] == "validation"
         assert "--model-type" not in command
         assert "--max-output-tokens" not in command
         if failure == "subprocess":
             raise subprocess.CalledProcessError(1, command)
         rows = [json.loads(line) for line in (tmp_path / "eval_inputs.jsonl").read_text().splitlines()]
-        assert len(rows) == 62
+        assert len(rows) == 30
         assert all(row["responses_create_params"]["max_output_tokens"] == 32668 for row in rows)
         assert all("\\boxed{}" in row["responses_create_params"]["input"][0]["content"] for row in rows)
+        rows = [
+            {**row, "reward": float(sample % 2), "response": {"output": []}} for row in rows for sample in range(8)
+        ]
         for row in rows:
-            row["reward"] = float(row.pop("question").startswith("aime25"))
-            row["response"] = {"output": []}
+            row.pop("question")
         rows.reverse()
         if failure == "missing":
             rows.pop()
@@ -310,6 +311,7 @@ def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeyp
         "time": time,
         "urllib": urllib,
         "subprocess": subprocess,
+        "Counter": Counter,
     }
     with (
         patch.object(subprocess, "Popen", return_value=server) as popen,
@@ -326,6 +328,8 @@ def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeyp
     server.terminate.assert_called_once()
     server.wait.assert_called_once_with(timeout=30)
     assert popen.call_args.args[0][:3] == [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
+    server_command = popen.call_args.args[0]
+    assert server_command[server_command.index("--max-num-seqs") + 1] == "30"
     _, configs = GlobalConfigDictParser().load_extra_config_paths([str(tmp_path / "gym_eval.yaml")])
     cfg = OmegaConf.merge(*configs)
     assert not cfg.policy_model.responses_api_models.vllm_model.uses_reasoning_parser
@@ -341,7 +345,7 @@ def test_gym_evaluation_scores_complete_rollouts_and_cleans_up(tmp_path, monkeyp
         assert "NEMORL_ENV_RESULT=" not in output
     else:
         result = json.loads(output.split("NEMORL_ENV_RESULT=")[1])
-        assert result == {"reward": 0.5, "math_eval_exact": 0.0, "aime25_exact": 1.0, "completed": 1, "wandb_url": ""}
+        assert result == {"reward": 0.5, "aime25_exact": 0.5, "aime25_avg_at_8": 0.5, "completed": 1, "wandb_url": ""}
 
 
 def test_legacy_checkpoint_exports_only_bfloat16_safetensors(tmp_path, capsys):

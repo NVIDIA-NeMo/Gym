@@ -3,8 +3,8 @@ nemorl_env:
     nemorl_env:
       entrypoint: app.py
       domain: coding
-      description: Isolated native author and one-hour, one-GPU post-training evaluation.
-      value: Train agents to conduct bounded empirical ML research.
+      description: Train models to train models.
+      value: Post-training evaluation and training.
       model_server:
         type: responses_api_models
         name: policy_model
@@ -20,18 +20,22 @@ nemorl_env:
       research_seconds: 3600
       max_turns: 200
       concurrency: 32
+      eval_concurrency: 30
       token_id_capture: false
       datasets:
         - name: train
           type: train
           jsonl_fpath: responses_api_agents/nemorl_env/data/train.jsonl
           license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/nemorl_env/data/example.jsonl
 
 author_sandbox:
   opensandbox:
     connection:
-      domain: ${oc.env:OPENSANDBOX_CELL3_DOMAIN}
-      api_key: ${oc.env:OPENSANDBOX_CELL3_API_KEY}
+      domain: ${oc.env:OPENSANDBOX_CPU_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_CPU_API_KEY}
       protocol: http
       use_server_proxy: true
       request_timeout_s: 300
@@ -47,8 +51,8 @@ author_sandbox:
 train_sandbox:
   opensandbox:
     connection:
-      domain: ${oc.env:OPENSANDBOX_CELL4_DOMAIN}
-      api_key: ${oc.env:OPENSANDBOX_CELL4_API_KEY}
+      domain: ${oc.env:OPENSANDBOX_GPU_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_GPU_API_KEY}
       protocol: http
       use_server_proxy: true
       request_timeout_s: 300
