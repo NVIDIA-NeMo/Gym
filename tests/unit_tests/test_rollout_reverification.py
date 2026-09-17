@@ -165,6 +165,15 @@ class TestRolloutReverificationConfig:
                     "input_format": "atif",
                     "rollouts_jsonl_fpath": None,
                     "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "judge_failed_only": True,
+                },
+                "does not support judge-failure recovery",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
                     "force": True,
                 },
                 "requires a stateless verifier",
@@ -377,6 +386,19 @@ class TestAtifPreflight:
         config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"] = "not-a-bool"
 
         with pytest.raises(ConfigError, match="invalid expose_tools_over_mcp"):
+            _resources_server_exposes_tools_over_mcp(config, "fixture-rs")
+
+    @pytest.mark.parametrize(
+        ("config", "match"),
+        [
+            ({}, "is missing from the config"),
+            ({"fixture-rs": {"resources_servers": {}}}, "must contain exactly one resources_servers entry"),
+            ({"fixture-rs": {"resources_servers": {"fixture": "invalid"}}}, "has an invalid config entry"),
+        ],
+        ids=["missing-block", "missing-implementation", "invalid-implementation"],
+    )
+    def test_malformed_resources_server_config_fails_closed(self, config: dict, match: str) -> None:
+        with pytest.raises(ConfigError, match=match):
             _resources_server_exposes_tools_over_mcp(config, "fixture-rs")
 
     @pytest.mark.parametrize(
@@ -1245,6 +1267,33 @@ class TestPrepareAtifPayloads:
                 materialized,
                 manifest,
             )
+
+    def test_reports_an_unreadable_materialized_input(self, tmp_path: Path) -> None:
+        _, manifest = self._write_inputs_and_manifest(tmp_path)
+        missing_materialized = tmp_path / "missing-materialized.jsonl"
+
+        with pytest.raises(AtifProjectionError, match="could not read materialized inputs"):
+            _prepare_atif_payloads(missing_materialized, manifest)
+
+    def test_limit_is_applied_before_projecting_and_blank_input_lines_are_ignored(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized.write_bytes(b"\n" + materialized.read_bytes() + b"\n")
+        manifest.write_bytes(
+            manifest.read_bytes()
+            + orjson.dumps(
+                {
+                    "trajectory_path": "excluded-missing-trajectory.json",
+                    TASK_INDEX_KEY_NAME: 999,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                }
+            )
+            + b"\n"
+        )
+
+        with pytest.warns(UserWarning, match="2 of 2 entries without expected_sha256"):
+            payloads = _prepare_atif_payloads(materialized, manifest, limit=1)
+
+        assert [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in payloads] == [(7, 2)]
 
     def test_materialized_input_preserves_arbitrary_size_json_integers(self, tmp_path: Path) -> None:
         materialized, manifest = self._write_inputs_and_manifest(tmp_path)
@@ -2147,7 +2196,7 @@ class TestRolloutReverificationRunFromConfig:
         The output file must contain exactly the same fields as the verify response plus the
         stamped metadata — no extra or missing keys.
         """
-        success_row = self._make_row("agent_a", task=0, skills=True)
+        success_row = self._make_row("agent_a", task=0, skills=True) | {TASK_SOURCE_KEY_NAME: "authoritative-rs"}
         failure_row = self._make_row("agent_a", task=1)
         no_persist_row = self._make_row("agent_a", task=2)
 
@@ -2178,6 +2227,7 @@ class TestRolloutReverificationRunFromConfig:
         assert stamped[ROLLOUT_INDEX_KEY_NAME] == 0
         assert stamped[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
         assert stamped[SKILLS_REF_KEY_NAME] == ["skill_a"]
+        assert stamped[TASK_SOURCE_KEY_NAME] == "authoritative-rs"
         assert stamped["reward"] == 1.0
         assert set(stamped.keys()) == {
             "reward",
@@ -2185,6 +2235,7 @@ class TestRolloutReverificationRunFromConfig:
             ROLLOUT_INDEX_KEY_NAME,
             AGENT_REF_KEY_NAME,
             SKILLS_REF_KEY_NAME,
+            TASK_SOURCE_KEY_NAME,
         }
 
         # failure row: exact field set = verify response fields + 3 stamped metadata fields (no SKILLS_REF)

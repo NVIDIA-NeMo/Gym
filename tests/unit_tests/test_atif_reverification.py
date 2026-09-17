@@ -341,6 +341,65 @@ def test_manifest_explicitly_joins_trajectory_to_materialized_rollout() -> None:
     assert _weather_reward(projected.payload) == 1.0
 
 
+def test_manifest_rejects_a_rollout_without_a_materialized_task() -> None:
+    entry = AtifReverifyManifestEntry(
+        trajectory_path=_FIXTURE_PATH.name,
+        task_index=7,
+        rollout_index=2,
+    )
+
+    with pytest.raises(AtifProjectionError, match=r"has no matching materialized input \(7, 2\)"):
+        project_atif_manifest_entry(entry, {}, manifest_directory=_FIXTURE_PATH.parent)
+
+
+@pytest.mark.parametrize(
+    "nemo_gym_metadata",
+    ["producer-private", {"source": "producer-private"}, {"source": {"format": "ng_trajectory"}}],
+)
+def test_manifest_allows_gym_metadata_that_does_not_declare_rollout_identity(
+    tmp_path: Path,
+    nemo_gym_metadata: Any,
+) -> None:
+    data = _trajectory_data()
+    data["extra"] = {"nemo_gym": nemo_gym_metadata}
+    trajectory_path = tmp_path / "trajectory.json"
+    trajectory_path.write_text(json.dumps(data))
+    entry = AtifReverifyManifestEntry(
+        trajectory_path=trajectory_path,
+        task_index=7,
+        rollout_index=2,
+    )
+
+    projected = project_atif_manifest_entry(
+        entry,
+        index_materialized_inputs([_materialized_input()]),
+        manifest_directory=tmp_path,
+    )
+
+    assert projected.task_index == 7
+    assert projected.rollout_index == 2
+
+
+@pytest.mark.parametrize("value", [True, -1, "7"])
+def test_manifest_rejects_invalid_declared_gym_source_identity(tmp_path: Path, value: Any) -> None:
+    data = _trajectory_data()
+    data["extra"] = {"nemo_gym": {"source": {"task_index": value, "rollout_index": 2}}}
+    trajectory_path = tmp_path / "trajectory.json"
+    trajectory_path.write_text(json.dumps(data))
+    entry = AtifReverifyManifestEntry(
+        trajectory_path=trajectory_path,
+        task_index=7,
+        rollout_index=2,
+    )
+
+    with pytest.raises(AtifProjectionError, match="source task_index is invalid"):
+        project_atif_manifest_entry(
+            entry,
+            index_materialized_inputs([_materialized_input()]),
+            manifest_directory=tmp_path,
+        )
+
+
 @pytest.mark.parametrize(("field_name", "value"), [("task_index", 8), ("rollout_index", 3)])
 def test_manifest_rejects_conflicting_gym_source_identity(
     tmp_path: Path,
@@ -510,6 +569,22 @@ def test_manifest_batch_rejects_one_source_path_mapped_to_distinct_rollouts() ->
         project_atif_manifest_entries(entries, indexed, manifest_directory=_FIXTURE_PATH.parent)
 
 
+def test_manifest_batch_rejects_byte_identical_sources_at_distinct_paths(tmp_path: Path) -> None:
+    source = json.dumps(_trajectory_data())
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    first_path.write_text(source)
+    second_path.write_text(source)
+    indexed = index_materialized_inputs([_materialized_input(), _materialized_input() | {ROLLOUT_INDEX_KEY_NAME: 3}])
+    entries = [
+        AtifReverifyManifestEntry(trajectory_path=first_path, task_index=7, rollout_index=2),
+        AtifReverifyManifestEntry(trajectory_path=second_path, task_index=7, rollout_index=3),
+    ]
+
+    with pytest.raises(AtifProjectionError, match="uses ATIF source content .* more than once"):
+        project_atif_manifest_entries(entries, indexed, manifest_directory=tmp_path)
+
+
 def test_manifest_batch_accepts_distinct_trajectories_without_trajectory_ids(tmp_path: Path) -> None:
     first_data = _trajectory_data()
     first_data["trajectory_id"] = None
@@ -586,6 +661,15 @@ def test_materialized_input_index_rejects_duplicate_rollout_keys() -> None:
 
     with pytest.raises(AtifProjectionError, match="duplicate materialized input key"):
         index_materialized_inputs([row, row])
+
+
+@pytest.mark.parametrize("field_name", [TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME])
+def test_materialized_input_index_rejects_negative_rollout_identity(field_name: str) -> None:
+    row = _materialized_input()
+    row[field_name] = -1
+
+    with pytest.raises(AtifProjectionError, match=f"has invalid {field_name}"):
+        index_materialized_inputs([row])
 
 
 @pytest.mark.parametrize(
@@ -699,6 +783,15 @@ def test_standard_atif_cost_metadata_does_not_block_stateless_reverification() -
     assert response.usage is not None
     assert response.usage.input_tokens == 30
     assert response.usage.output_tokens == 11
+
+
+def test_final_metrics_without_token_counts_do_not_invent_usage() -> None:
+    data = _trajectory_data()
+    data["final_metrics"] = {"total_steps": len(data["steps"]), "total_cost_usd": 0.003}
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.usage is None
 
 
 @pytest.mark.parametrize(
@@ -1099,6 +1192,96 @@ def test_parser_rejects_agent_only_fields_on_user_steps(field: str, value: Any) 
         AtifTrajectoryV1_7.model_validate(data)
 
 
+@pytest.mark.parametrize(
+    ("content_part", "match"),
+    [
+        ({"type": "text"}, "text content parts require text"),
+        (
+            {
+                "type": "text",
+                "text": "not an image",
+                "source": {"media_type": "image/png", "path": "fixture.png"},
+            },
+            "text content parts cannot contain an image source",
+        ),
+        ({"type": "image"}, "image content parts require source"),
+        (
+            {
+                "type": "image",
+                "text": "not image data",
+                "source": {"media_type": "image/png", "path": "fixture.png"},
+            },
+            "image content parts cannot contain text",
+        ),
+    ],
+)
+def test_parser_rejects_content_parts_that_conflict_with_their_declared_type(
+    content_part: dict[str, Any],
+    match: str,
+) -> None:
+    data = _trajectory_data()
+    data["steps"][0]["message"] = [content_part]
+
+    with pytest.raises(ValidationError, match=match):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_parser_accepts_explicitly_null_training_metadata() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {
+        "prompt_token_ids": None,
+        "completion_token_ids": None,
+        "logprobs": None,
+    }
+
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    assert trajectory.steps[1].metrics is not None
+    assert trajectory.steps[1].metrics.prompt_token_ids is None
+    assert trajectory.steps[1].metrics.completion_token_ids is None
+    assert trajectory.steps[1].metrics.logprobs is None
+
+
+@pytest.mark.parametrize("field_name", ["prompt_token_ids", "completion_token_ids"])
+def test_parser_rejects_non_integer_training_token_ids(field_name: str) -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {field_name: [True]}
+
+    with pytest.raises(ValidationError, match="token IDs must be non-negative JSON integer arrays"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_parser_rejects_nonfinite_training_logprobs() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {"logprobs": [float("nan")]}
+
+    with pytest.raises(ValidationError, match="log probabilities must be finite JSON number arrays"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_parser_rejects_invalid_iso_timestamp() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["timestamp"] = "not-a-timestamp"
+
+    with pytest.raises(ValidationError, match="invalid ISO 8601 timestamp"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [("reasoning_effort", "high"), ("reasoning_content", "reasoning"), ("metrics", {})],
+)
+def test_parser_rejects_llm_metadata_when_step_declares_no_llm_call(field_name: str, value: Any) -> None:
+    data = _trajectory_data()
+    step = data["steps"][1]
+    step.pop("reasoning_content")
+    step["llm_call_count"] = 0
+    step[field_name] = value
+
+    with pytest.raises(ValidationError, match="llm_call_count=0 cannot include reasoning or LLM metrics"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
 def test_parser_requires_object_tool_arguments() -> None:
     data = _trajectory_data()
     data["steps"][1]["tool_calls"][0]["arguments"] = "not-an-object"
@@ -1273,6 +1456,11 @@ def _strict_projection_case(case_id: str, mutate: Any, match: str) -> Any:
                 ]
             ),
             "no observation result.*call-b",
+        ),
+        _strict_projection_case(
+            "duplicate-tool-call-in-step",
+            lambda data: data["steps"][1]["tool_calls"].append(deepcopy(data["steps"][1]["tool_calls"][0])),
+            "step 2 repeats tool_call_id 'call-a'",
         ),
         _strict_projection_case(
             "empty-agent-content-parts",
