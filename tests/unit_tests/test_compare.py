@@ -22,7 +22,12 @@ import orjson
 import pytest
 
 from nemo_gym.comparison import loading as comparison_loading
-from nemo_gym.comparison.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
+from nemo_gym.comparison.diff import (
+    build_flip_summary,
+    build_metric_rows,
+    compare_runs,
+    is_comparison_worthy_metric,
+)
 from nemo_gym.comparison.loading import (
     build_loaded_run,
     load_agg_metrics_file,
@@ -442,7 +447,7 @@ class TestMetricRows:
         ],
     )
     def test_only_real_metrics_get_a_row(self, name, comparable):
-        assert is_comparable_metric(name) is comparable
+        assert is_comparison_worthy_metric(name) is comparable
 
     def test_reads_values_ci_and_delta(self, tmp_path):
         baseline = _load(
