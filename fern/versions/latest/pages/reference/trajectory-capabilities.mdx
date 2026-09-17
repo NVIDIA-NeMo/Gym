@@ -7,8 +7,8 @@ position: 5
 Use this reference to check which evidence an agent path provides. Start with
 [Rollout Evidence](/main/observability/rollout-evidence) for collection and artifact relationships.
 
-**Full** means complete for the documented path; **Partial** means some fields or paths are missing;
-**Unavailable** means the path does not supply that evidence. These are manually maintained coverage
+✅ **Full** means complete for the documented path; 🟡 **Partial** means some fields or paths are missing;
+❌ **Unavailable** means the path does not supply that evidence. These are manually maintained coverage
 claims, not guarantees for every configuration.
 
 <Note>
@@ -25,43 +25,43 @@ Gym Model Server URL. Direct-provider routes bypass capture. Token counts depend
 fields. History may come from captured payloads or harness conversations.
 
 | Agent | Per-call metadata | Token counts | Model-visible history |
-| --- | --- | --- | --- |
-| `anyswe_agent` | Unavailable | Unavailable | Unavailable |
-| `anyterminal_agent` | Full | Full | Full |
-| `aviary_agent` | Full | Full | Full |
-| `browsecomp_agent` | Full | Full | Full |
-| `claude_code_agent` | Full | Full | Full |
-| `cline_agent` | Full | Full | Full |
-| `codex_agent` | Full | Full | Full |
-| `critpt_agent` | Full | Full | Full |
-| `cvdp_agent` | Partial | Partial | Partial |
-| `finance_agent` | Unavailable | Partial | Unavailable |
-| `gymnasium_agent` | Full | Full | Full |
-| `harbor_agent` | Unavailable | Unavailable | Unavailable |
-| `hermes_agent` | Full | Full | Full |
-| `kilocode_agent` | Full | Full | Full |
-| `labbench2_vlm_agent` | Full | Full | Partial |
-| `langgraph_agent` | Unavailable | Unavailable | Unavailable |
-| `mini_swe_agent` | Unavailable | Unavailable | Unavailable |
-| `mini_swe_agent_2` | Full | Full | Full |
-| `non_executing_simple_agent` | Full | Full | Full |
-| `openclaw_agent` | Full | Full | Partial |
-| `opencode_agent` | Full | Full | Full |
-| `opencode_sandboxed_agent` | Full | Full | Full |
-| `osworld_agent` | Partial | Partial | Partial |
-| `pi_agent` | Full | Full | Full |
-| `proof_refinement_agent` | Full | Full | Full |
-| `remote_agent` | Unavailable | Partial | Unavailable |
-| `scicode_agent` | Unavailable | Unavailable | Unavailable |
-| `simple_agent` | Full | Full | Full |
-| `speed_bench_agent` | Full | Full | Full |
-| `stirrup_agent` | Partial | Partial | Partial |
-| `swe_agents` / OpenCode (legacy) | Full | Full | Full |
-| `swe_agents` / OpenHands (legacy) | Unavailable | Unavailable | Partial |
-| `tau2` | Full | Full | Full |
-| `tool_simulation_agent` | Full | Full | Full |
-| `toolsandbox_agent` | Full | Full | Full |
-| `verifiers_agent` | Unavailable | Unavailable | Unavailable |
+| --- | :---: | :---: | :---: |
+| `anyswe_agent` | ❌ | ❌ | ❌ |
+| `anyterminal_agent` | ✅ | ✅ | ✅ |
+| `aviary_agent` | ✅ | ✅ | ✅ |
+| `browsecomp_agent` | ✅ | ✅ | ✅ |
+| `claude_code_agent` | ✅ | ✅ | ✅ |
+| `cline_agent` | ✅ | ✅ | ✅ |
+| `codex_agent` | ✅ | ✅ | ✅ |
+| `critpt_agent` | ✅ | ✅ | ✅ |
+| `cvdp_agent` | 🟡 | 🟡 | 🟡 |
+| `finance_agent` | ❌ | 🟡 | ❌ |
+| `gymnasium_agent` | ✅ | ✅ | ✅ |
+| `harbor_agent` | ❌ | ❌ | ❌ |
+| `hermes_agent` | ✅ | ✅ | ✅ |
+| `kilocode_agent` | ✅ | ✅ | ✅ |
+| `labbench2_vlm_agent` | ✅ | ✅ | 🟡 |
+| `langgraph_agent` | ❌ | ❌ | ❌ |
+| `mini_swe_agent` | ❌ | ❌ | ❌ |
+| `mini_swe_agent_2` | ✅ | ✅ | ✅ |
+| `non_executing_simple_agent` | ✅ | ✅ | ✅ |
+| `openclaw_agent` | ✅ | ✅ | 🟡 |
+| `opencode_agent` | ✅ | ✅ | ✅ |
+| `opencode_sandboxed_agent` | ✅ | ✅ | ✅ |
+| `osworld_agent` | 🟡 | 🟡 | 🟡 |
+| `pi_agent` | ✅ | ✅ | ✅ |
+| `proof_refinement_agent` | ✅ | ✅ | ✅ |
+| `remote_agent` | ❌ | 🟡 | ❌ |
+| `scicode_agent` | ❌ | ❌ | ❌ |
+| `simple_agent` | ✅ | ✅ | ✅ |
+| `speed_bench_agent` | ✅ | ✅ | ✅ |
+| `stirrup_agent` | 🟡 | 🟡 | 🟡 |
+| `swe_agents` / OpenCode (legacy) | ✅ | ✅ | ✅ |
+| `swe_agents` / OpenHands (legacy) | ❌ | ❌ | 🟡 |
+| `tau2` | ✅ | ✅ | ✅ |
+| `tool_simulation_agent` | ✅ | ✅ | ✅ |
+| `toolsandbox_agent` | ✅ | ✅ | ✅ |
+| `verifiers_agent` | ❌ | ❌ | ❌ |
 
 ## Agent Activity
 
@@ -70,17 +70,17 @@ parallel timing requires independent tool intervals. Resource/sandbox coverage m
 benchmark path emits standardized agent evidence, not that every resource metric is available.
 
 | Agent | Semantic turns | Tool execution | Parallel timing | Resource/sandbox path |
-| --- | --- | --- | --- | --- |
-| `claude_code_agent` | Unavailable | Full | Full | Full |
-| `hermes_agent` | Unavailable | Full | Full | Full |
-| `labbench2_vlm_agent` | Partial | Partial | Unavailable | Full |
-| `openclaw_agent` | Unavailable | Full | Full | Full |
-| `opencode_agent` | Unavailable | Full | Full | Full |
-| `opencode_sandboxed_agent` | Unavailable | Full | Full | Full |
-| `pi_agent` | Unavailable | Full | Full | Full |
-| `simple_agent` | Partial | Partial | Unavailable | Full |
-| `swe_agents` / OpenCode (legacy) | Unavailable | Unavailable | Unavailable | Full |
-| `swe_agents` / OpenHands (legacy) | Unavailable | Unavailable | Unavailable | Full |
+| --- | :---: | :---: | :---: | :---: |
+| `claude_code_agent` | ❌ | ✅ | ✅ | ✅ |
+| `hermes_agent` | ❌ | ✅ | ✅ | ✅ |
+| `labbench2_vlm_agent` | 🟡 | 🟡 | ❌ | ✅ |
+| `openclaw_agent` | ❌ | ✅ | ✅ | ✅ |
+| `opencode_agent` | ❌ | ✅ | ✅ | ✅ |
+| `opencode_sandboxed_agent` | ❌ | ✅ | ✅ | ✅ |
+| `pi_agent` | ❌ | ✅ | ✅ | ✅ |
+| `simple_agent` | 🟡 | 🟡 | ❌ | ✅ |
+| `swe_agents` / OpenCode (legacy) | ❌ | ❌ | ❌ | ✅ |
+| `swe_agents` / OpenHands (legacy) | ❌ | ❌ | ❌ | ✅ |
 
 The other agents listed above report these four dimensions as unavailable. Model HTTP capture
 alone does not establish tool execution or sandbox activity.
