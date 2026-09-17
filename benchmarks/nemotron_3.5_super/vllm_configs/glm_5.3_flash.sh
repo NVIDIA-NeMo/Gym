@@ -35,7 +35,6 @@ VLLM_COMMON_ARGS=(
     --tensor-parallel-size 4
     --api-server-count 1
     --compilation-config '{"cudagraph_mm_encoder": true}'
-    --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
