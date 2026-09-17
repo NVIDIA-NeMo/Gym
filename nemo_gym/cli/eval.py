@@ -27,6 +27,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -407,42 +408,52 @@ def e2e_rollout_collection():  # pragma: no cover
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
 
-    # Prepare data
-    data_processor_config_dict = deepcopy(global_config_dict)
-    with open_dict(data_processor_config_dict):
-        data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = "train_preparation"
+    output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
+    data_process_output_dir = None
+    if e2e_rollout_collection_config.input_jsonl_fpath is not None:
+        input_jsonl_fpath = _resolve_under_cwd_or_install(e2e_rollout_collection_config.input_jsonl_fpath)
+        if not input_jsonl_fpath.is_file():
+            raise ConfigError(
+                f"Input file not found or not a file: '{e2e_rollout_collection_config.input_jsonl_fpath}' (--input). "
+                "Check the path is spelled correctly."
+            )
+    else:
+        # Prepare data
+        data_processor_config_dict = deepcopy(global_config_dict)
+        with open_dict(data_processor_config_dict):
+            data_processor_config_dict["should_download"] = True
+            data_processor_config_dict["mode"] = "train_preparation"
 
-        output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
-        data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
+            data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
+            data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
-    server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
-    _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
+        server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
+        _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
 
-    input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
-    should_skip_data_processing = (
-        e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
-    )
-    if not should_skip_data_processing:
-        if e2e_rollout_collection_config.reuse_existing_data_preparation:
+        input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
+        should_skip_data_processing = (
+            e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
+        )
+        if not should_skip_data_processing:
+            if e2e_rollout_collection_config.reuse_existing_data_preparation:
+                print(
+                    f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
+                )
+
+            data_processor = TrainDataProcessor()
+            data_processor.run(data_processor_config_dict)
+        else:
             print(
-                f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
+                f"Skipping data preparation since `reuse_existing_data_preparation=true` and the final input jsonl fpath `{input_jsonl_fpath}` already exists"
             )
 
-        data_processor = TrainDataProcessor()
-        data_processor.run(data_processor_config_dict)
-    else:
-        print(
-            f"Skipping data preparation since `reuse_existing_data_preparation=true` and the final input jsonl fpath `{input_jsonl_fpath}` already exists"
+        _validate_prepared_split_file_exists(
+            input_jsonl_fpath, e2e_rollout_collection_config.split, data_process_output_dir
         )
 
     # Convert to RolloutCollectionConfig
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
-        _validate_prepared_split_file_exists(
-            input_jsonl_fpath, e2e_rollout_collection_config.split, data_process_output_dir
-        )
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(
@@ -467,7 +478,7 @@ def e2e_rollout_collection():  # pragma: no cover
 
     print(
         f"""Output artifacts:
-1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
+1. Preprocessed datasets: {data_process_output_dir if data_process_output_dir is not None else "skipped (--input)"}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}

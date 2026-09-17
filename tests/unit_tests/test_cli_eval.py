@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import DictConfig
@@ -102,3 +103,109 @@ class TestValidatePreparedSplitFileExists:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(ConfigError, match=r"none"):
             _validate_prepared_split_file_exists(missing_dir / "train.jsonl", "train", missing_dir)
+
+
+class TestE2EInputSelection:
+    @pytest.fixture
+    def runtime(self, monkeypatch, tmp_path):
+        from nemo_gym.cli import eval as cli_eval
+
+        config = DictConfig({"output_jsonl_fpath": str(tmp_path / "out.jsonl"), "disable_health_check": True})
+        monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+        servers = MagicMock()
+        monkeypatch.setattr(cli_eval, "RunHelper", lambda: servers)
+        collector = MagicMock(run_from_config=AsyncMock())
+        monkeypatch.setattr("nemo_gym.rollout_collection.RolloutCollectionHelper", lambda: collector)
+        processor = MagicMock()
+        monkeypatch.setattr("nemo_gym.train_data_utils.TrainDataProcessor", lambda: processor)
+        return config, servers, collector, processor
+
+    @pytest.mark.parametrize("split", [None, "benchmark"])
+    @pytest.mark.parametrize("relative", [False, True])
+    def test_explicit_input_skips_preparation(self, runtime, monkeypatch, tmp_path, capsys, split, relative):
+        from nemo_gym.cli.eval import e2e_rollout_collection
+
+        config, servers, collector, processor = runtime
+        input_path = tmp_path / "subset.jsonl"
+        input_path.write_text('{"task_id": "selected"}\n')
+        monkeypatch.chdir(tmp_path)
+        config.input_jsonl_fpath = input_path.name if relative else str(input_path)
+        if split is not None:
+            config.split = split
+        config.reuse_existing_data_preparation = True
+        config.limit = 1
+        config.num_repeats = 2
+        e2e_rollout_collection()
+        processor.run.assert_not_called()
+        servers.start.assert_called_once_with(None)
+        servers.shutdown.assert_called_once_with()
+        collector.run_from_config.assert_awaited_once()
+        collected = collector.run_from_config.call_args.args[0]
+        assert Path(collected.input_jsonl_fpath) == input_path
+        assert collected.limit == 1
+        assert collected.num_repeats == 2
+        assert not (tmp_path / "out" / "preprocessed_datasets").exists()
+        assert "skipped (--input)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("directory", [False, True])
+    def test_invalid_input_fails_before_startup(self, runtime, tmp_path, capsys, directory):
+        from nemo_gym.cli.eval import e2e_rollout_collection
+
+        config, servers, collector, processor = runtime
+        input_path = tmp_path / "missing.jsonl"
+        if directory:
+            input_path.mkdir()
+        config.input_jsonl_fpath = str(input_path)
+        with pytest.raises(SystemExit, match="1"):
+            e2e_rollout_collection()
+        assert "Input file not found or not a file" in capsys.readouterr().out
+        processor.run.assert_not_called()
+        servers.start.assert_not_called()
+        collector.run_from_config.assert_not_called()
+
+    @pytest.mark.parametrize("reuse", [False, True])
+    def test_split_preparation_is_preserved(self, runtime, monkeypatch, tmp_path, reuse):
+        from nemo_gym.cli import eval as cli_eval
+
+        config, servers, collector, processor = runtime
+        config.split = "validation"
+        config.reuse_existing_data_preparation = reuse
+        agents = [_make_agent_instance_config("agent", [{"name": "data", "type": "validation"}])]
+        monkeypatch.setattr(cli_eval.GlobalConfigDictParser, "filter_for_server_instance_configs", lambda *_: agents)
+        prepared = tmp_path / "out" / "preprocessed_datasets" / "validation.jsonl"
+
+        def prepare(data_config):
+            assert data_config.mode == "train_preparation"
+            assert data_config.should_download is True
+            assert Path(data_config.output_dirpath) == prepared.parent
+            prepared.parent.mkdir(parents=True)
+            prepared.write_text("{}\n")
+
+        if reuse:
+            prepared.parent.mkdir(parents=True)
+            prepared.write_text("{}\n")
+        processor.run.side_effect = prepare
+        cli_eval.e2e_rollout_collection()
+        assert processor.run.call_count == (0 if reuse else 1)
+        assert Path(collector.run_from_config.call_args.args[0].input_jsonl_fpath) == prepared
+        servers.start.assert_called_once_with(None)
+        servers.shutdown.assert_called_once_with()
+
+    def test_explicit_input_reaches_custom_driver(self, runtime, monkeypatch, tmp_path):
+        from nemo_gym.cli.eval import e2e_rollout_collection
+
+        config, servers, collector, processor = runtime
+        input_path = tmp_path / "subset.jsonl"
+        input_path.write_text("{}\n")
+        config.input_jsonl_fpath = str(input_path)
+        config.rollout_collection_driver = f"{__name__}:test_driver"
+        driver = AsyncMock()
+        monkeypatch.setattr(__name__ + ".test_driver", driver, raising=False)
+        e2e_rollout_collection()
+        driver.assert_awaited_once()
+        collected, resolved = driver.call_args.args
+        assert Path(collected.input_jsonl_fpath) == input_path
+        assert resolved["input_jsonl_fpath"] == str(input_path)
+        processor.run.assert_not_called()
+        collector.run_from_config.assert_not_called()
+        servers.shutdown.assert_called_once_with()
