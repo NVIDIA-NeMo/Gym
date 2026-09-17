@@ -42,7 +42,7 @@ deepsearchqa_claude_code_benchmark:
       sandbox_spec:
         ttl_s: 1800
       sandbox_model_base_url: null
-      exa_api_key: ${oc.env:EXA_API_KEY}
+      exa_api_key: ${oc.env:EXA_API_KEY,null}
       token_id_capture: false
       datasets:
         - name: deepsearchqa
