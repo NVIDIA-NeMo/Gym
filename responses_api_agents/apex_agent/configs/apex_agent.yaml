@@ -54,6 +54,14 @@ apex_agent:
       # Shares the verifier's output root. Incomplete/max-turn runs are saved
       # here without being sent to the grader.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # Mid-rollout checkpoint and resume. Point this at a host directory that
+      # outlives the node (a shared filesystem); a per-rollout subdirectory is
+      # bind-mounted into the sandbox and a rollout killed mid-flight continues
+      # from its last turn boundary when Gym re-dispatches it. Null disables it.
+      resume_checkpoint_dir: ${oc.select:apex_agent_resume_checkpoint_dir,null}
+      resume_checkpoint_mount: ${oc.select:apex_agent_resume_checkpoint_mount,/checkpoint}
+      resume_checkpoint_interval_seconds: ${oc.select:apex_agent_resume_checkpoint_interval_seconds,60}
+      resume_min_remaining_seconds: ${oc.select:apex_agent_resume_min_remaining_seconds,300}
       datasets:
       - name: example
         type: example

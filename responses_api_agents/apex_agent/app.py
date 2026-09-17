@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import shlex
+import shutil
 import tempfile
 import time
 import uuid
@@ -40,6 +41,12 @@ from responses_api_agents.apex_agent.runtime_setup import (
     ApexImageBuildConfig,
     resolve_image,
     stirrup_cache_path,
+)
+from responses_api_agents.apex_agent.stirrup_runtime import (
+    RESUME_MANIFEST_FILENAME,
+    ResumeCheckpoint,
+    load_resume_checkpoint,
+    partial_result_from_checkpoint,
 )
 
 
@@ -76,6 +83,19 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
     artifact_output_dir: Optional[str] = None
+
+    # Mid-rollout checkpoint and resume. A per-rollout directory under this
+    # host path is bind-mounted into the sandbox at `resume_checkpoint_mount`;
+    # the runtime checkpoints there at turn boundaries and a rollout that Gym
+    # re-dispatches after a mid-flight kill continues from it. None disables
+    # the feature. Requires a sandbox provider with per-sandbox bind mounts
+    # (the apptainer provider) and a host path that outlives the node.
+    resume_checkpoint_dir: Optional[str] = None
+    resume_checkpoint_mount: str = "/checkpoint"
+    resume_checkpoint_interval_seconds: float = Field(default=60.0, ge=0.0)
+    # A resumed segment is not started when less than this much of the
+    # per-task budget is left; the rollout is reported as timed out instead.
+    resume_min_remaining_seconds: int = Field(default=300, ge=0)
 
 
 class ApexAgentRunRequest(BaseRunRequest):
@@ -257,8 +277,20 @@ class ApexAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(f"task attachment archive is {len(data)} bytes; limit is {self.config.max_world_bytes}")
         target.write_bytes(data)
 
-    def _sandbox_spec(self, body: ApexAgentRunRequest, instruction: str) -> SandboxSpec:
+    def _sandbox_spec(
+        self,
+        body: ApexAgentRunRequest,
+        instruction: str,
+        *,
+        resume_dir: Path | None = None,
+        resume_checkpoint: ResumeCheckpoint | None = None,
+    ) -> SandboxSpec:
         extra, provider_options, metadata, resources = self._sandbox_parts()
+        if resume_dir is not None:
+            binds = provider_options.get("binds")
+            binds = [binds] if isinstance(binds, str) else list(binds or [])
+            binds.append(f"{resume_dir}:{self.config.resume_checkpoint_mount}")
+            provider_options["binds"] = binds
         metadata.update({"nemo_gym_agent": self.config.name, "task_id": _safe_id(body.task_id)})
         policy_model = self._policy_model()
         if "edgar" in body.foundry_services and not self.config.edgar_user_agent:
@@ -290,6 +322,9 @@ class ApexAgent(SimpleResponsesAPIAgent):
             ),
             "foundry_services": body.foundry_services,
             "edgar_user_agent": self.config.edgar_user_agent,
+            "resume_checkpoint_dir": self.config.resume_checkpoint_mount if resume_dir is not None else None,
+            "resume_allowed": resume_checkpoint is not None,
+            "resume_checkpoint_interval_seconds": self.config.resume_checkpoint_interval_seconds,
         }
         return SandboxSpec(
             image=self._image or self.config.image,
@@ -344,6 +379,9 @@ class ApexAgent(SimpleResponsesAPIAgent):
         response.apex_trajectory = result.get("trajectory") or []
         response.apex_agent_mode = result.get("agent_mode")
         response.apex_completion_status = result.get("completion_status")
+        response.apex_resume_segments = result.get("resume_segments")
+        response.apex_resumed_from_turn = result.get("resumed_from_turn")
+        response.apex_resume_checkpoints = result.get("n_resume_checkpoints")
         return response
 
     def _failure(
@@ -416,7 +454,81 @@ class ApexAgent(SimpleResponsesAPIAgent):
         )
         return output_dir
 
+    @staticmethod
+    def _rollout_key(body: ApexAgentRunRequest) -> tuple[int, int, int] | None:
+        """Gym's (task index, rollout index, attempt index) for this request.
+
+        The attempt index counts prior classed failures and is absent on the first
+        attempt. A request without Gym's dispatch stamps has no stable identity
+        across re-dispatches, so it gets no key and never resumes.
+        """
+        extra = body.__pydantic_extra__ or {}
+        if "_ng_task_index" not in extra or "_ng_rollout_index" not in extra:
+            return None
+        return (
+            int(extra["_ng_task_index"]),
+            int(extra["_ng_rollout_index"]),
+            int(extra.get("_ng_attempt_index", 0) or 0),
+        )
+
+    def _resume_root(self) -> Path | None:
+        if not self.config.resume_checkpoint_dir:
+            return None
+        root = Path(self.config.resume_checkpoint_dir).expanduser()
+        if not root.is_absolute():
+            root = PARENT_DIR / root
+        return root.resolve()
+
+    def _resume_checkpoint_dir(self, body: ApexAgentRunRequest) -> Path | None:
+        """One directory per (task, rollout, attempt).
+
+        A rollout killed mid-flight is re-dispatched with the same three indices and
+        finds its checkpoint here; a retry after a classed failure carries the next
+        attempt index and therefore starts in an empty directory.
+        """
+        root = self._resume_root()
+        key = self._rollout_key(body)
+        if root is None or key is None:
+            return None
+        task_index, rollout_index, attempt_index = key
+        return root / _safe_id(body.task_id) / f"t{task_index}_r{rollout_index}_a{attempt_index}"
+
+    async def _prepare_resume(self, directory: Path | None) -> ResumeCheckpoint | None:
+        """Return the verified checkpoint in ``directory``, or None for a fresh start.
+
+        Verification hashes the world snapshot, so it runs off the event loop. A
+        manifest that is present but fails to verify is retried once: shared
+        filesystems return transient errors, and a wrong "no checkpoint" costs the
+        whole rollout. Nothing is deleted here; new checkpoint files carry a fresh
+        generation and the next manifest supersedes whatever is left.
+        """
+        if directory is None:
+            return None
+        checkpoint = await asyncio.to_thread(load_resume_checkpoint, directory)
+        if checkpoint is None and (directory / RESUME_MANIFEST_FILENAME).exists():
+            await asyncio.sleep(2.0)
+            checkpoint = await asyncio.to_thread(load_resume_checkpoint, directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        return checkpoint
+
+    async def _discard_resume_checkpoint(self, directory: Path | None) -> None:
+        """Remove one rollout's checkpoint directory; never anything outside the configured root."""
+        root = self._resume_root()
+        if directory is None or root is None or directory.parent.parent != root:
+            return
+        await asyncio.to_thread(shutil.rmtree, directory, True)
+
     async def run(self, request: Request, body: ApexAgentRunRequest) -> ApexAgentVerifyResponse:
+        resume_dir = self._resume_checkpoint_dir(body)
+        result = await self._run_rollout(request, body, resume_dir)
+        # Any row, graded or a classed failure, ends this attempt's lineage. Only a
+        # kill mid-flight returns nothing and leaves the checkpoint for the re-dispatch.
+        await self._discard_resume_checkpoint(resume_dir)
+        return result
+
+    async def _run_rollout(
+        self, request: Request, body: ApexAgentRunRequest, resume_dir: Path | None
+    ) -> ApexAgentVerifyResponse:
         instruction = instruction_from_input(body.responses_create_params)
         if not instruction:
             return self._failure(
@@ -431,6 +543,19 @@ class ApexAgent(SimpleResponsesAPIAgent):
             try:
                 policy_model = self._policy_model()
                 await self._ensure_runtime_setup()
+                resume_checkpoint = await self._prepare_resume(resume_dir)
+                timeout_s = self.config.timeout
+                if resume_checkpoint is not None:
+                    remaining = self.config.timeout - resume_checkpoint.elapsed_seconds
+                    if remaining < self.config.resume_min_remaining_seconds:
+                        return self._failure(
+                            body,
+                            f"per-task budget exhausted before resume: {resume_checkpoint.elapsed_seconds:.0f}s of "
+                            f"{self.config.timeout}s used across {resume_checkpoint.segments} segment(s)",
+                            failure_class="timeout_exceeded",
+                            partial_result=partial_result_from_checkpoint(resume_checkpoint),
+                        )
+                    timeout_s = max(1, int(remaining))
                 with tempfile.TemporaryDirectory(prefix=f"apex-{_safe_id(body.task_id)}-") as scratch:
                     scratch_path = Path(scratch)
                     world_zip = scratch_path / "world.zip"
@@ -447,15 +572,20 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     )
                     await raise_for_status(seed)
                     cookies = seed.cookies
-                    await self._download_world(cookies, world_zip)
-                    if body.task_input_files:
-                        await self._download_task_files(cookies, task_files_zip)
-                    spec = self._sandbox_spec(body, instruction)
+                    # A resumed segment restores the world from its checkpoint instead.
+                    if resume_checkpoint is None:
+                        await self._download_world(cookies, world_zip)
+                        if body.task_input_files:
+                            await self._download_task_files(cookies, task_files_zip)
+                    spec = self._sandbox_spec(
+                        body, instruction, resume_dir=resume_dir, resume_checkpoint=resume_checkpoint
+                    )
                     async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
                         await sandbox.start()
-                        await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
-                        if body.task_input_files:
-                            await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
+                        if resume_checkpoint is None:
+                            await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
+                            if body.task_input_files:
+                                await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
                         await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
                         unpack = await sandbox.exec(
                             f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
@@ -479,7 +609,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                         process = await sandbox.exec(
                             f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
                             f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
-                            timeout_s=self.config.timeout,
+                            timeout_s=timeout_s,
                         )
                         if process.return_code != 0:
                             detail = (process.stderr or process.stdout or "")[-4000:]

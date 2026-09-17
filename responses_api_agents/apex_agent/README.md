@@ -27,3 +27,37 @@ The Archipelago image is reused when present. If it is missing and automatic bui
 configured pinned Archipelago commit and builds the SIF once. The lightweight Stirrup runtime is pinned in
 `stirrup-requirements.txt`, built once inside that image, and cached under `deps/`; it does not vendor either source
 repository into Gym.
+
+## Mid-rollout checkpoint and resume
+
+A rollout can outlive a cluster allocation. Gym's own resume only skips rows that finished; a rollout killed
+mid-flight is re-dispatched from turn zero. Set `apex_agent_resume_checkpoint_dir` to a host directory that
+outlives the node (a shared filesystem) to continue such rollouts instead:
+
+- The agent bind-mounts `<dir>/<task_id>/t<task_index>_r<rollout_index>_a<attempt_index>` into the sandbox at
+  `/checkpoint` (apptainer provider). Requests without Gym's dispatch stamps have no identity to resume under and
+  run without checkpoints. The unified Slurm harness sets the directory to `<run dir>/resume_checkpoints` by
+  default (`APEX_RESUME_CHECKPOINT_DIR`); an empty value disables it.
+- At the start of a turn's model call, the one point where every tool call of the previous turn has landed, the
+  runtime writes Stirrup's cache state (messages, history groups, per-turn tool metadata), the Apex state Stirrup does
+  not track (active toolbelt, todo list, model-client counters), a world snapshot of `/filesystem` and
+  `/.apps_data`, and the first segment's initial snapshot, then a manifest with a size and SHA-256 per file. Files are
+  named by a generation counter and the previous generation is pruned only after the new manifest exists, so a
+  crash mid-write keeps the previous checkpoint. Writes are throttled to one per
+  `resume_checkpoint_interval_seconds` (default 60) and held back for two minutes after an MCP tool call times out
+  client-side, since the server may still be writing. A heartbeat every 30 seconds records time spent since the last
+  checkpoint.
+- Gym re-dispatches a killed rollout with the same task, rollout, and attempt indices, so it lands in the same
+  directory: the world is restored from the checkpoint, Stirrup continues from the recorded turn, and the initial
+  snapshot is carried forward so grading still diffs against the pre-agent world. A retry after a classed failure
+  carries the next attempt index and starts clean in its own directory.
+- Time already spent, including the heartbeat, is subtracted from the per-task `timeout`. When less than
+  `resume_min_remaining_seconds` remains, the rollout is reported as `timeout_exceeded` with its checkpointed
+  trajectory instead of starting a segment.
+- Any row written for the attempt, graded or a classed failure, deletes its checkpoint directory. A manifest that
+  fails verification is retried once and otherwise ignored, never deleted; the next checkpoint supersedes it.
+
+Rows carry `apex_resume_segments`, `apex_resumed_from_turn`, and `apex_resume_checkpoints` on the response. A
+resumed segment replays from the last checkpoint, so the turns since it are lost: at most one turn when a
+checkpoint was written at every boundary, more when the interval throttle skipped some. In-memory state of the MCP
+server processes is not captured; their durable state lives under the two snapshotted roots.

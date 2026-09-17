@@ -7,13 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
+import logging
 import os
 import shutil
+import time
 import zipfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any, get_args, get_origin
+from typing import Any, Callable, get_args, get_origin
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 FILESYSTEM_ROOT = Path("/filesystem")
@@ -25,6 +31,16 @@ TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN = 4
 TOOL_OUTPUT_HEAD_CHARACTERS = 20_000
 TOOL_OUTPUT_TAIL_CHARACTERS = 5_000
 PARTIAL_RESULT_CHECKPOINT_INTERVAL_SECONDS = 1.0
+RESUME_CHECKPOINT_SCHEMA_VERSION = 1
+RESUME_MANIFEST_FILENAME = "manifest.json"
+RESUME_INITIAL_FILENAME = "initial.zip"
+RESUME_STIRRUP_CACHE_DIRNAME = "stirrup_cache"
+RESUME_HEARTBEAT_FILENAME = "heartbeat.json"
+RESUME_HEARTBEAT_INTERVAL_SECONDS = 30.0
+# After an MCP tool call times out client-side the server may still be writing;
+# hold the next checkpoint back this long so the snapshot is not torn.
+RESUME_SETTLE_AFTER_TOOL_TIMEOUT_SECONDS = 120.0
+DEFAULT_RESUME_CHECKPOINT_INTERVAL_SECONDS = 60.0
 
 _STANDARD_SERVERS: dict[str, tuple[str, str, str]] = {
     "pdfs": ("pdfs", "pdf_server", "APP_PDF_ROOT"),
@@ -348,6 +364,31 @@ def install_tool_schema_type_annotation() -> None:
             module.to_openai_tools = to_openai_tools_with_annotated_ref_types
 
 
+def make_checkpointing_client_class(base_cls: Any) -> Any:
+    """Subclass Stirrup's ``ChatCompletionsClient`` with a hook awaited at the start of every model call.
+
+    ``base_cls`` is passed in because stirrup is only importable inside the
+    sandbox; the subclass is created at call time in ``run_stirrup_rollout``.
+    The resume checkpointer hangs on the hook: the top of a turn is the one
+    point where every tool call of the previous turn has landed and none of the
+    new turn has started, so the world is quiescent.
+    """
+
+    class CheckpointingChatCompletionsClient(base_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.on_generate_start: Any = None
+
+        async def generate(self, messages: Any, tools: Any) -> Any:
+            if self.on_generate_start is not None:
+                await self.on_generate_start()
+            return await super().generate(messages, tools)
+
+    CheckpointingChatCompletionsClient.__name__ = f"Checkpointing{base_cls.__name__}"
+    CheckpointingChatCompletionsClient.__qualname__ = CheckpointingChatCompletionsClient.__name__
+    return CheckpointingChatCompletionsClient
+
+
 def replace_tool_images_for_text_only_model(
     content: Any,
     *,
@@ -596,14 +637,19 @@ def _token_usage(history: list[list[Any]]) -> tuple[int, int, int]:
     return input_tokens, output_tokens, reasoning_tokens
 
 
-def partial_result_from_session(session: Any, *, completion_status: str = "running") -> dict[str, Any] | None:
+def partial_result_from_session(
+    session: Any,
+    *,
+    completion_status: str = "running",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Project Stirrup's latest completed-turn cache state into a recoverable rollout result."""
     state = getattr(session, "_current_run_state", None)
     if state is None:
         return None
     history = [*getattr(state, "full_msg_history", []), list(getattr(state, "msgs", []))]
     input_tokens, output_tokens, reasoning_tokens = _token_usage(history)
-    return {
+    return (extra or {}) | {
         "final_answer": "",
         "completion_status": completion_status,
         "completed": False,
@@ -621,9 +667,10 @@ def write_partial_result_checkpoint(
     *,
     completion_status: str = "running",
     error: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> bool:
     """Atomically retain the latest completed Stirrup turns for crash recovery."""
-    result = partial_result_from_session(session, completion_status=completion_status)
+    result = partial_result_from_session(session, completion_status=completion_status, extra=extra)
     if result is None:
         return False
     if error is not None:
@@ -635,17 +682,429 @@ def write_partial_result_checkpoint(
     return True
 
 
-async def _checkpoint_partial_result(session: Any, destination: Path) -> None:
+async def _checkpoint_partial_result(
+    session: Any,
+    destination: Path,
+    extra: dict[str, Any] | None = None,
+    checkpointer: Any = None,
+) -> None:
     checkpointed_state: Any = None
+    next_heartbeat = 0.0
     while True:
         current_state = getattr(session, "_current_run_state", None)
         if current_state is not None and current_state is not checkpointed_state:
             try:
-                if write_partial_result_checkpoint(session, destination):
+                if write_partial_result_checkpoint(session, destination, extra=extra):
                     checkpointed_state = current_state
             except Exception:
                 pass
+        if checkpointer is not None and checkpointer.checkpoints_written and time.monotonic() >= next_heartbeat:
+            with suppress(Exception):
+                checkpointer.heartbeat()
+            next_heartbeat = time.monotonic() + RESUME_HEARTBEAT_INTERVAL_SECONDS
         await asyncio.sleep(PARTIAL_RESULT_CHECKPOINT_INTERVAL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Mid-rollout checkpoint and resume
+# ---------------------------------------------------------------------------
+# A cluster job is walled or preempted after a few hours while an Apex rollout
+# can run far longer, and a rollout killed mid-flight restarts from turn zero.
+# Stirrup already rebuilds a CacheState (messages, history groups, per-turn
+# tool metadata) at the top of every turn and continues from one with
+# session(resume=True); it only writes that state on Ctrl-C, keys it on the
+# prompt alone, and knows nothing about the Archipelago world or the state the
+# Apex runtime keeps outside Stirrup (active toolbelt, todo list, the
+# length-tolerant client's counters). The checkpointer below fills those gaps
+# at the start of a turn's model call, the one quiescent point: every tool
+# call of the previous turn has landed and none of the new turn has started.
+# It writes the Stirrup state, the Apex state, a world snapshot in the shape
+# populate_world accepts, and the segment-1 initial snapshot the grader needs,
+# then the manifest last (sha256 + size per file) so a torn write is never
+# mistaken for a checkpoint. Files are versioned by turn and the previous
+# generation is pruned only after the new manifest is in place, so a crash
+# mid-write leaves the previous checkpoint intact. The directory is whatever
+# the host mounted; durability across nodes is the host's job.
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _replace_atomically(destination: Path, write: Callable[[Path], Any]) -> Any:
+    """Write through a sibling temp file and os.replace so readers never see a torn file."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        result = write(temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return result
+
+
+def _count_assistant_turns(history: list[list[Any]]) -> int:
+    return sum(1 for group in history for message in group if getattr(message, "role", None) == "assistant")
+
+
+def _json_token_usage(trajectory: list[dict[str, Any]]) -> tuple[int, int, int]:
+    input_tokens = output_tokens = reasoning_tokens = 0
+    for message in trajectory:
+        usage = message.get("token_usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        input_tokens += int(usage.get("input") or 0)
+        answer = int(usage.get("answer") or 0)
+        reasoning = int(usage.get("reasoning") or 0)
+        output_tokens += answer + reasoning
+        reasoning_tokens += reasoning
+    return input_tokens, output_tokens, reasoning_tokens
+
+
+def zip_manifest(archive_path: Path) -> list[str]:
+    """File manifest of a snapshot ZIP, in the shape write_snapshot returns."""
+    with zipfile.ZipFile(archive_path) as archive:
+        return [info.filename for info in archive.infolist() if not info.is_dir()]
+
+
+_RESUME_ROLES = ("stirrup_state", "apex_state", "world", "initial")
+
+
+class ResumeCheckpoint:
+    """A checkpoint whose manifest verified, ready to be resumed from."""
+
+    def __init__(self, directory: Path, manifest: dict[str, Any], apex_state: dict[str, Any]) -> None:
+        self.directory = Path(directory)
+        self.manifest = manifest
+        self.apex_state = apex_state
+        self.turn = int(manifest.get("turn") or 0)
+        self.segments = int(manifest.get("segments") or 1)
+        self.generation = int(manifest.get("generation") or 0)
+        self.elapsed_seconds = float(apex_state.get("elapsed_seconds") or 0.0)
+        # The heartbeat charges time spent after the last checkpoint (the turn
+        # that was interrupted) so a resumed rollout cannot outlive its budget.
+        heartbeat = _read_heartbeat(self.directory)
+        if heartbeat is not None and int(heartbeat.get("segments") or 0) == self.segments:
+            self.elapsed_seconds = max(self.elapsed_seconds, float(heartbeat.get("elapsed_seconds") or 0.0))
+
+    def path(self, role: str) -> Path:
+        return self.directory / self.manifest["files"][role]["name"]
+
+    @property
+    def stirrup_state_path(self) -> Path:
+        return self.path("stirrup_state")
+
+    @property
+    def world_zip(self) -> Path:
+        return self.path("world")
+
+    @property
+    def initial_zip(self) -> Path:
+        return self.path("initial")
+
+    def trajectory(self) -> list[dict[str, Any]]:
+        """Completed turns as JSON messages, for a row that must be written without another segment."""
+        state = json.loads(self.stirrup_state_path.read_text(encoding="utf-8"))
+        flattened = [message for group in state.get("full_msg_history") or [] for message in group]
+        return [*flattened, *(state.get("msgs") or [])]
+
+
+def _read_heartbeat(directory: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads((directory / RESUME_HEARTBEAT_FILENAME).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def write_resume_heartbeat(directory: Path, *, elapsed_seconds: float, segments: int) -> None:
+    """Record time spent since the last checkpoint; best effort, validated only for shape on load."""
+    _replace_atomically(
+        directory / RESUME_HEARTBEAT_FILENAME,
+        lambda temporary: temporary.write_text(
+            json.dumps({"elapsed_seconds": float(elapsed_seconds), "segments": int(segments)}), encoding="utf-8"
+        ),
+    )
+
+
+def load_resume_checkpoint(directory: Path | str | None) -> ResumeCheckpoint | None:
+    """Return the checkpoint in ``directory`` when its manifest verifies, otherwise None.
+
+    A missing manifest means no checkpoint. A manifest that fails verification is
+    logged and treated the same way; the caller decides whether to retry (a
+    shared filesystem can return transient errors) before starting fresh.
+    """
+    if directory is None:
+        return None
+    directory = Path(directory)
+    manifest_path = directory / RESUME_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema") != RESUME_CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError(f"unsupported checkpoint schema {manifest.get('schema')!r}")
+        if int(manifest.get("turn") or 0) < 1:
+            raise ValueError("checkpoint records no completed turn")
+        files = manifest["files"]
+        for role in _RESUME_ROLES:
+            entry = files[role]
+            path = directory / str(entry["name"])
+            if path.name != str(entry["name"]) or not path.is_file():
+                raise ValueError(f"checkpoint file for {role} is missing")
+            if path.stat().st_size != int(entry["size"]) or _sha256(path) != entry["sha256"]:
+                raise ValueError(f"checkpoint file for {role} does not match its manifest")
+        apex_state = json.loads((directory / str(files["apex_state"]["name"])).read_text(encoding="utf-8"))
+        if not isinstance(apex_state, dict):
+            raise ValueError("apex state is not an object")
+    except Exception as exc:
+        LOGGER.warning("Ignoring unusable resume checkpoint in %s: %s", directory, exc)
+        return None
+    return ResumeCheckpoint(directory, manifest, apex_state)
+
+
+def partial_result_from_checkpoint(
+    checkpoint: ResumeCheckpoint, *, completion_status: str = "timeout"
+) -> dict[str, Any]:
+    """Rollout result for a checkpoint that will not get another segment (budget already spent)."""
+    trajectory = checkpoint.trajectory()
+    input_tokens, output_tokens, reasoning_tokens = _json_token_usage(trajectory)
+    return {
+        "final_answer": "",
+        "completion_status": completion_status,
+        "completed": False,
+        "n_input_tokens": input_tokens,
+        "n_output_tokens": output_tokens,
+        "n_reasoning_tokens": reasoning_tokens,
+        "trajectory": trajectory,
+        "tool_metadata": {},
+        "resume_segments": checkpoint.segments,
+        "resumed_from_turn": checkpoint.turn,
+        "elapsed_seconds": checkpoint.elapsed_seconds,
+    }
+
+
+class ResumeCheckpointer:
+    """Write a resumable checkpoint at turn boundaries, at most once per ``min_interval_seconds``.
+
+    Filenames carry a generation counter seeded from the checkpoint being
+    resumed, so a write never replaces a file the live manifest references;
+    the previous generation is pruned only after the new manifest is in place.
+    """
+
+    def __init__(
+        self,
+        directory: Path | str,
+        *,
+        snapshot_world: Callable[[Path], Any],
+        apex_state: Callable[[], dict[str, Any]],
+        initial_snapshot: Path | str | None = None,
+        min_interval_seconds: float = DEFAULT_RESUME_CHECKPOINT_INTERVAL_SECONDS,
+        prior_elapsed_seconds: float = 0.0,
+        prior_segments: int = 0,
+        prior_generation: int = 0,
+        resumed_turn: int | None = None,
+        segment_started_at: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.directory = Path(directory)
+        self._snapshot_world = snapshot_world
+        self._apex_state = apex_state
+        self._initial_snapshot = Path(initial_snapshot) if initial_snapshot is not None else None
+        self.min_interval_seconds = float(min_interval_seconds)
+        self.prior_elapsed_seconds = float(prior_elapsed_seconds)
+        self.segments = int(prior_segments) + 1
+        self.generation = int(prior_generation)
+        self.resumed_turn = resumed_turn
+        self._clock = clock
+        self._segment_started_at = clock() if segment_started_at is None else float(segment_started_at)
+        self._last_state: Any = None
+        self._generate_seen_state: Any = None
+        self._last_written_at: float | None = None
+        self._not_before: float | None = None
+        self.checkpoints_written = 0
+        self.last_turn: int | None = resumed_turn
+        self._remove_stale_temporaries()
+
+    def _remove_stale_temporaries(self) -> None:
+        """A hard kill mid-write leaves ``.<name>.tmp`` behind; nothing else writes here at segment start."""
+        if not self.directory.is_dir():
+            return
+        for child in self.directory.iterdir():
+            if child.is_file() and child.name.startswith(".") and child.name.endswith(".tmp"):
+                child.unlink(missing_ok=True)
+
+    def elapsed_seconds(self) -> float:
+        return self.prior_elapsed_seconds + (self._clock() - self._segment_started_at)
+
+    def defer(self, seconds: float) -> None:
+        """Hold checkpoints back, e.g. after a tool call timed out client-side but may still be running."""
+        self._not_before = max(self._not_before or 0.0, self._clock() + float(seconds))
+
+    def eligible(self, state: Any) -> bool:
+        """A state is checkpointed once, only before its turn's first model call, and not too often."""
+        if state is None or state is self._last_state or state is self._generate_seen_state:
+            return False
+        turn = _count_assistant_turns([*state.full_msg_history, list(state.msgs)])
+        if turn < 1:
+            return False
+        if self.checkpoints_written == 0 and self.resumed_turn is not None and turn <= self.resumed_turn:
+            # The segment has not produced a new turn yet; the checkpoint on disk is current.
+            return False
+        now = self._clock()
+        if self._not_before is not None and now < self._not_before:
+            return False
+        if self._last_written_at is not None and now - self._last_written_at < self.min_interval_seconds:
+            return False
+        return True
+
+    async def on_generate_start(self, state: Any) -> None:
+        """Model-client hook. A failed checkpoint is logged and the rollout goes on without it."""
+        try:
+            if self.eligible(state):
+                await asyncio.to_thread(self.write, state)
+        except Exception as exc:
+            LOGGER.warning("Resume checkpoint failed; continuing without it: %s", exc)
+        finally:
+            if state is not None:
+                self._generate_seen_state = state
+
+    def heartbeat(self) -> None:
+        write_resume_heartbeat(self.directory, elapsed_seconds=self.elapsed_seconds(), segments=self.segments)
+
+    def write(self, state: Any) -> int:
+        """Persist ``state`` plus the world and Apex state; returns the checkpointed turn."""
+        history = [*state.full_msg_history, list(state.msgs)]
+        turn = _count_assistant_turns(history)
+        generation = self.generation + 1
+        self.directory.mkdir(parents=True, exist_ok=True)
+        names = {
+            "stirrup_state": f"stirrup_state.g{generation}.t{turn}.json",
+            "apex_state": f"apex_state.g{generation}.t{turn}.json",
+            "world": f"world.g{generation}.t{turn}.zip",
+            "initial": RESUME_INITIAL_FILENAME,
+        }
+        initial = self.directory / names["initial"]
+        if not initial.is_file():
+            if self._initial_snapshot is None or not self._initial_snapshot.is_file():
+                raise FileNotFoundError("the segment-1 initial snapshot is required for a resume checkpoint")
+            _replace_atomically(initial, lambda temporary: shutil.copy2(self._initial_snapshot, temporary))
+        _replace_atomically(self.directory / names["world"], self._snapshot_world)
+        apex_state = dict(self._apex_state()) | {
+            "turn": turn,
+            "elapsed_seconds": self.elapsed_seconds(),
+            "segments": self.segments,
+            "checkpoints_written": self.checkpoints_written + 1,
+        }
+        _replace_atomically(
+            self.directory / names["stirrup_state"],
+            lambda temporary: temporary.write_text(json.dumps(state.to_dict(), ensure_ascii=False), encoding="utf-8"),
+        )
+        _replace_atomically(
+            self.directory / names["apex_state"],
+            lambda temporary: temporary.write_text(json.dumps(apex_state, ensure_ascii=False), encoding="utf-8"),
+        )
+        manifest = {
+            "schema": RESUME_CHECKPOINT_SCHEMA_VERSION,
+            "turn": turn,
+            "segments": self.segments,
+            "generation": generation,
+            "written_at": time.time(),
+            "files": {
+                role: {
+                    "name": name,
+                    "size": (self.directory / name).stat().st_size,
+                    "sha256": _sha256(self.directory / name),
+                }
+                for role, name in names.items()
+            },
+        }
+        _replace_atomically(
+            self.directory / RESUME_MANIFEST_FILENAME,
+            lambda temporary: temporary.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8"),
+        )
+        keep = set(names.values()) | {
+            RESUME_MANIFEST_FILENAME,
+            RESUME_HEARTBEAT_FILENAME,
+            RESUME_STIRRUP_CACHE_DIRNAME,
+        }
+        for child in self.directory.iterdir():
+            if child.name not in keep and child.is_file() and not child.name.startswith("."):
+                child.unlink(missing_ok=True)
+        self.generation = generation
+        self._last_state = state
+        self._last_written_at = self._clock()
+        self.checkpoints_written += 1
+        self.last_turn = turn
+        # The interrupted turn's time is charged from here on.
+        with suppress(Exception):
+            self.heartbeat()
+        return turn
+
+
+def stage_stirrup_resume_state(checkpoint: ResumeCheckpoint, cache_dir: Path | str, instruction: str) -> Path:
+    """Put the checkpointed Stirrup state where ``Agent.run`` looks when ``session(resume=True)``.
+
+    Stirrup keys the cache on a hash of the prompt alone and constructs its
+    CacheManager with the module default directory, so the default is pointed
+    at ``cache_dir`` for this process. Only this rollout runs in the sandbox,
+    so the prompt-only key is unambiguous here.
+    """
+    import stirrup.core.cache as stirrup_cache
+
+    cache_dir = Path(cache_dir)
+    destination = cache_dir / stirrup_cache.compute_task_hash(instruction) / "state.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(checkpoint.stirrup_state_path, destination)
+    stirrup_cache.DEFAULT_CACHE_DIR = cache_dir
+    return destination
+
+
+def collect_apex_state(
+    *, agent: Any, catalog: dict[str, Any], todo_state: dict[str, Any], client: Any
+) -> dict[str, Any]:
+    """The rollout state Stirrup's cache does not cover.
+
+    The client counters exist only on clients that track length truncations;
+    on the stock client they read as zero and round-trip harmlessly.
+    """
+    return {
+        "active_tools": sorted(name for name in getattr(agent, "_active_tools", {}) if name in catalog),
+        "todos": [item.model_dump(mode="json") for item in todo_state.values()],
+        "length_truncations": int(getattr(client, "length_truncations", 0) or 0),
+        "recovery_turns": int(getattr(client, "recovery_turns", 0) or 0),
+        "recover_from_truncation": bool(getattr(client, "_recover_from_truncation", False)),
+    }
+
+
+def restore_apex_state(
+    *,
+    agent: Any,
+    catalog: dict[str, Any],
+    todo_state: dict[str, Any],
+    todo_item_cls: Any,
+    client: Any,
+    apex_state: dict[str, Any],
+) -> dict[str, int]:
+    """Inverse of collect_apex_state, applied after the session's tools exist and before run()."""
+    restored_tools = 0
+    for name in apex_state.get("active_tools") or []:
+        tool = catalog.get(name)
+        if tool is not None:
+            agent._active_tools[name] = tool
+            restored_tools += 1
+    todo_state.clear()
+    for item in apex_state.get("todos") or []:
+        todo = todo_item_cls.model_validate(item)
+        todo_state[todo.id] = todo
+    client.length_truncations = int(apex_state.get("length_truncations") or 0)
+    client.recovery_turns = int(apex_state.get("recovery_turns") or 0)
+    client._recover_from_truncation = bool(apex_state.get("recover_from_truncation"))
+    return {"active_tools": restored_tools, "todos": len(todo_state)}
 
 
 async def run_stirrup_rollout(
@@ -653,6 +1112,10 @@ async def run_stirrup_rollout(
     gateway_url: str,
     *,
     checkpoint_path: Path | None = None,
+    resume_checkpoint: ResumeCheckpoint | None = None,
+    resume_checkpoint_dir: Path | None = None,
+    initial_snapshot_path: Path | None = None,
+    segment_started_at: float | None = None,
 ) -> dict[str, Any]:
     """Run one 200-turn Stirrup session against the Archipelago MCP gateway."""
     from typing import Annotated, Literal
@@ -751,6 +1214,7 @@ async def run_stirrup_rollout(
             )
             self.catalog: dict[str, Any] = {}
             self.core_names = {"list_tools", "inspect_tool", "add_tool", "remove_tool", "todo_write", "finish"}
+            self.checkpointer: Any = None
 
         def attach(self, agent: Any) -> None:
             self.agent = agent
@@ -774,6 +1238,10 @@ async def run_stirrup_rollout(
                             timeout=MCP_TOOL_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
+                        # The server side may still be writing; keep the next
+                        # world snapshot away from a half-written file.
+                        if self.checkpointer is not None:
+                            self.checkpointer.defer(RESUME_SETTLE_AFTER_TOOL_TIMEOUT_SECONDS)
                         return ToolResult(
                             content=f"MCP tool timed out after {MCP_TOOL_TIMEOUT_SECONDS} seconds.",
                             success=False,
@@ -878,7 +1346,8 @@ async def run_stirrup_rollout(
         "temperature": float(config["temperature"]),
         "top_p": float(config["top_p"]),
     }
-    client = ChatCompletionsClient(
+    checkpointing_client_class = make_checkpointing_client_class(ChatCompletionsClient)
+    client = checkpointing_client_class(
         model=config["policy_model"],
         base_url=config["model_base_url"],
         api_key="unused",
@@ -899,9 +1368,59 @@ async def run_stirrup_rollout(
     )
     managed_tools.attach(agent)
 
-    async with agent.session() as session:
+    checkpointer: ResumeCheckpointer | None = None
+    if resume_checkpoint_dir is not None:
+        checkpointer = ResumeCheckpointer(
+            resume_checkpoint_dir,
+            snapshot_world=write_snapshot,
+            apex_state=lambda: collect_apex_state(
+                agent=agent, catalog=managed_tools.catalog, todo_state=todo_state, client=client
+            ),
+            initial_snapshot=initial_snapshot_path,
+            min_interval_seconds=float(
+                config.get("resume_checkpoint_interval_seconds", DEFAULT_RESUME_CHECKPOINT_INTERVAL_SECONDS)
+            ),
+            prior_elapsed_seconds=resume_checkpoint.elapsed_seconds if resume_checkpoint is not None else 0.0,
+            prior_segments=resume_checkpoint.segments if resume_checkpoint is not None else 0,
+            prior_generation=resume_checkpoint.generation if resume_checkpoint is not None else 0,
+            resumed_turn=resume_checkpoint.turn if resume_checkpoint is not None else None,
+            segment_started_at=segment_started_at,
+        )
+        client.on_generate_start = lambda: checkpointer.on_generate_start(getattr(agent, "_current_run_state", None))
+        managed_tools.checkpointer = checkpointer
+    resumed_from_turn: int | None = None
+    if resume_checkpoint is not None:
+        stage_stirrup_resume_state(
+            resume_checkpoint,
+            resume_checkpoint.directory / RESUME_STIRRUP_CACHE_DIRNAME,
+            config["instruction"],
+        )
+        resumed_from_turn = resume_checkpoint.turn
+    segment_fields = {
+        "resume_segments": checkpointer.segments if checkpointer is not None else 1,
+        "resumed_from_turn": resumed_from_turn,
+    }
+
+    async with agent.session(resume=resume_checkpoint is not None) as session:
+        if resume_checkpoint is not None:
+            restored = restore_apex_state(
+                agent=agent,
+                catalog=managed_tools.catalog,
+                todo_state=todo_state,
+                todo_item_cls=TodoItem,
+                client=client,
+                apex_state=resume_checkpoint.apex_state,
+            )
+            LOGGER.warning(
+                "resuming from turn %d as segment %d with %.0fs already spent; restored %d tool(s), %d todo(s)",
+                resume_checkpoint.turn,
+                resume_checkpoint.segments + 1,
+                resume_checkpoint.elapsed_seconds,
+                restored["active_tools"],
+                restored["todos"],
+            )
         checkpoint_task = (
-            asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path))
+            asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path, segment_fields, checkpointer))
             if checkpoint_path is not None
             else None
         )
@@ -915,6 +1434,7 @@ async def run_stirrup_rollout(
                         checkpoint_path,
                         completion_status="error",
                         error=f"{type(exc).__name__}: {exc}",
+                        extra=segment_fields,
                     )
             raise
         finally:
@@ -934,6 +1454,9 @@ async def run_stirrup_rollout(
         "n_reasoning_tokens": reasoning_tokens,
         "trajectory": _serialize_history(history),
         "tool_metadata": metadata,
+        **segment_fields,
+        "n_resume_checkpoints": checkpointer.checkpoints_written if checkpointer is not None else 0,
+        "elapsed_seconds": checkpointer.elapsed_seconds() if checkpointer is not None else None,
     }
     if checkpoint_path is not None:
         with suppress(Exception):
