@@ -9,7 +9,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, INDEX_FILENAME, prepare_assets
+from resources_servers.legal_agent_bench.prepare import (
+    EXPECTED_TASK_COUNT,
+    INDEX_FILENAME,
+    prepare_assets,
+    read_task_selection,
+)
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -53,12 +58,29 @@ def _atomic_write(output_path: Path, content: str) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def prepare(*, force: bool = False) -> Path:
-    """Prepare shared LAB assets and write the benchmark-specific task index."""
-    prepared = prepare_assets("all", force=force)
+def prepare(*, force: bool = False, input: str | Path | None = None) -> Path:
+    """Prepare all LAB tasks, or select them with +prepare_script_args.input=/path/to/tasks.jsonl."""
+    options = {}
+    for key, variable in (
+        ("tasks_dir", "LEGAL_AGENT_BENCH_TASK_CACHE_DIR"),
+        ("skills_dir", "LEGAL_AGENT_BENCH_SKILLS_DIR"),
+    ):
+        if value := os.environ.get(variable):
+            options[key] = value
+    if input is not None:
+        task_ids = read_task_selection(input)
+        options["task_ids"] = task_ids
+    prepared = prepare_assets("all", force=force, **options)
     tasks_dir = prepared.get("tasks")
     if tasks_dir is None:
         raise RuntimeError("LAB asset preparation did not return a task cache")
+
+    if input is not None:
+        # The supplied JSONL is already the dataset. Preserve its row parameters and
+        # the canonical full index, which may still be in use by another evaluation.
+        input_path = Path(input).expanduser()
+        print(f"Prepared {len(task_ids)} selected Legal Agent Bench tasks for {input_path}", flush=True)
+        return input_path
 
     content = _render_benchmark_index(Path(tasks_dir) / INDEX_FILENAME)
     _atomic_write(OUTPUT_FPATH, content)

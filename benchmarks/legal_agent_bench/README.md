@@ -109,6 +109,41 @@ gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_cl
 gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_codex
 ```
 
+### Prepare a selected set of tasks
+
+Pass an evaluation JSONL to prepare only the tasks named by its
+`legal_agent_bench::...` instance IDs:
+
+```bash
+gym eval prepare --benchmark legal_agent_bench/config_harbor \
+  +prepare_script_args.input=/path/to/tasks.jsonl
+```
+
+For the five examples included in the repository:
+
+```bash
+gym eval prepare --benchmark legal_agent_bench/config_harbor \
+  +prepare_script_args.input=resources_servers/legal_agent_bench/data/example.jsonl
+```
+
+The same option works with all five benchmark variants. Preparation preserves
+the supplied JSONL, including completion parameters and other row fields, and
+does not overwrite the full benchmark index. Use that same JSONL with `--input`
+when collecting rollouts through `gym eval run --no-serve` against running servers.
+
+Valid cached tasks are retained and reused. Changing the task list downloads
+only missing requested tasks; changing completion parameters does not require
+new task downloads. Omitting `+prepare_script_args.input` prepares the full
+1,749-task set, fetching only missing tasks when expanding a valid subset cache.
+If all requested tasks and required skills are valid in the cache, preparation
+requires no network access. `+prepare_script_args.force=true` explicitly
+rebuilds the requested assets instead of reusing them.
+
+Selective downloads require Git with sparse-checkout support. Preparation
+fetches metadata for the pinned upstream commit, then checks out missing task
+directories and required skills. A fresh full preparation still uses the pinned
+source archive.
+
 ## Test the various harnesses
 
 Run these one at a time for each harness you want to test. Each command starts

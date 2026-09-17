@@ -12,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.legal_agent_bench import prepare as benchmark_prepare
 from nemo_gym.benchmarks import BenchmarkConfig
+from nemo_gym.cli.eval import _multiprocess_benchmark_prepare_fn
 from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.train_data_utils import TrainDataProcessor
@@ -72,6 +73,77 @@ def test_prepare_writes_deterministic_complete_benchmark_index(monkeypatch, tmp_
     assert len(rows) == EXPECTED_TASK_COUNT
     assert [row["instance_id"].split("::", 1)[1] for row in rows] == task_names
     assert all("agent_ref" not in row for row in rows)
+
+
+def test_prepare_subset_forwards_selection_and_environment_cache_paths(monkeypatch, tmp_path) -> None:
+    tasks_dir, task_names = _write_task_index(tmp_path, 2)
+    selection = tmp_path / "selection.jsonl"
+    selection.write_bytes((tasks_dir / INDEX_FILENAME).read_bytes())
+    original_selection = selection.read_bytes()
+    output = tmp_path / "benchmark.jsonl"
+    output.write_text("existing full index\n")
+    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output)
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_TASK_CACHE_DIR", str(tasks_dir))
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_SKILLS_DIR", str(tmp_path / "skills"))
+    calls = []
+
+    def prepare_assets(asset, **kwargs):
+        calls.append((asset, kwargs))
+        return {"tasks": tasks_dir}
+
+    monkeypatch.setattr(benchmark_prepare, "prepare_assets", prepare_assets)
+    assert benchmark_prepare.prepare(input=selection) == selection
+    assert selection.read_bytes() == original_selection
+    assert output.read_text() == "existing full index\n"
+    assert calls == [
+        (
+            "all",
+            {
+                "force": False,
+                "tasks_dir": str(tasks_dir),
+                "skills_dir": str(tmp_path / "skills"),
+                "task_ids": tuple(task_names),
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["config.yaml", "config_harbor.yaml", "config_hermes.yaml", "config_claude_code.yaml", "config_codex.yaml"],
+)
+def test_subset_config_and_cli_prepare_use_input_without_publishing_full_index(
+    monkeypatch, tmp_path, filename
+) -> None:
+    tasks, _ = _write_task_index(tmp_path, 1)
+    selection = tmp_path / "selection.jsonl"
+    # These caller-provided settings must survive preparation unchanged.
+    selection.write_text(
+        json.dumps(
+            {
+                "instance_id": "legal_agent_bench::practice-area__task-0000",
+                "responses_create_params": {"input": [], "temperature": 0.2, "top_p": None},
+            }
+        )
+        + "\n"
+    )
+    original = selection.read_bytes()
+    full_index = tmp_path / "full.jsonl"
+    full_index.write_text("full dataset\n")
+    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", full_index)
+    monkeypatch.setattr(benchmark_prepare, "prepare_assets", lambda *args, **kwargs: {"tasks": tasks})
+    config = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / filename),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"prepare_script_args": {"input": str(selection)}},
+    )
+    benchmark = BenchmarkConfig.from_initial_config_dict(
+        path=BENCHMARK_DIR / filename, initial_config_dict=config, strict=False
+    )
+    assert benchmark.dataset.jsonl_fpath == selection
+    _multiprocess_benchmark_prepare_fn((benchmark, "benchmarks.legal_agent_bench.prepare", {"input": str(selection)}))
+    assert selection.read_bytes() == original
+    assert full_index.read_text() == "full dataset\n"
 
 
 def test_wrong_row_count_does_not_replace_existing_output(monkeypatch, tmp_path) -> None:

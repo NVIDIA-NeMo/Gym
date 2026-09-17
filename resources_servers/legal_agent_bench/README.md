@@ -83,7 +83,7 @@ From the repository root:
 python resources_servers/legal_agent_bench/prepare.py
 ```
 
-The command downloads the pinned LAB source archive from GitHub with retries and visible
+On a fresh cache, the command downloads the pinned LAB source archive from GitHub with retries and visible
 progress, verifies SHA-256
 `e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c`,
 rejects unsafe archive entries, generates deterministic runtime tasks, and
@@ -101,6 +101,25 @@ python resources_servers/legal_agent_bench/prepare.py \
   --skills-dir /custom/skills-cache
 ```
 
+To prepare only the tasks named by an evaluation JSONL's `instance_id` fields:
+
+```bash
+python resources_servers/legal_agent_bench/prepare.py \
+  --input resources_servers/legal_agent_bench/data/example.jsonl
+```
+
+Replace the example path with your own JSONL. Valid cached tasks are retained;
+only missing requested tasks and skills are downloaded using Git partial fetch
+and sparse checkout at the pinned revision. Completion parameters and other row
+fields remain in your input JSONL and do not affect task downloads. Omit `--input`
+to prepare all 1,749 tasks, reusing any valid cached subset. `--force` explicitly
+rebuilds the requested assets.
+
+The preparer also honors `LEGAL_AGENT_BENCH_TASK_CACHE_DIR` and
+`LEGAL_AGENT_BENCH_SKILLS_DIR`, matching the server configuration. For the
+`gym eval prepare` equivalent, see
+[Prepare a selected set of tasks](../../benchmarks/legal_agent_bench/README.md#prepare-a-selected-set-of-tasks).
+
 ## Collate datasets
 
 The five example tasks are included in the repo and can be collated without downloading the full LAB archive:
@@ -113,7 +132,7 @@ gym dataset collate \
   --mode example_validation
 ```
 
-Preparation using `prepare.py` generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
+Preparation using `prepare.py` without `--input` generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
 
 ```bash
 python resources_servers/legal_agent_bench/prepare.py
