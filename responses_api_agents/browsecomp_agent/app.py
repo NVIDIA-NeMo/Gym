@@ -520,14 +520,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     # model call re-renders it server-side (vLLM json-decodes tool-call
                     # arguments in the chat template) and fails with HTTP 400, which the
                     # agent sees as a 500 and aborts the whole sample. Blank the stored
-                    # arguments so history stays renderable; the raw text goes back to the
-                    # model in the tool output below, so nothing is lost.
+                    # arguments so history stays renderable. The raw text is deliberately
+                    # NOT echoed back: it would re-enter the history through the tool output.
                     self._sanitize_function_call_args(new_outputs, output_function_call)
-                    bad_args_excerpt = output_function_call.arguments[:500]
                     tool_output = (
                         f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
-                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments. "
-                        f"The arguments you sent were: {bad_args_excerpt}"
+                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
                     )
                 elif self.config.progress and output_function_call.name == "update_progress":
                     # Board writes are handled by the agent itself — the board is
