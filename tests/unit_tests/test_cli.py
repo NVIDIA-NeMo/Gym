@@ -321,21 +321,23 @@ class TestRunHelperLaunchEnvironment:
             NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
         )
 
-        cfg = OmegaConf.create({
-            "dry_run": True,
-            "verbose": False,
-            "test_server": {
-                "resources_servers": {
-                    "dummy": {
-                        "entrypoint": "app.py",
-                        "domain": "other",
-                        "host": "127.0.0.1",
-                        "port": 8000,
-                        "secret_token": "sk-super-secret-12345",
+        cfg = OmegaConf.create(
+            {
+                "dry_run": True,
+                "verbose": False,
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "host": "127.0.0.1",
+                            "port": 8000,
+                            "secret_token": "sk-super-secret-12345",
+                        }
                     }
-                }
+                },
             }
-        })
+        )
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
         monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
         monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
