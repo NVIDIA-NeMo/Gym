@@ -8,7 +8,15 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig
+
+
+SERVER_DIR = Path(__file__).resolve().parents[1]
+
+
+def task_validator() -> TaskDataValidator:
+    return TaskDataValidator("terminal_bench_4", load_task_data_schema(SERVER_DIR), "test.jsonl")
 
 
 def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
@@ -19,10 +27,45 @@ def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
     tasks = {"terminal-bench/" + task["name"]: task["ref"] for task in manifest["tasks"]}
     assert len(rows) == len(tasks) == 66
     assert {row["task_name"] for row in rows} == tasks.keys()
-    for row in rows:
+    validator = task_validator()
+    for index, row in enumerate(rows):
+        validator.validate_row(index, row)
         assert row["task_ref"] == tasks[row["task_name"]]
         assert row["dataset_ref"] == manifest["ref"]
         assert "path" not in row
+    assert validator.report.clean, validator.report.summary()
+
+
+@pytest.mark.parametrize("missing", ["task_name", "task_ref", "dataset_ref"])
+def test_schema_rejects_missing_task_identity(missing: str) -> None:
+    row = {"task_name": "terminal-bench/ks-solver-cpp", "task_ref": "sha256:task", "dataset_ref": "sha256:dataset"}
+    del row[missing]
+    validator = task_validator()
+    validator.validate_row(0, row)
+    assert validator.report.error_rows == 1
+    assert missing in validator.report.summary()
+
+
+def test_example_rollouts_match_pinned_tasks() -> None:
+    examples = [json.loads(line) for line in (SERVER_DIR / "data/example.jsonl").read_text().splitlines()]
+    rollouts = [json.loads(line) for line in (SERVER_DIR / "data/example_rollouts.jsonl").read_text().splitlines()]
+    manifest = json.loads((preparation.BENCHMARK_DIR / "manifest.json").read_text())
+    tasks = {"terminal-bench/" + task["name"]: task for task in manifest["tasks"]}
+    assert len(examples) == len(rollouts) == 5
+    assert len({row["task_name"] for row in examples}) == 5
+    assert {tasks[row["task_name"]]["category"] for row in examples} == {"cpu", "compose", "gpu"}
+    validator = task_validator()
+    for index, (example, rollout) in enumerate(zip(examples, rollouts, strict=True)):
+        validator.validate_row(index, example)
+        assert example["task_ref"] == tasks[example["task_name"]]["ref"]
+        assert example["dataset_ref"] == manifest["ref"]
+        for key in ("task_name", "task_ref", "dataset_ref"):
+            assert rollout[key] == example[key]
+        assert rollout["evaluation_completed"] is True
+        assert rollout["infrastructure_error"] is None
+        assert rollout["response"]["output"]
+        assert rollout["harness_version"] == "2.4.6"
+    assert validator.report.clean, validator.report.summary()
 
 
 @pytest.mark.parametrize("category,count", [("cpu", 52), ("compose", 11), ("gpu", 3)])
