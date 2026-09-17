@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nvidia.com/nemo-gym/task-packages/hello-gym/task.schema.json",
+  "title": "Hello Gym task data",
+  "description": "Package-specific scoring data shared by the Hello Gym task family.",
+  "type": "object",
+  "properties": {
+    "expected_path": {
+      "type": "string",
+      "pattern": "^/workspace/.+",
+      "description": "Absolute path to the file the verifier checks."
+    },
+    "expected_content": {
+      "type": "string",
+      "description": "UTF-8 text expected in the file."
+    }
+  },
+  "required": [
+    "expected_path",
+    "expected_content"
+  ],
+  "additionalProperties": false
+}
