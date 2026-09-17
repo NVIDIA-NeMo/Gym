@@ -26,7 +26,13 @@ Use `--limit 1` for a quick end-to-end check before running the full benchmark.
 Complete long-run config copies for all supported harnesses are in
 [`configs`](configs). Each file includes the DeepSearchQA verifier, agent
 settings, sandbox settings, prompt, and dataset. The files do not inherit from
-a shared agent config.
+a shared agent config. The `agent` field selects a name from Gym’s shared
+`harness_agent` registry, and `agent_kwargs` contains that agent’s settings.
+Switching agents also requires the matching settings and dependency setup;
+use the corresponding config copy as the starting point.
+
+The Claude Code configs install Gym and the Claude CLI in a fresh sandbox
+using `setup_command`. No cluster runtime archive is required.
 
 For example, select the Codex copy directly:
 

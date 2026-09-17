@@ -27,10 +27,8 @@ widesearch_pi_benchmark:
       resources_server:
         type: resources_servers
         name: widesearch
-      harness_module: responses_api_agents.pi_agent.app
-      harness_class: PiAgent
-      harness_config_class: PiAgentConfig
-      harness_kwargs:
+      agent: pi
+      agent_kwargs:
         model: ${policy_model_name}
         thinking: null
         timeout: 7200

@@ -27,10 +27,8 @@ widesearch_simple_strands_benchmark:
       resources_server:
         type: resources_servers
         name: widesearch
-      harness_module: responses_api_agents.simple_strands_agent.app
-      harness_class: SimpleStrandsAgent
-      harness_config_class: SimpleStrandsAgentConfig
-      harness_kwargs:
+      agent: simple_strands
+      agent_kwargs:
         model: ${policy_model_name}
         max_turns: 200
         max_output_tokens: 131072

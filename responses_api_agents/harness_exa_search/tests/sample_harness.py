@@ -10,6 +10,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage,
 
 class SampleHarnessConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+    answer_prefix: str = ""
 
 
 class SampleHarness:
@@ -28,7 +29,9 @@ class SampleHarness:
                     id="message",
                     content=[
                         NeMoGymResponseOutputText(
-                            annotations=[], text=os.environ["MOCK_EXA_SEARCH_RESULT"], type="output_text"
+                            annotations=[],
+                            text=self.config.answer_prefix + os.environ["MOCK_EXA_SEARCH_RESULT"],
+                            type="output_text",
                         )
                     ],
                     role="assistant",

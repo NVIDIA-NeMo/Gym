@@ -27,10 +27,8 @@ widesearch_hermes_benchmark:
       resources_server:
         type: resources_servers
         name: widesearch
-      harness_module: responses_api_agents.hermes_agent.app
-      harness_class: HermesAgent
-      harness_config_class: HermesAgentConfig
-      harness_kwargs:
+      agent: hermes
+      agent_kwargs:
         model: ${policy_model_name}
         max_turns: 200
         max_tokens: null

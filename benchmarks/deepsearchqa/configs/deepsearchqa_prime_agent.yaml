@@ -27,10 +27,8 @@ deepsearchqa_prime_agent_benchmark:
       resources_server:
         type: resources_servers
         name: deepsearchqa
-      harness_module: responses_api_agents.prime_agent.app
-      harness_class: PrimeAgent
-      harness_config_class: PrimeAgentConfig
-      harness_kwargs:
+      agent: prime
+      agent_kwargs:
         model: ${policy_model_name}
         thinking: null
         timeout: 7200

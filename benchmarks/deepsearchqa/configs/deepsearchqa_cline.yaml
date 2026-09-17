@@ -27,10 +27,8 @@ deepsearchqa_cline_benchmark:
       resources_server:
         type: resources_servers
         name: deepsearchqa
-      harness_module: responses_api_agents.cline_agent.app
-      harness_class: ClineAgent
-      harness_config_class: ClineAgentConfig
-      harness_kwargs:
+      agent: cline
+      agent_kwargs:
         model: ${policy_model_name}
         thinking: null
         compaction: agentic

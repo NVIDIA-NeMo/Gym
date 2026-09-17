@@ -27,6 +27,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 
 _MODEL_RELAY_PORT = 18080
@@ -135,10 +136,8 @@ async def _pump_model_relay(endpoint: SandboxEndpoint, upstream: str) -> None:
 class HarnessExaSearchConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    harness_module: str
-    harness_class: str
-    harness_config_class: str
-    harness_kwargs: dict[str, Any] = Field(default_factory=dict)
+    agent: str
+    agent_kwargs: dict[str, Any] = Field(default_factory=dict)
     image: str
     python: str = "python3"
     runtime_archive: Path | None = None
@@ -165,6 +164,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
     config: HarnessExaSearchConfig
 
     def model_post_init(self, context: Any) -> None:
+        self._agent_types = resolve_agent(self.config.agent)
         model = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         self._model_url = self.server_client._build_server_base_url(model)
         self._provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
@@ -201,11 +201,15 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
         upstream_model_url = (self.config.sandbox_model_base_url or self._model_url).rstrip(
             "/"
         ) + self.url_path_for_request("", request).rstrip("/")
+        agent_kwargs = dict(self.config.agent_kwargs)
+        if adapter := _FABRIC_ADAPTERS.get(self.config.agent):
+            agent_kwargs.setdefault("adapter_id", adapter)
         runner_config = {
-            "harness_module": self.config.harness_module,
-            "harness_class": self.config.harness_class,
-            "harness_config_class": self.config.harness_config_class,
-            "harness_kwargs": self.config.harness_kwargs,
+            "agent": self.config.agent,
+            "agent_module": self._agent_types[0],
+            "agent_class": self._agent_types[1],
+            "agent_config_class": self._agent_types[2],
+            "agent_kwargs": agent_kwargs,
             "model_url": upstream_model_url,
             "model_relay_port": _MODEL_RELAY_PORT if use_model_relay else None,
             "input_path": input_path,
@@ -241,7 +245,11 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                     f"{shlex.quote(python)} {runner_path} {config_path}"
                 )
                 if self.config.setup_command:
-                    command = f"{self.config.setup_command} && {command}"
+                    setup = await sandbox.exec(self.config.setup_command, timeout_s=1200)
+                    if setup.return_code != 0:
+                        raise RuntimeError(
+                            f"sandbox dependency setup failed: {(setup.stderr or setup.stdout or '')[-2000:]}"
+                        )
                 runner = asyncio.create_task(sandbox.exec(command, timeout_s=None))
                 relay = None
                 if use_model_relay:

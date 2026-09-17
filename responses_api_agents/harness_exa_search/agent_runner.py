@@ -95,9 +95,9 @@ async def main() -> None:
 
     logging.basicConfig(level=logging.WARNING)
     settings = json.loads(Path(sys.argv[1]).read_text())
-    module = importlib.import_module(settings["harness_module"])
-    agent_class = getattr(module, settings["harness_class"])
-    config_class = getattr(module, settings["harness_config_class"])
+    module = importlib.import_module(settings["agent_module"])
+    agent_class = getattr(module, settings["agent_class"])
+    config_class = getattr(module, settings["agent_config_class"])
     model_url = settings["model_url"]
     relay_runner = None
     if settings.get("model_relay_port"):
@@ -112,7 +112,7 @@ async def main() -> None:
         "port": 0,
         "name": "sandboxed_harness",
         "entrypoint": "app.py",
-        **settings["harness_kwargs"],
+        **settings["agent_kwargs"],
     }
     exa_api_key = settings.get("exa_api_key")
     if exa_api_key:
@@ -165,7 +165,7 @@ async def main() -> None:
             "args": ["-y", "exa-mcp-server"],
             "env": {"EXA_API_KEY": exa_api_key},
         }
-    if settings.get("pi_extension_path") and settings["harness_class"] == "PiAgent":
+    if settings.get("pi_extension_path") and settings["agent"] == "pi":
         config_values.setdefault("extra_args", []).extend(["--extension", settings["pi_extension_path"]])
     try:
         config = config_class(**config_values)
@@ -180,8 +180,8 @@ async def main() -> None:
         metadata = dict(response.metadata or {})
         diagnostics = json.loads(metadata.get("agent_run", "{}"))
         diagnostics.update(
-            harness_module=settings["harness_module"],
-            harness_class=settings["harness_class"],
+            agent_module=settings["agent_module"],
+            agent_class=settings["agent_class"],
             runner_status="returned",
             runner_duration_ms=(monotonic() - started_at) * 1000,
         )

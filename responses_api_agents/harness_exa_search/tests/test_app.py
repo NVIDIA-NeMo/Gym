@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from aiohttp import ClientSession, web
 from fastapi import Request
-from pytest import mark
+from pytest import mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
@@ -67,9 +67,18 @@ async def test_model_relay_round_trip(unused_tcp_port_factory) -> None:
 
 
 @mark.parametrize("task_index", [0, 1])
-async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_index: int) -> None:
+@mark.parametrize("setup_fails", [False, True])
+async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_index: int, setup_fails: bool) -> None:
     lines = (Path(__file__).parents[3] / "resources_servers/deepsearchqa/data/example.jsonl").read_text().splitlines()
     task = json.loads(lines[task_index])
+    monkeypatch.setattr(
+        "responses_api_agents.harness_exa_search.app.resolve_agent",
+        lambda _: (
+            "responses_api_agents.harness_exa_search.tests.sample_harness",
+            "SampleHarness",
+            "SampleHarnessConfig",
+        ),
+    )
     monkeypatch.setenv("MOCK_EXA_SEARCH_RESULT", task["answer"])
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"policy_model": {"responses_api_models": {"model": {}}}}
@@ -81,9 +90,9 @@ async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_
         name="test",
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
-        harness_module="responses_api_agents.harness_exa_search.tests.sample_harness",
-        harness_class="SampleHarness",
-        harness_config_class="SampleHarnessConfig",
+        agent="sample",
+        agent_kwargs={"answer_prefix": "forwarded:"},
+        setup_command="exit 7" if setup_fails else "true",
         image="unused-by-local-provider",
         python=sys.executable,
         sandbox_provider={"local": {}},
@@ -91,22 +100,37 @@ async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_
         exa_api_key="temporary-test-key",
     )
     agent = HarnessExaSearchAgent(config=config, server_client=client)
+    if setup_fails:
+        with raises(RuntimeError, match="sandbox dependency setup failed"):
+            await agent.responses(
+                Request({"type": "http", "path": "/v1/responses", "path_params": {}, "headers": []}),
+                NeMoGymResponseCreateParamsNonStreaming(input=[], model="model"),
+            )
+        return
     result = await agent.responses(
         Request({"type": "http", "path": "/v1/responses", "path_params": {}, "headers": []}),
         NeMoGymResponseCreateParamsNonStreaming(
             input=[NeMoGymEasyInputMessage(role="user", content=task["problem"])], model="model"
         ),
     )
-    assert result.output[0].content[0].text == task["answer"]
+    assert result.output[0].content[0].text == "forwarded:" + task["answer"]
     assert result.model_dump()["object"] == "response"
     diagnostics = json.loads(result.metadata["agent_run"])
-    assert diagnostics["harness_class"] == "SampleHarness"
+    assert diagnostics["agent_class"] == "SampleHarness"
     assert diagnostics["runner_status"] == "returned"
     assert diagnostics["runner_duration_ms"] >= 0
     assert "temporary-test-key" not in config.model_dump_json()
 
 
 async def test_smoke_rollout_uses_prebuilt_runtime(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "responses_api_agents.harness_exa_search.app.resolve_agent",
+        lambda _: (
+            "responses_api_agents.harness_exa_search.tests.sample_harness",
+            "SampleHarness",
+            "SampleHarnessConfig",
+        ),
+    )
     monkeypatch.setenv("MOCK_EXA_SEARCH_RESULT", "Say hello")
     deps = tmp_path / "deps" / "bin"
     deps.mkdir(parents=True)
@@ -127,9 +151,7 @@ async def test_smoke_rollout_uses_prebuilt_runtime(monkeypatch, tmp_path: Path) 
         name="test",
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
-        harness_module="responses_api_agents.harness_exa_search.tests.sample_harness",
-        harness_class="SampleHarness",
-        harness_config_class="SampleHarnessConfig",
+        agent="sample",
         image="unused-by-local-provider",
         runtime_archive=archive,
         sandbox_provider={"local": {}},
