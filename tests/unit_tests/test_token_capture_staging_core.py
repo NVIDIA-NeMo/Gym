@@ -333,6 +333,12 @@ def test_stage_result_and_receipt_validate_identity() -> None:
             manifest=[manifest],
             terminal_selection="declared",
         )
+    # No attribution stage ran (e.g. the manifest failed to parse): the
+    # selection stays unset rather than being stamped with a method.
+    unattributed = RolloutReceipt(rollout_id="rollout-1", manifest=[manifest])
+    assert unattributed.terminal_selection is None
+    with pytest.raises(ValidationError):
+        RolloutReceipt(rollout_id="rollout-1", manifest=[manifest], terminal_selection="guess")
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:

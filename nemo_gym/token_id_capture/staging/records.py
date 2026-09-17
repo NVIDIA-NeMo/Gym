@@ -369,8 +369,10 @@ class RolloutReceipt(_DigestWireModel):
     # named the response it kept, ``response_id``/``content`` when a witness
     # joined the scored response to a manifest row, ``heuristic`` when the
     # parent-link walk inferred it (also stamped on failed selections — it
-    # names the last stage attempted).
-    terminal_selection: Literal["declared", "response_id", "content", "heuristic"]
+    # names the last stage attempted). ``None`` when no attribution stage ran
+    # at all (for example the manifest failed to parse), so such receipts
+    # stay out of the per-method buckets.
+    terminal_selection: Literal["declared", "response_id", "content", "heuristic"] | None = None
     # The witness abstention/corroboration trail from attribution, kept on
     # success and failure alike so per-method metrics stay diagnosable.
     terminal_attribution_reason: str | None = None
