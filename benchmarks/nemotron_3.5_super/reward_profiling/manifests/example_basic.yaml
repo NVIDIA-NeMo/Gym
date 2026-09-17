@@ -1,0 +1,34 @@
+# Example manifest for basic environment without judge or sandbox.
+
+nickname: example_basic
+
+# Becomes sweep_config.yaml, passed to `gym env start --config`.
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
+# Which rows enter the sweep, read by `01_materialize.sh`. Unset means every row.
+# materialize:
+#   limit_per_entry: 500     # per entry; `sample: random` and `seed:` also available
+#                            # an entry can override with its own `limit:`
+
+# Slurm and container settings, so a run needs only MODEL on the command line.
+# Each sbatch key becomes SBATCH_<KEY>; a launcher's own env var overrides either block.
+# sbatch:
+#   account: nemotron_n3_post
+#   qos: interactive
+#   timelimit: "04:00:00"
+# srun:
+#   container: /path/to/eval.sqsh
+#   sandbox_container: /path/to/nemo-skills-sandbox-0.7.1-arm64.sqsh
+
+# Runtime settings for `gym eval run --no-serve`.
+gym_eval_run:
+  num_repeats: 8
+
+entries:
+  - label: tau_pivot
+    agent: single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
+    owner: jkyi
