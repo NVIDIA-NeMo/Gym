@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -130,6 +131,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    # Downloaded components can reuse a development checkout even before its version reaches PyPI.
+    package_core = ""
+    if (dir_path.resolve().parents[1] / "gym-package.json").is_file() and (PARENT_DIR / "pyproject.toml").is_file():
+        package_core = f"-e {shlex.quote(str(PARENT_DIR))}"
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
@@ -146,12 +151,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
                 )
             else:
-                # install nemo-gym from pypi instead of relative path in pyproject.toml
-                # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                core_requirement = package_core or f"nemo-gym{version_spec}"
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{core_requirement} && """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
@@ -160,13 +164,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             if is_editable_install:
                 install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
-                # install nemo-gym from pypi instead of relative path in requirements.txt
-                # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                requirements_source = "grep -v -F '../..' requirements.txt"
+                if not package_core:
+                    requirements_source = f"(echo 'nemo-gym{version_spec}' && {requirements_source})"
+                core_flag = f"{package_core} " if package_core else ""
                 install_cmd = (
-                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""{requirements_source} | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}{core_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(

@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import json
 import logging
+import shutil
 from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -27,6 +28,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -353,15 +355,12 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
     """
     declared_lines: List[str] = []
     declared_types: set = set()
-    example_fpaths: List[str] = []
     for c in server_instance_configs:
         if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers"):
             continue
         for d in c.datasets or []:
             declared_types.add(d.type)
             declared_lines.append(f"- {c.name}: {d.name} (type: {d.type})")
-            if d.type == "example":
-                example_fpaths.append(str(d.jsonl_fpath))
     if split in declared_types:
         return
 
@@ -370,15 +369,8 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
         f"No dataset of type `{split}` is declared in this config, so `--split {split}` has nothing to run.\n"
         f"Declared datasets:\n{declared_str}"
     )
-    if example_fpaths:
-        example_fpaths_str = "\n".join(
-            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
-        )
-        message += (
-            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
-            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
-            f"{example_fpaths_str}"
-        )
+    if "example" in declared_types:
+        message += "\nTo run the committed smoke-test samples, use `--split example` with the same environment config."
     raise ConfigError(message)
 
 
@@ -411,7 +403,9 @@ def e2e_rollout_collection():  # pragma: no cover
     data_processor_config_dict = deepcopy(global_config_dict)
     with open_dict(data_processor_config_dict):
         data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = "train_preparation"
+        data_processor_config_dict["mode"] = (
+            "example_validation" if e2e_rollout_collection_config.split == "example" else "train_preparation"
+        )
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
@@ -429,6 +423,22 @@ def e2e_rollout_collection():  # pragma: no cover
             print(
                 f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
             )
+
+        if e2e_rollout_collection_config.split == "example":
+            # Sample runs write their metrics and prepared files beside staged inputs,
+            # keeping source-checkout sidecars and cached release files untouched.
+            for server_index, server in enumerate(
+                GlobalConfigDictParser().filter_for_server_instance_configs(data_processor_config_dict)
+            ):
+                datasets = server.get_inner_run_server_config_dict().get("datasets") or []
+                for dataset_index, dataset in enumerate(datasets):
+                    if dataset.type != "example":
+                        continue
+                    source = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
+                    staged = data_process_output_dir / "inputs" / str(server_index) / str(dataset_index) / source.name
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, staged)
+                    dataset.jsonl_fpath = str(staged.absolute())
 
         data_processor = TrainDataProcessor()
         data_processor.run(data_processor_config_dict)

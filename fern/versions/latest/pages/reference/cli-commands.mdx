@@ -42,6 +42,7 @@ gym env validate              # validate a manifest-backed workload or legacy co
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
+gym env pull REFERENCE        # preload a registry environment into the package cache
 gym env start                 # start the servers
 gym env status                # show running servers
 
@@ -57,6 +58,28 @@ gym eval compare              # compare a baseline eval run against a candidate 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
 ```
+
+## Registry Environments
+
+Set your community registry once, then run a versioned environment by name. Gym downloads the package, verifies its checksums, and loads its server configuration automatically.
+
+```bash
+export GYM_ENV_REGISTRY=registry.example.com/community
+gym env start nvidia/workplace_assistant:0.1.0 --model-type openai_model
+
+# Run one bundled example; starts and stops the servers automatically.
+gym eval run nvidia/workplace_assistant:0.1.0 --split example \
+  --model-type openai_model --limit 1 --output ./results/workplace_assistant.jsonl
+
+# Optional: preload the same cache used by start and eval.
+gym env pull nvidia/workplace_assistant:0.1.0
+```
+
+Replace the registry and environment with a published release from your community. Gym automatically downloads and caches its checksum-verified registry helper on macOS and Linux (ARM64 or AMD64); an existing ORAS installation on `PATH` is also supported. Private registries use your existing Docker/ORAS credentials. Configure your model endpoint and credentials through the [model flags](#selecting-the-model-server) or your Gym config.
+
+A tag or `@sha256:DIGEST` is required; Gym never assumes `latest`. Full OCI references and local `.tar.gz` archives also work as the positional argument. `--package REFERENCE` remains supported, but cannot be combined with a positional reference. Repeated pulls verify the cached files and avoid downloading the package layer again. `--output-dir` on `env pull` is only needed when you want a separate extracted copy.
+
+`--split example` runs the environment's committed smoke-test samples. It does not measure benchmark performance, and example data remains excluded from train, validation, and benchmark preparation.
 
 ## Common Options
 
