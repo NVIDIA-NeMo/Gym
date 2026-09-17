@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""M5 local-CLI conformance; external CLI execution is a separate smoke gate."""
+"""Local CLI agent-session conformance; external CLI execution is a separate smoke gate."""
 
 import asyncio
 import importlib

@@ -38,7 +38,7 @@ class CLIActivation:
 
 
 class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
-    """Opt local CLI harnesses into the M1 session protocol.
+    """Opt local CLI harnesses into the agent session protocol.
 
     Capabilities: one Responses activation, local scratch workspace, no runtime
     resources tools, no borrowed sandbox. Direct resources metadata is retained
