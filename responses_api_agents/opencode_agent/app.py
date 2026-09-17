@@ -776,7 +776,7 @@ class OpenCodeAgent(CLIResponsesAPIAgent):
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
         return AgentEpisode(response=response, observations=observations)
 
-    async def legacy_responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

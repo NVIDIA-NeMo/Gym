@@ -273,7 +273,7 @@ async def test_caller_cancellation_leaves_cleanup_for_close(cli):
             cleaning.set()
             await release.wait()
 
-    object.__setattr__(agent, "legacy_responses", AsyncMock(side_effect=block))
+    object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=block))
     activation = asyncio.create_task(agent.responses(request, params()))
     await entered.wait()
     activation.cancel()
@@ -302,7 +302,7 @@ async def test_close_waits_for_cancelled_activation_and_can_be_retried(cli):
             cleaning.set()
             await release.wait()
 
-    object.__setattr__(agent, "legacy_responses", AsyncMock(side_effect=block))
+    object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=block))
     activation = asyncio.create_task(agent.responses(request, params()))
     await entered.wait()
     closing = asyncio.create_task(
@@ -337,7 +337,7 @@ async def test_cancelled_cleanup_failure_does_not_close_session(cli):
         finally:
             raise RuntimeError("cleanup failed")
 
-    object.__setattr__(agent, "legacy_responses", AsyncMock(side_effect=block))
+    object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=block))
     activation = asyncio.create_task(agent.responses(request, params()))
     await entered.wait()
     for _ in range(2):
@@ -353,7 +353,7 @@ async def test_activation_error_is_preserved_and_close_collects_failure(cli):
     agent, _, _ = cli
     request = request_for()
     await agent.seed_agent_session(request, seed())
-    object.__setattr__(agent, "legacy_responses", AsyncMock(side_effect=RuntimeError("model transport failed")))
+    object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=RuntimeError("model transport failed")))
     with pytest.raises(RuntimeError, match="model transport failed"):
         await agent.responses(request, params())
     result = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
@@ -395,7 +395,7 @@ async def test_native_path_preserves_token_ids_and_existing_observation_bundle(c
         ],
     )
     attached = response.model_copy(update={"_ng_agent_observations": observations.model_dump(mode="json")})
-    object.__setattr__(agent, "legacy_responses", AsyncMock(return_value=attached))
+    object.__setattr__(agent, "_execute_responses", AsyncMock(return_value=attached))
     actual = await agent.responses(request, params())
     assert actual.model_dump(mode="json") == response.model_dump(mode="json")
     assert "_ng_agent_observations" in attached.model_extra  # No mutation of the producer result.
