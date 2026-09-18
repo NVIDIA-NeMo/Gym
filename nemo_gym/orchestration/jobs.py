@@ -41,14 +41,19 @@ then be read as if it meant the new thing. Anything of that kind needs a
 `SCHEMA_VERSION` bump and an explicit migration, not a silent reinterpretation.
 """
 
+import json
+import logging
 import os
 import secrets
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 from pydantic import BaseModel
 
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -62,6 +67,29 @@ MANIFEST_NAME = "gym-job.json"
 # disk, which may have changed since, or the overrides, which are meaningless
 # without the file they were applied to.
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
+
+
+def installed_gym_commit() -> str | None:
+    """Return the git commit of the installed nemo-gym, or None when the install does not record one."""
+    try:
+        raw = distribution("nemo-gym").read_text("direct_url.json")
+    except PackageNotFoundError:
+        logger.warning("Cannot determine the installed Gym commit: no nemo-gym distribution is installed.")
+        return None
+    if raw is None:
+        logger.warning(
+            "Cannot determine the installed Gym commit: nemo-gym was installed from a package index "
+            "(no direct_url.json)."
+        )
+        return None
+    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
+    if not commit:
+        logger.warning(
+            "Cannot determine the installed Gym commit: nemo-gym was not installed from git (url=%r).",
+            json.loads(raw).get("url"),
+        )
+        return None
+    return str(commit)
 
 
 class BenchmarkJob(BaseModel):
@@ -93,10 +121,14 @@ class SubmissionRecord(BaseModel):
     workload manager's client directly, rather than reaching it over SSH -- not
     that the host is unknown. Executors with no remote-submission concept at all
     leave it None.
+
+    `gym_commit` is the commit of the Gym that wrote the record, when its install
+    records one (see `installed_gym_commit`).
     """
 
     gym_job_id: str
     gym_version: str
+    gym_commit: str | None = None
     submitted_at: str
     run_dir: str
     cluster: str
