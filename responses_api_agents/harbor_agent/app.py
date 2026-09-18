@@ -96,6 +96,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # Cap agent timeout (seconds). Uses the task's own timeout but clamps it
     # to this maximum. Respects shorter per-task timeouts unlike harbor_agent_override_timeout.
     harbor_agent_max_timeout: Optional[int] = None
+    # Override agent setup timeout (seconds). Replaces Harbor's default setup timeout.
+    # Useful when agent setup is slow (e.g. on initial runs).
+    harbor_agent_override_setup_timeout: Optional[int] = None
     # Override verifier timeout (seconds). Replaces the task's own verifier timeout.
     harbor_verifier_override_timeout: Optional[int] = None
     # Cap verifier timeout (seconds). Uses the task's own verifier timeout but
@@ -457,6 +460,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
             max_timeout_sec=(
                 float(self.config.harbor_agent_max_timeout)
                 if self.config.harbor_agent_max_timeout is not None
+                else None
+            ),
+            override_setup_timeout_sec=(
+                float(self.config.harbor_agent_override_setup_timeout)
+                if self.config.harbor_agent_override_setup_timeout is not None
                 else None
             ),
             kwargs=agent_kwargs,
