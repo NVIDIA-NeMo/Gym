@@ -18,7 +18,7 @@ from shlex import quote
 from threading import Lock
 
 
-HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"
+HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"  # pragma: allowlist secret (pinned Git commit)
 
 
 def progress_result(agent, n_input):
