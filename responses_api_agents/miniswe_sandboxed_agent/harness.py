@@ -7,9 +7,7 @@ import asyncio
 import json
 from pathlib import Path
 from shlex import quote
-from threading import Lock
 from time import time
-from typing import Any
 from uuid import uuid4
 
 import yaml
@@ -26,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import NeMoGymChatCompletionMessageToolCall, NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.harness import HarnessContext, HarnessOutcome, WorkerBridge
 
 
 MINI_CONFIG = yaml.safe_load((builtin_config_dir / "mini.yaml").read_text())
@@ -49,52 +48,6 @@ def responses_input(messages):
 class MiniSWEConfig(BaseModel):
     step_limit: int = Field(default=0, ge=0)
     step_timeout_sec: int = Field(default=600, gt=0)
-
-
-class HarnessOutcome(BaseModel):
-    reason: str
-    exit_code: int | None = None
-    detail: str | None = None
-    artifacts: list[str] = Field(default_factory=list)
-
-
-class HarnessContext(BaseModel):
-    session_id: str
-    instruction: str
-    user: str | int | None = None
-    workdir: str | None = None
-    setup_timeout_sec: float = Field(default=360, gt=0)
-    mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
-    skills_dir: str | None = None
-
-
-class WorkerBridge:
-    """Synchronous mini-SWE loop, asynchronous Gym I/O, explicit cancellation."""
-
-    def __init__(self):
-        self.loop = asyncio.get_running_loop()
-        self.closed = False
-        self.pending = set()
-        self.lock = Lock()
-
-    def call(self, factory):
-        with self.lock:
-            if self.closed:
-                raise RuntimeError("Episode is closed")
-            future = asyncio.run_coroutine_threadsafe(factory(), self.loop)
-            self.pending.add(future)
-        try:
-            return future.result()
-        finally:
-            with self.lock:
-                self.pending.discard(future)
-
-    def close(self):
-        with self.lock:
-            self.closed = True
-            pending = list(self.pending)
-        for future in pending:
-            future.cancel()
 
 
 class GymModel:
@@ -308,7 +261,7 @@ class MiniSWEHarness:
         except Exception as exc:
             termination = HarnessOutcome(reason="infrastructure_error", detail=f"{type(exc).__name__}: {exc}")
         finally:
-            bridge.close()
+            await bridge.aclose()
             # Cancel pending I/O and join the synchronous loop before verification.
             await asyncio.gather(worker, return_exceptions=True)
         response = NeMoGymResponse(

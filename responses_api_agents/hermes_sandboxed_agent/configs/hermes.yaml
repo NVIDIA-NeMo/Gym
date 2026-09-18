@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+agent:
+  api_mode: chat_completions
+  use_streaming: false
+  insert_reasoning: false
+  enabled_toolsets: []
+  quiet_mode: true
+  skip_context_files: true
+  skip_memory: true
+  persist_session: false
+  save_trajectories: false
+  checkpoints_enabled: false
+
+runtime:
+  compression:
+    enabled: false

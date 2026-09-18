@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.sandbox.harness import HarnessContext
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -43,7 +44,7 @@ from resources_servers.terminal_bench_4.models import (
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
 from responses_api_agents.hermes_sandboxed_agent.harness import HermesConfig, HermesHarness
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
+from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig, MiniSWEHarness
 
 
 BENCHMARK = Path(__file__).resolve().parents[2] / "benchmarks" / "terminal_bench_4"

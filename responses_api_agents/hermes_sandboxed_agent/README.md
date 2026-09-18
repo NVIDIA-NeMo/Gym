@@ -9,7 +9,11 @@ verifies the result, and cleans up.
 `app.py` forwards Gym `/run` requests to that resources runner, including the
 rollout identity and model-capture settings. `harness.py` accepts the sandbox,
 task instruction, working directory, user, model callback, and artifact
-directory. It contains no benchmark loading or verification logic.
+directory. `GymModel` adapts model calls, `SandboxEnvironment` executes terminal
+tools, and `TrajectoryRecorder` retains the conversation and observations. Hermes
+and mini-SWE share `HarnessContext`, `HarnessOutcome`, and `WorkerBridge` from
+`nemo_gym.sandbox.harness`. The Hermes harness contains no benchmark loading or
+verification logic.
 
 The profile is `benchmarks/terminal_bench_4/hermes.yaml`. It uses the existing
 TB4 resources runner and pinned task packages. Defaults are 90 model turns
@@ -29,9 +33,11 @@ responses in rollout artifacts.
 
 This terminal profile exposes one foreground bash command per tool call.
 Each command starts in the task working directory. Hermes context compression,
-memory, delegation, and additional toolsets are disabled. Hermes uses an isolated
-process configuration with a 128,000-token context estimate. Task MCP servers are
-rejected during setup; tasks can provide skills through their skills directory.
+memory, delegation, and additional toolsets are disabled. `configs/hermes.yaml`
+contains the native agent settings and runtime overrides. Hermes loads those
+runtime overrides from an isolated temporary home and supplies its own remaining
+defaults; the harness does not override the model context length. Task MCP servers
+are rejected during setup; tasks can provide skills through their skills directory.
 The Hermes dependency is pinned to `26bb847a88493342ca1b194e0455b479073ae21d`.
 
 Run the agent tests with:
