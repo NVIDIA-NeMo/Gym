@@ -554,6 +554,7 @@ class TestApp:
         if empty_output:
             mock_response_reasoning_data["output"] = []
         mock_response_reasoning_data["status"] = "completed"
+        mock_response_reasoning_data["metadata"] = {"existing_key": "preserved"}
         dotjson_mock = AsyncMock()
         dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data)]
         dotjson_mock.cookies = {}
@@ -563,6 +564,11 @@ class TestApp:
 
         assert res.status_code == 200
         server.server_client.post.assert_awaited_once()
+        assert res.json()["status"] == "incomplete"
+        assert res.json()["incomplete_details"] is None
+        assert res.json()["metadata"]["existing_key"] == "preserved"
+        assert res.json()["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+        assert res.json()["metadata"]["ng_termination_message"] in caplog.text
         assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
         if not empty_output:
             assert res.json()["output"][0]["summary"] == mock_response_reasoning_data["output"][0]["summary"]
@@ -609,6 +615,66 @@ class TestApp:
         assert trajectory.turns[0].answer == []
         assert trajectory.turns[0].reasoning_content[0]["id"] == "reasoning-1"
         assert trajectory.tool_calls == []
+
+    @pytest.mark.parametrize("with_compaction", [False, True])
+    @pytest.mark.parametrize("skip_verification", [False, True])
+    async def test_termination_metadata_survives_run(self, with_compaction, skip_verification) -> None:
+        from responses_api_agents.simple_agent_with_compaction.app import (
+            SimpleAgentWithCompaction,
+            SimpleAgentWithCompactionConfig,
+            SimpleAgentWithCompactionRunRequest,
+        )
+
+        agent_cls = SimpleAgentWithCompaction if with_compaction else SimpleAgent
+        config_cls = SimpleAgentWithCompactionConfig if with_compaction else SimpleAgentConfig
+        request_cls = SimpleAgentWithCompactionRunRequest if with_compaction else SimpleAgentRunRequest
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = agent_cls(
+            config=config_cls(
+                host="localhost",
+                port=8080,
+                entrypoint="",
+                name="agent",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+                skip_verification=skip_verification,
+            ),
+            server_client=client,
+        )
+        payload = {
+            "id": "reasoning-response",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [{"id": "reasoning-1", "type": "reasoning", "summary": []}],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "completed",
+        }
+        request = MagicMock(cookies={})
+
+        async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if server_name == "agent":
+                response = await server.responses(request, Response(), kwargs["json"])
+                return _mock_response(response.model_dump(mode="json"))
+            if server_name == "model":
+                return _mock_response(payload)
+            assert url_path == "/verify"
+            assert kwargs["json"]["response"]["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+            return _mock_response(kwargs["json"] | {"reward": 0.0})
+
+        client.post = AsyncMock(side_effect=post)
+        result = await server.run(request, request_cls(responses_create_params={"input": "question"}))
+        saved = json.loads(result.model_dump_json())
+        assert "ng_trajectory" not in saved
+        assert saved["response"]["status"] == "incomplete"
+        assert saved["response"]["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+        assert "training-level fixes" in saved["response"]["metadata"]["ng_termination_message"]
+        assert sum(call.kwargs["server_name"] == "model" for call in client.post.await_args_list) == 1
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(

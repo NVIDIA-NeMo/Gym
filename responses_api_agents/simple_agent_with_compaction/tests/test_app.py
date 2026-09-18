@@ -1083,6 +1083,7 @@ class TestApp:
         if empty_output:
             mock_response_reasoning_data["output"] = []
         mock_response_reasoning_data["status"] = "completed"
+        mock_response_reasoning_data["metadata"] = {"existing_key": "preserved"}
         dotjson_mock = AsyncMock()
         dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data)]
         dotjson_mock.cookies = {}
@@ -1092,6 +1093,11 @@ class TestApp:
 
         assert res.status_code == 200
         server.server_client.post.assert_awaited_once()
+        assert res.json()["status"] == "incomplete"
+        assert res.json()["incomplete_details"] is None
+        assert res.json()["metadata"]["existing_key"] == "preserved"
+        assert res.json()["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+        assert res.json()["metadata"]["ng_termination_message"] in caplog.text
         assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
         if not empty_output:
             assert res.json()["output"][0]["summary"] == mock_response_reasoning_data["output"][0]["summary"]
