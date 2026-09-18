@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, CANCELLED, VERIFIER_ERROR
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
@@ -345,9 +346,21 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
+        reason = session.termination.reason
+        failure_kind = None
+        if reason == "infrastructure_error":
+            failure_kind = AGENT_RUN_ERROR
+        elif reason == "cancelled":
+            failure_kind = CANCELLED
+        elif not completed:
+            failure_kind = VERIFIER_ERROR
+        elif reason == "timeout":
+            failure_kind = AGENT_TIMEOUT
         return SandboxedVerifyResponse(
             **(
-                session.verify_body.model_dump(exclude={"termination"})
+                session.verify_body.model_dump(
+                    exclude={"termination", "mask_sample", "failure_kind", "failure_reason"}
+                )
                 | extra
                 | {"task_id": session.request.task_name}
             ),
@@ -356,6 +369,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure,
+            mask_sample=bool(failure) or reason == "cancelled",
+            failure_kind=failure_kind,
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")

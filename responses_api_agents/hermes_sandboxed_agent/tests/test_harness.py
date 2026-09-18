@@ -6,10 +6,81 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.hermes_sandboxed_agent.harness import HarnessContext, HermesConfig, HermesHarness
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_truns": 2},
+        {"quiet_mod": False},
+        {"use_streaming": True},
+        {"toolsets": ["browser"]},
+        {"runtime": {"compression": {"enabled": True}}},
+        {"tool_delay": -1},
+        {"toolsets": []},
+    ],
+)
+def test_unsupported_configuration_is_rejected(overrides):
+    """Unsupported settings fail validation instead of silently changing the run."""
+    with pytest.raises(ValidationError):
+        HermesConfig.model_validate({"name": "hermes", **overrides})
+
+
+async def test_configured_prompt_and_toolsets_reach_native_worker(tmp_path):
+    """Gym configuration changes the native prompt and offered tools for this episode."""
+    config = HermesConfig.model_validate(
+        {
+            "name": "hermes",
+            "max_turns": 2,
+            "toolsets": ["file"],
+            "ephemeral_system_prompt": "Use the configured project conventions.",
+            "tool_delay": 0,
+        }
+    )
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        return NeMoGymResponse(
+            id="configured",
+            created_at=0,
+            model="model",
+            object="response",
+            output=[
+                {
+                    "type": "message",
+                    "id": "done",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Done", "annotations": []}],
+                }
+            ],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+
+    harness = HermesHarness(
+        sandbox=SimpleNamespace(),
+        context=HarnessContext(session_id="configured", instruction="Inspect the task"),
+        config=config,
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path,
+    )
+    _, outcome, extra = await harness.execute(20)
+    assert outcome.reason == "completed", outcome
+    assert {tool["name"] for tool in requests[0]["tools"]} == {"read_file", "write_file", "patch", "search_files"}
+    assert "Use the configured project conventions." in json.dumps(requests[0]["input"])
+    saved = json.loads((tmp_path / "harness-config.json").read_text())
+    assert saved["config"] == config.model_dump(mode="json")
+    assert extra["hermes_config"] == saved["config"]
 
 
 @pytest.mark.parametrize("stop", ["completed", "timeout", "cancelled", "turn_limit", "partial", "tool_error", "retry"])

@@ -1,22 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-agent:
-  api_mode: chat_completions
-  use_streaming: false
-  insert_reasoning: false
-  enabled_toolsets: []
-  quiet_mode: true
-  skip_context_files: true
-  skip_memory: true
-  persist_session: false
-  save_trajectories: false
-  checkpoints_enabled: false
-
-toolsets:
-  - terminal
-  - file
-
-runtime:
-  compression:
-    enabled: false
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      harness:
+        name: hermes
+        insert_reasoning: false
+        quiet_mode: true
+        tool_delay: 1
+        toolsets:
+          - terminal
+          - file

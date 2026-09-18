@@ -148,6 +148,14 @@ def main():
 
     agent = SandboxedAgent(
         **payload["agent_config"],
+        api_mode="chat_completions",
+        use_streaming=False,
+        enabled_toolsets=[],
+        skip_context_files=True,
+        skip_memory=True,
+        persist_session=False,
+        save_trajectories=False,
+        checkpoints_enabled=False,
         base_url="http://gym.invalid/v1",
         api_key="dummy-key",
         model=payload["model_name"],
@@ -156,6 +164,8 @@ def main():
         tool_start_callback=tool_start,
         tool_complete_callback=tool_complete,
     )
+    # Native compression uses an auxiliary client outside Gym's model transport.
+    agent.compression_enabled = False
     tool_names = {name for toolset in payload["toolsets"] for name in resolve_toolset(toolset)}
     agent.tools = [{"type": "function", "function": registry.get_schema(name)} for name in sorted(tool_names)]
     agent.valid_tool_names = tool_names

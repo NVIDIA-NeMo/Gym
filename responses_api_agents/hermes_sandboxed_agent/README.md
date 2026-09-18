@@ -17,14 +17,43 @@ cross a local pipe to the async Gym callbacks; native tool dispatch, model
 retries, and parallel tool execution remain in Hermes. Cancellation stops
 pending callbacks and joins the worker before returning to the resources runner.
 
-`configs/hermes.yaml` selects native terminal and file toolsets: `terminal`,
+`configs/hermes.yaml` selects terminal and file toolsets, which provide these tools: `terminal`,
 `process`, `read_file`, `write_file`, `patch`, and `search_files`. Their schemas
 and handlers come from Hermes, including background-process support. The YAML
-also supplies native agent settings and runtime overrides. Each episode writes
-those overrides under its own artifact directory in `home/config.yaml`.
-Hermes supplies the remaining defaults; the harness does not set a model
-context length. Compression and memory are disabled for this profile. Task MCP
-servers are rejected during setup; tasks can provide a skills directory.
+is included through Gym's `config_paths`, so experiment configs can override
+`terminal_bench_4.resources_servers.terminal_bench_4.harness` without editing
+the installed profile. Each episode writes its resolved settings to
+`harness-config.json`.
+The rollout also includes `hermes_config` and the pinned `harness_revision`.
+
+Supported settings are `max_turns`, `step_timeout_sec`, `toolsets` (a nonempty
+selection of `terminal` and `file`), `quiet_mode`, `insert_reasoning`,
+`tool_delay`, and `ephemeral_system_prompt`. They are fields on the harness config, like mini-SWE's
+execution limits. Hermes supplies its other defaults, including context length;
+there is no separate runtime config.
+
+Sampling and output-token limits belong in Gym's `responses_create_params`.
+Unknown keys and unsupported values fail configuration validation. Streaming,
+memory, checkpoints, and native session persistence remain disabled to preserve
+Gym's model transport and episode isolation. Compression cannot be enabled:
+the pinned native compressor uses an auxiliary client outside Gym's model
+transport. Task MCP servers are rejected during setup; tasks can provide a
+skills directory.
+
+For example, merge this into an experiment config that includes the benchmark
+profile:
+
+```yaml
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      harness:
+        name: hermes
+        max_turns: 32
+        toolsets: [terminal, file]
+        tool_delay: 0
+        ephemeral_system_prompt: "Follow the task's project conventions."
+```
 
 The benchmark profile is `benchmarks/terminal_bench_4/hermes.yaml`. It uses the
 existing TB4 resources runner and pinned task packages. Defaults are 90 native
@@ -41,6 +70,13 @@ with model turns and tool callback timings. For parallel batches, callback
 durations can include time waiting for another tool. Enable `observability_enabled` and set an
 absolute `model_call_capture_dir` to join turns to captured model requests and
 responses in rollout artifacts.
+
+The TB4 runner sets `mask_sample` for infrastructure failures, missing official
+rewards, and cancelled episodes so Gym excludes them from quality scores.
+`failure_kind` groups the cause for reporting.
+An official zero remains scoreable; exhausting the agent's time budget also
+remains scoreable when verification succeeds. Verifier rewards are preserved
+even when masked.
 
 The Hermes dependency is pinned to `26bb847a88493342ca1b194e0455b479073ae21d`.
 Run the agent tests with:

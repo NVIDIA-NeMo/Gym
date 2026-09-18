@@ -1,5 +1,6 @@
 config_paths:
 - benchmarks/terminal_bench_4/resources.yaml
+- responses_api_agents/hermes_sandboxed_agent/configs/hermes.yaml
 terminal_bench_4_hermes:
   responses_api_agents:
     hermes_sandboxed_agent:

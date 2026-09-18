@@ -14,9 +14,8 @@ from time import time
 from typing import Literal
 from uuid import uuid4
 
-import yaml
 from openai.types.chat import ChatCompletion
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.openai_utils import NeMoGymFunctionCallOutput, NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.responses_converter import ResponsesConverter
@@ -30,14 +29,21 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox.harness import HarnessContext, HarnessOutcome
 
 
-HERMES_CONFIG = yaml.safe_load((Path(__file__).parent / "configs" / "hermes.yaml").read_text())
 HERMES_REVISION = "26bb847a88493342ca1b194e0455b479073ae21d"
 
 
 class HermesConfig(BaseModel):
+    """Hermes options for execution in a caller-owned sandbox."""
+
+    model_config = ConfigDict(extra="forbid")
     name: Literal["hermes"]
     max_turns: int = Field(default=90, gt=0)
     step_timeout_sec: int = Field(default=600, gt=0)
+    toolsets: list[Literal["terminal", "file"]] = Field(default_factory=lambda: ["terminal", "file"], min_length=1)
+    quiet_mode: bool = True
+    insert_reasoning: bool = False
+    tool_delay: float = Field(default=1, ge=0, allow_inf_nan=False)
+    ephemeral_system_prompt: str | None = None
 
 
 class TrajectoryRecorder:
@@ -240,7 +246,7 @@ class HermesHarness:
         *,
         sandbox,
         context: HarnessContext,
-        config,
+        config: HermesConfig,
         params,
         query,
         model_name,
@@ -270,7 +276,10 @@ class HermesHarness:
         environment = SandboxEnvironment(self.sandbox, self.context)
         home = self.directory / "home"
         home.mkdir(exist_ok=True)
-        (home / "config.yaml").write_text(yaml.safe_dump(HERMES_CONFIG["runtime"]))
+        config_path = self.directory / "harness-config.json"
+        config_path.write_text(
+            json.dumps({"harness_revision": HERMES_REVISION, "config": self.config.model_dump(mode="json")}, indent=2)
+        )
         instruction = self.context.instruction
         if self.context.skills_dir:
             instruction += f"\nTask skills are in {self.context.skills_dir}. Read the relevant SKILL.md files."
@@ -285,8 +294,10 @@ class HermesHarness:
         payload = {
             "context": self.context.model_dump(),
             "instruction": instruction,
-            "agent_config": HERMES_CONFIG["agent"],
-            "toolsets": HERMES_CONFIG["toolsets"],
+            "agent_config": self.config.model_dump(
+                exclude={"name", "max_turns", "step_timeout_sec", "toolsets"}, exclude_none=True
+            ),
+            "toolsets": self.config.toolsets,
             "max_turns": self.config.max_turns,
             "max_tokens": self.params.max_output_tokens,
             "step_timeout": min(budget, self.config.step_timeout_sec),
@@ -374,7 +385,7 @@ class HermesHarness:
         if recorder.trajectory.exists():
             result.setdefault("messages", json.loads(recorder.trajectory.read_text())["messages"])
         recorder.persist(result.get("messages") or recorder.messages)
-        outcome.artifacts = [str(recorder.trajectory)]
+        outcome.artifacts = [str(recorder.trajectory), str(config_path), str(self.directory / "worker.log")]
         response = NeMoGymResponse(
             id="resp_" + uuid4().hex,
             created_at=int(time()),
@@ -426,6 +437,7 @@ class HermesHarness:
             {
                 "hermes_trajectory": result,
                 "harness_revision": HERMES_REVISION,
+                "hermes_config": self.config.model_dump(mode="json"),
                 **({"ng_trajectory": trajectory_record.model_dump(mode="json")} if self.observability_enabled else {}),
             },
         )
