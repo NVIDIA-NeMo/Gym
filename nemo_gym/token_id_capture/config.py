@@ -173,7 +173,7 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
-        if block.external_staging_backend != "vllm_worker" and not block.external_staging:
+        if block.external_staging_backend == "megatron_worker" and not block.external_staging:
             raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
