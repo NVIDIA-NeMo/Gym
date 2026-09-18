@@ -75,6 +75,7 @@ class OpenAICompatibleJudge:
         parse_repair_attempts: int = 2,
         repair_max_tokens: int = 1024,
         transcript_path: Path | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.model = model
         self.api_model = self._normalize_api_model(model)
@@ -87,6 +88,7 @@ class OpenAICompatibleJudge:
         self.parse_repair_attempts = max(0, parse_repair_attempts)
         self.repair_max_tokens = max(1, repair_max_tokens)
         self.transcript_path = transcript_path
+        self.reasoning_effort = reasoning_effort
         self.trace_context: dict[str, Any] = {}
         self.last_raw_response: str | None = None
         self.last_structured: bool | None = None
@@ -320,6 +322,8 @@ class OpenAICompatibleJudge:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         if structured:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -350,6 +354,7 @@ class OpenAICompatibleJudge:
                 "model": self.api_model,
                 "structured": structured,
                 "max_tokens": max_tokens,
+                "reasoning_effort": self.reasoning_effort,
                 "prompt_chars": len(prompt),
                 "payload_bytes": len(body),
                 "request_timeout_seconds": self.timeout_seconds,

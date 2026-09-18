@@ -144,6 +144,39 @@ class TestOpenAIUtils:
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
+    @pytest.mark.parametrize(
+        ("item", "prefix"),
+        [
+            ({"type": "reasoning", "summary": []}, "rs"),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "I inspected the files."}],
+                },
+                "msg",
+            ),
+        ],
+    )
+    def test_duplicate_replayed_output_items_have_unique_stable_ids(self, item: dict, prefix: str) -> None:
+        provided_id = f"{prefix}_provided"
+        body = {"input": [deepcopy(item), deepcopy(item), {**deepcopy(item), "id": provided_id}]}
+        original = deepcopy(body)
+
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+        replay = params.model_dump()["input"]
+        ids = [entry["id"] for entry in replay]
+
+        assert len(set(ids)) == 3
+        assert all(item_id.startswith(f"{prefix}_") for item_id in ids)
+        assert ids[2] == provided_id
+        if prefix == "msg":
+            assert all(entry["content"][0]["annotations"] == [] for entry in replay)
+        assert NeMoGymResponseCreateParamsNonStreaming.model_validate(body) == params
+        assert NeMoGymResponseCreateParamsNonStreaming.model_validate(params.model_dump()) == params
+        assert body == original
+
     def test_seed_rejected_at_top_level(self) -> None:
         """seed is not part of the OpenAI Responses schema; it must be passed via metadata.extra_body."""
         with pytest.raises(ValidationError):

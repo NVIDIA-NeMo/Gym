@@ -29,6 +29,7 @@ JUDGE_CONFIG_TO_ENV = {
     "judge_base_url": "LAB_JUDGE_BASE_URL",
     "judge_api_key": "LAB_JUDGE_API_KEY",  # pragma: allowlist secret
     "judge_model_name": "LAB_JUDGE_MODEL",
+    "judge_reasoning_effort": "LAB_JUDGE_REASONING_EFFORT",
     "judge_temperature": "LAB_JUDGE_TEMPERATURE",
     "judge_request_timeout_seconds": "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS",
     "judge_max_retries": "LAB_JUDGE_MAX_RETRIES",
@@ -51,6 +52,10 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
     judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
     judge_model_name: str | None = Field(default=None, description="Model identifier sent to the LAB judge endpoint.")
+    judge_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default=None,
+        description="Optional reasoning effort sent to compatible LAB judge endpoints.",
+    )
     judge_temperature: float | None = Field(
         default=None,
         ge=0,

@@ -28,10 +28,12 @@ sandbox:
       workspace: ${oc.env:OPENSHELL_WORKSPACE,default}
       # OIDC bearer token for authenticated gateways; null for the local compose gateway.
       bearer_token: ${oc.env:OPENSHELL_BEARER_TOKEN,null}
-      # mTLS material for TLS gateways (ca / cert+key paths); all null -> plaintext channel.
-      # tls_ca_path: /path/to/ca.pem
-      # tls_cert_path: /path/to/client.pem
-      # tls_key_path: /path/to/client-key.pem
+      # mTLS material for TLS gateways; all null selects a plaintext channel.
+      # `openshell gateway start` writes these files below its gateway metadata
+      # directory, while a compose-managed plaintext gateway leaves them unset.
+      tls_ca_path: ${oc.env:OPENSHELL_TLS_CA_PATH,null}
+      tls_cert_path: ${oc.env:OPENSHELL_TLS_CERT_PATH,null}
+      tls_key_path: ${oc.env:OPENSHELL_TLS_KEY_PATH,null}
       request_timeout_s: 30
     create:
       # Provisioning can include an image pull on the gateway host.
