@@ -222,7 +222,11 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        requirements_source = (
+            r"grep -v -E '^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym(\[[^]]+\])?"
+            r"[[:space:]]*@[[:space:]]*\.\./\.\./?([[:space:]]|$)' requirements.txt"
+        )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && {requirements_source}) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
@@ -274,7 +278,13 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = tmp_path / "resources_servers/alpha"
         server_dir.mkdir(parents=True)
         (server_dir / dependency_file).write_text(
-            f"-e nemo-gym{extras} @ ../../\npytest\n" if dependency_file == "requirements.txt" else ""
+            (
+                f"-e nemo-gym{extras} @ ../../\nnemo_gym{extras} @ ../..\npytest\n"
+                "-e ../../benchmarks/automationbench\n"
+                "other-package @ ../../shared/other_package\n"
+            )
+            if dependency_file == "requirements.txt"
+            else ""
         )
         if package:
             (tmp_path / "gym-package.json").write_text("{}")
@@ -312,7 +322,10 @@ uv() {{
             assert f"nemo-gym{expected_extras}==9.8.7" in arguments + requirements.splitlines()
         if dependency_file == "requirements.txt":
             assert "pytest" in requirements.splitlines()
-            assert "../.." not in requirements
+            assert f"-e nemo-gym{extras} @ ../../" not in requirements.splitlines()
+            assert f"nemo_gym{extras} @ ../.." not in requirements.splitlines()
+            assert "-e ../../benchmarks/automationbench" in requirements.splitlines()
+            assert "other-package @ ../../shared/other_package" in requirements.splitlines()
         else:
             assert "--no-sources" in arguments
 

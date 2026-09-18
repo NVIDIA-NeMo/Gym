@@ -175,7 +175,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 extras_spec = f"[{','.join(extras)}]" if extras else ""
                 if package_core:
                     package_core = f"-e {shlex.quote(f'{PARENT_DIR}{extras_spec}')}"
-                requirements_source = "grep -v -F '../..' requirements.txt"
+                requirements_source = (
+                    r"grep -v -E '^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym(\[[^]]+\])?"
+                    r"[[:space:]]*@[[:space:]]*\.\./\.\./?([[:space:]]|$)' requirements.txt"
+                )
                 if not package_core:
                     requirements_source = f"(echo 'nemo-gym{extras_spec}{version_spec}' && {requirements_source})"
                 core_flag = f"{package_core} " if package_core else ""
