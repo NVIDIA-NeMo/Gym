@@ -14,4 +14,9 @@ hermes_agent:
       temperature: 1.0
       terminal_backend: local
       terminal_timeout: 60
+      sandbox_provider: null
+      sandbox_config: {}
+      sandbox_install_timeout_seconds: 900
+      sandbox_runner_poll_seconds: 0.25
+      session_close_timeout_seconds: 30
       system_prompt: null
