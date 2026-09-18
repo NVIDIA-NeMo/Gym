@@ -6,6 +6,7 @@
 from typing import Any, Literal
 
 from aiohttp import ClientConnectionError, ClientResponseError
+from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_environment_server import (
@@ -26,7 +27,13 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import (
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -66,6 +73,16 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
     config: SingleAgentEnvironmentServerConfig
     request_model = SingleAgentEpisodeRequest
     response_model = SingleAgentEpisodeResponse
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the resources server, which owns verification in this protocol."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(
         self,
