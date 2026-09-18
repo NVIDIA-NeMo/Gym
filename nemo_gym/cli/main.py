@@ -564,9 +564,24 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
             )
 
 
+def _register_submit_mode(p: argparse.ArgumentParser) -> None:
+    # Both stop short of submitting, at different depths: --resolve-only right after SubmitConfig
+    # validation, --dry-run after the executor has rendered its scripts. Combining them has no
+    # meaning, so argparse refuses the pair up front instead of one flag silently winning.
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Print generated job scripts without submitting.")
+    mode.add_argument(
+        "--resolve-only",
+        action="store_true",
+        help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
+        "and stop before any job script is rendered or anything is submitted.",
+    )
+
+
 @exit_cleanly_on_config_error
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     import rich
+    import yaml
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
@@ -609,6 +624,16 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         if invalid:
             parts.append(f"invalid configuration: {'; '.join(invalid)}")
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
+
+    if args.resolve_only:
+        # `config` is exactly what `submit()` would receive; the YAML form is the same serialization
+        # BaseExecutor.persist() writes as RESOLVED_CONFIG_NAME, so a caller can diff this against a
+        # persisted run's file. Nothing below this point runs: no connection, no script, no record.
+        if args.json:
+            print(config.model_dump_json(indent=2))
+        else:
+            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+        return
 
     record = submit(config, dry_run=args.dry_run)
     if record is None:
@@ -1167,14 +1192,12 @@ COMMANDS = {
                     "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
                 ),
             ),
+            Flag(register=_register_submit_mode),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--dry-run", action="store_true", help="Print generated job scripts without submitting."
-                ),
-            ),
-            Flag(
-                register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Emit the submission record as JSON."
+                    "--json",
+                    action="store_true",
+                    help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
         ),
