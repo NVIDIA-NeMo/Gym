@@ -16,7 +16,6 @@ hle_verified_equivalence_llm_judge_resources_server:
       judge_not_equal_label: "Judgement: no"
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
-      max_answer_chars: 100000
       question_extract_regex: null
       check_twice_swap: false
       use_per_record_regex: false

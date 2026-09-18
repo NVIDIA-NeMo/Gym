@@ -126,10 +126,9 @@ def _response_with_output(output: list) -> dict:
 
 
 class TestOpenAIUtils:
-    @pytest.mark.parametrize("kwargs", [{"max_http_attempts": 0}, {"additional_retry_status_codes": [200]}])
-    def test_invalid_retry_configuration_rejected(self, kwargs):
+    def test_invalid_retry_configuration_rejected(self):
         with pytest.raises(ValidationError):
-            NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", **kwargs)
+            NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_http_attempts=0)
 
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
@@ -147,17 +146,15 @@ class TestOpenAIUtils:
 
         assert request.await_count == MAX_NUM_TRIES
 
-    @pytest.mark.parametrize("status,extra_statuses", [(408, []), (404, [404])])
-    async def test_retry_reuses_request_and_backs_off(self, monkeypatch, status, extra_statuses):
+    @pytest.mark.parametrize("status", [404, 408])
+    async def test_retry_reuses_request_and_backs_off(self, monkeypatch, status):
         failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, failure, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
-        client = NeMoGymAsyncOpenAI(
-            api_key="abc", base_url="https://example.com/v1", additional_retry_status_codes=extra_statuses
-        )
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
         original = deepcopy(payload)
 
@@ -169,7 +166,7 @@ class TestOpenAIUtils:
         assert payload == original
         assert sleep.await_args_list == [call(0.5), call(1.0)]
 
-    @pytest.mark.parametrize("status", [400, 401, 403, 404])
+    @pytest.mark.parametrize("status", [400, 401, 403])
     async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch, status):
         response = SimpleNamespace(status=status)
         request = AsyncMock(return_value=response)
@@ -182,11 +179,13 @@ class TestOpenAIUtils:
         request.assert_awaited_once()
         sleep.assert_not_awaited()
 
-    @pytest.mark.parametrize("status,extra_statuses", [(408, []), (404, [404])])
-    async def test_configured_attempt_limit_preserves_terminal_error(self, monkeypatch, status, extra_statuses):
+    @pytest.mark.parametrize("status", [404, 408])
+    @pytest.mark.parametrize("attempts", [1, 3, 5])
+    @pytest.mark.parametrize("internal", [False, True])
+    async def test_configured_attempt_limit_preserves_terminal_error(self, monkeypatch, status, attempts, internal):
         replies = [
             SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"error body")))
-            for _ in range(5)
+            for _ in range(attempts)
         ]
         request = AsyncMock(side_effect=replies)
         sleep = AsyncMock()
@@ -202,13 +201,13 @@ class TestOpenAIUtils:
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://example.com/v1",
-            max_http_attempts=5,
-            additional_retry_status_codes=extra_statuses,
+            max_http_attempts=attempts,
+            internal=internal,
         )
         with pytest.raises(RuntimeError, match="terminal error"):
             await client._request_with_retry()
-        assert request.await_count == 5
-        assert sleep.await_args_list == [call(0.5), call(1.0), call(2.0), call(4.0)]
+        assert request.await_count == attempts
+        assert sleep.await_args_list == [call(0.5 * 2**i) for i in range(attempts - 1)]
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

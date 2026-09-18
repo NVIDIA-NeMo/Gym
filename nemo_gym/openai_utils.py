@@ -1221,11 +1221,13 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 ########################################
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors
+# 404 can be a transient model-routing failure; retries remain bounded.
+# 408 is a request timeout.
 # 500 is internal server error, which may sporadically occur
 # 502 is Bad gateway (when the endpoint is overloaded)
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
-RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [408, 500]
+RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -1248,10 +1250,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
-    additional_retry_status_codes: List[Annotated[int, Field(ge=400, le=599)]] = Field(
-        default_factory=list,
-        description="Opt-in HTTP retries for this endpoint, e.g. 404 from a transient model-routing failure.",
-    )
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
@@ -1278,7 +1276,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             tries += 1
             response = await request(**request_kwargs)
 
-            if response.status in RETRY_ERROR_CODES or response.status in self.additional_retry_status_codes:
+            if response.status in RETRY_ERROR_CODES:
                 # Internal NeMo Gym servers extend max tries for retryable errors.
                 if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1

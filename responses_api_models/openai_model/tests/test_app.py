@@ -82,11 +82,9 @@ class TestApp:
         self._setup_server()
 
     async def test_retry_configuration_is_scoped_to_model_server(self):
-        judge = self._setup_server(additional_retry_status_codes=[404], max_http_attempts=5)
+        judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()
-        assert judge._client.additional_retry_status_codes == [404]
         assert judge._client.max_http_attempts == 5
-        assert policy._client.additional_retry_status_codes == []
         assert policy._client.max_http_attempts == 3
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:

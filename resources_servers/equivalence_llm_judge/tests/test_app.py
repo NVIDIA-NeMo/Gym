@@ -92,9 +92,11 @@ class TestApp:
             type="message",
         )
 
-    @mark.parametrize("limit,answer_length,skip", [(100, 101, True), (100, 100, False), (None, 101, False)])
+    @mark.parametrize("limit,answer_length,skip", [(100, 101, True), (100, 100, False), (None, 100001, False)])
     async def test_final_answer_limit_preserves_response(self, config, limit, answer_length, skip):
-        config.max_answer_chars = limit
+        assert config.max_answer_chars is None
+        if limit is not None:
+            config.max_answer_chars = limit
         client = MagicMock(spec=ServerClient)
         reply = MagicMock(ok=True)
         reply.read = AsyncMock(return_value=self._create_response("judge", self._msg("[[A=B]]")))

@@ -95,29 +95,3 @@ gym eval run --no-serve \
 
 `mean/reward` is the headline metric. `judgement_parsing_issue_rate` reports the
 fraction of judged rollouts with parsing issues.
-
-## Judge recovery and answer length
-
-Both variants score final assistant answers longer than 100,000 characters zero
-without sending them to the judge. The full response is retained, with
-`failure_reason` starting with `final_answer_too_long`. The check excludes
-reasoning, counts the last assistant message before regex extraction, and does
-not stop generation early. This is a benchmark scoring guard; set the resources
-server's `max_answer_chars` to `null` to disable it when reproducing an uncapped
-grading protocol. Other equivalence-judge benchmarks have no limit by default.
-
-HTTP 408 is retried automatically by the OpenAI-compatible model client. For a
-judge endpoint known to return transient HTTP 404 routing errors, load
-`--config benchmarks/hle_verified/judge_recovery.yaml` instead of the plain
-judge-model config, and point the benchmark resources server's
-`judge_model_server.name` at `judge_model`. Supply `judge_base_url`, `judge_api_key`,
-and `judge_model_name` as usual. This opts only that judge client into 404 retries,
-with five total HTTP attempts and exponential backoff. Unconfigured clients do
-not retry 404. Judge retries preserve the request and do not rerun the policy.
-
-If attempts are exhausted, the shared judge failsafe saves the policy response
-in the failures sidecar as `judge_failed`, excluded from scored aggregates.
-Recover these rows with `gym eval reverify --judge-failed-only` and the same
-verifier/judge configuration. Successful grades are preserved. This recovery path
-applies to new sidecar-tagged failures; older in-band `JUDGE_ERROR` rows require
-migration before using it. A run with pending grades is incomplete.

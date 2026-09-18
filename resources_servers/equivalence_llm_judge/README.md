@@ -19,6 +19,32 @@ https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa
 - `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
 - `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
 
+### Answer-length guard and judge recovery
+
+`max_answer_chars` is optional and defaults to `null` (no limit) for every dataset.
+To protect a judge endpoint from oversized answers, set it on the resources server:
+
+```yaml
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      max_answer_chars: 100000
+```
+
+When enabled, longer final assistant answers score zero without a judge call.
+The full response is retained, with `failure_reason` starting with
+`final_answer_too_long`. The check counts characters in the last assistant message
+before regex extraction, excludes reasoning and earlier messages, and does not
+stop generation early. The limit changes grading semantics and should be selected
+by the evaluation configuration; Gym's benchmark configs do not enable it.
+
+If judge calls exhaust their retries, the shared judge failsafe saves the policy
+response in the failures sidecar as `judge_failed`, excluded from scored aggregates.
+Recover these rows with `gym eval reverify --judge-failed-only` and the same
+verifier/judge configuration. Successful grades are preserved. This applies to
+new sidecar-tagged failures; older in-band `JUDGE_ERROR` rows require migration
+before using it. A run with pending grades is incomplete.
+
 ### Input schema
 Accepts the same outer request structure as other resources servers:
 - `responses_create_params`: the original model query (used here to extract a question/context string from user messages for the judge prompt).
