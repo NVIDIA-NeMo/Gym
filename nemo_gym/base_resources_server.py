@@ -182,17 +182,18 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Initialize resources-server state for one episode."""
+    """Idempotently initialize resources state under a caller-assigned identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
+    resources_session_id: str = Field(min_length=1)
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
 
 
 class ResourcesSeedSessionResponse(BaseModel):
-    """Return resources state and optional agent access."""
+    """Confirm resources state and return optional agent access."""
 
     model_config = ConfigDict(extra="forbid")
 
