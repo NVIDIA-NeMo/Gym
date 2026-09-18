@@ -621,7 +621,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"anyswe-{params.instance_id}",
             created_at=int(time.time()),
-            model=params.body.model,
+            model=params.body.model or params.agent_kwargs.get("model", "model"),
             object="response",
             output=saved.output if saved is not None else [],
             parallel_tool_calls=params.body.parallel_tool_calls,
