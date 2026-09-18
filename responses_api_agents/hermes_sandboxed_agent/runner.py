@@ -7,6 +7,7 @@ outside the task repository. TERMINAL_CWD independently selects the tool cwd.
 """
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -247,6 +248,8 @@ def run(params):
 
 
 def main():
+    # Configure before importing Hermes so startup and turn logs reach captured stderr.
+    logging.basicConfig(level=logging.INFO)
     params = json.loads(Path(sys.argv[1]).read_text())
     try:
         result = run(params)

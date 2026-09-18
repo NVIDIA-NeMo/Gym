@@ -53,6 +53,39 @@ def test_input_preserves_system_and_history():
     )
 
 
+def test_runner_emits_info_logs_to_stderr(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    runner = Path(__file__).parents[1] / "runner.py"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"run_dir": str(tmp_path)}))
+    # A fresh interpreter is essential: pytest has already configured logging.
+    probe = """
+import logging, runpy, sys
+runner = runpy.run_path(sys.argv[1])
+def run(params):
+    logging.getLogger("run_agent").info("Starting turn")
+    logging.getLogger("tools.lazy_deps").info("Dependencies ready")
+    print("Hermes stdout")
+    return {"completed": True}
+runner["main"].__globals__["run"] = run
+sys.argv = sys.argv[1:]
+sys.exit(runner["main"]())
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(runner), str(request)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert result.stdout == "Hermes stdout\n"
+    assert "INFO:run_agent:Starting turn" in result.stderr
+    assert "INFO:tools.lazy_deps:Dependencies ready" in result.stderr
+
+
 @pytest.mark.parametrize(
     "items",
     [
@@ -117,7 +150,7 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
         exec=AsyncMock(
             side_effect=[
                 SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
-                SandboxExecResult(return_code=0, stdout="ran", stderr=""),
+                SandboxExecResult(return_code=0, stdout="ran", stderr="INFO:run_agent:Starting turn\n"),
             ]
         ),
         upload=AsyncMock(),
@@ -142,6 +175,9 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert " -I " in command
     assert sandbox.exec.call_args.kwargs["cwd"].startswith("/tmp/nemo-hermes-")
     assert metrics["hermes_finished"] and response.status == "completed"
+    persisted = json.loads(uploaded.with_name("agent_result.json").read_text())
+    assert persisted["stdout"] == "ran"
+    assert persisted["stderr"] == "INFO:run_agent:Starting turn\n"
 
 
 @pytest.mark.asyncio
