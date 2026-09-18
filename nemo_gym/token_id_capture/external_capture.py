@@ -290,7 +290,7 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
 
 
 class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
-    """Commit lineage after an MInf worker durably stages a canonical delta."""
+    """Commit lineage after a Megatron Inference worker durably stages a canonical delta."""
 
     _BACKEND_LABEL = "Megatron"
 
@@ -302,6 +302,7 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Megatron token capture requires n=1")
+        _reject_multimodal_content(request_payload)
         # Megatron Inference forwards ``offload_params`` opaquely to its prompt preparer and
         # payload stager; the admission rides inside it. The prefix itself is resolved on the
         # worker from ``staging_chain``, so no prefix token ids travel on the request.
@@ -316,6 +317,28 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         # echo (``return_tokenized_data``) on the HTTP path.
         request_payload.update(logprobs=True, top_logprobs=0)
         return request_payload
+
+
+def _reject_multimodal_content(request_payload: dict[str, Any]) -> None:
+    """Fail closed when a Megatron capture request carries media or audio parts.
+
+    The Megatron adapter stages no media geometry, so a multimodal prompt would
+    commit token rows whose lengths disagree with the expanded engine prompt.
+    Until multimodal staging lands, refuse the request rather than train on it.
+    """
+    messages = request_payload.get("messages")
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            part_type = part.get("type") if isinstance(part, dict) else None
+            if part_type != "text":
+                raise ValueError(
+                    f"Megatron token capture does not support multimodal content (got part type {part_type!r})"
+                )
 
 
 def make_external_capture_handler(backend: ExternalStagingBackend) -> ExternalCaptureHandler:

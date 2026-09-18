@@ -137,6 +137,18 @@ def test_handler_prepares_worker_staged_request(
     [
         ({"n": 2}, "requires n=1"),
         ({"offload_params": []}, "offload_params must be an object"),
+        (
+            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]},
+            "does not support multimodal content",
+        ),
+        (
+            {"messages": [{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "data:,"}}]}]},
+            "does not support multimodal content",
+        ),
+        (
+            {"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": ""}}]}]},
+            "does not support multimodal content",
+        ),
     ],
 )
 def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict[str, Any], error: str) -> None:

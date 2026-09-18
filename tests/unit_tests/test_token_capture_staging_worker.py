@@ -486,6 +486,34 @@ def test_megatron_adapter_rejects_malformed_fields() -> None:
         adapter.extract_generation(_minf_payload(generated_log_probs=[-0.1]))
 
 
+@pytest.mark.parametrize("bad_ids", [[1.0, 2], ["1", 2], [True, 2], [None]])
+def test_megatron_adapter_rejects_non_integer_token_ids(bad_ids: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="prompt_token_ids must contain only integer token ids"):
+        adapter.extract_prompt_ids(_minf_payload(prompt_token_ids=bad_ids))
+    with pytest.raises(ValueError, match="generated_token_ids must contain only integer token ids"):
+        adapter.extract_generation(
+            _minf_payload(generated_token_ids=bad_ids, generated_log_probs=[-0.1] * len(bad_ids))
+        )
+
+
+@pytest.mark.parametrize("bad_log_probs", [["-0.1", -0.2], [True, -0.2], [None, -0.2]])
+def test_megatron_adapter_rejects_non_numeric_log_probs(bad_log_probs: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="generated_log_probs must contain only numeric log probabilities"):
+        adapter.extract_generation(_minf_payload(generated_log_probs=bad_log_probs))
+
+
+def test_megatron_adapter_malformed_element_poisons_capture() -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        _minf_payload(generated_token_ids=[12.0, 13.0]),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
 def test_megatron_adapter_enter_prefix_writes_the_required_prefix_field() -> None:
     request = MegatronCaptureAdapter().enter_prefix({"n": 1}, [1, 2])
     assert request == {"n": 1, "required_prefix_token_ids": [1, 2]}
