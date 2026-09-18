@@ -19,7 +19,13 @@ https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa
 - `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
 - `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
 
-### Answer-length guard and judge recovery
+### Empty answers, answer-length guard, and judge recovery
+
+Missing assistant messages and empty or whitespace-only final assistant text
+score zero without a judge call, with `failure_reason: empty_final_answer`.
+The full response is retained, including any reasoning. This check applies before
+regex extraction, so nonempty answers still use the existing extraction and
+full-generation fallback logic even when a regex produces an empty match.
 
 `max_answer_chars` is optional and defaults to `null` (no limit) for every dataset.
 To protect a judge endpoint from oversized answers, set it on the resources server:

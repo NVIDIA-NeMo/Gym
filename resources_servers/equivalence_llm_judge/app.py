@@ -493,23 +493,26 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:
-        1. Extract question and expected answer
+        1. Extract expected answer; reject empty or over-limit final text; extract question
         2. Determine extraction regex (per-record override, length threshold)
         3. Extract answer to judge (could be regex-extracted OR full generation)
         4. Run first judge evaluation on extracted answer
         5. Handle failure → rescue with full generation or immediate fail
         6. Handle success → swap check or immediate success
         """
-        # Step 1: Extract question and expected answer
+        # Step 1: Check the raw final answer before applying extraction or calling the judge.
         expected = _extract_expected_answer(body) or ""
-        if self.config.max_answer_chars is not None:
-            answer = _extract_last_assistant_text(body, extract_regex=None)
-            if len(answer) > self.config.max_answer_chars:
-                result = self._make_response(body, expected, reward=0.0, evaluations=[])
-                result.failure_reason = (
-                    f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
-                )
-                return result
+        answer = _extract_last_assistant_text(body, extract_regex=None)
+        if not answer:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = "empty_final_answer"
+            return result
+        if self.config.max_answer_chars is not None and len(answer) > self.config.max_answer_chars:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = (
+                f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
+            )
+            return result
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)

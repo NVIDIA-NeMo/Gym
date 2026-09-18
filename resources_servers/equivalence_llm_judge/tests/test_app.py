@@ -305,38 +305,47 @@ class TestApp:
         res = await rs.verify(req)
         assert res.reward == approx(0.0)
 
-    async def test_missing_assistant_text_uses_configured_failure_message(
-        self, config: LLMJudgeResourcesServerConfig
+    @mark.parametrize("case", ["missing", "reasoning_only", "empty", "whitespace", "no_text", "last_empty"])
+    async def test_empty_final_answer_skips_judge_and_preserves_response(
+        self, config: LLMJudgeResourcesServerConfig, case: str
     ) -> None:
-        server_mock = MagicMock(spec=ServerClient)
-        cfg = config.model_copy(deep=True)
-        cfg.msg_extraction_failure = "[CUSTOM EXTRACTION FAILURE]"
-        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        req = LLMJudgeVerifyRequest(
+        config.check_twice_swap = True
+        config.check_full_generation_on_fail = True
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock()
+        server = LLMJudgeResourcesServer(config=config, server_client=client)
+        outputs = {
+            "missing": [],
+            "reasoning_only": [
+                {
+                    "id": "thinking",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "The answer is 42"}],
+                }
+            ],
+            "empty": [self._msg("")],
+            "whitespace": [self._msg(" \n\t ")],
+            "no_text": [self._msg("").model_copy(update={"content": []})],
+            "last_empty": [self._msg("Earlier answer"), self._msg("")],
+        }
+        response = json.loads(self._create_response("policy", self._msg("")))
+        response["output"] = outputs[case]
+        request = LLMJudgeVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=NeMoGymResponse(
-                id="r",
-                created_at=0.0,
-                model="m",
-                object="response",
-                output=[],
-                parallel_tool_calls=False,
-                tool_choice="none",
-                tools=[],
-            ),
-            expected_answer="x",
+            response=NeMoGymResponse.model_validate(response),
+            expected_answer="42",
+            template_metadata={"output_regex": r"ANSWER: (.*)"},
         )
+        before = request.model_dump()
 
-        res = await rs.verify(req)
+        result = await server.verify(request)
 
-        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
-        assert cfg.msg_extraction_failure in judge_prompt
-        assert res.reward == approx(0.0)
+        client.post.assert_not_awaited()
+        assert result.reward == 0
+        assert result.failure_reason == "empty_final_answer"
+        assert result.judge_evaluations == []
+        assert result.response.model_dump() == before["response"]
+        assert request.model_dump() == before
 
     async def test_swap_fails_uses_configured_reward(self, config: LLMJudgeResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
@@ -414,7 +423,10 @@ class TestApp:
         # Verify the regex extraction worked by checking judge was called once
         assert server_mock.post.call_count == 1
 
-    async def test_full_generation_rescue_on_extraction_failure(self, config: LLMJudgeResourcesServerConfig) -> None:
+    @mark.parametrize("pattern", [r"ANSWER:\s*(.+)", r"(?=The)"])
+    async def test_full_generation_rescue_on_extraction_failure(
+        self, config: LLMJudgeResourcesServerConfig, pattern: str
+    ) -> None:
         """When regex-extracted answer fails, retry with full generation for partial credit."""
         server_mock = MagicMock(spec=ServerClient)
         cfg = config.model_copy(deep=True)
@@ -435,7 +447,7 @@ class TestApp:
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[{"role": "user", "content": "What is 2+2?"}]
         )
-        # Model output: correct answer is in full text but regex won't match properly
+        # Model output contains an answer even if extraction misses or matches empty text.
         model_response = NeMoGymResponse(
             id="resp",
             created_at=0.0,
@@ -447,12 +459,12 @@ class TestApp:
             tools=[],
         )
 
-        # Regex pattern that won't match the model output
+        # Both a missing match and an empty match must retain full-generation rescue.
         req = LLMJudgeVerifyRequest(
             responses_create_params=deepcopy(model_create_params),
             response=model_response.model_copy(deep=True),
             expected_answer="4",
-            template_metadata={"output_regex": r"ANSWER:\s*(.+)"},  # Won't match
+            template_metadata={"output_regex": pattern},
         )
 
         res = await rs.verify(req)
