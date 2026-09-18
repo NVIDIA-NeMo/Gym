@@ -385,3 +385,25 @@ class RolloutReceipt(_DigestWireModel):
         if self.terminal_model_call_id is not None and self.terminal_model_call_id not in set(model_call_ids):
             raise ValueError("terminal_model_call_id is absent from the receipt manifest")
         return self
+
+    @model_validator(mode="after")
+    def _validate_attribution_state(self) -> Self:
+        """Keep the terminal fields in one of the three documented states.
+
+        A trainable receipt names its terminal and the method that chose it. An
+        unset ``terminal_selection`` is reserved for receipts where no attribution
+        stage ran, which cannot name a terminal and must be poisoned with a reason.
+        A poisoned receipt may still carry a terminal and method, because
+        attribution can succeed before another call poisons the rollout.
+        """
+        if not self.capture_poisoned:
+            if self.failure_reason is not None:
+                raise ValueError("an unpoisoned receipt cannot carry a failure_reason")
+            if self.terminal_model_call_id is None or self.terminal_selection is None:
+                raise ValueError("an unpoisoned receipt must name terminal_model_call_id and terminal_selection")
+        if self.terminal_selection is None:
+            if self.terminal_model_call_id is not None:
+                raise ValueError("terminal_model_call_id requires a terminal_selection method")
+            if self.failure_reason is None:
+                raise ValueError("a receipt with no attribution stage must be poisoned with a failure_reason")
+        return self
