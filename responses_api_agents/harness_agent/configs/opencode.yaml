@@ -37,3 +37,4 @@ harness_benchmark_agent:
         files:
           /tmp/nemo-gym-environment.txt: |
             Internet access is disabled on this machine.
+            Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
