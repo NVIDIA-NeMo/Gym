@@ -631,6 +631,9 @@ class TestBenchmarkAgentResolution:
             }
         }
 
+    def _environment_server(self, agent_name):
+        return {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent_name}}}}
+
     def _config(self, **top_level):
         from nemo_gym.benchmarks import BenchmarkConfig
 
@@ -642,7 +645,8 @@ class TestBenchmarkAgentResolution:
         cfg = self._config(
             my_agent={
                 "responses_api_agents": {"impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset()]}}
-            }
+            },
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
         )
         assert cfg.agent_name == "my_agent"
 
@@ -658,6 +662,8 @@ class TestBenchmarkAgentResolution:
                     }
                 },
                 other_agent={"responses_api_agents": {"impl": {"entrypoint": "app.py"}}},
+                **{"my_agent_environment_server": self._environment_server("my_agent")},
+                **{"other_agent_environment_server": self._environment_server("other_agent")},
             )
 
     def test_redundant_agent_pin_naming_the_declarer_is_allowed(self) -> None:
@@ -666,7 +672,8 @@ class TestBenchmarkAgentResolution:
                 "responses_api_agents": {
                     "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="my_agent")]}
                 }
-            }
+            },
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
         )
         assert cfg.agent_name == "my_agent"
 
@@ -678,6 +685,7 @@ class TestBenchmarkAgentResolution:
                 }
             },
             my_agent=self._agent("my_rs"),
+            **{"my_agent_environment_server": self._environment_server("my_agent")},
         )
         assert cfg.agent_name == "my_agent"
 
@@ -693,6 +701,8 @@ class TestBenchmarkAgentResolution:
                 },
                 agent_a=self._agent("my_rs"),
                 agent_b=self._agent("my_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
+                **{"agent_b_environment_server": self._environment_server("agent_b")},
             )
 
     def test_rs_declared_dataset_with_pin_needs_no_inversion(self) -> None:
@@ -708,6 +718,8 @@ class TestBenchmarkAgentResolution:
             },
             agent_a=self._agent("my_rs"),
             agent_b=self._agent("my_rs"),
+            **{"agent_a_environment_server": self._environment_server("agent_a")},
+            **{"agent_b_environment_server": self._environment_server("agent_b")},
         )
         assert cfg.agent_name == "agent_b"
 
@@ -729,6 +741,8 @@ class TestBenchmarkAgentResolution:
                 some_other_rs={"resources_servers": {"impl": {"entrypoint": "app.py", "domain": "other"}}},
                 agent_a=self._agent("my_rs"),
                 agent_b=self._agent("some_other_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
+                **{"agent_b_environment_server": self._environment_server("agent_b")},
             )
 
     def test_rs_declared_pin_naming_unknown_agent_errors(self) -> None:
@@ -746,6 +760,7 @@ class TestBenchmarkAgentResolution:
                     }
                 },
                 agent_a=self._agent("my_rs"),
+                **{"agent_a_environment_server": self._environment_server("agent_a")},
             )
 
 
@@ -796,6 +811,12 @@ class TestAgentPinDiscoveryCollateRollout:
                         "resources_server": {"type": "resources_servers", "name": "shared_rs"},
                     }
                 }
+            },
+            "agent_a_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_a"}}}
+            },
+            "agent_b_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_b"}}}
             },
         }
         config_dict = OmegaConf.create(config)

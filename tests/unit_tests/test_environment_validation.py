@@ -113,7 +113,15 @@ demo_agent:
         name: demo_resources
 {model_server.rstrip()}
       datasets:
-{dataset}{rollout_driver}"""
+{dataset.rstrip()}
+demo_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: demo_agent
+{rollout_driver}"""
 
 
 def _asset(tmp_path: Path, *, kind: str = "environment", profile: str = "custom-gym-verifier") -> Path:
@@ -332,6 +340,13 @@ second_demo_agent:
       - name: duplicate
         type: example
         jsonl_fpath: environments/demo/data/example.jsonl
+second_demo_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: second_demo_agent
 """,
         encoding="utf-8",
     )
