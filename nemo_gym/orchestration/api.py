@@ -55,7 +55,7 @@ def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
     - `runtime:VAR` -> left unresolved; canonicalized to `runtime:VAR` for executors to
       pick up and reference from the job's own environment at run time.
     """
-    resolved = {}
+    resolved: dict[str, str] = {}
     for key, raw in env.items():
         if raw.startswith("lit:"):
             resolved[key] = _LiteralEnvValue(raw[len("lit:") :])
