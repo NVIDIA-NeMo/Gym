@@ -114,8 +114,8 @@ def test_custom_loop_may_use_a_direct_model_endpoint(explicit_null: bool) -> Non
 
 @pytest.mark.parametrize("explicit_null", [False, True])
 @pytest.mark.parametrize("profile", list(IntegrationProfile))
-@pytest.mark.parametrize("agent", ["verifiers_agent", "simple_agent"])
-def test_only_native_verifiers_loop_may_omit_resources_server(explicit_null, profile, agent) -> None:
+@pytest.mark.parametrize("agent", ["verifiers_agent", "tau2", "simple_agent"])
+def test_only_native_embedded_grading_agents_may_omit_resources_server(explicit_null, profile, agent) -> None:
     raw = _manifest(profile=profile)
     raw["agent_server"] = agent
     if explicit_null:
@@ -123,7 +123,10 @@ def test_only_native_verifiers_loop_may_omit_resources_server(explicit_null, pro
     else:
         raw.pop("resources_server")
     schema = Draft202012Validator(manifest_json_schema())
-    if profile == IntegrationProfile.CUSTOM_GYM_AGENT_LOOP and agent == "verifiers_agent":
+    if (profile, agent) in {
+        (IntegrationProfile.CUSTOM_GYM_AGENT_LOOP, "verifiers_agent"),
+        (IntegrationProfile.EXTERNAL_AGENT_LOOP, "tau2"),
+    }:
         assert EnvironmentManifest.model_validate(raw).resources_server is None
         schema.validate(raw)
     else:
