@@ -322,6 +322,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
+            if "messages" in kw:
+                kw["messages"] = [dict(message) for message in kw["messages"]]
+                for message in kw["messages"]:
+                    if message.get("tool_calls"):
+                        message["tool_calls"] = [dict(call) for call in message["tool_calls"]]
+                        for call in message["tool_calls"]:
+                            call.pop("call_id", None)
+                            call.pop("response_item_id", None)
             if not self.config.chat_template_kwargs_enabled:
                 return kw
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})

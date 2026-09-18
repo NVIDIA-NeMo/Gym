@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -378,10 +379,11 @@ class TestMaxTokens:
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
                 seen["max_tokens"] = kwargs.get("max_tokens")
-                self._build_api_kwargs = lambda _messages: {}
+                self._build_api_kwargs = lambda messages: {"messages": messages}
                 self.compression_enabled = True
 
             def run_conversation(self, *args, **kwargs) -> dict:
+                seen["api_kwargs"] = self._build_api_kwargs(seen.get("messages", []))
                 return {"messages": [{"role": "assistant", "content": "ok"}]}
 
         monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
@@ -400,6 +402,47 @@ class TestMaxTokens:
         agent, seen = self._agent_and_seen(monkeypatch)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["max_tokens"] is None
+
+    @pytest.mark.parametrize("chat_template_kwargs_enabled", [False, True])
+    def test_replay_removes_redundant_tool_metadata(self, monkeypatch, chat_template_kwargs_enabled) -> None:
+        from pydantic import ValidationError
+
+        from nemo_gym.openai_utils import (
+            NeMoGymChatCompletionCreateParamsNonStreaming,
+            NeMoGymResponseCreateParamsNonStreaming,
+        )
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": "<think>Inspect the current change.</think>",
+                "reasoning_content": None,
+                "tool_calls": [
+                    {
+                        "id": "chatcmpl-tool-aeb566f6d5f20798",
+                        "call_id": "chatcmpl-tool-aeb566f6d5f20798",
+                        "response_item_id": "fc_chatcmpl-tool-aeb566f6d5f20798",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": '{"command":"git diff"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "chatcmpl-tool-aeb566f6d5f20798", "content": "diff"},
+            {"role": "assistant", "content": "Continue."},
+        ]
+        original = deepcopy(messages)
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=deepcopy(messages))
+        agent, seen = self._agent_and_seen(monkeypatch, chat_template_kwargs_enabled=chat_template_kwargs_enabled)
+        seen["messages"] = messages
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        normalized = seen["api_kwargs"]["messages"]
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=normalized)
+        expected = deepcopy(original)
+        del expected[0]["tool_calls"][0]["call_id"]
+        del expected[0]["tool_calls"][0]["response_item_id"]
+        assert normalized == expected
+        assert messages == original
 
 
 class TestObservability:
