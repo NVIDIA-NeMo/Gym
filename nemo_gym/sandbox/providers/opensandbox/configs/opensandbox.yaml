@@ -27,16 +27,9 @@ sandbox:
       protocol: http
       request_timeout_s: 300
       use_server_proxy: true
-      # Must stay below the server's keep-alive idle timeout (uvicorn: ~5s),
-      # else pooled sockets are reused after the server has closed them.
-      keepalive_expiry_s: 3.0
-      # 0 disables connection reuse.
-      max_keepalive_connections: 20
-      # null for no cap.
-      max_connections: null
-      connect_retries: 2
-      # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
-      # back to httpx with a warning when it is not installed.
+      # Uses Gym's global aiohttp client. Pool limits come from
+      # global_aiohttp_connector_limit and global_aiohttp_connector_limit_per_host.
+      # Provider-local pool settings apply only to the legacy httpx backend.
       transport_backend: aiohttp
       # Certificate verification for every connection the provider opens (SDK
       # transport and PTY sockets). Off by default; set true for endpoints whose
