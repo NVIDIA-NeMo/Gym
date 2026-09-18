@@ -184,7 +184,16 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
-_NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
+ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
+NG_ENVIRONMENT_SERVER_KEY = "_ng_environment_server"
+NG_TASKSET_KEY = "_ng_taskset"
+_NO_RESULT_FAILURE_CLASSES = frozenset(
+    {
+        AGENT_REQUEST_FAILED_FAILURE_CLASS,
+        AGENT_RUN_ERROR_FAILURE_CLASS,
+        ENVIRONMENT_SERVER_FAILURE_CLASS,
+    }
+)
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
@@ -212,6 +221,54 @@ def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfi
         f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
         "Config validation should have caught this before any server started."
     )
+
+
+class TasksetRunConfig(BaseModel):
+    """Declare the protocol contract emitted by one materialized taskset."""
+
+    task_input_contract: str = Field(min_length=1)
+
+
+def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
+    task_id = row.get("task_id")
+    if not isinstance(task_id, Mapping) or "task_input" not in row:
+        return None
+    taskset = task_id.get("taskset")
+    return taskset if isinstance(taskset, str) and taskset else None
+
+
+def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
+    if config.environment_routing_mode == "agent":
+        return None
+    if config.environment_routing_mode == "legacy":
+        return config.environment_server_name
+    taskset = _materialized_taskset(row)
+    if taskset is None:
+        raise ValueError("taskset routing requires rows containing task_id.taskset and task_input")
+    if taskset not in config.tasksets:
+        raise ValueError(f"Materialized task references undeclared taskset {taskset!r}")
+    try:
+        return config.environment_server_routes[taskset]
+    except KeyError as error:
+        raise ValueError(f"No environment server route is configured for taskset {taskset!r}") from error
+
+
+def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
+    attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+        raise ValueError(f"Invalid episode attempt: {attempt!r}")
+    base_identity_row = dict(row)
+    base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
+    rollout_id = maybe_rollout_id_from_run_body(base_identity_row)
+    if rollout_id is None:
+        rollout_id = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return {
+        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "task": {
+            "task_id": row["task_id"],
+            "task_input": row["task_input"],
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -691,6 +748,37 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "When unset, the standard single-pass collection runs."
         ),
     )
+    environment_routing_mode: Literal["agent", "legacy", "taskset"] = Field(
+        default="agent",
+        description="Select existing agent routing, whole-run legacy environment routing, or native taskset routing.",
+    )
+    environment_server_name: str | None = Field(
+        default=None,
+        description="Compatibility environment server used for every row when environment_routing_mode=legacy.",
+    )
+    tasksets: dict[str, TasksetRunConfig] = Field(default_factory=dict)
+    environment_server_routes: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment server deployments keyed by materialized TaskId.taskset.",
+    )
+
+    @model_validator(mode="after")
+    def validate_environment_routing(self) -> "SharedRolloutCollectionConfig":
+        if self.environment_routing_mode == "legacy" and self.environment_server_name is None:
+            raise ValueError("environment_server_name is required when environment_routing_mode=legacy")
+        if self.environment_routing_mode == "taskset":
+            if not self.tasksets:
+                raise ValueError("tasksets are required when environment_routing_mode=taskset")
+            if not self.environment_server_routes:
+                raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
+            undeclared = set(self.environment_server_routes) - set(self.tasksets)
+            unrouted = set(self.tasksets) - set(self.environment_server_routes)
+            if undeclared or unrouted:
+                raise ValueError(
+                    "tasksets and environment_server_routes must have identical keys: "
+                    f"undeclared routes={sorted(undeclared)}, unrouted tasksets={sorted(unrouted)}"
+                )
+        return self
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -883,6 +971,8 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "environment_server": row.get(NG_ENVIRONMENT_SERVER_KEY),
+        "taskset": _materialized_taskset(row),
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -1110,18 +1200,23 @@ class RolloutCollectionHelper(BaseModel):
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
+            task_source = row.get(TASK_SOURCE_KEY_NAME)
+            taskset = _materialized_taskset(row)
+            environment_server = _environment_server_for_config_row(row, config)
             # Routing basis: the name this row routes by — its agent_ref.name when present, else
             # its task_source (resolved to an agent by resolve_task_sources once the merged config
             # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            basis = agent_name if agent_name is not None else row.get(TASK_SOURCE_KEY_NAME)
-            if config.agent_map:
+            basis = agent_name if agent_name is not None else task_source
+            if environment_server is not None:
+                basis = taskset or task_source or environment_server
+            elif config.agent_map:
                 # A row may carry both an agent_ref and a task_source (derived artifacts do);
                 # a map entry for either re-routes it, the agent name taking precedence.
                 mapped = next(
                     (
                         config.agent_map[key]
-                        for key in (agent_name, row.get(TASK_SOURCE_KEY_NAME))
+                        for key in (agent_name, task_source)
                         if key is not None and key in config.agent_map
                     ),
                     None,
@@ -1137,24 +1232,31 @@ class RolloutCollectionHelper(BaseModel):
             # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
             # target — the row's agent when known, else deferred to task_source resolution.
             targets: List[Optional[str]]
-            if config.fan_out and basis is not None and basis in config.fan_out:
+            if environment_server is not None:
+                targets = [None]
+            elif config.fan_out and basis is not None and basis in config.fan_out:
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
                 targets = [agent_name]
-            elif row.get(TASK_SOURCE_KEY_NAME) is not None:
+            elif task_source is not None:
                 targets = [None]
             else:
                 row_idxs_missing_agent_ref.append(row_idx)
                 continue
 
-            # Responses create params
-            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
-            )
+            if taskset is not None:
+                if responses_create_params_overrides:
+                    raise ValueError("responses_create_params overrides are not supported for materialized task rows")
+                if skills_ref_dict is not None:
+                    raise ValueError("run-level skills are not supported for materialized task rows")
+            else:
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
+                    row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
+                )
 
             # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
             # /run request body and propagated to results. The source dataset stays untouched.
-            if skills_ref_dict is not None:
+            if skills_ref_dict is not None and taskset is None:
                 row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
             # Resolve task index. Honor a caller-provided value when present (e.g. when an
@@ -1163,6 +1265,8 @@ class RolloutCollectionHelper(BaseModel):
             # identical input rows to the same task index as before.
             if TASK_INDEX_KEY_NAME not in row:
                 row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
+            if environment_server is not None:
+                row[NG_ENVIRONMENT_SERVER_KEY] = environment_server
 
             base_row = row
             for target in targets:
@@ -1312,6 +1416,7 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
+        environment_server_client = self.setup_server_client() if config.environment_routing_mode != "agent" else None
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -1352,11 +1457,18 @@ class RolloutCollectionHelper(BaseModel):
             # inputs are the run-scoped artifact and must carry the resolved agent_ref (custom
             # drivers, e.g. gdpval's multistage orchestrator, read it from there). Guarded so
             # legacy agent_ref-only runs never need the head server at this point.
+            direct_source_rows = [row for row in input_rows if NG_ENVIRONMENT_SERVER_KEY not in row]
             if any(
                 (r.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and r.get(TASK_SOURCE_KEY_NAME) is not None
-                for r in input_rows
+                for r in direct_source_rows
             ):
-                self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
+                server_client = environment_server_client or self.setup_server_client()
+                self.resolve_task_sources(direct_source_rows, server_client.global_config_dict)
+            if environment_server_client is not None:
+                self._stamp_environment_server_agent_refs(
+                    input_rows,
+                    environment_server_client.global_config_dict,
+                )
 
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
@@ -1372,7 +1484,11 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        global_config = get_global_config_dict()
+        global_config = (
+            environment_server_client.global_config_dict
+            if environment_server_client is not None
+            else get_global_config_dict()
+        )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Resolve the training-token store directory once.
@@ -1402,7 +1518,10 @@ class RolloutCollectionHelper(BaseModel):
         token_capture_rows = [
             row
             for row in input_rows
-            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                self._agent_name_for_row(row, global_config),
+            )
         ]
         if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
             raise ValueError(
@@ -1432,9 +1551,15 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_scored = defaultdict(Counter)
         # Rollouts that never reach the main output at all, kept apart from quality.
         agent_name_to_dropped = defaultdict(Counter)
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        counts_left = Counter(self._dispatch_name(row) for row in input_rows)
         dispatched_per_agent = Counter(counts_left)
+        completed_dispatches = 0
         start_time = time()
+        environment_routes = Counter(
+            row[NG_ENVIRONMENT_SERVER_KEY] for row in input_rows if NG_ENVIRONMENT_SERVER_KEY in row
+        )
+        if environment_routes:
+            print(f"Environment server routes: {dict(environment_routes)}")
 
         if config.route_failures_to_sidecar:
             print(
@@ -1450,13 +1575,15 @@ class RolloutCollectionHelper(BaseModel):
             input_rows,
             semaphore=semaphore,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
+            tasksets=config.tasksets,
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if AGENT_REF_KEY_NAME in row:
+                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if TASK_SOURCE_KEY_NAME in row:
                 result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
@@ -1467,6 +1594,11 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
+            if NG_ENVIRONMENT_SERVER_KEY in row:
+                result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
+            taskset = _materialized_taskset(row)
+            if taskset is not None:
+                result[NG_TASKSET_KEY] = taskset
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -1495,7 +1627,7 @@ class RolloutCollectionHelper(BaseModel):
             token_capture_build = None
             if not no_result and token_id_capture_enabled_for_agent(
                 global_config,
-                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+                self._agent_name_for_row(row, global_config),
             ):
                 token_capture_build = await finalize_rollout_token_capture(result, token_source)
                 if token_capture_build is not None:
@@ -1527,6 +1659,7 @@ class RolloutCollectionHelper(BaseModel):
 
             rows.append(row)
             results.append(result)
+            completed_dispatches += 1
             serialized = orjson.dumps(result)
 
             if no_persist:
@@ -1569,11 +1702,12 @@ class RolloutCollectionHelper(BaseModel):
                     os.fsync(results_file.fileno())
                     await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+            dispatch_name = self._dispatch_name(row)
+            counts_left[dispatch_name] -= 1
+            if counts_left[dispatch_name] <= 0:
+                counts_left.pop(dispatch_name)
 
-            agent_name = result["agent_ref"]["name"]
+            agent_name = dispatch_name
             if not no_result:
                 # An infrastructure failure is not a score of zero, and not a sample either.
                 metrics = agent_name_to_metrics[agent_name]
@@ -1593,15 +1727,15 @@ class RolloutCollectionHelper(BaseModel):
             else:
                 agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
 
-            current_pct = 100 * len(results) / len(input_rows)
+            current_pct = 100 * completed_dispatches / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_min = len(results) / (time_taken_s / 60)
-                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+                rollouts_per_min = completed_dispatches / (time_taken_s / 60)
+                print_str = f"Finished {completed_dispatches} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
 
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
@@ -1746,7 +1880,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # Group results by agent name
         agent_results: Dict[str, List[Dict]] = {}
         for row, result in zip(rows, results):
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or result.get(AGENT_REF_KEY_NAME) or {}).get("name")
             if not agent_name:
                 continue
             agent_results.setdefault(agent_name, []).append(result)
@@ -1940,6 +2074,119 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         )
 
     @staticmethod
+    def _dispatch_name(row: dict[str, Any]) -> str:
+        environment_server_name = row.get(NG_ENVIRONMENT_SERVER_KEY)
+        if isinstance(environment_server_name, str):
+            return environment_server_name
+        return row[AGENT_REF_KEY_NAME]["name"]
+
+    @staticmethod
+    def _agent_name_for_row(
+        row: dict[str, Any],
+        global_config_dict: DictConfig,
+    ) -> str | None:
+        environment_server_name = row.get(NG_ENVIRONMENT_SERVER_KEY)
+        if not isinstance(environment_server_name, str):
+            return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        environment_group = global_config_dict[environment_server_name]["environment_servers"]
+        environment_config = next(iter(environment_group.values()))
+        agent_ref = environment_config.get("agent_server")
+        return agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+
+    @classmethod
+    def _stamp_environment_server_agent_refs(
+        cls,
+        examples: list[dict[str, Any]],
+        global_config_dict: DictConfig,
+    ) -> None:
+        """Stamp compatibility-routed rows with the bound agent.
+
+        These rows never reach ``resolve_task_sources``, so without this they carry no
+        ``agent_ref`` and results, aggregate metrics and reward profiling lose the agent
+        they ran on. A row that already names an agent is left alone; the name is validated
+        against the environment server by ``_validate_environment_servers``. Materialized tasks are
+        skipped: they carry no agent by design, and their result projection is not the
+        legacy shape this key belongs to.
+        """
+        for row in examples:
+            if NG_ENVIRONMENT_SERVER_KEY not in row or _materialized_taskset(row) is not None:
+                continue
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None:
+                continue
+            agent_name = cls._agent_name_for_row(row, global_config_dict)
+            if agent_name is not None:
+                row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+
+    @classmethod
+    def _validate_environment_servers(
+        cls,
+        examples: list[dict],
+        global_config_dict: DictConfig,
+        tasksets: dict[str, TasksetRunConfig],
+    ) -> None:
+        requested = {
+            environment_server
+            for row in examples
+            if isinstance((environment_server := row.get(NG_ENVIRONMENT_SERVER_KEY)), str)
+        }
+        if not requested:
+            return
+        available = {
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and "environment_servers" in block
+        }
+        unknown = requested - available
+        if unknown:
+            raise ValueError(f"Environment servers are not present in the running config: {sorted(unknown)}")
+
+        environment_pairings: list[dict[str, Any]] = []
+        for row in examples:
+            environment_server_name = row.get(NG_ENVIRONMENT_SERVER_KEY)
+            if not isinstance(environment_server_name, str):
+                continue
+            environment_group = global_config_dict[environment_server_name]["environment_servers"]
+            environment_config = next(iter(environment_group.values()))
+            agent_ref = environment_config.get("agent_server")
+            resources_ref = environment_config.get("resources_server")
+            configured_agent = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+            configured_resources = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
+
+            row_agent = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            task_source = row.get(TASK_SOURCE_KEY_NAME)
+            if row_agent is not None and configured_agent is not None and row_agent != configured_agent:
+                raise ValueError(
+                    f"Row agent_ref {row_agent!r} does not match environment server "
+                    f"{environment_server_name!r} agent server {configured_agent!r}"
+                )
+            if task_source is not None and configured_resources is not None and task_source != configured_resources:
+                raise ValueError(
+                    f"Row task_source {task_source!r} does not match environment server "
+                    f"{environment_server_name!r} resources server {configured_resources!r}"
+                )
+
+            taskset = _materialized_taskset(row)
+            if taskset is not None:
+                declared_contract = tasksets[taskset].task_input_contract
+                accepted_contract = environment_config.get("task_input_contract")
+                if accepted_contract != declared_contract:
+                    raise ValueError(
+                        f"Taskset {taskset!r} emits {declared_contract!r}, but environment server "
+                        f"{environment_server_name!r} accepts {accepted_contract!r}"
+                    )
+
+            if configured_agent is not None:
+                environment_pairings.append(
+                    {
+                        AGENT_REF_KEY_NAME: {"name": configured_agent},
+                        TASK_SOURCE_KEY_NAME: configured_resources,
+                    }
+                )
+
+        cls._validate_agent_names(environment_pairings, global_config_dict)
+        cls._validate_agent_pairings(environment_pairings, global_config_dict)
+
+    @staticmethod
     def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
         """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
         if pairing_override_enabled(global_config_dict):
@@ -1985,6 +2232,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        environment_server_name: str | None = None,
+        tasksets: dict[str, TasksetRunConfig] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1995,9 +2244,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that a direct caller of ``run_examples`` could also observe.
         """
         server_client = self.setup_server_client(head_server_config)
-        self.resolve_task_sources(examples, server_client.global_config_dict)
-        self._validate_agent_names(examples, server_client.global_config_dict)
-        self._validate_agent_pairings(examples, server_client.global_config_dict)
+        if environment_server_name is not None:
+            for row in examples:
+                row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
+        self._validate_environment_servers(examples, server_client.global_config_dict, tasksets or {})
+        self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
+        direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
+        self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
+        self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
+        self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
@@ -2005,10 +2260,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    server_name = _environment_server_for_agent(
-                        row[AGENT_REF_KEY_NAME]["name"], server_client.global_config_dict
+                    server_name = (
+                        self._dispatch_name(row)
+                        if NG_ENVIRONMENT_SERVER_KEY in row
+                        else _environment_server_for_agent(
+                            row[AGENT_REF_KEY_NAME]["name"],
+                            server_client.global_config_dict,
+                        )
                     )
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=row)
+                    request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
+                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
@@ -2047,6 +2308,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        environment_server_name: str | None = None,
+        tasksets: dict[str, TasksetRunConfig] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -2074,6 +2337,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 route_failures_to_sidecar=route_failures_to_sidecar,
+                environment_server_name=environment_server_name,
+                tasksets=tasksets,
             ),
         )
 
