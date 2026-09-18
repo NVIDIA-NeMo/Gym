@@ -1179,6 +1179,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
     audio: Optional[ChatCompletionAudioParam] = None
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
     frequency_penalty: Optional[float] = None
     logit_bias: Optional[Dict[str, int]] = None
     logprobs: Optional[bool] = None

@@ -579,6 +579,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+        chat_template_kwargs.update(body_dict.get("chat_template_kwargs") or {})
 
         metadata = body_dict.get("metadata") or {}
 
@@ -1517,20 +1518,20 @@ class VLLMModel(SimpleResponsesAPIModel):
         Assistant and tool messages, plus any tool definitions, are passed
         through to the template unchanged.
 
-        ``chat_template_kwargs`` is merged from two sources: the
-        server-level value from config, plus an optional per-request
-        override JSON-encoded under ``metadata.chat_template_kwargs``. The
-        per-request override wins on key conflicts.
+        ``chat_template_kwargs`` merges server defaults, request fields, then
+        JSON-encoded ``metadata.chat_template_kwargs`` overrides, in that
+        order of precedence.
         """
         messages = body_dict.get("messages") or []
         tools = body_dict.get("tools") or None
         self._validate_text_only_messages(messages)
 
         # Mirror the precedence rules in _preprocess_chat_completion_create_params:
-        # global config baseline, per-request metadata overrides on top.
+        # config baseline, request fields, then metadata overrides.
         chat_template_kwargs: Dict[str, Any] = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
+        chat_template_kwargs.update(body_dict.get("chat_template_kwargs") or {})
         metadata = body_dict.get("metadata") or {}
         metadata_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
         chat_template_kwargs.update(json.loads(metadata_kwargs_str))

@@ -1623,10 +1623,10 @@ def test_request_model_carries_every_sdk_request_field() -> None:
 def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     """Keep the strict Chat request model aligned with the supported SDK fields.
 
-    Deprecated fields remain disabled.
+    Deprecated fields remain disabled; the native chat-template extension is explicit.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = sdk_fields - {"function_call", "functions"}
+    expected = (sdk_fields - {"function_call", "functions"}) | {"chat_template_kwargs"}
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "

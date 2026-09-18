@@ -782,6 +782,49 @@ class TestApp:
 
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize("template_kwargs", [None, {"enable_thinking": True, "truncate_history_thinking": False}])
+    def test_chat_request_template_kwargs_reach_provider(self, monkeypatch, stream, template_kwargs):
+        server = self._setup_server(monkeypatch)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        server._clients = [provider]
+        body = {"messages": [{"role": "user", "content": "hi"}], "stream": stream}
+        if template_kwargs is not None:
+            body["chat_template_kwargs"] = template_kwargs
+        response = TestClient(server.setup_webserver()).post("/v1/chat/completions", json=body)
+        assert response.status_code == 200
+        forwarded = provider.create_chat_completion.call_args.kwargs
+        assert forwarded["messages"] == body["messages"]
+        if template_kwargs is None:
+            assert "chat_template_kwargs" not in forwarded
+        else:
+            assert forwarded["chat_template_kwargs"] == template_kwargs
+
+    def test_chat_template_request_overrides_config_and_retains_metadata_precedence(self, monkeypatch):
+        server = self._setup_server(monkeypatch)
+        server.config.chat_template_kwargs = {"enable_thinking": False, "config_only": 1}
+        body = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False},
+            "metadata": {"chat_template_kwargs": '{"truncate_history_thinking": true}'},
+        }
+        forwarded = server._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert forwarded["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "config_only": 1,
+            "truncate_history_thinking": True,
+        }
+        assert server.config.chat_template_kwargs == {"enable_thinking": False, "config_only": 1}
+
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
@@ -4462,6 +4505,7 @@ class TestCompletionsBackendChatTemplateRender:
         )
         body_dict = {
             "messages": [{"role": "user", "content": "x"}],
+            "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False},
             "metadata": {
                 # Per-request override — JSON string, mirroring the chat-completions path.
                 "chat_template_kwargs": json.dumps({"enable_thinking": False, "extra_knob": 7}),
@@ -4480,6 +4524,7 @@ class TestCompletionsBackendChatTemplateRender:
             "enable_thinking": False,  # metadata override
             "tool_use_mode": "tool_calls",  # global config preserved
             "extra_knob": 7,  # metadata-only addition
+            "truncate_history_thinking": False,  # request field preserved
         }
 
     def test_post_init_loads_tokenizer_when_render_chat_template_is_set(self, monkeypatch: MonkeyPatch) -> None:
