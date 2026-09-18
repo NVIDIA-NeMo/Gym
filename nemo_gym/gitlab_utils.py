@@ -18,6 +18,7 @@ from pathlib import Path
 import requests
 from mlflow import MlflowClient
 from mlflow.artifacts import get_artifact_repository
+from mlflow.entities.model_registry import ModelVersion
 from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
 from mlflow.exceptions import RestException
 
@@ -46,6 +47,28 @@ def create_mlflow_client() -> MlflowClient:  # pragma: no cover
     client = MlflowClient(tracking_uri=config.mlflow_tracking_uri)
 
     return client
+
+
+def _is_registry_404(error: RestException) -> bool:
+    # GitLab may wrap its HTTP 404 in MLflow's INTERNAL_ERROR code.
+    message = error.json.get("message", error.json.get("error"))
+    return error.get_http_status_code() == 404 or (
+        error.error_code == "INTERNAL_ERROR" and isinstance(message, str) and message.strip() == "404 Not Found"
+    )
+
+
+def _get_model_version(client: MlflowClient, dataset_name: str, version: str) -> ModelVersion:
+    try:
+        return client.get_model_version(dataset_name, version)
+    except RestException as e:
+        if not _is_registry_404(e):
+            raise
+        raise ConfigError(
+            f"Could not access dataset '{dataset_name}' version '{version}' in the GitLab model registry. "
+            "Confirm that the dataset and version exist, the MLflow tracking URI points to the correct project, "
+            "and the tracking token can access that project's model registry. GitLab can return 404 for both "
+            "missing and inaccessible resources."
+        ) from e
 
 
 def upload_jsonl_dataset(
@@ -84,7 +107,7 @@ def download_jsonl_dataset(
     # TODO: There is probably a much better way to do this, but it is not clear at the moment.
     client = create_mlflow_client()
 
-    model_version = client.get_model_version(config.dataset_name, config.version)
+    model_version = _get_model_version(client, config.dataset_name, config.version)
     run_id = model_version.run_id
     repo = get_artifact_repository(artifact_uri=f"runs:/{run_id}", tracking_uri=client.tracking_uri)
     artifact_uri = repo.repo.artifact_uri
