@@ -578,11 +578,17 @@ class TestEvalSubmitThroughTheRealCli:
 
         assert yaml.safe_load(capsys.readouterr().out)["job"]["output_path"] == "/tmp/gym-jobs"
 
-    def test_resolve_only_and_dry_run_together_are_refused_by_the_parser(self, tmp_path, monkeypatch, capsys):
+    def test_dry_run_is_redundant_under_resolve_only(self, tmp_path, monkeypatch, capsys):
+        """Both flags mean "do not submit"; --resolve-only stops earlier, so adding --dry-run changes
+        nothing -- the same way --json is accepted and inert under --dry-run."""
+
+        class _NeverExecutor:
+            def run(self, config, *, dry_run: bool = False):
+                raise AssertionError("--resolve-only reached an executor")
+
+        monkeypatch.setattr(submit_module, "_EXECUTORS", {SlurmComputeConfig: _NeverExecutor})
         self._argv(monkeypatch, _config_file(tmp_path), "--resolve-only", "--dry-run")
 
-        with pytest.raises(SystemExit) as exit_info:
-            main()
+        main()
 
-        assert exit_info.value.code == 2
-        assert "not allowed with" in capsys.readouterr().err
+        assert yaml.safe_load(capsys.readouterr().out)["job"]["output_path"] == "/tmp/gym-jobs"

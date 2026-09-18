@@ -564,17 +564,6 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
             )
 
 
-def _register_submit_mode(p: argparse.ArgumentParser) -> None:
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="Print generated job scripts without submitting.")
-    mode.add_argument(
-        "--resolve-only",
-        action="store_true",
-        help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
-        "and stop before any job script is rendered or anything is submitted.",
-    )
-
-
 @exit_cleanly_on_config_error
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     import rich
@@ -1186,7 +1175,19 @@ COMMANDS = {
                     "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
                 ),
             ),
-            Flag(register=_register_submit_mode),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--resolve-only",
+                    action="store_true",
+                    help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
+                    "and stop before any job script is rendered or anything is submitted.",
+                ),
+            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--json",
