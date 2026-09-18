@@ -67,3 +67,11 @@ terminus_judge_simple_agent:
         type: example
         jsonl_fpath: resources_servers/terminus_judge/data/example.jsonl
         num_repeats: 1
+
+terminus_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminus_judge_simple_agent
