@@ -47,6 +47,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
+    _message_content_to_text,
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
@@ -188,6 +189,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+    merge_system_messages: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -573,6 +575,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
+
+        if self.config.merge_system_messages:
+            messages = body_dict["messages"]
+            systems = [message for message in messages if message["role"] == "system"]
+            if systems:
+                body_dict["messages"] = [
+                    {"role": "system", "content": "\n\n".join(_message_content_to_text(m["content"]) for m in systems)},
+                    *(message for message in messages if message["role"] != "system"),
+                ]
 
         body_dict["model"] = self.config.model
 

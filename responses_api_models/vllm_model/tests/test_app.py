@@ -3482,6 +3482,25 @@ def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
 
 
 class TestAssistantReasoningHistoryPreprocess:
+    @mark.parametrize("merge", [False, True])
+    def test_merge_system_messages_is_opt_in(self, merge: bool) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        model.config.merge_system_messages = merge
+        messages = [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "task"},
+            {"role": "system", "content": [{"type": "text", "text": "environment"}]},
+        ]
+        result = model._preprocess_chat_completion_create_params(MagicMock(), {"messages": messages})
+        assert result["messages"] == (
+            [
+                {"role": "system", "content": "instructions\n\nenvironment"},
+                {"role": "user", "content": "task"},
+            ]
+            if merge
+            else messages
+        )
+
     @staticmethod
     def _body(content: Any) -> dict[str, Any]:
         return {
