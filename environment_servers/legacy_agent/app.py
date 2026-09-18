@@ -10,7 +10,7 @@ it relays `/run` to an agent that has not been migrated, so the agent's own cont
 from collections.abc import Iterable
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from pydantic import ConfigDict
 
 from nemo_gym.base_environment_server import (
@@ -18,8 +18,9 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServerConfig,
     EpisodeContext,
 )
-from nemo_gym.config_types import AgentServerRef
+from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
+from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 # Headers that describe a connection or a body, not the payload. Each hop frames its own, and
@@ -58,7 +59,18 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         app.post("/run")(self.run_legacy)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the agent server, which aggregates its own rollouts today."""
+        response = await self.server_client.post(
+            server_name=self.config.agent_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(self, request: BaseEpisodeRequest[Any], context: EpisodeContext) -> BaseEpisodeResponse[Any]:
         raise RuntimeError(
