@@ -59,6 +59,7 @@ class _FakeCutBackend:
                             "staging_keys": (f"prefix/{prefix.ticket_id}",),
                             "prefix_token_count": 3,
                             "prefix_digest": "a" * 64,
+                            "effective_output_limit": 128,
                         }
                         if self.disposition == "durable_prefix"
                         else {}
@@ -475,9 +476,50 @@ def test_receipt_rejects_logical_identity_different_from_inventory() -> None:
                 staging_keys=("staging-1",),
                 prefix_token_count=3,
                 prefix_digest="c" * 64,
+                effective_output_limit=128,
             ),
         ),
     )
 
     with pytest.raises(ValueError, match="identity differs"):
         ack.validate_for(inventory)
+
+
+def test_active_prefix_requires_resolved_output_budget() -> None:
+    with pytest.raises(ValueError, match="effective_output_limit"):
+        GenerationCutPrefixAck(
+            ticket_id="ticket-1",
+            rollout_id="rollout-1",
+            attempt_index=0,
+            model_call_id="call-1",
+            admitted_at=1.0,
+            disposition="durable_prefix",
+            cut_kind="active_prefix",
+            frozen_buffer_id="buffer-1",
+            staging_keys=("staging-1",),
+            prefix_token_count=3,
+            prefix_digest="c" * 64,
+        )
+
+
+def test_active_prefix_terminal_metadata_round_trips() -> None:
+    prefix = GenerationCutPrefixAck(
+        ticket_id="ticket-1",
+        rollout_id="rollout-1",
+        attempt_index=0,
+        model_call_id="call-1",
+        admitted_at=1.0,
+        disposition="durable_prefix",
+        cut_kind="active_prefix",
+        frozen_buffer_id="buffer-1",
+        staging_keys=("staging-1",),
+        prefix_token_count=3,
+        prefix_digest="c" * 64,
+        effective_output_limit=128,
+        terminal_finish_reason="stop",
+        terminal_stop_reason="</s>",
+    )
+
+    restored = GenerationCutPrefixAck.model_validate(prefix.model_dump(mode="json"))
+
+    assert restored == prefix

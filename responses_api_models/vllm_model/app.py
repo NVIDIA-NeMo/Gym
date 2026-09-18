@@ -954,6 +954,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                         staging_keys=restored_cut.staging_keys,
                         generation_token_count=restored_cut.prefix_token_count,
                         digest=restored_cut.prefix_digest,
+                        effective_output_limit=restored_cut.effective_output_limit,
+                        terminal_finish_reason=restored_cut.terminal_finish_reason,
+                        terminal_stop_reason=restored_cut.terminal_stop_reason,
                     )
                 }
             )
