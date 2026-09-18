@@ -22,7 +22,7 @@ The manifest is the place to read this declaration, but not every field is autho
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
-| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+| Benchmark protocol: `canonical_split` and optional `standard_prompt_config` | Manifest |
 
 When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
 
@@ -84,7 +84,7 @@ New manifests are `experimental: true` by default. The NeMo Gym team can manuall
 | `state` | string or null | Optional; `none` or `per_session` |
 | `sandbox` | string or null | Optional sandbox requirement |
 | `canonical_split` | string or null | Required for benchmarks |
-| `standard_prompt_config` | string or null | Required for benchmarks |
+| `standard_prompt_config` | string or null | Benchmark prompt template; omit for rows with valid `responses_create_params` |
 | `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
 | `lifecycle` | string | Optional; `active` (default) or `deprecated` |
 
@@ -101,7 +101,7 @@ Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `trai
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
-Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
+Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`. Set `standard_prompt_config` to materialize raw dataset rows, or omit it when every row already contains valid `responses_create_params`. Dataset-level `prompt_config` remains optional and, when supplied, must match `standard_prompt_config`.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 

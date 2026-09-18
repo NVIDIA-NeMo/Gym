@@ -84,7 +84,7 @@ _PROFILE_REQUIRED_FIELDS = {
     IntegrationProfile.EXTERNAL_AGENT_LOOP: (),
     IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER: ("rollout_driver",),
 }
-_BENCHMARK_REQUIRED_FIELDS = ("canonical_split", "standard_prompt_config")
+_BENCHMARK_REQUIRED_FIELDS = ("canonical_split",)
 
 
 class _ManifestModel(BaseModel):
@@ -159,7 +159,6 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             "then": {
                 "properties": {
                     "canonical_split": nonempty_string,
-                    "standard_prompt_config": nonempty_string,
                     "datasets": {
                         **nonempty_datasets,
                         "contains": {

@@ -128,13 +128,24 @@ def test_rollout_driver_is_custom_profile_only() -> None:
         EnvironmentManifest.model_validate(custom)
 
 
-@pytest.mark.parametrize("missing_field", ["canonical_split", "standard_prompt_config"])
-def test_benchmark_requires_protocol_fields(missing_field: str) -> None:
+def test_benchmark_requires_canonical_split() -> None:
     raw = _manifest(kind="benchmark")
-    raw.pop(missing_field)
+    raw.pop("canonical_split")
 
-    with pytest.raises(ValidationError, match=missing_field):
+    with pytest.raises(ValidationError, match="canonical_split"):
         EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_preformatted_benchmark_can_omit_prompt(explicit_null: bool) -> None:
+    raw = _manifest(kind="benchmark")
+    if explicit_null:
+        raw["standard_prompt_config"] = None
+    else:
+        raw.pop("standard_prompt_config")
+
+    assert EnvironmentManifest.model_validate(raw).standard_prompt_config is None
+    Draft202012Validator(manifest_json_schema()).validate(raw)
 
 
 def test_benchmark_requires_a_benchmark_dataset() -> None:
@@ -289,10 +300,9 @@ def test_generated_schema_is_machine_readable() -> None:
     invalid["rollout_driver"] = "package.driver:collect"
     invalid_manifests.append(invalid)
 
-    for field in ("canonical_split", "standard_prompt_config"):
-        invalid = _manifest(kind="benchmark")
-        invalid.pop(field)
-        invalid_manifests.append(invalid)
+    invalid = _manifest(kind="benchmark")
+    invalid.pop("canonical_split")
+    invalid_manifests.append(invalid)
 
     invalid = _manifest(kind="benchmark")
     invalid["datasets"][0]["type"] = "validation"

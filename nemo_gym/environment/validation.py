@@ -490,18 +490,14 @@ def _validate_dataset(
         prepare_path = _resolve_under_cwd_or_install(dataset.prepare_script)
         _validate_prepare_script(prepare_path)
         prompt_config = dataset.prompt_config or standard_prompt_config
-        if prompt_config is None:
-            raise EnvironmentValidationError(
-                f"Benchmark dataset '{dataset.name}' has no prompt_config and the manifest has no "
-                "standard_prompt_config."
-            )
-        prompt_path = _resolve_under_cwd_or_install(prompt_config)
-        try:
-            prompt = load_prompt_config(str(prompt_path))
-        except (OSError, UnicodeError, YAMLError, ValueError, KeyError, AttributeError, TypeError) as error:
-            raise EnvironmentValidationError(
-                f"Could not materialize benchmark dataset '{dataset.name}': {error}"
-            ) from error
+        if prompt_config is not None:
+            prompt_path = _resolve_under_cwd_or_install(prompt_config)
+            try:
+                prompt = load_prompt_config(str(prompt_path))
+            except (OSError, UnicodeError, YAMLError, ValueError, KeyError, AttributeError, TypeError) as error:
+                raise EnvironmentValidationError(
+                    f"Could not materialize benchmark dataset '{dataset.name}': {error}"
+                ) from error
 
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):

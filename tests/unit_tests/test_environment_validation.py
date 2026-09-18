@@ -4,9 +4,11 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym.environment.artifacts import build_environment_package, pull_environment_package
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -355,6 +357,46 @@ def test_benchmark_uses_root_prompt_without_executing_prepare(tmp_path: Path) ->
 
     assert report.datasets[0].type == "benchmark"
     assert report.datasets[0].prompt_config.endswith("prompts/default.yaml")
+
+
+def test_benchmark_accepts_preformatted_rows_without_prompt(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, standard_prompt_config=None)
+    row = {
+        "responses_create_params": {"input": [{"role": "user", "content": "Follow the instruction."}]},
+        "instruction_id_list": ["keywords:existence"],
+        "kwargs": [{"keywords": ["example"]}],
+    }
+    data_path = manifest_path.parent / "data/example.jsonl"
+    data_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    report = validate_environment(manifest_path)
+
+    assert report.datasets[0].rows == 1
+    assert report.datasets[0].prompt_config is None
+    assert json.loads(data_path.read_text()) == row
+
+    manifest_path.with_name("package.yaml").write_text("include:\n- benchmarks/demo\n", encoding="utf-8")
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=manifest_path.with_name("config.yaml"))
+    archive = build_environment_package(entry, tmp_path / "native-benchmark.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "benchmarks/demo/manifest.yaml"
+
+    assert load_manifest(installed_manifest).standard_prompt_config is None
+    assert validate_environment(installed_manifest).datasets[0].prompt_config is None
+    assert json.loads(installed_manifest.parent.joinpath("data/example.jsonl").read_text()) == row
+
+
+@pytest.mark.parametrize("row", [{"question": "What is 1 + 1?"}, {"responses_create_params": {"input": 42}}])
+def test_benchmark_without_prompt_rejects_invalid_rollout_inputs(tmp_path: Path, row: dict) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, standard_prompt_config=None)
+    manifest_path.parent.joinpath("data/example.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        EnvironmentValidationError, match="row 1 is not a valid rollout input at responses_create_params"
+    ):
+        validate_environment(manifest_path)
 
 
 def test_malformed_benchmark_prompt_is_an_actionable_validation_error(tmp_path: Path) -> None:
