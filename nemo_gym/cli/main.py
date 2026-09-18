@@ -1039,7 +1039,7 @@ COMMANDS = {
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
+        flags=(PACKAGE_REFERENCE, PACKAGE, CONFIG, BENCHMARK, SEARCH_DIR),
     ),
     "eval run": Command(
         target=_eval_run,

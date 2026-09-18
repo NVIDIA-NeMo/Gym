@@ -17,6 +17,7 @@ import importlib
 import json
 import logging
 import shutil
+import sys
 from collections.abc import Sequence
 from copy import deepcopy
 from itertools import islice
@@ -29,7 +30,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym import _augment_sys_path, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -202,11 +203,15 @@ def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
     prepare_script_args: Dict[str, Any]
-    (benchmark_config, prepare_module_path, prepare_script_args) = args
+    (benchmark_config, prepare_module_path, prepare_script_args, prepare_root) = args
 
     print(f"Preparing benchmark: {benchmark_config.name}")
 
+    sys.path.insert(0, str(prepare_root))
+    _augment_sys_path()
     module = importlib.import_module(prepare_module_path)
+    if Path(module.__file__).resolve() != benchmark_config.dataset.prepare_script:
+        raise ConfigError(f"Preparation imported the wrong script: {module.__file__}")
     output_fpath = module.prepare(**prepare_script_args)
     if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
         raise ConfigError(
@@ -290,16 +295,33 @@ def prepare_benchmark() -> None:
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, str]] = []
+    validated: List[Tuple[BenchmarkConfig, str, Dict[str, Any], Path]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
+        prepare_script_path = _resolve_under_cwd_or_install(benchmark_config.dataset.prepare_script).resolve()
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
 
-        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        prepare_root = next(
+            (
+                root.resolve()
+                for root in component_search_roots()
+                if prepare_script_path.is_relative_to(root.resolve())
+            ),
+            prepare_script_path.parent,
+        )
+        benchmark_config.dataset.prepare_script = prepare_script_path
+        if not benchmark_config.dataset.jsonl_fpath.is_absolute():
+            benchmark_config.dataset.jsonl_fpath = prepare_root / benchmark_config.dataset.jsonl_fpath
+        prepare_module_path = ".".join(prepare_script_path.relative_to(prepare_root).with_suffix("").parts)
+        sys.path.insert(0, str(prepare_root))
+        _augment_sys_path()
         module = importlib.import_module(prepare_module_path)
+        if Path(module.__file__).resolve() != prepare_script_path:
+            raise ConfigError(
+                f"Preparation imported the wrong script: {module.__file__}; expected {prepare_script_path}"
+            )
         if not hasattr(module, "prepare"):
             prepare_function_missing.append(benchmark_config)
             continue
@@ -309,7 +331,9 @@ def prepare_benchmark() -> None:
             already_prepared.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
+        validated.append(
+            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), prepare_root)
+        )
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)

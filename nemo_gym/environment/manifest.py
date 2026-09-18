@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Literal, Mapping
 
 import yaml
 from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
@@ -240,6 +240,7 @@ class EnvironmentManifest(_ManifestModel):
     resources_server: NonEmptyString | None = None
     agent_server: NonEmptyString
     datasets: list[ManifestDataset] = Field(min_length=1)
+    data_delivery: Literal["bundled", "prepare"] = "bundled"
     model_server: NonEmptyString | None = None
     rollout_driver: PythonCallable | None = None
     grading_mode: NonEmptyString | None = None

@@ -57,7 +57,7 @@ class DatasetValidation:
     name: str
     type: str
     path: str
-    rows: int
+    rows: int | None
     prompt_config: str | None = None
 
 
@@ -479,6 +479,7 @@ def _validate_dataset(
     dataset: ManifestDataset,
     *,
     standard_prompt_config: str | None,
+    allow_unprepared: bool = False,
 ) -> DatasetValidation:
     data_path = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
     prompt_path: Path | None = None
@@ -498,6 +499,15 @@ def _validate_dataset(
                 raise EnvironmentValidationError(
                     f"Could not materialize benchmark dataset '{dataset.name}': {error}"
                 ) from error
+
+    if allow_unprepared and dataset.type == DatasetKind.BENCHMARK and not data_path.exists():
+        return DatasetValidation(
+            name=dataset.name,
+            type=dataset.type.value,
+            path=str(data_path),
+            rows=None,
+            prompt_config=str(prompt_path) if prompt_path else None,
+        )
 
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):
@@ -636,7 +646,11 @@ def validate_environment(
         if manifest.rollout_driver:
             _validate_rollout_driver(manifest.rollout_driver)
         dataset_reports = tuple(
-            _validate_dataset(dataset, standard_prompt_config=manifest.standard_prompt_config)
+            _validate_dataset(
+                dataset,
+                standard_prompt_config=manifest.standard_prompt_config,
+                allow_unprepared=manifest.data_delivery == "prepare",
+            )
             for dataset in manifest.datasets
         )
     if synchronized:
@@ -659,5 +673,11 @@ def validate_environment(
             manifest.integration_profile.value,
             inferred_profile,
             profile_evidence,
+        )
+        + tuple(
+            f"Dataset '{dataset.name}' is not prepared; run gym eval prepare before evaluation. "
+            "Its rows and runtime have not been validated."
+            for dataset in dataset_reports
+            if dataset.rows is None
         ),
     )

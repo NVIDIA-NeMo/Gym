@@ -628,3 +628,44 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+def test_missing_data_requires_explicit_preparation_contract(tmp_path: Path, kind: str) -> None:
+    manifest_path = _asset(tmp_path, kind=kind)
+    manifest_path.parent.joinpath("data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    _replace_manifest(manifest_path, data_delivery="prepare")
+    if kind == "environment":
+        with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+            validate_environment(manifest_path)
+    else:
+        report = validate_environment(manifest_path)
+        assert report.datasets[0].rows is None
+        assert "not prepared" in report.warnings[0]
+        manifest_path.parent.joinpath("prepare.py").write_text("def wrong_name(): pass\n")
+        with pytest.raises(EnvironmentValidationError, match="synchronous prepare"):
+            validate_environment(manifest_path)
+
+
+def test_unprepared_package_roundtrip_then_validates_materialized_data(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, data_delivery="prepare")
+    manifest_path.parent.joinpath("data/example.jsonl").unlink()
+    manifest_path.with_name("package.yaml").write_text("include:\n- benchmarks/demo\n")
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=manifest_path.with_name("config.yaml"))
+    archive = build_environment_package(entry, tmp_path / "unprepared.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "benchmarks/demo/manifest.yaml"
+    assert load_manifest(installed_manifest).data_delivery == "prepare"
+    assert validate_environment(installed_manifest).datasets[0].rows is None
+    data_path = installed_manifest.parent / "data/example.jsonl"
+    data_path.parent.mkdir()
+    data_path.write_text('{"question":"What is 1+1?","expected_answer":"2"}\n')
+    report = validate_environment(installed_manifest)
+    assert report.datasets[0].rows == 1
+    assert not report.warnings
+    data_path.write_text('{"wrong_field":"not a valid prompt row"}\n')
+    with pytest.raises(EnvironmentValidationError, match="Could not materialize"):
+        validate_environment(installed_manifest)

@@ -153,6 +153,20 @@ Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicti
 Publication includes an `experimental` annotation only when the manifest's flag is `true`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not yet automated.
 </Note>
 
+## Packages with separately prepared data
+
+Set `data_delivery: prepare` in the manifest when benchmark data is fetched by the consumer instead of included in the package. Include the original `prepare.py`, prompt, required helper modules, and source/access instructions. This supports large datasets and datasets that require the consumer's own credentials or acceptance of access terms.
+
+```bash
+gym env pull publisher/benchmark:1.0.0
+gym eval prepare publisher/benchmark:1.0.0
+gym eval run publisher/benchmark:1.0.0 --split benchmark
+```
+
+The package digest identifies its preparation code, not data fetched later. Pin upstream revisions or checksums in that recipe when exact dataset reproducibility is required.
+
+Validation still checks the preparation function, prompt and component composition. Missing benchmark data is reported with an unknown row count and an explicit warning; it is not a successful dataset or runtime check. Once preparation writes the dataset, validation checks its rows normally. Missing example or training data still fails validation. The default `data_delivery: bundled` retains the requirement that every dataset exists and is nonempty.
+
 ## Verifier Fixture Contract
 
 The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:

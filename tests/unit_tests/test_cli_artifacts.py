@@ -18,7 +18,7 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.environment.publication import EnvironmentPublicationReport
 
 
-@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"]])
+@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"], ["eval", "prepare"]])
 @pytest.mark.parametrize(
     "reference_args",
     [
@@ -68,7 +68,7 @@ def test_package_config_and_components_reach_runtime(monkeypatch, tmp_path, comm
     assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "/original"
 
 
-@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"]])
+@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"], ["eval", "prepare"]])
 def test_positional_reference_does_not_consume_hydra_overrides(monkeypatch, command):
     dispatch = Mock()
     pull = Mock()
@@ -80,7 +80,7 @@ def test_positional_reference_does_not_consume_hydra_overrides(monkeypatch, comm
     pull.assert_not_called()
 
 
-@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"]])
+@pytest.mark.parametrize("command", [["env", "start"], ["eval", "run"], ["eval", "prepare"]])
 def test_positional_reference_conflicts_with_package_flag(monkeypatch, capsys, command):
     pull = Mock()
     monkeypatch.setattr(artifacts, "pull_environment_package", pull)
