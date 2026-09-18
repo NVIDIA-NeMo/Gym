@@ -768,7 +768,18 @@ def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, mo
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
     import nemo_gym.base_responses_api_model as obs
 
-    monkeypatch.setattr(obs.json, "loads", MagicMock(side_effect=RecursionError))
+    # `_record`'s request-body parse and `CaptureStore.read`'s exchange-line parse both go
+    # through `orjson.loads` now, so the failure must be scoped to the exact malformed
+    # payload under test rather than blanket-patching `orjson.loads` (which would also break
+    # this test's own `store.read()` call below).
+    real_loads = obs.orjson.loads
+
+    def _raise_for_malformed_request(data):
+        if data == b"deeply-nested-request":
+            raise RecursionError
+        return real_loads(data)
+
+    monkeypatch.setattr(obs.orjson, "loads", MagicMock(side_effect=_raise_for_malformed_request))
     store = CaptureStore(tmp_path)
     obs._record(
         store,

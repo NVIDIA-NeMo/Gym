@@ -31,12 +31,12 @@ this module provides:
   function-call names back into ``namespace`` + ``name`` on the way out.
 """
 
-import json
 import logging
 from copy import deepcopy
 from typing import Any, Iterator, Optional
 from uuid import uuid4
 
+import orjson
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
@@ -238,7 +238,7 @@ def validate_streaming_responses_params(body: dict[str, Any]) -> NeMoGymResponse
 
 
 def _sse_event(payload: dict[str, Any]) -> str:
-    return f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n"
+    return f"event: {payload['type']}\ndata: {orjson.dumps(payload).decode()}\n\n"
 
 
 def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> list[dict]:

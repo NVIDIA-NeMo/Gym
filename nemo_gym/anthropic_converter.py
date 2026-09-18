@@ -41,10 +41,11 @@ changing the egress contract.
 
 import base64
 import binascii
-import json
 from time import time
 from typing import Any, Dict, Iterator, List, Optional
 from uuid import uuid4
+
+import orjson
 
 # Types only — never the `anthropic` client. The client uses httpx (O(n^2) connection
 # pooling at high concurrency); all transport in Gym stays on aiohttp via server_utils.
@@ -264,7 +265,7 @@ class AnthropicConverter:
                 self._flush_text_output(pending_text, output)
                 output.append(
                     NeMoGymResponseFunctionToolCall(
-                        arguments=json.dumps(block.get("input", {})),
+                        arguments=orjson.dumps(block.get("input", {})).decode(),
                         call_id=block["id"],
                         name=block["name"],
                         id=block["id"],
@@ -369,7 +370,7 @@ class AnthropicConverter:
                 flush_message()
                 items.append(
                     NeMoGymResponseFunctionToolCall(
-                        arguments=json.dumps(block.get("input", {})),
+                        arguments=orjson.dumps(block.get("input", {})).decode(),
                         call_id=block["id"],
                         name=block["name"],
                         id=block["id"],
@@ -599,11 +600,11 @@ class AnthropicConverter:
         if block_type == "thinking":
             return [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
         if block_type == "tool_use":
-            return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
+            return [{"type": "input_json_delta", "partial_json": orjson.dumps(block.get("input", {})).decode()}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
 
     def _sse_event(self, event_type: str, data: Dict[str, Any]) -> str:
-        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        return f"event: {event_type}\ndata: {orjson.dumps(data).decode()}\n\n"
 
     ############################################################################
     # Shared structural helpers
@@ -738,7 +739,7 @@ class AnthropicConverter:
         }
 
     def _json_object_from_arguments(self, arguments: str) -> Dict[str, Any]:
-        parsed = json.loads(arguments or "{}")
+        parsed = orjson.loads(arguments or "{}")
         if not isinstance(parsed, dict):
             raise ValueError(f"Anthropic tool_use input must be a JSON object, got {type(parsed).__name__}")
         return parsed
