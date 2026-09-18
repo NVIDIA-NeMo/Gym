@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-from io import StringIO
 from typing import Any, Dict
 
 import pandas as pd
@@ -31,6 +29,11 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.workplace_assistant.checkpoint_state import (
+    WorkplaceCheckpointState,
+    encode_frame,
+    restore_tool_tables,
+)
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 
@@ -80,21 +83,17 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
-        session_id = request.session[SESSION_ID_KEY]
-        self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
         identity = self._current_identity()
+        session_id = (
+            f"checkpoint:{identity[0]}:a{identity[1]}" if identity is not None else request.session[SESSION_ID_KEY]
+        )
+        self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
         if identity is not None:
             self.execution_to_session[identity] = session_id
         return BaseSeedSessionResponse()
 
     async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
-        identity = self._current_identity()
-        if identity is not None:
-            session_id = self.execution_to_session.get(identity)
-            if session_id is None:
-                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
-        else:
-            session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
 
         # Check if session exists
         if session_id not in self.session_id_to_tool_env:
@@ -117,12 +116,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         identity = self._current_identity()
-        if identity is not None:
-            session_id = self.execution_to_session.get(identity)
-            if session_id is None:
-                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
-        else:
-            session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         try:
             ground_truth = body.ground_truth
             response = body.response.output
@@ -159,6 +153,15 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             return None
         return rollout_id, attempt_index
 
+    def _session_id(self, request: Request) -> str:
+        identity = self._current_identity()
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+            return session_id
+        return request.session[SESSION_ID_KEY]
+
     def checkpoint_state_enabled(self) -> bool:
         return True
 
@@ -173,41 +176,39 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
         session_id = self.execution_to_session[(rollout_id, attempt_index)]
         tool_env = self.session_id_to_tool_env[session_id]
-        return {
-            "containers": {
+        state = WorkplaceCheckpointState(
+            schema_version=1,
+            containers={
                 name: {
-                    attribute: frame.to_json(orient="split")
+                    attribute: encode_frame(frame)
                     for attribute, frame in vars(container).items()
                     if isinstance(frame, pd.DataFrame)
                 }
                 for name, container in tool_env["containers"].items()
-            }
-        }
+            },
+        )
+        return state.model_dump()
 
     async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
         restored: list[tuple[ResourceSnapshot, str, dict[str, Any]]] = []
+        restored_identities: set[tuple[str, int]] = set()
         for snapshot in snapshots:
+            identity = (snapshot.rollout_id, snapshot.attempt_index)
+            if identity in restored_identities:
+                raise ValueError(f"Duplicate Workplace checkpoint execution: {identity}")
+            state = WorkplaceCheckpointState.model_validate(snapshot.state)
             tool_env = get_tools(_TOOLKITS)
-            for name, frames in snapshot.state["containers"].items():
-                container = tool_env["containers"][name]
-                for attribute, payload in frames.items():
-                    frame = pd.read_json(StringIO(payload), orient="split", dtype=False, convert_dates=False)
-                    encoded = json.loads(payload)
-                    columns = encoded.get("columns", [])
-                    rows = encoded.get("data", [])
-                    for index, column in enumerate(columns):
-                        if any(len(row) > index and row[index] is None for row in rows):
-                            frame[column] = frame[column].astype(object).where(frame[column].notna(), None)
-                    index_values = encoded.get("index", [])
-                    if index_values == list(range(len(index_values))):
-                        frame.index = pd.RangeIndex(len(index_values))
-                    setattr(container, attribute, frame)
+            restore_tool_tables(tool_env, state)
             session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
             restored.append((snapshot, session_id, tool_env))
+            restored_identities.add(identity)
 
         replacement_environments = dict(self.session_id_to_tool_env)
         replacement_index = dict(self.execution_to_session)
         for snapshot, session_id, tool_env in restored:
+            previous_session_id = replacement_index.get((snapshot.rollout_id, snapshot.attempt_index))
+            if previous_session_id is not None:
+                replacement_environments.pop(previous_session_id, None)
             replacement_environments[session_id] = tool_env
             replacement_index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
         self.session_id_to_tool_env = replacement_environments
