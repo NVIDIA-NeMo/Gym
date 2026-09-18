@@ -34,6 +34,7 @@ benchmark dir (no server changes).
 """
 
 import pickle
+import re
 from asyncio import Semaphore, get_running_loop
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -95,32 +96,18 @@ class EvalPlusVerifyResponse(BaseVerifyResponse):
 # Code extraction
 # ----------------------------
 def extract_code_strict(completion: str, language: str = "python") -> str:
-    """Match Skills' `preprocess_code` last-fence + strict-mode semantics.
+    """Extract the last complete Python or untagged fence, preserving indentation.
 
-    Skills additionally strips `<think>...</think>` reasoning preambles;
-    we delegate that to the vLLM `--reasoning-parser` flag, so this function
-    operates on already-clean output. If the model emits no closing fence,
-    the extracted code is empty (strict mode), matching Skills.
-
-    Picks the LAST occurrence of a fenced code block (preferring
-    ```python over a generic ```) so chain-of-thought scratch code blocks
-    don't shadow the final solution.
+    Only complete fences are accepted. Reasoning preambles are handled by
+    the model server's reasoning parser, not by this extractor.
     """
     completion = completion.replace("\r", "")
-    specific_fence = f"```{language}"
-    generic_fence = "```"
-    start = completion.rfind(specific_fence)
-    fence_len = len(specific_fence)
-    if start == -1:
-        start = completion.rfind(generic_fence)
-        fence_len = len(generic_fence)
-    if start == -1:
-        return ""
-    rest = completion[start + fence_len :]
-    end = rest.find(generic_fence)
-    if end == -1:
-        return ""
-    return rest[:end].strip()
+    blocks = [
+        match.group(2)
+        for match in re.finditer(r"```([^\n`]*)\n(.*?)```", completion, re.DOTALL)
+        if match.group(1).strip() in {language, ""}
+    ]
+    return blocks[-1].strip("\n") if blocks else ""
 
 
 # ----------------------------
@@ -207,7 +194,9 @@ class EvalPlusResourcesServer(SimpleResourcesServer):
         # `List[float]` and check_correctness reports a hard fail with empty
         # details. Skills' `eval_evalplus` evaluator goes through `evaluate()`
         # and gets this prepend for free; check_correctness does NOT.
-        solution = code if code.startswith(problem["prompt"]) else problem["prompt"] + code
+        # Prepared prompts use tabs; preserve that prefix when the body follows it.
+        prompt = problem["prompt"].replace("    ", "\t") if code.startswith("\t") else problem["prompt"]
+        solution = code if code.startswith(prompt) else prompt + code
 
         async with self._semaphore:
             loop = get_running_loop()
