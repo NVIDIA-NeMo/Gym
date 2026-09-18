@@ -45,6 +45,7 @@ from nemo_gym.base_responses_api_model import (
     observability_enabled_from_config,
 )
 from nemo_gym.config_types import (
+    AgentWithoutEnvironmentServerError,
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
     ConfigError,
@@ -54,6 +55,7 @@ from nemo_gym.config_types import (
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -191,7 +193,7 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfig) -> str:
-    """Return the environment server declared for an agent, so collection never posts to the agent.
+    """Return the environment server that fronts an agent.
 
     Resolving from the agent only describes an episode that has exactly one. Routing should name
     the server directly once tasksets can.
@@ -203,10 +205,13 @@ def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfi
         if not isinstance(servers, DictConfig):
             continue
         for server in servers.values():
-            reference = server.get("agent_server") if isinstance(server, DictConfig) else None
+            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
             if isinstance(reference, DictConfig) and reference.get("name") == agent_name:
                 return str(name)
-    return agent_name
+    raise AgentWithoutEnvironmentServerError(
+        f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
+        "Config validation should have caught this before any server started."
+    )
 
 
 @dataclass(frozen=True)
