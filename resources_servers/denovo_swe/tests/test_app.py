@@ -55,7 +55,7 @@ def _inputs(**overrides) -> VerificationInputs:
     base = dict(
         instance_id="langchain-ai_langgraph-supervisor-py_pr184",
         workdir="/workspace/langgraph-supervisor-py",
-        base_commit="1bf5acae5966bec5b174a903be038c1d271dccd7",
+        base_commit="1bf5acae5966bec5b174a903be038c1d271dccd7",  # pragma: allowlist secret
         patch="diff --git a/a.py b/a.py\n",
         test_patch="diff --git a/tests/test_a.py b/tests/test_a.py\n",
         document="# langgraph-supervisor-py\n\nA spec the agent must implement.\n",
@@ -127,7 +127,7 @@ class TestBuildEvalScript:
 
     def test_checks_out_the_base_commit(self) -> None:
         script = build_eval_script(_inputs(), is_golden=True)
-        assert "1bf5acae5966bec5b174a903be038c1d271dccd7" in script
+        assert "1bf5acae5966bec5b174a903be038c1d271dccd7" in script  # pragma: allowlist secret
 
     def test_deletes_pre_existing_test_files(self) -> None:
         script = build_eval_script(_inputs(), is_golden=True)
@@ -252,7 +252,7 @@ class TestVerifyResponseShape:
             "instance_id": "langchain-ai_langgraph-supervisor-py_pr184",
             "workdir": "/workspace/langgraph-supervisor-py",
             "image_ref": "docker.io/aweaiteam/denovoswe:langchain-ai_langgraph-supervisor-py_pr184",
-            "base_commit": "1bf5acae5966bec5b174a903be038c1d271dccd7",
+            "base_commit": "1bf5acae5966bec5b174a903be038c1d271dccd7",  # pragma: allowlist secret
             "language": "python",
             "passed_ptp": [],
             "failed_ptp": [],
