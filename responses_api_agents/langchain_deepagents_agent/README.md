@@ -206,8 +206,7 @@ request - it gets the compacted version.
   reported, so that alone accounts for most of the risk. That's considered safe enough to ship as-is; the
   exception-type mismatch itself is still unfixed, so if compaction ever lags (e.g. `max_input_tokens` set
   too high relative to the real limit, compounded by the approximate token counting above), the failure
-  mode is still an opaque `ClientResponseError` rather than a graceful retry. Worth a follow-up if it
-  recurs in practice.
+  mode is still an opaque `ClientResponseError` rather than a graceful retry. 
 
 - **Known lossy points in the LangChain ↔ Responses translation layer** — see the table and list above:
   unrecognized input item types are dropped silently on one side but raise on the other, `usage_metadata`
