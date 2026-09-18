@@ -19,6 +19,7 @@ import logging
 import shutil
 from collections.abc import Sequence
 from copy import deepcopy
+from itertools import islice
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -392,7 +393,7 @@ def e2e_rollout_collection():  # pragma: no cover
         RolloutCollectionConfig,
         RolloutCollectionHelper,
     )
-    from nemo_gym.train_data_utils import TrainDataProcessor
+    from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
 
     global_config_dict = get_global_config_dict()
 
@@ -424,23 +425,44 @@ def e2e_rollout_collection():  # pragma: no cover
                 f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
             )
 
-        if e2e_rollout_collection_config.split == "example":
-            # Sample runs write their metrics and prepared files beside staged inputs,
-            # keeping source-checkout sidecars and cached release files untouched.
+        data_processor = TrainDataProcessor()
+        limit = global_config_dict.get("limit")
+        remaining = limit if limit is not None and limit > 0 else None
+        if remaining is not None or e2e_rollout_collection_config.split == "example":
+            # Stage only the prefix the collector will consume, before validation and
+            # prompt expansion. Dataset repeats precede the limit; rollout repeats follow it.
             for server_index, server in enumerate(
                 GlobalConfigDictParser().filter_for_server_instance_configs(data_processor_config_dict)
             ):
-                datasets = server.get_inner_run_server_config_dict().get("datasets") or []
+                inner = server.get_inner_run_server_config_dict()
+                datasets = inner.get("datasets") or []
+                selected = []
                 for dataset_index, dataset in enumerate(datasets):
-                    if dataset.type != "example":
+                    if dataset.type != e2e_rollout_collection_config.split or remaining == 0:
                         continue
                     source = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
+                    if remaining is not None and not source.exists():
+                        download_server = deepcopy(server)
+                        download_server.get_inner_run_server_config().datasets = [server.datasets[dataset_index]]
+                        data_processor.load_datasets(
+                            TrainDataProcessorConfig.model_validate(data_processor_config_dict), [download_server]
+                        )
+                        source = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
                     staged = data_process_output_dir / "inputs" / str(server_index) / str(dataset_index) / source.name
                     staged.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(source, staged)
+                    if remaining is None:
+                        shutil.copyfile(source, staged)
+                    else:
+                        repeats = dataset.get("num_repeats", 1)
+                        with source.open() as infile, staged.open("w") as outfile:
+                            for line in islice(infile, (remaining + repeats - 1) // repeats):
+                                outfile.write(line)
+                                remaining = max(0, remaining - repeats)
                     dataset.jsonl_fpath = str(staged.absolute())
+                    selected.append(dataset)
+                if limit is not None and limit > 0 and "datasets" in inner:
+                    inner.datasets = selected
 
-        data_processor = TrainDataProcessor()
         data_processor.run(data_processor_config_dict)
     else:
         print(

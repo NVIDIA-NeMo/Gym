@@ -39,6 +39,7 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIA
                         "type": d["type"],
                         "jsonl_fpath": d.get("jsonl_fpath", f"path/{d['name']}.jsonl"),
                         "license": None if d["type"] == "example" else "Apache 2.0",
+                        **({"prepare_script": "unused_prepare.py"} if d["type"] == "benchmark" else {}),
                     }
                     for d in dataset_specs
                 ],
@@ -140,10 +141,10 @@ def test_package_example_eval_ignores_conflicting_checkout_sidecars(monkeypatch,
     collected = collector.run_from_config.call_args.args[0]
     prepared = Path(collected.input_jsonl_fpath)
     rows = [json.loads(line) for line in prepared.read_text().splitlines()]
-    assert len(rows) == 4 * len(packaged_data.splitlines())
+    assert len(rows) == 1
     assert rows[0]["responses_create_params"] == json.loads(packaged_data.splitlines()[0])["responses_create_params"]
-    assert {row["task_source"] for row in rows} == {"sample_agent", "second_agent"}
-    assert len(list(prepared.parent.glob("inputs/*/*/example_metrics.json"))) == 4
+    assert {row["task_source"] for row in rows} == {"sample_agent"}
+    assert len(list(prepared.parent.glob("inputs/*/*/example_metrics.json"))) == 1
     assert checkout_metrics.read_bytes() == original_metrics
     assert checkout_prepared.read_text() == "keep checkout output"
     assert (package / relative).read_bytes() == packaged_data
@@ -199,3 +200,134 @@ class TestValidatePreparedSplitFileExists:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(ConfigError, match=r"none"):
             _validate_prepared_split_file_exists(missing_dir / "train.jsonl", "train", missing_dir)
+
+
+@pytest.mark.parametrize("split", ["example", "train", "validation", "benchmark"])
+@pytest.mark.parametrize("limit", [1, 5, 8, None, 0])
+def test_e2e_limit_preserves_order_split_and_both_repeat_levels(monkeypatch, tmp_path, split, limit):
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps({"responses_create_params": {"input": str(i)}}) + "\n" for i in range(2)))
+    agents = {}
+    for name, repeats in [("first", 2), ("second", 3)]:
+        dataset_source = tmp_path / f"{name}.jsonl"
+        dataset_source.write_bytes(source.read_bytes())
+        instance = _make_agent_instance_config(
+            name, [{"name": name, "type": split, "jsonl_fpath": str(dataset_source)}]
+        )
+        dataset = instance.server_type_config_dict.responses_api_agents.simple_agent.datasets[0]
+        dataset.num_repeats = repeats
+        agents[name] = instance.server_type_config_dict
+    config = DictConfig(
+        {
+            **agents,
+            "split": split,
+            "output_jsonl_fpath": str(tmp_path / "out/rows.jsonl"),
+            "limit": limit,
+            "num_repeats": 2,
+            "disable_aggregation": True,
+        }
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(cli_eval, "RunHelper", Mock(return_value=Mock()))
+    collect = AsyncMock()
+    monkeypatch.setattr(rollout_collection.RolloutCollectionHelper, "run_from_config", collect)
+    cli_eval.e2e_rollout_collection()
+    collected_config = collect.call_args.args[0]
+    rows = rollout_collection.RolloutCollectionHelper()._preprocess_rows_from_config(collected_config)
+    original = [
+        (name, str(i)) for name, repeats in [("first", 2), ("second", 3)] for i in range(2) for _ in range(repeats)
+    ]
+    expected = original[:limit] if limit else original
+    assert [(r["task_source"], r["responses_create_params"]["input"]) for r in rows] == [
+        r for r in expected for _ in range(2)
+    ]
+    assert [config[name].responses_api_agents.simple_agent.datasets[0].num_repeats for name in agents] == [2, 3]
+    if limit:
+        assert not list(tmp_path.glob("*_prepare.jsonl"))
+
+
+def test_e2e_limit_does_not_process_large_tail_or_unselected_datasets(monkeypatch, tmp_path):
+    source = tmp_path / "large.jsonl"
+    prefix = "".join(json.dumps({"responses_create_params": {"input": str(i)}}) + "\n" for i in range(5))
+    source.write_text(prefix + "malformed tail must not be parsed\n" * 100_000)
+    datasets = [
+        {"name": "selected", "type": "train", "jsonl_fpath": str(source)},
+        {"name": "unselected", "type": "train", "jsonl_fpath": str(tmp_path / "missing.jsonl")},
+        {"name": "other_split", "type": "validation", "jsonl_fpath": str(tmp_path / "missing2.jsonl")},
+    ]
+    agent = _make_agent_instance_config("sample_agent", datasets)
+    config = DictConfig(
+        {
+            "sample_agent": agent.server_type_config_dict,
+            "split": "train",
+            "limit": 5,
+            "output_jsonl_fpath": str(tmp_path / "out/rows.jsonl"),
+            "disable_aggregation": True,
+        }
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(cli_eval, "RunHelper", Mock(return_value=Mock()))
+    collect = AsyncMock()
+    monkeypatch.setattr(rollout_collection.RolloutCollectionHelper, "run_from_config", collect)
+    cli_eval.e2e_rollout_collection()
+    prepared = Path(collect.call_args.args[0].input_jsonl_fpath)
+    assert len(prepared.read_text().splitlines()) == 5
+    staged = list(prepared.parent.glob("inputs/*/*/*.jsonl"))
+    assert sum(p.stat().st_size for p in staged) < 5000
+    assert not source.with_name("large_prepare.jsonl").exists()
+    assert len(config.sample_agent.responses_api_agents.simple_agent.datasets) == 3
+
+
+@pytest.mark.parametrize("split", ["train", "benchmark"])
+def test_e2e_limit_downloads_only_selected_source_or_reports_missing_benchmark(monkeypatch, tmp_path, split):
+    import nemo_gym.train_data_utils as data_utils
+
+    source = tmp_path / "selected.jsonl"
+    unselected = tmp_path / "unselected.jsonl"
+    agent = _make_agent_instance_config(
+        "sample_agent",
+        [
+            {"name": name, "type": split, "jsonl_fpath": str(path)}
+            for name, path in [("selected", source), ("unselected", unselected)]
+        ],
+    )
+    if split == "train":
+        for dataset in agent.server_type_config_dict.responses_api_agents.simple_agent.datasets:
+            dataset.source = {"type": "huggingface", "repo_id": f"test/{dataset.name}"}
+    config = DictConfig(
+        {
+            "sample_agent": agent.server_type_config_dict,
+            "split": split,
+            "limit": 2,
+            "output_jsonl_fpath": str(tmp_path / "out/rows.jsonl"),
+            "disable_aggregation": True,
+        }
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(data_utils, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(data_utils, "validate_backend_credentials", lambda backend: (True, None))
+    monkeypatch.setattr(cli_eval, "RunHelper", Mock(return_value=Mock()))
+    collect = AsyncMock()
+    monkeypatch.setattr(rollout_collection.RolloutCollectionHelper, "run_from_config", collect)
+
+    def download(download_config):
+        Path(download_config.output_fpath).write_text(
+            "".join(json.dumps({"responses_create_params": {"input": str(i)}}) + "\n" for i in range(10))
+        )
+
+    fetch = Mock(side_effect=download)
+    monkeypatch.setattr(data_utils, "download_hf_dataset_as_jsonl", fetch)
+    if split == "benchmark":
+        with pytest.raises(ValueError, match="gym eval prepare"):
+            cli_eval.e2e_rollout_collection()
+        fetch.assert_not_called()
+        collect.assert_not_called()
+    else:
+        cli_eval.e2e_rollout_collection()
+        fetch.assert_called_once()
+        assert fetch.call_args.args[0].repo_id == "test/selected"
+        prepared = Path(collect.call_args.args[0].input_jsonl_fpath)
+        rows = [json.loads(line) for line in prepared.read_text().splitlines()]
+        assert [row["responses_create_params"]["input"] for row in rows] == ["0", "1"]
+        assert len(source.read_text().splitlines()) == 10
+        assert not unselected.exists()
