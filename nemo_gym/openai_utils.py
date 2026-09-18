@@ -741,10 +741,35 @@ _register_item_tags(NeMoGymResponseInputItem, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
+def _restore_default_replay_discriminators(value: Any, dumped: Any) -> Any:
+    """Restore default fields used to discriminate a typed replay item."""
+    if isinstance(value, BaseModel) and isinstance(dumped, dict):
+        for field_name in ("type", "role", "status"):
+            field_value = getattr(value, field_name, None)
+            if field_value is not None:
+                dumped.setdefault(field_name, field_value)
+        for field_name in type(value).model_fields:
+            if field_name in dumped:
+                dumped[field_name] = _restore_default_replay_discriminators(
+                    getattr(value, field_name), dumped[field_name]
+                )
+    elif isinstance(value, list) and isinstance(dumped, list):
+        dumped = [
+            _restore_default_replay_discriminators(item, dumped_item)
+            for item, dumped_item in zip(value, dumped, strict=True)
+        ]
+    elif isinstance(value, dict) and isinstance(dumped, dict):
+        dumped = {
+            key: _restore_default_replay_discriminators(value[key], dumped_value) if key in value else dumped_value
+            for key, dumped_value in dumped.items()
+        }
+    return dumped
+
+
 def _normalize_output_item_for_replay(item: Any) -> Any:
     """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
-        item = item.model_dump(exclude_unset=True)
+        item = _restore_default_replay_discriminators(item, item.model_dump(exclude_unset=True))
     if not isinstance(item, dict):
         return item
 
