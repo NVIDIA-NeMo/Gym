@@ -241,7 +241,12 @@ def test_direct_endpoint_custom_loop_package_roundtrip(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("agent", "profile"), [("verifiers_agent", "custom-gym-agent-loop"), ("tau2", "external-agent-loop")]
+    ("agent", "profile"),
+    [
+        ("verifiers_agent", "custom-gym-agent-loop"),
+        ("tau2", "external-agent-loop"),
+        ("pinchbench", "external-agent-loop"),
+    ],
 )
 def test_native_embedded_grading_package_roundtrip_and_stale_agent_rejected(tmp_path: Path, agent, profile) -> None:
     manifest_path = _asset(tmp_path, profile=profile)

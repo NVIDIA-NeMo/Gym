@@ -89,6 +89,7 @@ _BENCHMARK_REQUIRED_FIELDS = ("canonical_split",)
 _EMBEDDED_GRADING_AGENTS = {
     "verifiers_agent": IntegrationProfile.CUSTOM_GYM_AGENT_LOOP,
     "tau2": IntegrationProfile.EXTERNAL_AGENT_LOOP,
+    "pinchbench": IntegrationProfile.EXTERNAL_AGENT_LOOP,
 }
 
 
