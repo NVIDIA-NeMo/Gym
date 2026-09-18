@@ -306,6 +306,7 @@ async def test_partial_worker_cut_ack_remains_draining_until_abort(sock_dir) -> 
                         staging_keys=(f"prefix/{prefix.ticket_id}",),
                         prefix_token_count=1,
                         prefix_digest="b" * 64,
+                        effective_output_limit=128,
                     )
                     for prefix in inventory.active_prefixes
                 ),

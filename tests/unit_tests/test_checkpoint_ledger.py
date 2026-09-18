@@ -145,6 +145,9 @@ def _generation_cut_receipt(
                 ),
                 prefix_token_count=17,
                 prefix_digest="a" * 64,
+                effective_output_limit=128,
+                terminal_finish_reason="stop",
+                terminal_stop_reason="</s>",
             ),
         ),
     )
@@ -627,6 +630,7 @@ def test_model_commit_accepts_agent_continuation_index_and_returns_reference_ind
                 staging_keys=("__generation_cut__/checkpoint-1/rollout-a/call-1",),
                 prefix_token_count=2,
                 prefix_digest="a" * 64,
+                effective_output_limit=128,
             ),
         ),
     )
@@ -715,6 +719,7 @@ class _RecordingGenerationCutBackend:
                     ),
                     prefix_token_count=2,
                     prefix_digest="a" * 64,
+                    effective_output_limit=128,
                 )
                 for prefix in inventory.active_prefixes
             ),
