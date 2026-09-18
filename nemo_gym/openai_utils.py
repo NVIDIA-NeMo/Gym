@@ -1291,7 +1291,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
-                await sleep(min(0.5 * 2 ** min(tries - 1, 6), 30.0))
+                await sleep(0.5)
                 continue
             else:
                 return response

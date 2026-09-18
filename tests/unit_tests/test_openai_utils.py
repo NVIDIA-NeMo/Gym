@@ -147,7 +147,7 @@ class TestOpenAIUtils:
         assert request.await_count == MAX_NUM_TRIES
 
     @pytest.mark.parametrize("status", [404, 408])
-    async def test_retry_reuses_request_and_backs_off(self, monkeypatch, status):
+    async def test_retry_reuses_request_with_fixed_delay(self, monkeypatch, status):
         failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, failure, success])
@@ -164,7 +164,7 @@ class TestOpenAIUtils:
         assert request.await_count == 3
         assert all(c.kwargs["json"] == original for c in request.await_args_list)
         assert payload == original
-        assert sleep.await_args_list == [call(0.5), call(1.0)]
+        assert sleep.await_args_list == [call(0.5), call(0.5)]
 
     @pytest.mark.parametrize("status", [400, 401, 403])
     async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch, status):
@@ -207,7 +207,7 @@ class TestOpenAIUtils:
         with pytest.raises(RuntimeError, match="terminal error"):
             await client._request_with_retry()
         assert request.await_count == attempts
-        assert sleep.await_args_list == [call(0.5 * 2**i) for i in range(attempts - 1)]
+        assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
