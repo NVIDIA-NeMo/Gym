@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
+import zipfile
 from types import SimpleNamespace
 
 import pytest
@@ -15,9 +17,12 @@ from nemo_gym.environment.validation import validate_environment
 from tests.unit_tests.test_environment_validation import _asset, _replace_manifest
 
 
+@pytest.mark.parametrize("preparation_dependencies", [False, True])
 @pytest.mark.parametrize("processes", [1, 2])
 @pytest.mark.parametrize("absolute_script", [False, True])
-def test_prepare_installed_package_from_empty_working_directory(tmp_path, absolute_script, processes):
+def test_prepare_installed_package_from_empty_working_directory(
+    tmp_path, absolute_script, processes, preparation_dependencies
+):
     manifest = _asset(tmp_path / "publisher", kind="benchmark")
     _replace_manifest(manifest, data_delivery="prepare")
     manifest.parent.joinpath("data/example.jsonl").unlink()
@@ -31,6 +36,23 @@ def test_prepare_installed_package_from_empty_working_directory(tmp_path, absolu
         "    path.write_text(json.dumps({'question': QUESTION, 'expected_answer': '2'}) + '\\n')\n"
         "    return path\n"
     )
+    assert importlib.util.find_spec("gym_prepare_fixture") is None
+    if preparation_dependencies:
+        wheel = tmp_path / "gym_prepare_fixture-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("gym_prepare_fixture/__init__.py", "AVAILABLE = True\n")
+            archive.writestr(
+                "gym_prepare_fixture-1.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: gym-prepare-fixture\nVersion: 1.0\n",
+            )
+            archive.writestr(
+                "gym_prepare_fixture-1.0.dist-info/WHEEL",
+                "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            )
+            archive.writestr("gym_prepare_fixture-1.0.dist-info/RECORD", "")
+        manifest.with_name("prepare-requirements.txt").write_text(wheel.as_uri() + "\n")
+        prepare = manifest.with_name("prepare.py")
+        prepare.write_text("from gym_prepare_fixture import AVAILABLE\nassert AVAILABLE\n" + prepare.read_text())
     manifest.with_name("package.yaml").write_text("include:\n- benchmarks/demo\n")
     archive = build_environment_package(
         SimpleNamespace(manifest_path=manifest, config_path=manifest.with_name("config.yaml")),
@@ -64,7 +86,14 @@ def test_prepare_installed_package_from_empty_working_directory(tmp_path, absolu
         command.append(f"+prepare_script_args.output={output}")
     result = subprocess.run(command, cwd=workdir, env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert importlib.util.find_spec("gym_prepare_fixture") is None
     assert "Packaged helper was imported" in output.read_text()
+    if preparation_dependencies:
+        missing_uv = subprocess.run(
+            command, cwd=workdir, env=dict(env, PATH=""), capture_output=True, text=True, timeout=60
+        )
+        assert missing_uv.returncode != 0
+        assert "Install uv" in missing_uv.stdout + missing_uv.stderr
     assert not (workdir / "benchmarks").exists()
     if absolute_script:
         # Restore the relative config so manifest composition still matches the published recipe.

@@ -163,6 +163,8 @@ gym eval prepare publisher/benchmark:1.0.0
 gym eval run publisher/benchmark:1.0.0 --split benchmark
 ```
 
+If preparation needs additional Python libraries, include `prepare-requirements.txt` beside its preparation script. Use pinned package requirements such as `tiktoken==0.14.0`. `gym eval prepare` uses uv to install the selected recipes' requirements into a temporary environment layered over Gym, then runs their original preparation functions. It does not install these libraries into your Gym environment. Requirements from multiple selected recipes must be compatible. Relative local paths in requirements are resolved from the command's working directory; prefer package-index requirements for portable releases.
+
 The package digest identifies its preparation code, not data fetched later. Pin upstream revisions or checksums in that recipe when exact dataset reproducibility is required.
 
 Validation still checks the preparation function, prompt and component composition. Missing benchmark data is reported with an unknown row count and an explicit warning; it is not a successful dataset or runtime check. Once preparation writes the dataset, validation checks its rows normally. Missing example or training data still fails validation. The default `data_delivery: bundled` retains the requirement that every dataset exists and is nonempty.

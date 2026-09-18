@@ -16,7 +16,9 @@ import asyncio
 import importlib
 import json
 import logging
+import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from copy import deepcopy
@@ -292,6 +294,39 @@ def prepare_benchmark() -> None:
         )
 
     # Validate all benchmarks before preparing any
+    requirements = sorted(
+        {
+            path
+            for benchmark in benchmarks_dict.values()
+            if (
+                path := _resolve_under_cwd_or_install(benchmark.dataset.prepare_script)
+                .resolve()
+                .with_name("prepare-requirements.txt")
+            ).is_file()
+        }
+    )
+    requirement_set = os.pathsep.join(map(str, requirements))
+    if requirements and os.environ.get("NEMO_GYM_PREPARE_ENV") != requirement_set:
+        if not shutil.which("uv"):
+            raise ConfigError("Install uv to provision the benchmark preparation dependencies.")
+        command = ["uv", "run", "--no-project", "--python", sys.executable]
+        for path in requirements:
+            command.extend(["--with-requirements", str(path)])
+        command.extend(
+            [
+                "python",
+                "-c",
+                "from nemo_gym.cli.eval import prepare_benchmark; prepare_benchmark()",
+                *sys.argv[1:],
+            ]
+        )
+        subprocess.run(
+            command,
+            check=True,
+            env=dict(os.environ, VIRTUAL_ENV=sys.prefix, NEMO_GYM_PREPARE_ENV=requirement_set),
+        )
+        return
+
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
