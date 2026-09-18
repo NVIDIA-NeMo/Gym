@@ -47,7 +47,7 @@ from responses_api_agents.pi_agent.app import (
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the Pi extension")
-@pytest.mark.parametrize("filename", ["test_gym_mcp.mjs", "test_remaining_context.mjs"])
+@pytest.mark.parametrize("filename", ["test_gym_mcp.mjs", "test_remaining_context.mjs", "test_bash_timeout.mjs"])
 def test_gym_extensions(filename):
     result = subprocess.run(
         ["node", "--test", str(Path(__file__).with_name(filename))],
@@ -180,13 +180,15 @@ class TestEnv:
 
 @pytest.mark.parametrize("with_mcp", [False, True])
 @pytest.mark.parametrize("remaining_context", [False, True])
-async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with_mcp, remaining_context):
+@pytest.mark.parametrize("bash_timeout", [None, 120])
+async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with_mcp, remaining_context, bash_timeout):
     servers = {"search": {"url": "https://tools.test/mcp", "headers": {"X-Session": "private-token"}}}
     agent = _make_agent(
         workspace_root=str(tmp_path),
         mcp_servers=servers if with_mcp else {},
         output_token_policy="remaining_context" if remaining_context else "fixed",
         auto_compaction=not remaining_context,
+        bash_timeout=bash_timeout,
     )
     homes = []
 
@@ -199,6 +201,9 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
         }
         extensions = [Path(cmd[i + 1]).name for i, arg in enumerate(cmd) if arg == "--extension"]
         assert ("remaining-context.mjs" in extensions) is remaining_context
+        assert ("bash-timeout.mjs" in extensions) is (bash_timeout is not None)
+        if bash_timeout is not None:
+            assert kwargs["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == str(bash_timeout)
         if with_mcp:
             path = Path(kwargs["env"]["NEMO_GYM_PI_MCP_CONFIG"])
             assert path.stat().st_mode & 0o777 == 0o600

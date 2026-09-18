@@ -64,6 +64,10 @@ configuration is unchanged.
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)
 - `system_prompt`: appended via `--append-system-prompt`
 - `timeout`: seconds for the `pi` run
+- `bash_timeout`: optional per-call Bash limit in seconds. Supplies omitted deadlines
+  and caps model-requested deadlines, preserving shorter ones. Pi terminates the
+  command's process tree and returns a tool error so the agent can continue.
+  Unset preserves Pi's native behavior (no default Bash deadline).
 - `extra_args`: extra flags appended to the `pi` command
 - `models_config`: written to `~/.pi/agent/models.json`
 - `pi_version`: npm version to pin on install (null means latest)

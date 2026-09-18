@@ -435,6 +435,7 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
     timeout: int = 900
+    bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
     models_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
@@ -540,6 +541,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
+        if self.config.bash_timeout is not None:
+            env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
+            cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
         if self.config.output_token_policy == "remaining_context":
             cmd += ["--extension", str(Path(__file__).with_name("remaining-context.mjs"))]
         if self.config.mcp_servers:
