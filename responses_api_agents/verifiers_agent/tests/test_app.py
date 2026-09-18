@@ -17,9 +17,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
+from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
@@ -174,15 +176,46 @@ class TestPolicyClient:
 
     def test_policy_client_is_shared_across_rollouts(self) -> None:
         agent = self._agent()
-        with patch.object(VerifiersAgent, "_policy_model_server_url", return_value=POLICY_URL):
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
             first = agent._get_client()
             second = agent._get_client()
         assert first is second
         assert str(first.client.base_url).rstrip("/") == POLICY_URL
 
+    def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
+        agent = self._agent()
+
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+            prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
+            return f"http://policy{prefix}/v1"
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: body.rollout_id),
+        ):
+            first = agent._get_client(MagicMock(rollout_id="7-2"))
+            second = agent._get_client(MagicMock(rollout_id="7-3"))
+
+        assert str(first.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-2/v1"
+        assert str(second.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-3/v1"
+        assert second is not first
+        assert second.client._client is first.client._client
+
+    def test_client_base_url_is_unprefixed_when_capture_is_disabled(self) -> None:
+        agent = self._agent()
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: None),
+        ):
+            first = agent._get_client(MagicMock())
+            second = agent._get_client(MagicMock())
+
+        assert first is second
+        assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
     def test_policy_client_never_replays_the_session_cookie(self) -> None:
         agent = self._agent()
-        with patch.object(VerifiersAgent, "_policy_model_server_url", return_value=POLICY_URL):
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
             openai_client = agent._get_client().client
 
         # The jar must be ours. httpx.Cookies adopts a CookieJar instance but
@@ -210,3 +243,75 @@ class TestPolicyClient:
 
         assert seen[0] is None
         assert seen[1] == seen[2] == SESSION_COOKIE.split(";")[0]
+
+
+class TestPrefixedResponsesRoute:
+    """The `/ng-rollout/<id>/v1/responses` route must correlate too.
+
+    `rollout_id_from_run` only sees `/run`, where rollout collection injects
+    `_ng_rollout_id` into the body. The prefixed Responses route carries the id
+    in the PATH, and agents get no `RolloutContextMiddleware` (that is installed
+    on resources servers), so nothing recovered it and the route silently built
+    an unprefixed client -- capture lost for every call made through it.
+
+    These drive the real FastAPI routes rather than patching
+    `rollout_id_from_run`, so they exercise the actual protocol.
+    """
+
+    @staticmethod
+    def _agent(*, observability: bool) -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: observability}
+        return VerifiersAgent(config=config, server_client=server_client)
+
+    @staticmethod
+    def _resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        return "http://policy%s/v1" % (f"/ng-rollout/{rollout_id}" if rollout_id else "")
+
+    def _base_url_seen_by(self, agent: VerifiersAgent, url: str) -> str:
+        """POST `url` through the real app and report the client's base_url."""
+        seen: list[str] = []
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            seen.append(str(client.client.base_url).rstrip("/"))
+            return [{"reward": 0.0, "metrics": {}, "completion": [], "trajectory": []}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=self._resolve),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            client = TestClient(agent.setup_webserver())
+            response = client.post(
+                url,
+                json={
+                    "task_idx": 0,
+                    "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert seen, "run_group was never reached; the route did not execute"
+        return seen[0]
+
+    def test_prefixed_route_correlates_the_model_client(self) -> None:
+        agent = self._agent(observability=True)
+        assert self._base_url_seen_by(agent, "/ng-rollout/7-2/v1/responses") == ("http://policy/ng-rollout/7-2/v1")
+
+    def test_unprefixed_route_stays_unprefixed(self) -> None:
+        agent = self._agent(observability=True)
+        assert self._base_url_seen_by(agent, "/v1/responses") == "http://policy/v1"
+
+    def test_prefixed_route_is_inert_when_capture_is_disabled(self) -> None:
+        """Capture off means the shared unprefixed client, as on the body path."""
+        agent = self._agent(observability=False)
+        assert self._base_url_seen_by(agent, "/ng-rollout/7-2/v1/responses") == "http://policy/v1"

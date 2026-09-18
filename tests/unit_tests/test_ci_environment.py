@@ -202,6 +202,31 @@ def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
     assert "concurrency:" not in unit_workflow
 
 
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
+
+
+def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
+    # The full test suite measures coverage against the repo-wide gate
+    # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
+    # nemo-lens (requires_lens), which only the telemetry extra installs. If the
+    # full-test-suite install omits that extra, those tests skip, the telemetry
+    # modules count as uncovered, and the gate fails below its threshold.
+    workflow = FULL_TEST_WORKFLOW.read_text()
+
+    assert "uv sync" in workflow, "full test suite must install dependencies with uv sync"
+    sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
+    assert any("--extra telemetry" in line for line in sync_lines), (
+        "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
+    )
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
@@ -445,6 +470,17 @@ def test_notification_workflows_pin_slack_rejection_handling() -> None:
         (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
 
         assert notify_step["uses"] == expected_action, workflow_file
+
+
+def test_notify_failure_message_reports_friendly_trigger_label() -> None:
+    # The Slack message renders a "• Trigger: <expr>" bullet; assert the full
+    # GitHub expression (encoding-independent of the bullet) is present.
+    expected_trigger_expr = (
+        "Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
+        "|| github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}"
+    )
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        assert expected_trigger_expr in workflow_file.read_text(), workflow_file
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
@@ -781,14 +817,12 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
 
+    # setup_dev.sh reuses a uv already on PATH when it is the pinned version, so the
+    # test puts a fake pinned uv first. The fake uv's `sync` is a no-op so it works
+    # against this bare repo (which intentionally has no pyproject.toml).
     _write_executable(
-        bin_dir / "curl",
+        bin_dir / "uv",
         """#!/usr/bin/env bash
-cat <<'INSTALL'
-set -eu
-mkdir -p "${UV_UNMANAGED_INSTALL}"
-cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
-#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
     --version) printf '%s\\n' 'uv 0.11.29' ;;
@@ -803,9 +837,6 @@ case "${1:-}" in
     sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-UV
-chmod +x "${UV_UNMANAGED_INSTALL}/uv"
-INSTALL
 """,
     )
     _write_executable(
@@ -852,3 +883,54 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
+    setup_dev = SETUP_DEV.read_text()
+
+    assert "command -v uv >/dev/null 2>&1" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
+
+
+def test_lint_reuses_pre_commit_on_path() -> None:
+    # lint.sh reuses a pre-commit already on PATH (the offline/container dev
+    # environment); otherwise it installs the pinned pre-commit (version from
+    # uv.lock) into an isolated venv. It does not use uv or setup_dev.sh.
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    assert "command -v pre-commit" in lint
+    assert "uv.lock" in lint
+    assert "uv sync" not in lint
+    assert "setup_dev.sh" not in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
+    # lint.sh's offline branch reuses the baked pre-commit executable, but
+    # `pre-commit run` also needs the hook repositories and per-hook
+    # environments declared in .pre-commit-config.yaml: without a seeded
+    # PRE_COMMIT_HOME, the first lint run in a clean container still clones
+    # the hook repos from GitHub and pip-installs the local hooks'
+    # dependencies from PyPI. The release image must seed the hook cache at
+    # build time and leave it writable by the runtime UID (asserted by the
+    # non-root smoke test).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit" in dockerfile
+    assert "pre-commit install-hooks" in dockerfile
+    assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
+    assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile

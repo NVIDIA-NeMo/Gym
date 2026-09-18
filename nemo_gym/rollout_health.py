@@ -121,6 +121,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         trajectory, "trajectory_projection_failed"
     )
     turns_observed = trajectory_observed and not _trajectory_has_gap(trajectory, "turns_unavailable")
+    turn_call_scope_complete = trajectory_observed and not _trajectory_has_gap(
+        trajectory, "turn_model_call_scope_incomplete"
+    )
     model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
     calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
     turn_bindings, owned_bindings = _bind_policy_call_views(trajectory if trajectory_observed else {}, calls)
@@ -173,7 +176,8 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
                 unobserved.append(spec.id)
                 continue
         if spec.id == "rollout_token_count_mismatch" and (
-            not bindings.complete
+            not turn_call_scope_complete
+            or not bindings.complete
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
             or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
@@ -220,7 +224,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         findings=findings,
         unobserved=unobserved,
         capture_observed=bool(calls),
-        policy_calls_observed=turn_bindings.complete,
+        policy_calls_observed=turn_call_scope_complete and turn_bindings.complete,
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),

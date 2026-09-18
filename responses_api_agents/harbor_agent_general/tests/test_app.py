@@ -14,7 +14,11 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
 from harbor.models.trajectories import Trajectory
 
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborVerifyResponse
@@ -218,3 +222,33 @@ def test_verify_response_preserves_conversion_diagnostics() -> None:
         "lossless": False,
         "warnings": ["documented limitation"],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_location", ["trial", "step", None])
+async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, monkeypatch, failure_location):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    failure = SimpleNamespace(exception_type="RuntimeError", exception_message="notebook unavailable")
+    trial = SimpleNamespace(
+        task_name="task",
+        exception_info=failure if failure_location == "trial" else None,
+        step_results=[SimpleNamespace(exception_info=failure if failure_location == "step" else None)],
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    if failure_location is not None:
+        with pytest.raises(RuntimeError, match="notebook unavailable"):
+            await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+        assert not result_path.exists(), "Gym retries must not reuse a failed step's result"
+    else:
+        assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
+        assert result_path.exists()

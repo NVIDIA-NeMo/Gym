@@ -1,0 +1,5 @@
+#!/bin/bash
+[[ -f "$STUB_DIR/sbatch_fail" ]] && { echo "sbatch: error: quota exceeded" >&2; exit 1; }
+id=$(( $(cat "$STUB_DIR/next_id" 2>/dev/null || echo 1000) + 1 )); echo "$id" > "$STUB_DIR/next_id"
+echo "$id" >> "$STUB_DIR/submitted"
+echo "Submitted batch job $id"

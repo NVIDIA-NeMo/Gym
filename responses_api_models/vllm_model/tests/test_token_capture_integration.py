@@ -6,8 +6,11 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture import (
@@ -25,10 +28,14 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     trajectories_from_source,
 )
+from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
+from nemo_gym.token_id_capture.staging.records import CaptureAdmission, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
-def _model(client: NeMoGymAsyncOpenAI) -> VLLMModel:
+def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
     config = VLLMModelConfig(
         host="0.0.0.0",
         port=8080,
@@ -42,9 +49,223 @@ def _model(client: NeMoGymAsyncOpenAI) -> VLLMModel:
         uses_interleaved_reasoning=False,
         supply_prefix_token_ids=True,
     )
+    config = config.model_copy(update=config_overrides)
     model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
     model._clients = [client]
     return model
+
+
+@pytest.mark.parametrize(
+    "endpoint,reasoning_field",
+    [
+        (endpoint, field)
+        for endpoint in ("responses", "chat/completions", "messages")
+        for field in (None, "reasoning", "reasoning_content", "inline")
+    ]
+    + [("responses", "refusal"), ("messages", "refusal")],
+)
+@pytest.mark.parametrize("tool_call", [False, True])
+def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, reasoning_field, tool_call) -> None:
+    """Echoing served output must preserve capture ancestry across API conversion."""
+    records = {}
+
+    class Sink:
+        def stage(self, record):
+            key = f"{record.rollout_id}/{record.model_call_id}"
+            records[key] = record
+            return StageResult(ok=True, staging_key=key)
+
+    capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
+    admissions = []
+
+    async def complete(**body):
+        admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in body else None
+        admissions.append(admission)
+        index = len(admissions)
+        payload = _completion([], [], f"answer {index}")
+        message = payload["choices"][0]["message"]
+        if reasoning_field == "refusal":
+            message.update(content=None, refusal=f"refusal {index}")
+        elif reasoning_field == "inline":
+            message["content"] = f"<think>reasoning {index}</think>" + message["content"]
+        elif reasoning_field:
+            message[reasoning_field] = f"reasoning {index}"
+        if tool_call:
+            message["tool_calls"] = [
+                {"id": f"tool-{index}", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+            ]
+        if admission is not None:
+            prefix = [token for key in admission.staging_chain for token in records[key].token_ids_delta]
+            active = capture.begin_call(admission, prefix_token_ids=prefix)
+            coords = capture.complete_call(
+                active,
+                prompt_token_ids=prefix + [10 * index],
+                generated_token_ids=[100 + index],
+                generated_logprobs=[-0.1],
+            )
+            payload[NG_COMMIT_COORDS_FIELD] = coords.model_dump(mode="json")
+        return payload
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=complete)
+    model = _model(
+        backend,
+        return_token_id_information=False,
+        supply_prefix_token_ids=False,
+        uses_reasoning_parser=reasoning_field is not None,
+    )
+    model._external_capture_enabled = True
+    ledger = FileLineageStore(tmp_path)
+    ledger.record = AsyncMock(wraps=ledger.record)
+    history = [{"role": "user", "content": "question"}]
+    app = _CaptureMiddleware(
+        model.setup_webserver(),
+        store=None,
+        model_server_name="vllm_model",
+        lineage_store=ledger,
+        external_staging=True,
+        token_capture_enabled=True,
+    )
+    try:
+        with TestClient(app) as client:
+            for index in range(1, 4):
+                body = {"input" if endpoint == "responses" else "messages": history}
+                if endpoint == "messages":
+                    body.update(model="dummy_model", max_tokens=16)
+                response = client.post(
+                    f"/ng-rollout/reasoning-rollout/training-token-capture/v1/{endpoint}", json=body
+                )
+                assert response.status_code == 200, response.text
+                manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
+                assert not manifest["failures"], manifest
+                assert len(manifest["records"]) == index
+                # Messages delegates through Responses and Chat, but commits only once.
+                assert ledger.record.await_count == index
+                assert admissions[-1] is not None
+                assert admissions[-1].parent_call_id == (None if index == 1 else admissions[-2].model_call_id)
+                assert admissions[-1].prev_len == 2 * (index - 1)
+                assert NG_COMMIT_COORDS_FIELD not in response.text
+                assert "prompt_token_ids" not in response.text
+                served = response.json()
+                assert manifest["records"][-1]["response_id"] == served["id"]
+                if endpoint == "responses":
+                    output = served["output"]
+                elif endpoint == "messages":
+                    output = [{"role": "assistant", "content": served["content"]}]
+                else:
+                    output = [
+                        {key: value for key, value in served["choices"][0]["message"].items() if value is not None}
+                    ]
+                history.extend(output)
+                if tool_call:
+                    if endpoint == "responses":
+                        history.append(
+                            {"type": "function_call_output", "call_id": f"tool-{index}", "output": "result"}
+                        )
+                    elif endpoint == "messages":
+                        history.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "tool_result", "tool_use_id": f"tool-{index}", "content": "result"}
+                                ],
+                            }
+                        )
+                    else:
+                        history.append({"role": "tool", "tool_call_id": f"tool-{index}", "content": "result"})
+                history.append({"role": "user", "content": "continue"})
+
+        manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
+        assert len(manifest["records"]) == 3
+        assert not manifest["failures"]
+        # Parent verification must still reject edits to the last served answer.
+        last_answer = history[-3 if tool_call else -2]
+        if last_answer.get("type") == "function_call":
+            last_answer["arguments"] = '{"changed": true}'
+        else:
+            last_answer["content"] = "different answer"
+        with TestClient(app) as client:
+            response = client.post(f"/ng-rollout/reasoning-rollout/training-token-capture/v1/{endpoint}", json=body)
+        assert response.status_code == 200, response.text
+        assert admissions[-1] is None
+        manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
+        assert len(manifest["records"]) == 3
+        assert manifest["failures"]
+        assert ledger.record.await_count == 3
+    finally:
+        asyncio.run(ledger.close())
+
+
+@pytest.mark.parametrize(
+    "endpoint,failure",
+    [("responses", "conversion"), ("messages", "conversion")]
+    + [(endpoint, "serialization") for endpoint in ("responses", "chat/completions", "messages")],
+)
+def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypatch, endpoint, failure) -> None:
+    """Worker staging can succeed while the final API conversion fails."""
+    staged = []
+
+    class Sink:
+        def stage(self, record):
+            staged.append(record)
+            return StageResult(ok=True, staging_key=f"{record.rollout_id}/{record.model_call_id}")
+
+    capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
+
+    async def complete(**body):
+        admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD])
+        coords = capture.complete_call(
+            capture.begin_call(admission, prefix_token_ids=[]),
+            prompt_token_ids=[10],
+            generated_token_ids=[100],
+            generated_logprobs=[-0.1],
+        )
+        payload = _completion([], [], "answer")
+        payload[NG_COMMIT_COORDS_FIELD] = coords.model_dump(mode="json")
+        return payload
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=complete)
+    model = _model(backend, return_token_id_information=False, supply_prefix_token_ids=False)
+    model._external_capture_enabled = True
+
+    def fail_conversion(*args, **kwargs):
+        raise ValueError("injected final conversion failure")
+
+    if failure == "serialization":
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._orjson_dispatch_response", fail_conversion)
+    elif endpoint == "responses":
+        monkeypatch.setattr(type(model._converter), "chat_completion_to_response", fail_conversion)
+    else:
+        monkeypatch.setattr(AnthropicConverter, "responses_to_anthropic_response", fail_conversion)
+    ledger = FileLineageStore(tmp_path)
+    ledger.record = AsyncMock(wraps=ledger.record)
+    app = _CaptureMiddleware(
+        model.setup_webserver(),
+        store=None,
+        model_server_name="vllm_model",
+        lineage_store=ledger,
+        external_staging=True,
+        token_capture_enabled=True,
+    )
+    body = {"input" if endpoint == "responses" else "messages": [{"role": "user", "content": "question"}]}
+    if endpoint == "messages":
+        body.update(model="dummy_model", max_tokens=16)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                f"/ng-rollout/conversion-failure/training-token-capture/v1/{endpoint}",
+                json=body,
+            )
+        assert response.status_code == 500
+        assert len(staged) == 1, "failure must occur after worker staging"
+        ledger.record.assert_not_awaited()
+        manifest = asyncio.run(ledger.manifest("conversion-failure"))
+        assert not manifest["records"]
+        assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
+        assert NG_COMMIT_COORDS_FIELD not in response.text
+    finally:
+        asyncio.run(ledger.close())
 
 
 def _completion(prompt: list[int], generation: list[int], content: str) -> dict[str, Any]:
