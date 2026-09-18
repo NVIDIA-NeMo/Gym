@@ -39,3 +39,11 @@ swerl_llm_judge_simple_agent:
         jsonl_fpath: resources_servers/swerl_llm_judge/data/example.jsonl
 
 
+
+swerl_llm_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swerl_llm_judge_simple_agent

@@ -23,3 +23,11 @@ openenv_echo_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/openenv/data/echo/example.jsonl
+
+openenv_echo_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: openenv_echo_simple_agent

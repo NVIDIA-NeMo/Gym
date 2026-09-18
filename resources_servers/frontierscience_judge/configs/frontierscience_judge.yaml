@@ -46,3 +46,11 @@ judge_model:
       openai_base_url: ${judge_base_url}
       openai_api_key: ${judge_api_key}
       openai_model: ${judge_model_name}
+
+frontierscience_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: frontierscience_judge_simple_agent

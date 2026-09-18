@@ -151,3 +151,19 @@ xstest_eval_agent:
         type: responses_api_models
         name: policy_model
 
+
+over_refusal_detection_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: over_refusal_detection_simple_agent
+
+xstest_eval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: xstest_eval_agent
