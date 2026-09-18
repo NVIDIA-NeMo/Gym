@@ -40,6 +40,7 @@ from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
+    AgentWithoutEnvironmentServerError,
     AlmostServerError,
     ConfigError,
     ConfigInterpolationError,
@@ -165,6 +166,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+# The field an environment server names its agent in.
+AGENT_SERVER_REF_KEY_NAME = "agent_server"
 ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
@@ -812,7 +815,7 @@ Duplicate config paths:
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get("agent_server") if isinstance(server, DictConfig) else None
+                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
                 if isinstance(reference, DictConfig) and reference.get("name") in renames:
                     reference["name"] = renames[reference["name"]]
 
@@ -1042,6 +1045,40 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
+    def _raise_on_agent_without_environment_server(self, global_config_dict: DictConfig) -> None:
+        """Reject an agent that rollout collection would otherwise have to call directly.
+
+        Runs after composition, so every agent left is one a run can dispatch to.
+        """
+        with_environment_server = set()
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
+                if isinstance(reference, DictConfig):
+                    with_environment_server.add(reference.get("name"))
+
+        without_environment_server = [
+            agent.name
+            for agent in self._agent_instances(global_config_dict)
+            if not self._is_unbound_agent(agent.server_config) and agent.name not in with_environment_server
+        ]
+        if not without_environment_server:
+            return
+
+        listing = "\n".join(f"  - {name}" for name in sorted(without_environment_server))
+        raise AgentWithoutEnvironmentServerError(
+            f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
+{listing}
+
+Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
+scripts/add_legacy_agent_environment_servers.py to update your config."""
+        )
+
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
 
@@ -1250,6 +1287,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # NOTE(martas): this is for catching agents not attached to an environment server
+        self._raise_on_agent_without_environment_server(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
