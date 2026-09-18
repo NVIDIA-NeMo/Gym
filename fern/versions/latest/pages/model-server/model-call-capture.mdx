@@ -302,6 +302,25 @@ rollout's `ng_perf`: mean/median/total token stats, mean/median tokens-per-turn,
 mean/median/std/min/p90/max distribution for `num_turns`, and p50/p90/p99/mean `total_latency_ms`.
 `perf_summary` is absent when no rollout in the run carried `ng_perf`.
 
+## Framework-owned media staging
+
+Training frameworks using `nemo_gym.token_id_capture.staging` can attach a shared
+`media` summary to a call's extras. `MediaCaptureExtras` validates the modality,
+per-frame `imgs_sizes`, and optional `num_frames` or `num_tiles`.
+`build_multimodal_extras` and `parse_multimodal_extras` provide the common envelope.
+The extras digest covers this JSON metadata; the framework owns tensor storage.
+
+`VLLMCaptureAdapter` reads the worker-supplied `media` summary and preserves optional
+`routed_experts` alongside it. It also passes through `media_spans`, small metadata
+that the RL vLLM worker uses to remap image/video placeholders when reusing a captured
+prefix. vLLM uses expanded token IDs and does not emit a separate compact token delta.
+Tensor payloads stay in framework storage and do not travel in capture receipts.
+
+This replaces the experimental tensor-attachment extension of the staging sink.
+Deploy the paired RL changes with this adapter; older attachment-format checkpoints
+need a separate migration. Supported processors and modalities are enforced by the
+framework's inference worker.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,
