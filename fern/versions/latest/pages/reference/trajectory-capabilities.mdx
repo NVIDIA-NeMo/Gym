@@ -1,20 +1,17 @@
 ---
-title: "Trajectory Evidence"
+title: "Harness: Trajectory Evidence"
 description: "Harness evidence contracts and artifact validation"
 position: 5
 ---
 
-# Trajectory Evidence
+# Harness: Trajectory Evidence
 
 Trajectory Evidence (TE) describes the execution facts available from a particular harness integration. Each claim
 identifies evidence that a validator can inspect in a saved rollout. The location of the evidence does not change
 its meaning: a tool observation can establish tool timing without a canonical turn record.
 
 This page defines a proposed vocabulary for harness onboarding and artifact validation. It does not certify individual
-harnesses or introduce a validator command. The earlier per-harness V/O/X table was a
-[source audit](https://github.com/NVIDIA-NeMo/Gym/blob/4a8835e3a61808ee8e25e1c08dd6e798bc3615bd/fern/versions/latest/pages/reference/trajectory-capabilities.mdx),
-not a set of results for these TE contracts. Its ratings must not be copied into a TE matrix without evaluating the
-corresponding claims.
+harnesses or introduce a validator command.
 
 ## Scope and assumptions
 
@@ -23,16 +20,35 @@ capture, collection, serialization, aggregation, and verification implementation
 harness must expose the execution facts those shared components need. Reward calculation and generic aggregation are
 outside this harness evidence taxonomy.
 
-For this first validation scope, model calls are assumed to route through Gym's Model Server adapters. Configure
-`observability_enabled: true`, `model_call_capture_dir`, and the rollout-prefixed Model Server route as described in
-[Model-call capture](/model-server/model-call-capture). A direct-provider path does not inherit these capture guarantees.
-There is no independent observer in this scope: inspecting saved evidence cannot prove that no call bypassed capture or
-that no event was omitted entirely.
+For this first validation scope, model calls are assumed to route through Gym's Model Server adapters. There is no
+independent observer: inspecting saved evidence cannot prove that no call bypassed capture or that no event was omitted
+entirely. A direct-provider path does not inherit Gym's capture guarantees.
 
 A validator reads the final rollout artifact, such as `evaluator_rollouts.jsonl` in an evaluator run. Gym's output filename
 is configurable and commonly `rollouts.jsonl`. It checks evidence availability, structure, and internal relationships.
 Claims about request fidelity or complete attempt membership are assessed against the retained evidence under the routing
 assumption, not against an independent execution trace.
+
+## Gym integration prerequisites
+
+A harness can satisfy a TE claim using evidence produced by Gym's shared components. It does not need to record a second
+copy itself. The integration must supply the routing, identifiers, and observations those components require:
+
+| Prerequisite | Integration requirement |
+|---|---|
+| Capture configuration and routing | Enable `observability_enabled`, configure `model_call_capture_dir`, and route the relevant model clients through the `/ng-rollout/<rollout_id>` Model Server prefix. Include subagent, retry, and compaction clients within the claimed scope. |
+| Correlation | Preserve rollout identity through downstream execution. For claimed invocation or turn ownership, retain the exact identifiers used by the integration's correlation mechanism, such as session IDs or model-server/response-ID references. Do not infer ownership from message order alone. |
+| Evidence forwarding | If a nested harness, subprocess, or adapter produces observations or trajectory records, forward that evidence through the integration to rollout collection. Returning only the final answer does not preserve those records. |
+
+See [Model-call capture](/model-server/model-call-capture) for capture configuration and routing. These are integration
+prerequisites, not additional TE categories. They do not require re-testing Gym's shared capture or serialization code.
+Recorded identifiers and relationships can be checked in artifacts; the absence of calls that bypass capture cannot be
+established from those artifacts alone.
+
+Validate the saved individual rollout records. Gym omits `ng_trajectory`, `ng_agent_observations`, and
+`ng_model_call_capture` from requests to `/aggregate_metrics`; the resulting metrics summary is not an evidence artifact.
+This does not remove the attachments from saved rollout records. Supplying only a metrics summary to a TE validator is
+an unsuitable validation input, not evidence that the harness lacks instrumentation.
 
 ## Evidence records and locations
 
