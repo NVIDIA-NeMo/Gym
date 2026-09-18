@@ -579,3 +579,11 @@ async def test_task_identity_uses_name_instead_of_collector_index(fixture):
     record = result.model_dump(mode="json") | {"_ng_task_index": 25, "_ng_rollout_index": 0}
     assert _trajectory_identity(record)[0] == expected
     assert record["_ng_task_index"] == 25
+
+
+@pytest.mark.parametrize("global_config", [{}, {"observability_enabled": False}, {"observability_enabled": True}])
+async def test_harness_observability_follows_global_opt_in(fixture, global_config):
+    f = fixture
+    f.server.server_client.global_config_dict = global_config
+    await f.server.run(f.request, f.body)
+    assert f.harnesses[0].observability_enabled is global_config.get("observability_enabled", False)

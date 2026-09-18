@@ -111,6 +111,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         query=query,
         model_name="model",
         directory=tmp_path,
+        observability_enabled=True,
     )
     harness.system_info = {"system": "Linux", "release": "6", "version": "test", "machine": "x86_64"}
     response, outcome, extra = await harness.execute(5)

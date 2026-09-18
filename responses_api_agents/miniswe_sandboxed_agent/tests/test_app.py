@@ -14,12 +14,21 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import harness as module
 
 
+@pytest.mark.parametrize("observability_enabled", [False, True])
+@pytest.mark.parametrize("response_id", ["present", ""])
 @pytest.mark.parametrize("custom_directory", [False, True])
 @pytest.mark.parametrize("with_mcp,step_timeout", [(False, 600), (True, 30)])
 async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
-    tmp_path, monkeypatch, with_mcp, step_timeout, custom_directory
+    tmp_path, monkeypatch, with_mcp, step_timeout, custom_directory, observability_enabled, response_id
 ):
     monkeypatch.chdir(tmp_path)
+    if not observability_enabled:
+
+        def unexpected_observation(*args, **kwargs):
+            raise AssertionError("Observability records must not be constructed when disabled")
+
+        for name in ("AgentInvocation", "AgentObservationBundle", "TrajectoryRecord", "ToolCallObservation"):
+            monkeypatch.setattr(module, name, unexpected_observation)
     client = MagicMock(spec=ServerClient)
     first_command = (
         '/tmp/task-mcp/bin/python /tmp/task-mcp/client.py call browser navigate \'{"url":"http://app"}\''
@@ -30,7 +39,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
         side_effect=[
             SimpleNamespace(
                 value={
-                    "id": f"resp_test_{index}",
+                    "id": f"resp_test_{index}" if response_id == "present" else response_id,
                     "created_at": 0,
                     "object": "response",
                     "model": "test",
@@ -108,6 +117,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
         query=query,
         model_name="model",
         directory=directory,
+        observability_enabled=observability_enabled,
     )
     await harness.setup()
     response, termination, extra = await harness.execute(900)
@@ -120,22 +130,35 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     assert len(result.response.output) == 9
     assert result.response.usage.total_tokens == 39
     assert result.termination.reason == "completed"
-    observations = extra["ng_agent_observations"]
-    invocation = observations["records"][0]
-    assert invocation["invocation_id"] == seed.session_id
-    assert invocation["status"] == "completed"
-    assert [ref["response_id"] for ref in invocation["model_calls"]] == [f"resp_test_{i}" for i in range(3)]
-    tools = observations["records"][1:]
-    assert [tool["status"] for tool in tools] == ["completed", "timeout", "completed"]
-    assert [tool["tool_call_id"] for tool in tools] == [f"call_{i}" for i in range(3)]
-    assert all(tool["duration_ms"] >= 0 and tool["completed_at"] >= tool["started_at"] for tool in tools)
-    assert all(left["completed_at"] <= right["started_at"] for left, right in zip(tools, tools[1:]))
+    if observability_enabled:
+        observations = extra["ng_agent_observations"]
+        invocation = observations["records"][0]
+        assert invocation["invocation_id"] == seed.session_id
+        assert invocation["status"] == "completed"
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == (
+            [f"resp_test_{i}" for i in range(3)] if response_id == "present" else []
+        )
+        tools = observations["records"][1:]
+        assert [tool["status"] for tool in tools] == ["completed", "timeout", "completed"]
+        assert [tool["tool_call_id"] for tool in tools] == [f"call_{i}" for i in range(3)]
+        assert all(tool["duration_ms"] >= 0 and tool["completed_at"] >= tool["started_at"] for tool in tools)
+        assert all(left["completed_at"] <= right["started_at"] for left, right in zip(tools, tools[1:]))
+    else:
+        assert "ng_agent_observations" not in extra
+        assert "ng_trajectory" not in extra
     outcomes = [item for item in response.output if item.type == "function_call_output"]
     assert len(outcomes) == 3
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in outcomes[-1].output
-    turns = extra["ng_trajectory"]["turns"]
-    assert [turn["step_count"] for turn in turns] == [1, 2, 3]
-    assert all(turn["resolved"] is None for turn in turns)
+    if observability_enabled:
+        turns = extra["ng_trajectory"]["turns"]
+        assert [turn["step_count"] for turn in turns] == [1, 2, 3]
+        assert all(turn["resolved"] is None for turn in turns)
+        if response_id != "present":
+            assert all(turn["model_calls"] == [] for turn in turns)
+            assert extra["ng_trajectory"]["gaps"] == [
+                {"code": "model_call_reference_unavailable", "invocation_id": seed.session_id, "detail": f"turn:{i}"}
+                for i in range(1, 4)
+            ]
     requests = [call.kwargs["json"] for call in client.post.await_args_list]
     for request in requests:
         NeMoGymResponseCreateParamsNonStreaming.model_validate(request)

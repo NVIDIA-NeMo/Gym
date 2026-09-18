@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import monotonic, time
@@ -23,6 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
@@ -265,10 +267,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         await raise_for_status(model_response)
                         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
+                    global_config = getattr(self.server_client, "global_config_dict", None)
                     harness = MiniSWEHarness(
                         sandbox=session.environment.main,
                         context=context,
                         config=self.config.harness,
+                        observability_enabled=isinstance(global_config, Mapping)
+                        and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                         params=body.responses_create_params,
                         query=query,
                         model_name=self.config.model_server.name,

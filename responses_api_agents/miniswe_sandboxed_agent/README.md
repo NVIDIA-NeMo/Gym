@@ -56,7 +56,11 @@ the profile is not an exact reproduction of AA's evaluation.
 
 ## Rollout observability
 
-The harness returns `ng_agent_observations` and canonical `ng_trajectory` turns.
+Enable `observability_enabled: true` in Gym's run configuration to collect
+`ng_agent_observations` and canonical `ng_trajectory` turns. Direct harness
+callers pass `observability_enabled=True`; collection is disabled by default.
+Responses without an ID retain their turn and record a
+`model_call_reference_unavailable` gap.
 TB4 sends the resources session ID as `x-session-id` on every Gym model request,
 so capture can assign failed attempts and retries to the same invocation even
 when there is no response ID. Successful responses retain exact response refs;
@@ -72,6 +76,3 @@ zero sum.
 
 `benchmarks/terminal_bench_4/smoke.py` now retains `model_calls/`,
 `evaluator_rollouts.jsonl`, and Gym's `quality_summary.json` for offline inspection.
-The separate harness capability checker currently lives in EFB's
-`harness_capabilities` package. A passing artifact gate does not establish the
-RFC's complete behavioral qualification or parallel-execution capability.
