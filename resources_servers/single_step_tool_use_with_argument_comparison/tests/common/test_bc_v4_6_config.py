@@ -70,9 +70,9 @@ def _raw(config_filename: str) -> dict[str, Any]:
 
 
 def _comparator_config(config_filename: str, root_key: str) -> dict[str, Any]:
-    return _raw(config_filename)[root_key]["resources_servers"][
-        "single_step_tool_use_with_argument_comparison"
-    ]["tool_call_comparator_config"]
+    return _raw(config_filename)[root_key]["resources_servers"]["single_step_tool_use_with_argument_comparison"][
+        "tool_call_comparator_config"
+    ]
 
 
 def _comparator(config_filename: str, root_key: str) -> ToolCallComparator:

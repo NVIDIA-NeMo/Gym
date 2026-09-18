@@ -40,6 +40,7 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.veri
     ToolCallComparatorConfig,
 )
 
+
 CONFIGS_DIR = Path(__file__).parents[2] / "configs"
 
 GOLDEN_QUERY = "2024 PGA Awards Outstanding Producer Limited Anthology Series Television winner"
@@ -162,8 +163,15 @@ def test_token_order_still_ignored(v47) -> None:
 
 
 def test_bash_command_still_name_only(v47) -> None:
-    assert _score(v47, "bash_command", {"duration": 5, "keystrokes": "grep -i x y.txt"},
-                  {"duration": 9, "keystrokes": "cat /etc/hostname"}) == 1.0
+    assert (
+        _score(
+            v47,
+            "bash_command",
+            {"duration": 5, "keystrokes": "grep -i x y.txt"},
+            {"duration": 9, "keystrokes": "cat /etc/hostname"},
+        )
+        == 1.0
+    )
 
 
 def test_update_progress_still_name_only(v47) -> None:

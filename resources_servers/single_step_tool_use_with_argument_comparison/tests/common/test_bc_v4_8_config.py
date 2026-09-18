@@ -41,6 +41,7 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.veri
     ToolCallComparatorConfig,
 )
 
+
 CONFIGS_DIR = Path(__file__).parents[2] / "configs"
 
 GOLDEN_QUERY = "2024 PGA Awards Outstanding Producer Limited Anthology Series Television winner"
