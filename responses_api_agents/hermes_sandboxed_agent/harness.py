@@ -4,12 +4,12 @@
 """Hermes execution with injected model I/O and a caller-owned sandbox."""
 
 import asyncio
+import base64
 import json
 import os
-from functools import cache
+import sys
 from pathlib import Path
 from shlex import quote
-from tempfile import TemporaryDirectory
 from time import time
 from typing import Literal
 from uuid import uuid4
@@ -27,31 +27,11 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.sandbox.harness import HarnessContext, HarnessOutcome, WorkerBridge
+from nemo_gym.sandbox.harness import HarnessContext, HarnessOutcome
 
 
 HERMES_CONFIG = yaml.safe_load((Path(__file__).parent / "configs" / "hermes.yaml").read_text())
 HERMES_REVISION = "26bb847a88493342ca1b194e0455b479073ae21d"
-TERMINAL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "terminal",
-        "description": "Run a bash command in the task sandbox. Each call starts in the task working directory.",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-
-@cache
-def hermes_runtime():
-    directory = TemporaryDirectory(prefix="gym-hermes-")
-    Path(directory.name, "config.yaml").write_text(yaml.safe_dump(HERMES_CONFIG["runtime"]))
-    return directory
 
 
 class HermesConfig(BaseModel):
@@ -70,6 +50,7 @@ class TrajectoryRecorder:
         self.recorded_tools = set()
         self.tool_observations = []
         self.turns = []
+        self.tool_started = {}
 
     def persist(self, native_messages):
         self.messages[:] = native_messages
@@ -91,31 +72,60 @@ class TrajectoryRecorder:
                     )
                 )
                 self.recorded_tools.add(message["tool_call_id"])
+        native_results = {
+            message["tool_call_id"]: message["content"] for message in self.messages if message["role"] == "tool"
+        }
+        for item in self.output:
+            if item.type == "function_call_output" and item.call_id in native_results:
+                item.output = native_results[item.call_id]
+        for observation in self.tool_observations:
+            if observation.tool_call_id in native_results:
+                observation.output = native_results[observation.tool_call_id]
         self.trajectory.write_text(
             json.dumps({"messages": self.messages, "harness_revision": HERMES_REVISION}, indent=2)
         )
 
+    def tool_start(self, call_id, name, args):
+        self.tool_started[call_id] = time()
+
+    def tool_complete(self, call_id, name, args, result, failed):
+        completed = time()
+        started = self.tool_started.pop(call_id)
+        self.tool_observations.append(
+            TrajectoryToolCall(
+                invocation_id=self.invocation_id,
+                tool_call_id=call_id,
+                tool_name=name,
+                output=result,
+                started_at=started,
+                completed_at=completed,
+                duration_ms=max(0, (completed - started) * 1000),
+                timing_source="harness",
+                status="failed" if failed else "completed",
+            )
+        )
+        self.turns[-1].step_count = len(self.tool_observations)
+        self.persist([*self.messages, {"role": "tool", "tool_call_id": call_id, "content": result}])
+
 
 class GymModel:
-    def __init__(self, bridge, query, params, model_name, recorder):
-        self.bridge = bridge
+    def __init__(self, query, params, model_name, recorder):
         self.callback = query
         self.params = params
         self.model_name = model_name
         self.recorder = recorder
         self.converter = ResponsesConverter(return_token_id_information=True)
 
-    def query(self, kwargs):
-        return self.bridge.call(lambda: self._query(kwargs))
-
-    async def _query(self, kwargs):
+    async def query(self, kwargs):
         self.recorder.persist(kwargs["messages"])
         params = self.params.model_dump(exclude_none=True)
         params["input"] = [
             item.model_dump(exclude_none=True)
             for item in self.converter.chat_completions_messages_to_responses_items(kwargs["messages"])
         ]
-        params["tools"] = [{"type": "function", **TERMINAL_TOOL["function"], "strict": False}]
+        params["tools"] = [
+            {"type": "function", **tool["function"], "strict": False} for tool in kwargs.get("tools", [])
+        ]
         turn_started = time()
         response = await self.callback(params)
         self.recorder.responses.append(response)
@@ -192,67 +202,32 @@ class GymModel:
 
 
 class SandboxEnvironment:
-    def __init__(self, bridge, sandbox, context, timeout, recorder):
-        self.bridge = bridge
+    def __init__(self, sandbox, context):
         self.sandbox = sandbox
         self.context = context
-        self.timeout = timeout
-        self.recorder = recorder
         self.error = None
 
-    async def _execute(self, call):
-        try:
-            args = json.loads(call.function.arguments)
-            if call.function.name != "terminal" or not isinstance(args, dict) or set(args) != {"command"}:
-                raise ValueError("Use terminal with a single command argument")
-            if not isinstance(args["command"], str):
-                raise ValueError("command must be a string")
-        except (ValueError, TypeError) as exc:
-            return json.dumps({"error": str(exc)})
+    async def execute(self, command, cwd, timeout, stdin_data):
+        if stdin_data is not None:
+            encoded = base64.b64encode(stdin_data.encode()).decode()
+            command = f"printf %s {quote(encoded)} | base64 -d | bash -c {quote(command)}"
         pidfile = quote(f"/tmp/{self.context.session_id}.pids")
-        result = await self.sandbox.exec(
-            "setsid --wait bash -c " + quote(f"echo $$ >> {pidfile}; " + args["command"]),
-            user=self.context.user,
-            cwd=self.context.workdir,
-            timeout_s=self.timeout,
-        )
-        if result.error_type and result.error_type != "timeout":
-            raise RuntimeError(f"Sandbox execution failed: {result.error_type}")
-        return json.dumps(
-            {
-                "output": (result.stdout or "") + (result.stderr or ""),
-                "exit_code": result.return_code,
-                "error": result.error_type,
-            }
-        )
-
-    def execute(self, assistant_message, native_messages):
-        for call in assistant_message.tool_calls:
-            started_at = time()
-            try:
-                if self.error:
-                    raise RuntimeError("Tool not executed because the episode stopped")
-                result = self.bridge.call(lambda: self._execute(call))
-            except Exception as exc:
-                self.error = f"{type(exc).__name__}: {exc}"
-                result = json.dumps({"error": self.error})
-            native_messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
-            completed_at = time()
-            self.recorder.tool_observations.append(
-                TrajectoryToolCall(
-                    invocation_id=self.recorder.invocation_id,
-                    tool_call_id=call.id,
-                    tool_name=call.function.name,
-                    output=result,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    duration_ms=max(0, (completed_at - started_at) * 1000),
-                    timing_source="executor",
-                    status="failed" if json.loads(result).get("error") else "completed",
-                )
+        try:
+            result = await self.sandbox.exec(
+                "setsid --wait bash -c " + quote(f"echo $$ >> {pidfile}; " + command),
+                user=self.context.user,
+                cwd=cwd,
+                timeout_s=timeout,
             )
-            self.recorder.turns[-1].step_count = len(self.recorder.tool_observations)
-            self.recorder.persist(native_messages)
+            if result.error_type and result.error_type != "timeout":
+                raise RuntimeError(f"Sandbox execution failed: {result.error_type}")
+            return {
+                "output": (result.stdout or "") + (result.stderr or ""),
+                "returncode": 124 if result.error_type == "timeout" else result.return_code,
+            }
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            return {"output": self.error, "returncode": 1}
 
 
 class HermesHarness:
@@ -271,75 +246,119 @@ class HermesHarness:
         if self.context.mcp_servers:
             raise ValueError("The Hermes terminal profile does not support task MCP servers")
         self.directory.mkdir(parents=True, exist_ok=True)
-        os.environ["HERMES_HOME"] = hermes_runtime().name
         result = await self.sandbox.exec("command -v setsid", user=self.context.user, cwd=self.context.workdir)
         if result.return_code:
             raise RuntimeError("Hermes requires setsid for process cleanup")
 
     async def execute(self, budget):
-        from run_agent import AIAgent
-
-        bridge = WorkerBridge()
         recorder = TrajectoryRecorder(self.context, self.directory)
-        model = GymModel(bridge, self.query, self.params, self.model_name, recorder)
-        environment = SandboxEnvironment(
-            bridge, self.sandbox, self.context, min(budget, self.config.step_timeout_sec), recorder
-        )
-
-        class SandboxedAgent(AIAgent):
-            def _handle_max_iterations(self, messages, api_call_count):
-                # Native Hermes makes an extra direct model call here, beyond the turn budget.
-                return None
-
-            def _interruptible_api_call(self, api_kwargs):
-                return model.query(api_kwargs)
-
-            def _execute_tool_calls(self, assistant_message, native_messages, effective_task_id, api_call_count=0):
-                environment.execute(assistant_message, native_messages)
-                if environment.error:
-                    self.interrupt(environment.error)
-
-        agent = SandboxedAgent(
-            **HERMES_CONFIG["agent"],
-            base_url="http://gym.invalid/v1",
-            api_key="dummy-key",
-            model=self.model_name,
-            max_iterations=self.config.max_turns,
-            max_tokens=self.params.max_output_tokens,
-        )
-        agent.tools = [TERMINAL_TOOL]
-        agent.valid_tool_names = {"terminal"}
+        model = GymModel(self.query, self.params, self.model_name, recorder)
+        environment = SandboxEnvironment(self.sandbox, self.context)
+        home = self.directory / "home"
+        home.mkdir(exist_ok=True)
+        (home / "config.yaml").write_text(yaml.safe_dump(HERMES_CONFIG["runtime"]))
         instruction = self.context.instruction
         if self.context.skills_dir:
             instruction += f"\nTask skills are in {self.context.skills_dir}. Read the relevant SKILL.md files."
-        worker = asyncio.create_task(asyncio.to_thread(agent.run_conversation, instruction))
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(home),
+            "HERMES_HOME": str(home),
+            "TERMINAL_ENV": "gym",
+            "TERMINAL_LIFETIME_SECONDS": str(int(budget) + 60),
+            "PYTHONUNBUFFERED": "1",
+        }
+        payload = {
+            "context": self.context.model_dump(),
+            "instruction": instruction,
+            "agent_config": HERMES_CONFIG["agent"],
+            "toolsets": HERMES_CONFIG["toolsets"],
+            "max_turns": self.config.max_turns,
+            "max_tokens": self.params.max_output_tokens,
+            "step_timeout": min(budget, self.config.step_timeout_sec),
+            "model_name": self.model_name,
+            "trajectory": str(recorder.trajectory),
+        }
         outcome = HarnessOutcome(reason="completed")
         result = {}
-        try:
-            result = await asyncio.wait_for(asyncio.shield(worker), budget)
-            if environment.error:
-                outcome = HarnessOutcome(reason="infrastructure_error", detail=environment.error)
-            elif result.get("partial"):
-                outcome = HarnessOutcome(
-                    reason="nonzero_exit", detail=result.get("error") or "Model output was truncated"
-                )
-            elif result.get("error") or result.get("failed"):
-                outcome = HarnessOutcome(reason="infrastructure_error", detail=str(result.get("error")))
-            elif not result.get("completed"):
-                outcome = HarnessOutcome(
-                    reason="nonzero_exit", detail="Hermes did not complete within its turn budget"
-                )
-        except asyncio.CancelledError:
-            outcome = HarnessOutcome(reason="cancelled")
-        except TimeoutError:
-            outcome = HarnessOutcome(reason="timeout")
-        except Exception as exc:
-            outcome = HarnessOutcome(reason="infrastructure_error", detail=f"{type(exc).__name__}: {exc}")
-        finally:
-            agent.interrupt("Episode closed")
-            await bridge.aclose()
-            await asyncio.gather(worker, return_exceptions=True)
-            agent.client.close()
+        with (self.directory / "worker.log").open("w") as log:
+            worker = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(Path(__file__).with_name("worker.py")),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log,
+                env=env,
+                limit=64 * 1024 * 1024,
+            )
+            pending = []
+
+            async def dispatch(message):
+                nonlocal result
+                request_id = message.pop("id")
+                operation = message.pop("operation")
+                try:
+                    if operation == "model":
+                        response = await model.query(message["kwargs"])
+                        value = response.model_dump(mode="json")
+                    elif operation == "sandbox":
+                        value = await environment.execute(**message)
+                    elif operation == "tool_start":
+                        value = recorder.tool_start(**message)
+                    elif operation == "tool_complete":
+                        value = recorder.tool_complete(**message)
+                    elif operation == "messages":
+                        recorder.persist(message["messages"])
+                        value = environment.error
+                    elif operation == "result":
+                        result = message["result"]
+                        value = None
+                    else:
+                        raise RuntimeError(f"Unknown Hermes worker operation: {operation}")
+                    reply = {"id": request_id, "result": value}
+                except Exception as exc:
+                    reply = {"id": request_id, "error": f"{type(exc).__name__}: {exc}"}
+                worker.stdin.write((json.dumps(reply) + "\n").encode())
+                await worker.stdin.drain()
+
+            try:
+                async with asyncio.timeout(budget):
+                    worker.stdin.write((json.dumps(payload) + "\n").encode())
+                    await worker.stdin.drain()
+                    while line := await worker.stdout.readline():
+                        task = asyncio.create_task(dispatch(json.loads(line)))
+                        pending.append(task)
+                    code = await worker.wait()
+                    if code:
+                        raise RuntimeError(f"Hermes worker exited with {code}; see worker.log")
+                    if environment.error:
+                        outcome = HarnessOutcome(reason="infrastructure_error", detail=environment.error)
+                    elif result.get("partial"):
+                        outcome = HarnessOutcome(
+                            reason="nonzero_exit", detail=result.get("error") or "Model output was truncated"
+                        )
+                    elif result.get("error") or result.get("failed"):
+                        outcome = HarnessOutcome(reason="infrastructure_error", detail=str(result.get("error")))
+                    elif not result.get("completed"):
+                        outcome = HarnessOutcome(
+                            reason="nonzero_exit", detail="Hermes did not complete within its turn budget"
+                        )
+            except asyncio.CancelledError:
+                outcome = HarnessOutcome(reason="cancelled")
+            except TimeoutError:
+                outcome = HarnessOutcome(reason="timeout")
+            except Exception as exc:
+                outcome = HarnessOutcome(reason="infrastructure_error", detail=f"{type(exc).__name__}: {exc}")
+            finally:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if worker.returncode is None:
+                    worker.kill()
+                await worker.wait()
+        # On interruption the latest model request contains native tool observations.
+        if recorder.trajectory.exists():
+            result.setdefault("messages", json.loads(recorder.trajectory.read_text())["messages"])
         recorder.persist(result.get("messages") or recorder.messages)
         outcome.artifacts = [str(recorder.trajectory)]
         response = NeMoGymResponse(

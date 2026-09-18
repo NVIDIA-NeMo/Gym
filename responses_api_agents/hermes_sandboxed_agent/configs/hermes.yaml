@@ -13,6 +13,10 @@ agent:
   save_trajectories: false
   checkpoints_enabled: false
 
+toolsets:
+  - terminal
+  - file
+
 runtime:
   compression:
     enabled: false
