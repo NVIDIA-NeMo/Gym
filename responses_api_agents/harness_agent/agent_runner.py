@@ -37,6 +37,15 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noq
 from nemo_gym.server_utils import ServerClient  # noqa: E402
 
 
+class SandboxServerClient(ServerClient):
+    """Route legacy adapters that resolve server roots directly to the host proxy."""
+
+    model_base_url: str
+
+    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        return self.model_base_url
+
+
 def main() -> None:
     rc = json.loads((WORK_DIR / "runner_config.json").read_text())
     body = json.loads((WORK_DIR / "request.json").read_text())
@@ -56,15 +65,12 @@ def main() -> None:
     global_config = {}
     if model_ref.get("name"):
         global_config[model_ref["name"]] = {"responses_api_models": {"sandbox_model": {"host": "", "port": 0}}}
-    sc = ServerClient(
+    sc = SandboxServerClient(
         head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
         global_config_dict=OmegaConf.create(global_config),
+        model_base_url=model_url,
     )
-    sc._build_server_base_url = lambda _: model_url
-    agent = agent_class(config=cfg, server_client=sc)
-    # The host already included the rollout/capture prefix in this URL. Carry
-    # the rollout ID to observations without adding that prefix a second time.
-    object.__setattr__(agent, "resolve_model_base_url", lambda *_: model_url.rstrip("/") + "/v1")
+    agent = agent_class(config=cfg, server_client=sc, resolved_model_base_url=model_url.rstrip("/") + "/v1")
 
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     request = SimpleNamespace(path_params={"rollout_id": rc.get("rollout_id")}, url=SimpleNamespace(path=""))

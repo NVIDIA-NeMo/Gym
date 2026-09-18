@@ -269,7 +269,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 local.write_text(content)
                 await self._provider.upload_file(handle, local, self._box_path(handle, target))
 
-    async def run(self, request: Request, body: HarnessAgentRunRequest) -> BaseVerifyResponse:
+    async def run(self, request: Request, body: HarnessAgentRunRequest) -> HarnessAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 
@@ -463,10 +463,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            lines = local.read_text().splitlines()
-            if len(lines) != 1:
-                raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
-            return json.loads(lines[0])
+            return json.loads(local.read_text())
 
     def _write_generation(self, rollout_id: str, record: dict[str, Any], *, failure: bool = False) -> Path | None:
         if not self.config.artifacts_dir:
@@ -490,7 +487,9 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         context = _RUN_CONTEXT.get()
         if context is None:
             context = {}
-        runner_config["rollout_id"] = context.get("rollout_id") or uuid4().hex
+        path_params = getattr(request, "path_params", None)
+        request_rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        runner_config["rollout_id"] = context.get("rollout_id") or request_rollout_id or uuid4().hex
         agent_body = body.model_copy(deep=True)
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
@@ -586,9 +585,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 },
             )
             if destination:
-                await self._provider.download_file(
-                    handle, self._box_path(handle, "/work/runner.out"), destination / "runner.log"
-                )
+                try:
+                    await self._provider.download_file(
+                        handle, self._box_path(handle, "/work/runner.out"), destination / "runner.log"
+                    )
+                except Exception:
+                    # The validated response and receipt are already saved. A missing
+                    # diagnostic log must not turn a completed rollout into a failure.
+                    LOG.warning("Could not download runner log for sandbox %s", handle.sandbox_id, exc_info=True)
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw

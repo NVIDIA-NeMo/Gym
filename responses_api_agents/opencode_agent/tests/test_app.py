@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -393,6 +394,16 @@ class TestEnv:
 
 
 class TestRolloutObservability:
+    @pytest.mark.parametrize("prefix", ["", "/ng-rollout/1-2", "/ng-rollout/1-2/training-token-capture"])
+    def test_uses_resolved_runtime_endpoint(self, tmp_path: Path, prefix: str) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        agent.resolved_model_base_url = f"https://proxy.example/gym{prefix}/v1"
+        agent._write_opencode_config(tmp_path, "1-2")
+        config = json.loads((tmp_path / "opencode.json").read_text())
+        assert config["provider"]["nemo"]["options"]["baseURL"] == agent.resolved_model_base_url
+        assert agent._env(str(tmp_path), "1-2")["OPENAI_BASE_URL"] == agent.resolved_model_base_url
+        agent.server_client._build_server_base_url.assert_not_called()
+
     def test_routes_model_server_without_mutating_config(self, tmp_path: Path) -> None:
         opencode_config = {"provider": {"openai": {"options": {"baseURL": "https://api.openai.com/v1"}}}}
         agent = _make_agent(

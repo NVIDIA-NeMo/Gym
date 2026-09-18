@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -90,6 +91,56 @@ def _config(**kwargs) -> HarnessAgentConfig:
     )
     base.update(kwargs)
     return HarnessAgentConfig(**base)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_runner_passes_resolved_endpoint_and_rollout_identity(tmp_path, capture):
+    root = Path(__file__).resolve().parents[3]
+    mount = tmp_path / "gym_mount"
+    mount.mkdir()
+    (mount / "nemo_gym").symlink_to(root / "nemo_gym", target_is_directory=True)
+    (mount / "probe.py").write_text(
+        "from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent\n"
+        "from nemo_gym.config_types import ModelServerRef\n"
+        "from nemo_gym.openai_utils import NeMoGymResponse\n"
+        "class Config(BaseResponsesAPIAgentConfig):\n"
+        "    model_server: ModelServerRef\n"
+        "class Agent(SimpleResponsesAPIAgent):\n"
+        "    async def run(self, body):\n"
+        "        raise NotImplementedError\n"
+        "    async def responses(self, request, body):\n"
+        "        rid = request.path_params['rollout_id']\n"
+        f"        response = {repr(_response())}\n"
+        "        response['metadata'] = {'endpoint': self.resolve_model_base_url('model', rid), 'rollout_id': rid}\n"
+        "        return NeMoGymResponse.model_validate(response)\n"
+    )
+    runner = tmp_path / "agent_runner.py"
+    runner.write_text((root / "responses_api_agents/harness_agent/agent_runner.py").read_text())
+    url = "https://proxy.example/base/ng-rollout/run-1" + ("/training-token-capture" if capture else "")
+    (tmp_path / "model_url.txt").write_text(url)
+    (tmp_path / "runner_config.json").write_text(
+        json.dumps(
+            {
+                "agent_module": "probe",
+                "agent_class": "Agent",
+                "agent_config_class": "Config",
+                "rollout_id": "run-1",
+            }
+        )
+    )
+    (tmp_path / "agent_config.json").write_text(
+        json.dumps(
+            {
+                "model_server": {"type": "responses_api_models", "name": "model"},
+            }
+        )
+    )
+    (tmp_path / "request.json").write_text(json.dumps({"input": "hello"}))
+    result = subprocess.run([sys.executable, str(runner)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    response = json.loads((tmp_path / "response.json").read_text())
+    assert response["metadata"] == {"endpoint": url + "/v1", "rollout_id": "run-1"}
+    assert "RUNNER_DONE" in result.stdout
 
 
 def _make_agent(**cfg_kwargs) -> HarnessAgent:
@@ -531,12 +582,22 @@ def test_sandbox_model_url_keeps_loopback_on_dns_failure():
     assert url == "http://localhost:8000"
 
 
-async def test_download_json_requires_exactly_one_row():
+@pytest.mark.parametrize("indent", [None, 2])
+async def test_download_json_preserves_unicode_line_separators(indent):
+    agent = _make_agent()
+    response = {"input": "poem\u2028line\u2029next\u0085line", "output": {"answer": "B"}}
+    payload = json.dumps(response, ensure_ascii=False, indent=indent)
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(payload))
+
+    assert await agent._download_json(MagicMock(), "/work/response.json") == response
+
+
+async def test_download_json_requires_exactly_one_document():
     agent = _make_agent()
     agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text("{}\n{}\n"))
 
-    with pytest.raises(RuntimeError, match="expected one JSON row.*got 2"):
-        await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
+    with pytest.raises(json.JSONDecodeError, match="Extra data"):
+        await agent._download_json(MagicMock(), "/work/response.json")
 
 
 def test_gym_source_prebuilt_path_and_url():
@@ -606,7 +667,10 @@ async def test_restricted_network_rejects_provider_without_enforcement():
 
 
 @pytest.mark.parametrize("status,failed", [("completed", False), ("failed", True), ("incomplete", True)])
-async def test_generation_preserves_observations_and_receipt_before_judging(tmp_path, status, failed):
+@pytest.mark.parametrize("log_download_fails", [False, True])
+async def test_generation_preserves_observations_and_receipt_before_judging(
+    tmp_path, status, failed, log_download_fails
+):
     from hashlib import sha256
 
     from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
@@ -636,6 +700,8 @@ async def test_generation_preserves_observations_and_receipt_before_judging(tmp_
     ).model_dump(mode="json")
 
     async def download(_, remote, local):
+        if remote.endswith("runner.out") and log_download_fails:
+            raise OSError("sandbox log unavailable")
         local.write_text("runner logs" if remote.endswith("runner.out") else json.dumps(response))
 
     agent._provider.download_file = AsyncMock(side_effect=download)
@@ -653,7 +719,10 @@ async def test_generation_preserves_observations_and_receipt_before_judging(tmp_
     assert context["observations"].records[-1].sandbox_id == "box-test"
     dest = tmp_path / sha256(b"../../rollout-id").hexdigest()
     assert json.loads((dest / "generation.json").read_text())["harness_failed"] is failed
-    assert (dest / "runner.log").read_text() == "runner logs"
+    if log_download_fails:
+        assert not (dest / "runner.log").exists()
+    else:
+        assert (dest / "runner.log").read_text() == "runner logs"
     agent._provider.close.assert_awaited_once_with(handle)
 
 
@@ -675,6 +744,40 @@ async def test_completed_harness_failure_skips_judge():
     assert result.reward == 0 and result.harness_failed
     assert agent.server_client.post.await_count == 1
     assert agent.server_client.post.await_args.kwargs["url_path"] == "/seed_session"
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_run_http_preserves_harness_failure_and_observations(failed):
+    from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
+
+    agent = _make_agent(execution_failure_reward_zero=True)
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    body = {"responses_create_params": {"input": "hello"}}
+    observations = AgentObservationBundle(
+        source="opencode",
+        records=[AgentInvocation(invocation_id="rollout-1", status="failed" if failed else "completed")],
+    )
+
+    async def response(_, __, ___):
+        _RUN_CONTEXT.get().update(observations=observations, harness_failed=failed)
+        return NeMoGymResponse.model_validate(_response())
+
+    with (
+        patch.object(HarnessAgent, "responses", new=response),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(side_effect=[{}, body | {"response": _response(), "reward": 1.0}]),
+        ),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        result = client.post("/run", json=body)
+
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    assert payload["harness_failed"] is failed
+    assert payload["reward"] == (0.0 if failed else 1.0)
+    assert payload["ng_agent_observations"] == observations.model_dump(mode="json")
 
 
 async def test_tool_session_requires_authenticated_metadata_and_preserves_cookies():
@@ -741,6 +844,19 @@ async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config():
         mcp = json.loads(files["/work/agent_config.json"])["opencode_config"]["mcp"]
         assert mcp["search"]["headers"]["Authorization"] == identifier
         assert mcp["existing"] == {"enabled": False}
+
+
+async def test_direct_responses_preserves_inbound_rollout_identity():
+    agent = _make_agent()
+    agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("RUNNER_DONE", "", 0))
+    agent._provider.close = AsyncMock()
+    agent._download_json = AsyncMock(return_value=_response())
+    request = SimpleNamespace(path_params={"rollout_id": "incoming-id"}, url=SimpleNamespace(path=""))
+    with patch.object(agent, "_sandbox_model_url", return_value="https://model.example/ng-rollout/incoming-id"):
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    files = agent._provision_box.await_args.args[1]
+    assert json.loads(files["/work/runner_config.json"])["rollout_id"] == "incoming-id"
 
 
 @pytest.mark.parametrize("benchmark", ["apex_shortlist/opencode", "hle/opencode", "hle/opencode_search"])

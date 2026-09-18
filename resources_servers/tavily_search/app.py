@@ -279,7 +279,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    def mcp_allowed_tools_for_session(self, seed_body):
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
         return ["web_search", "find_in_page", "scroll_page"]
 
     def _select_tavily_client(self) -> AsyncTavilyClient:

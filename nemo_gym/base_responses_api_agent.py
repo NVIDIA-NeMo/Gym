@@ -19,6 +19,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -66,6 +67,11 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    resolved_model_base_url: Optional[str] = Field(
+        default=None,
+        exclude=True,
+        description="Runtime model endpoint, including API version and any rollout/capture path. Used verbatim.",
+    )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -178,7 +184,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model-server URL with an optional rollout prefix."""
+        """Use a supplied runtime endpoint or resolve a server with an optional rollout prefix.
+
+        Sandbox runners may supply an endpoint already scoped by their host. The
+        rollout ID remains available to observations but must not be appended again.
+        """
+        if self.resolved_model_base_url is not None:
+            return self.resolved_model_base_url
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"

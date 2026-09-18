@@ -164,6 +164,14 @@ class TestEnv:
 
 
 class TestModelServer:
+    @pytest.mark.parametrize("prefix", ["", "/ng-rollout/1-2", "/ng-rollout/1-2/training-token-capture"])
+    def test_uses_resolved_runtime_endpoint(self, prefix: str) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        agent.resolved_model_base_url = f"https://proxy.example/gym{prefix}/v1"
+        config = agent._build_models_config("1-2")
+        assert config["providers"]["nemo"]["baseUrl"] == agent.resolved_model_base_url
+        agent.server_client._build_server_base_url.assert_not_called()
+
     def test_builds_pi_provider_config(self) -> None:
         models_config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
         agent = _make_agent(

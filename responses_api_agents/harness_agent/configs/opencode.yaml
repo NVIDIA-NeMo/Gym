@@ -17,6 +17,8 @@ harness_benchmark_agent:
           agent:
             build:
               steps: 400
+            title:
+              disable: true
           provider:
             nemo:
               options:

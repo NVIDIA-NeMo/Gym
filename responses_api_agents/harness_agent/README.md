@@ -45,6 +45,9 @@ cannot be checked. Backend API keys stay in the host-side Gym model server. An
 explicit `sandbox_model_base_url` must also point to a reachable model proxy.
 
 The shared runner carries rollout identity and returns native agent observations.
+It supplies `resolved_model_base_url` as a runtime input to the inner agent,
+including `/v1` and any rollout/capture path. Agents using the shared URL resolver
+use that endpoint verbatim; ordinary server-config resolution is unchanged.
 `artifacts_dir` saves generation receipts and runner logs before host-side grading;
 receipt directories hash the rollout ID to avoid interpreting dataset values as
 paths. `execution_failure_reward_zero` skips grading completed harness failures
