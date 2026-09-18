@@ -15,11 +15,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
-from nemo_gym.episode import AgentCloseSessionRequest, AgentSeedSessionRequest, EpisodeId, TaskId
+from nemo_gym.episode import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    DirectHTTPToolAccess,
+    EpisodeId,
+    MCPStdioConnection,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    TaskId,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -92,8 +101,22 @@ def seed(rollout: str = "rollout") -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
         episode_id=EpisodeId(rollout_id=rollout, attempt=1),
         task_id=TaskId(taskset="verifier", task_id="task"),
-        resources_access={"direct_http": {"base_url": "http://verifier", "cookies": {"res": "private"}}},
     )
+
+
+def close_request(session_id: str = "session", rollout: str = "rollout") -> AgentCloseSessionRequest:
+    return AgentCloseSessionRequest(agent_session_id=session_id, episode_id=seed(rollout).episode_id)
+
+
+def tool_access(kind: str, *, required: bool = True) -> DirectHTTPToolAccess | MCPToolAccess:
+    if kind == "direct_http":
+        return DirectHTTPToolAccess(name="owner", required=required, base_url="http://verifier")
+    connection = (
+        MCPStdioConnection(command="unused-mcp-server")
+        if kind == "mcp_stdio"
+        else MCPStreamableHTTPConnection(url="http://verifier/mcp")
+    )
+    return MCPToolAccess(name="owner", required=required, connection=connection)
 
 
 def request_for(session_id: str = "session", rollout: str = "rollout") -> Request:
@@ -189,7 +212,7 @@ def test_http_seed_activate_close_preserves_response_usage_and_observations(cli,
             assert f"/ng-rollout/{key}/" in mocked.call_args.args[2]
         else:
             assert key in [*mocked.call_args.args, *mocked.call_args.kwargs.values()]
-        closed = client.post("/v1/agent_sessions/close", json={"agent_session_id": session_id})
+        closed = client.post("/v1/agent_sessions/close", json=close_request(session_id).model_dump(mode="json"))
         assert closed.status_code == 200, closed.text
         bundle = AgentObservationBundle.model_validate(closed.json()["agent_observations"])
         assert bundle.source == agent.observation_source
@@ -211,7 +234,10 @@ def test_http_cookie_isolation_and_single_activation(cli):
         b = second.post("/v1/agent_sessions", json=seed("b").model_dump(mode="json")).json()["agent_session_id"]
         assert a != b
         assert first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).status_code == 409
-        assert second.post("/v1/agent_sessions/close", json={"agent_session_id": a}).status_code == 409
+        assert (
+            second.post("/v1/agent_sessions/close", json=close_request(a, "a").model_dump(mode="json")).status_code
+            == 409
+        )
         assert a in agent._agent_sessions
         route = f"/ng-rollout/{seed('a').episode_id.capture_key}/v1/responses"
         assert second.post(route, json=params().model_dump(mode="json")).status_code == 409
@@ -220,12 +246,18 @@ def test_http_cookie_isolation_and_single_activation(cli):
         assert first.post(route, json=params().model_dump(mode="json")).status_code == 200
         assert first.post(route, json=params().model_dump(mode="json")).status_code == 409
         mocked.assert_awaited_once()
-        assert first.post("/v1/agent_sessions/close", json={"agent_session_id": a}).status_code == 200
+        assert (
+            first.post("/v1/agent_sessions/close", json=close_request(a, "a").model_dump(mode="json")).status_code
+            == 200
+        )
         assert b in agent._agent_sessions
-        assert second.post("/v1/agent_sessions/close", json={"agent_session_id": b}).status_code == 200
+        assert (
+            second.post("/v1/agent_sessions/close", json=close_request(b, "b").model_dump(mode="json")).status_code
+            == 200
+        )
 
 
-@pytest.mark.parametrize("access", ["sandbox", "mcp", "http-and-mcp"])
+@pytest.mark.parametrize("access", ["sandbox", "direct_http", "mcp_http", "mcp_stdio"])
 def test_unsupported_access_fails_before_activation(cli, access):
     agent, _, runner = cli
     mocked = mock_runner(agent, runner)
@@ -236,15 +268,108 @@ def test_unsupported_access_fails_before_activation(cli, access):
             "connection": {"kind": "direct", "provider_config_ref": "owner", "descriptor": {"sandbox_id": "owned"}},
         }
     else:
-        resources_access = body["resources_access"] if access == "http-and-mcp" else {}
-        resources_access["mcp"] = {"server_name": "owner", "headers": {}}
-        body["resources_access"] = resources_access
+        body["tool_accesses"] = [tool_access(access).model_dump(mode="json")]
     with TestClient(agent.setup_webserver()) as client:
         result = client.post("/v1/agent_sessions", json=body)
         assert result.status_code == 422
         assert "does not support" in result.text or "do not support" in result.text
     assert agent._agent_sessions == {}
     mocked.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["direct_http", "mcp_http", "mcp_stdio"])
+def test_configured_required_tools_reject_native_seed_but_preserve_direct_calls(cli, kind):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    agent.config.tool_accesses = [tool_access(kind)]
+    with TestClient(agent.setup_webserver()) as client:
+        native = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert native.status_code == 422 and "required runtime tools" in native.text
+        assert agent._agent_sessions == {}
+        mocked.assert_not_called()
+        assert client.post("/v1/responses", json=params().model_dump(mode="json")).status_code == 200
+        mocked.assert_awaited_once()
+
+
+@pytest.mark.parametrize("kind", ["direct_http", "mcp_http", "mcp_stdio"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_optional_tools_can_be_skipped_for_verifier_only_sessions(cli, kind, configured):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    body = seed()
+    access = tool_access(kind, required=False)
+    if configured:
+        agent.config.tool_accesses = [access]
+    else:
+        body.tool_accesses = [access]
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert seeded.status_code == 200
+        session_id = seeded.json()["agent_session_id"]
+        route = f"/ng-rollout/{body.episode_id.capture_key}/v1/responses"
+        assert client.post(route, json=params().model_dump(mode="json")).status_code == 200
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_request(session_id).model_dump(mode="json")).status_code
+            == 200
+        )
+    mocked.assert_awaited_once()
+    agent.server_client.post.assert_not_called()
+    assert agent._agent_sessions == {}
+
+
+@pytest.mark.parametrize("episode_required", [False, True])
+def test_episode_tool_access_overrides_configured_access_by_name(cli, episode_required):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    agent.config.tool_accesses = [tool_access("direct_http", required=not episode_required)]
+    body = seed()
+    body.tool_accesses = [tool_access("mcp_http", required=episode_required)]
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert seeded.status_code == (422 if episode_required else 200)
+        if not episode_required:
+            session_id = seeded.json()["agent_session_id"]
+            assert (
+                client.post(
+                    "/v1/agent_sessions/close", json=close_request(session_id).model_dump(mode="json")
+                ).status_code
+                == 200
+            )
+    mocked.assert_not_called()
+    assert agent._agent_sessions == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "episode_id", [EpisodeId(rollout_id="other", attempt=1), EpisodeId(rollout_id="rollout", attempt=2)]
+)
+async def test_wrong_episode_close_does_not_cancel_active_harness(cli, episode_id):
+    agent, _, _ = cli
+    request = request_for()
+    await agent.seed_agent_session(request, seed())
+    entered = asyncio.Event()
+
+    async def block(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=block))
+    activation = asyncio.create_task(agent.responses(request, params()))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        with pytest.raises(HTTPException, match="episode_id does not match") as error:
+            await agent.close_agent_session(
+                request, AgentCloseSessionRequest(agent_session_id="session", episode_id=episode_id)
+            )
+        assert error.value.status_code == 409
+        state = agent._agent_sessions["session"].state
+        assert not state.task.done()
+        assert not state.task.cancelling()
+        assert not state.cancel_requested
+    finally:
+        await agent.close_agent_session(request, close_request())
+        await asyncio.gather(activation, return_exceptions=True)
+    assert agent._agent_sessions == {}
 
 
 def test_multiworker_legacy_config_rejects_only_native_seed(cli):
@@ -285,7 +410,7 @@ async def test_queued_activation_can_close_without_starting_cli(cli):
     try:
         await asyncio.sleep(0)
         assert agent._agent_sessions["session"].activation_started
-        result = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+        result = await agent.close_agent_session(request, close_request())
         assert result.agent_observations.records[0].status == "incomplete"
         with pytest.raises(asyncio.CancelledError):
             await activation
@@ -321,7 +446,7 @@ async def test_caller_cancellation_leaves_cleanup_for_close(cli):
     await cleaning.wait()
     assert not agent._agent_sessions["session"].state.task.done()
     release.set()
-    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+    closed = await agent.close_agent_session(request, close_request())
     assert closed.agent_observations.records[0].status == "incomplete"
     assert agent._agent_sessions == {}
 
@@ -344,9 +469,7 @@ async def test_close_waits_for_cancelled_activation_and_can_be_retried(cli):
     object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=block))
     activation = asyncio.create_task(agent.responses(request, params()))
     await entered.wait()
-    closing = asyncio.create_task(
-        agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
-    )
+    closing = asyncio.create_task(agent.close_agent_session(request, close_request()))
     await cleaning.wait()
     assert not closing.done()
     closing.cancel()
@@ -354,7 +477,7 @@ async def test_close_waits_for_cancelled_activation_and_can_be_retried(cli):
         await closing
     assert "session" in agent._agent_sessions
     release.set()
-    result = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+    result = await agent.close_agent_session(request, close_request())
     assert result.agent_observations.records[0].status == "incomplete"
     with pytest.raises(asyncio.CancelledError):
         await activation
@@ -381,7 +504,7 @@ async def test_cancelled_cleanup_failure_does_not_close_session(cli):
     await entered.wait()
     for _ in range(2):
         with pytest.raises(RuntimeError, match="cleanup failed"):
-            await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+            await agent.close_agent_session(request, close_request())
         assert "session" in agent._agent_sessions
     with pytest.raises(RuntimeError, match="cleanup failed"):
         await activation
@@ -395,7 +518,7 @@ async def test_activation_error_is_preserved_and_close_collects_failure(cli):
     object.__setattr__(agent, "_execute_responses", AsyncMock(side_effect=RuntimeError("model transport failed")))
     with pytest.raises(RuntimeError, match="model transport failed"):
         await agent.responses(request, params())
-    result = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+    result = await agent.close_agent_session(request, close_request())
     assert result.agent_observations.records[0].status == "failed"
     assert agent._agent_sessions == {}
 
@@ -438,7 +561,7 @@ async def test_native_path_preserves_token_ids_and_existing_observation_bundle(c
     actual = await agent.responses(request, params())
     assert actual.model_dump(mode="json") == response.model_dump(mode="json")
     assert "_ng_agent_observations" in attached.model_extra  # No mutation of the producer result.
-    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session"))
+    closed = await agent.close_agent_session(request, close_request())
     assert closed.agent_observations == observations
 
 
@@ -518,9 +641,7 @@ async def test_real_subprocess_cancellation_cleans_up(cli, monkeypatch, tmp_path
         await asyncio.wait_for(started.wait(), timeout=10)
         await asyncio.sleep(0.01)
         if native:
-            closed = await asyncio.wait_for(
-                agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session")), timeout=10
-            )
+            closed = await asyncio.wait_for(agent.close_agent_session(request, close_request()), timeout=10)
             assert closed.agent_observations.records[0].status == "incomplete"
         else:
             task.cancel()
@@ -604,9 +725,7 @@ async def test_native_terminus_close_removes_tmux_session_and_workspace(
     try:
         await asyncio.wait_for(entered.wait(), timeout=10)
         assert (await inspector.exec("tmux has-session -t episode")).return_code == 0
-        await asyncio.wait_for(
-            agent.close_agent_session(request, AgentCloseSessionRequest(agent_session_id="session")), timeout=10
-        )
+        await asyncio.wait_for(agent.close_agent_session(request, close_request()), timeout=10)
         with pytest.raises(asyncio.CancelledError):
             await activation
         assert (await inspector.exec("tmux has-session -t episode")).return_code != 0

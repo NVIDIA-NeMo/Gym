@@ -57,9 +57,9 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
     """Opt local CLI harnesses into the agent session protocol.
 
     Capabilities: one Responses activation, local scratch workspace, no runtime
-    resources tools, no borrowed sandbox. Direct resources metadata is retained
-    but unused for verifier-only tasks; MCP access is rejected. Legacy /run
-    callers keep the original Responses path without session interception.
+    resources tools, no borrowed sandbox. Required tool accesses are rejected;
+    optional accesses are not configured. Legacy /run callers keep the original
+    Responses path without session interception.
     """
 
     observation_source: ClassVar[str]
@@ -86,6 +86,8 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
         if body.agent_session_id != self.agent_session_id_from_request(request):
             raise HTTPException(409, "agent_session_id does not match the session cookie")
         session = self.require_agent_session(body.agent_session_id)
+        if body.episode_id != session.request.episode_id:
+            raise HTTPException(409, "episode_id does not match the seeded agent session")
         observations = await self.close_agent_session_state(body.agent_session_id, session)
         del self._agent_sessions[body.agent_session_id]
         request.session.pop(_AGENT_SESSION_ACTIVE_KEY, None)
@@ -132,8 +134,12 @@ class CLIResponsesAPIAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Native CLI sessions require num_workers=1")
         if body.sandbox_access is not None:
             raise HTTPException(422, f"{self.observation_source} does not support borrowed SandboxAccess yet")
-        if body.resources_access is not None and body.resources_access.mcp is not None:
-            raise HTTPException(422, f"{self.observation_source} native sessions do not support runtime MCP tools yet")
+        required_tools = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required_tools:
+            raise HTTPException(
+                422,
+                f"{self.observation_source} native sessions do not support required runtime tools: {required_tools}",
+            )
         # Persistent workspace overrides cannot provide episode isolation.
         for option in ("cwd", "repo_dir"):
             if getattr(self.config, option, None):
