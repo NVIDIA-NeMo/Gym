@@ -2302,7 +2302,7 @@ class RolloutAggregationHelper(BaseModel):
         run_ids: set[str] = set()
         for shard_path in input_paths:
             shard = Path(shard_path)
-            history = RolloutStore.read(shard)
+            history = RolloutStore.read(shard, import_legacy=False)
             if history is not None:
                 if history.manifest.run_id in run_ids:
                     raise ConfigError("The same run was supplied through multiple shard paths.")
@@ -2388,7 +2388,8 @@ class RolloutAggregationHelper(BaseModel):
         atomic_write_json(coverage_path_for(output_fpath), completion)
         if not inventory_known:
             print(
-                "Completion coverage is unknown for legacy shards without materialized inputs; scores may be partial."
+                "Completion coverage is unknown for legacy shards without validated attempt history; "
+                "scores may be partial."
             )
         coverage = _coverage_report(
             completion["expected"] if inventory_known else scored_rollouts + sum(dropped.values()),

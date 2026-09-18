@@ -100,14 +100,19 @@ An explicit `skipped` entry in `count_failure_classes_as_zero` includes terminal
 completion disposition remains intentionally omitted. Omissions without a failure payload cannot be scored this way.
 
 Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/failed`,
-`coverage/omitted`, and `coverage/unknown`. For legacy shards without an inventory, observed measured/masked counts remain
+`coverage/omitted`, and `coverage/unknown`. For legacy shards without a manifest or journal, observed measured/masked counts remain
 available, while expected, omitted, and unknown totals remain unknown.
 
 The coverage file is a snapshot written at collection start and cleanup. After an abrupt process kill it may be stale;
 resume or aggregate to reconstruct it from the journal and payloads. An incomplete final JSONL write is ignored during
 reconciliation and its partial bytes are removed before appending. Malformed complete records remain errors.
-If a legacy shard has no materialized inventory, aggregation reports its completion coverage as unknown.
+An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
+
+Health reports from collection, aggregation (with or without merging), and standalone health checks inspect the same
+selected completed attempts. Older successes superseded by a failed or unknown attempt are excluded. Passing a failure
+sidecar directly to health checks still inspects its saved diagnostic records. Judge-only reverification preserves the
+saved canonical trajectory, including existing health findings about the generated answer.
 
 ### Legacy artifacts and explicit overrides
 
@@ -119,6 +124,11 @@ payloads are preserved; newly written payloads carry the run identifier. Gym sti
 manifests and materialized inputs that no longer match their saved manifest.
 Use a fresh output location when the intention is to evaluate changed tasks or a different model.
 
+If only part of a legacy cache exists and there is no manifest or journal, Gym prints `Skipping resume_from_cache`
+and starts fresh from the current inputs, replacing the incomplete cache. This also covers interruption during initial
+preparation before the run identity was published. If a manifest or journal exists, missing required artifacts remain
+an error rather than causing an automatic restart.
+
 The unsafe override can also reconstruct missing dispatch history from saved payloads, retaining their run identifier.
 This includes an absent or emptied journal and a truncated journal whose remaining complete records are valid.
 An empty journal before any dispatch is valid and needs no override. Invalid complete events, conflicting payloads,
@@ -127,9 +137,11 @@ If the manifest is missing, all surviving tagged artifacts must agree on one run
 remain errors. Dispatches that left no saved outcome cannot be reconstructed after journal loss, so attempt counts become
 lower bounds; recovered coverage remains unverified. Keep the journal whenever possible.
 
-Offline aggregation reads untagged legacy append/reverify artifacts without requiring a manifest. Where older writers
-reused an attempt index, migration orders those legacy outcomes by their recorded arrival, with sidecar failures read
-before main-file results. This compatibility rule does not relax conflict detection for journal-backed records.
+Offline aggregation reads legacy append/reverify artifacts line by line when neither a manifest nor a journal exists,
+even if an old inventory contains repeated explicit rollout IDs. It does not automatically migrate those artifacts or
+claim known completion coverage. When explicitly importing a legacy run for resume, reused attempt indices are ordered
+by their recorded arrival, with sidecar failures read before main-file results. This compatibility rule does not relax
+conflict detection for journal-backed records.
 
 ## Structured failures for direct callers
 

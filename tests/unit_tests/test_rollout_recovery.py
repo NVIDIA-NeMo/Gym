@@ -538,12 +538,13 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
 
 
 @pytest.mark.parametrize("retry_failure", [False, True])
-async def test_resume_preserves_health_and_isolates_failed_attempt(runner_config, monkeypatch, retry_failure):
+@pytest.mark.parametrize("workers", [1, 2])
+async def test_resume_preserves_health_and_isolates_failed_attempt(runner_config, monkeypatch, retry_failure, workers):
     from nemo_gym.rollout_health import run_health_checks
     from tests.unit_tests.test_rollout_health import _record
 
     runner_config.disable_aggregation = runner_config.disable_health_check = False
-    runner_config.health_check_workers = 1
+    runner_config.health_check_workers = workers
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", list)
 
@@ -583,11 +584,16 @@ async def test_resume_preserves_health_and_isolates_failed_attempt(runner_config
         target = output.parent / f"aggregate-{merge}" / "rollouts.jsonl"
         await collection.RolloutAggregationHelper().run_from_config(
             collection.RolloutAggregationConfig(
-                input_glob=str(output), output_jsonl_fpath=str(target), merge_shards=merge, health_check_workers=1
+                input_glob=str(output),
+                output_jsonl_fpath=str(target),
+                merge_shards=merge,
+                health_check_workers=workers,
             )
         )
         assert json.loads((target.parent / "quality_summary.json").read_bytes())["run"] == expected
-    assert run_health_checks(output, workers=1, output_dir=output.parent / "standalone").summary["run"] == expected
+    assert (
+        run_health_checks(output, workers=workers, output_dir=output.parent / "standalone").summary["run"] == expected
+    )
 
 
 async def test_runner_accepts_nested_hydra_overrides_and_unused_unresolved_server(runner_config, monkeypatch):

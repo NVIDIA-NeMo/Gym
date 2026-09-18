@@ -93,6 +93,17 @@ class RolloutStore:
         journal = journal_path_for(output)
         artifacts = (output, failures_path_for(output), materialized, manifest_path, journal)
         output.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            resume
+            and any(path.exists() for path in artifacts)
+            and not (materialized.exists() and output.exists())
+            and not (manifest_path.exists() or journal.exists())
+        ):
+            # Legacy collection also restarted incomplete caches. Preparation can
+            # leave just the inventory if interrupted before publishing a run.
+            # Once a manifest or journal exists, missing files remain an error.
+            print("Skipping resume_from_cache because the legacy cache is incomplete; starting fresh.")
+            resume = False
         if resume and any(path.exists() for path in artifacts):
             if not materialized.exists() or not output.exists():
                 raise ConfigError("Cannot resume: saved materialized inputs or rollout output are missing.")
@@ -159,13 +170,17 @@ class RolloutStore:
         return cls(output, state)
 
     @classmethod
-    def read(cls, output: Path) -> "RolloutStore | None":
+    def read(cls, output: Path, *, import_legacy: bool = True) -> "RolloutStore | None":
         """Read the same selected outcomes offline, without modifying artifacts.
 
         A legacy file without an input inventory has unknown completion coverage;
         return None so its caller can choose its documented compatibility path.
+        With import_legacy=False, an inventory alone also stays on that path:
+        pre-journal writers did not enforce the recovery identity invariants.
         """
         path = manifest_path_for(output)
+        if not import_legacy and not (path.exists() or journal_path_for(output).exists()):
+            return None
         if path.exists():
             manifest = RunManifest.model_validate_json(path.read_bytes())
         elif materialized_path_for(output).exists():

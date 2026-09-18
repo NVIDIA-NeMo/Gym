@@ -50,7 +50,7 @@ from nemo_gym.rollout_collection import (
     _rollout_for_export,
     _rollout_request_debug_summary,
 )
-from nemo_gym.rollout_journal import RUN_ID_KEY, journal_path_for, logical_rollout_id
+from nemo_gym.rollout_journal import RUN_ID_KEY, logical_rollout_id
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.server_utils import (
@@ -460,7 +460,12 @@ def _yield_inputs_and_rollouts_paired(
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
+    payload = pair.input | {"response": pair.rollout["response"]}
+    # Judging reuses the generation; its canonical evidence must travel with it.
+    # Do not copy stale rewards, failure flags, or other verifier-owned fields.
+    if "ng_trajectory" in pair.rollout:
+        payload["ng_trajectory"] = pair.rollout["ng_trajectory"]
+    return payload
 
 
 def _prepare_payloads(
@@ -737,8 +742,7 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
     # An inventory alone does not make loose legacy output a journal-backed run.
-    has_history = manifest_path_for(output_fpath).exists() or journal_path_for(output_fpath).exists()
-    store = RolloutStore.read(output_fpath) if has_history else None
+    store = RolloutStore.read(output_fpath, import_legacy=False)
     if store is not None:
         results = store.selected("success")
     else:
@@ -836,6 +840,11 @@ class RolloutReverificationHelper(BaseModel):
                 for key in (ROLLOUT_ID_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, RUN_ID_KEY):
                     if key in row:
                         result[key] = row[key]
+                if "ng_trajectory" in row:
+                    # A verifier may drop extra request fields or return its own
+                    # evidence. The saved agent trajectory still describes the
+                    # unchanged generation, including any existing health findings.
+                    result["ng_trajectory"] = row["ng_trajectory"]
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

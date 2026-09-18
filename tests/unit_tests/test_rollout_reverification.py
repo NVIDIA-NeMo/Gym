@@ -415,6 +415,23 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    def test_preserves_generation_evidence_without_stale_verifier_fields(self) -> None:
+        trajectory = {"turns": [{"answer": "saved answer"}]}
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "saved answer"},
+                "ng_trajectory": trajectory,
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_reason": "old judge failure",
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+            },
+        )
+        result = _build_verify_payload(pair)
+        assert result == {"task": "q1", "response": pair.rollout["response"], "ng_trajectory": trajectory}
+        assert pair.input == {"task": "q1"}
+
     def test_merges_input_row_with_response(self) -> None:
         pair = InputRolloutPair(
             input={"task": "q1", "verifier_metadata": {"answer": 42}},

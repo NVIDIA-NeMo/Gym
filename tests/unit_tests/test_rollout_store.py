@@ -211,6 +211,54 @@ def test_prepared_but_never_opened_run_can_resume(prepared_run):
     assert RolloutStore.read(output).coverage()["complete"]
 
 
+@pytest.mark.parametrize("allow_unsafe", [False, True])
+@pytest.mark.parametrize("artifact", ["materialized", "output", "failures"])
+def test_incomplete_legacy_cache_restarts_from_current_inputs(prepared_run, capsys, artifact, allow_unsafe):
+    output, prepare = prepared_run
+    paths = {"materialized": materialized_path_for(output), "output": output, "failures": failures_path_for(output)}
+    paths[artifact].write_bytes(b'{"old_partial_run":true}\n')
+    with RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=allow_unsafe) as store:
+        assert store.coverage()["attempts"] == 0
+        assert len(store.pending(3)) == 2
+        assert list(read_records(output)) == []
+        assert list(read_records(failures_path_for(output))) == []
+    prepare.assert_called_once()
+    assert "Skipping resume_from_cache" in capsys.readouterr().out
+
+
+def test_interruption_after_materialization_can_restart(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    touch = Path.touch
+
+    def interrupted_touch(path, *args, **kwargs):
+        if path == output:
+            raise OSError("interrupted before output creation")
+        return touch(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "touch", interrupted_touch)
+        with pytest.raises(OSError, match="interrupted before output"):
+            RolloutStore.start_or_resume(output, prepare, resume=False)
+    assert materialized_path_for(output).exists()
+    assert not manifest_path_for(output).exists()
+    assert not journal_path_for(output).exists()
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        assert len(store.pending(3)) == 2
+        assert store.coverage()["attempts"] == 0
+
+
+@pytest.mark.parametrize("metadata", [manifest_path_for, journal_path_for])
+@pytest.mark.parametrize("allow_unsafe", [False, True])
+def test_incomplete_journaled_cache_does_not_fall_back_to_fresh(prepared_run, metadata, allow_unsafe):
+    output, prepare = prepared_run
+    metadata(output).write_bytes(b"{}\n")
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="missing"):
+        RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=allow_unsafe)
+    prepare.assert_not_called()
+    assert snapshot(output) == before
+
+
 @pytest.mark.parametrize("missing", [("journal",), ("manifest",), ("manifest", "journal")])
 def test_unsafe_recovery_rebuilds_own_artifacts_without_relabeling(prepared_run, missing):
     output, prepare = prepared_run

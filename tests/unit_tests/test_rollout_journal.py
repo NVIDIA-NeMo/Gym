@@ -28,6 +28,7 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
     RolloutJournal,
+    coverage_path_for,
     journal_path_for,
     materialized_path_for,
     prepare_append,
@@ -482,6 +483,51 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
         }
     ]
     assert "scores may be partial" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("merge_shards", [False, True])
+async def test_legacy_repeated_explicit_ids_remain_aggregatable(tmp_path, monkeypatch, merge_shards):
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.rollout_health import run_health_checks
+
+    output = tmp_path / "legacy.jsonl"
+    rows = [
+        {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": index,
+            "_ng_rollout_id": "old-explicit-id",
+            "agent_ref": {"name": "agent"},
+        }
+        for index in range(2)
+    ]
+    records = [row | {"reward": float(index), "response": {}} for index, row in enumerate(rows)]
+    output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in records))
+    inventory = materialized_path_for(output)
+    inventory.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    original = output.read_bytes(), inventory.read_bytes()
+    scored = []
+
+    async def aggregate(self, results, rows, path):
+        scored.extend(results)
+
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", list)
+    target = tmp_path / "aggregate" / "rollouts.jsonl"
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output), output_jsonl_fpath=str(target), merge_shards=merge_shards, health_check_workers=1
+        )
+    )
+    assert scored == records
+    coverage = orjson.loads(coverage_path_for(target).read_bytes())
+    assert coverage["successful"] == 2 and not coverage["coverage_known"]
+    assert coverage["expected"] is None
+    automatic = orjson.loads((target.parent / "quality_summary.json").read_bytes())["run"]
+    standalone = run_health_checks(output, workers=1, output_dir=tmp_path / "health").summary["run"]
+    assert automatic == standalone
+    assert automatic["artifacts"]["records"] == 2
+    assert (output.read_bytes(), inventory.read_bytes()) == original
+    assert not manifest_path_for(output).exists() and not journal_path_for(output).exists()
 
 
 @pytest.mark.parametrize("mixed_legacy", [False, True])
