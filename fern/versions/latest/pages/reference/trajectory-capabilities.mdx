@@ -1,208 +1,196 @@
 ---
-title: "Trajectory capability matrix"
-description: "Observed trajectory coverage by criterion and producer"
+title: "Trajectory Evidence"
+description: "Harness evidence contracts, artifact validation, and legacy capability mapping"
 position: 5
 ---
 
-# Trajectory capability matrix
+# Trajectory Evidence
 
-This matrix reports trajectory evidence supported by the implemented agent paths. It is a static source audit of
-[Gym commit `609c3d150`](https://github.com/NVIDIA-NeMo/Gym/tree/609c3d150f869d45e5402eebbf7ac71b1f4ffb42),
-not a claim that every path has been validated with live rollouts. Coverage depends on configuration and the evidence
-actually saved for a rollout.
+Trajectory Evidence (TE) describes the execution facts available from a particular harness integration. Each claim
+identifies evidence that a validator can inspect in a saved rollout. The location of the evidence does not change
+its meaning: a tool observation can establish tool timing without a canonical turn record.
 
-`ng_trajectory` schema version `1.0` combines available model-call capture and agent observations in a rollout record.
-Model-call capture records qualifying calls routed through the Gym Model Server, while agent observations provide
-harness-side turns and tool activity. The trajectory joins the available evidence from both sources. Direct-provider
-calls bypass Gym Model Server capture, so the trajectory cannot obtain Gym-captured model-call evidence for those calls
-even when agent observations are available.
+This page defines a proposed vocabulary for harness onboarding and artifact validation. It does not certify individual
+harnesses or introduce a validator command. The earlier per-harness V/O/X table was a
+[source audit](https://github.com/NVIDIA-NeMo/Gym/blob/4a8835e3a61808ee8e25e1c08dd6e798bc3615bd/fern/versions/latest/pages/reference/trajectory-capabilities.mdx),
+not a set of results for these TE contracts. Its ratings must not be copied into a TE matrix without evaluating the
+corresponding claims.
 
-The trajectory can contain task and rollout identity, model calls and token usage, semantic turns, invocation-scoped
-model-visible histories, tool attempts, resolution, step count, and explicit evidence gaps. Source attachments remain
-under `ng_model_call_capture` and `ng_agent_observations`.
+## Scope and assumptions
 
-## Key caveats
+The unit being assessed is a harness integration under a declared configuration, model API, and modality. Gym's shared
+capture, collection, serialization, aggregation, and verification implementations are assumed to work correctly. The
+harness must expose the execution facts those shared components need. Reward calculation and generic aggregation are
+outside this harness evidence taxonomy.
 
-- Coverage is path-dependent. A producer may use both captured Gym Model Server calls and uncaptured direct-provider
-  calls.
-- Model-call evidence requires `observability_enabled: true`, `model_call_capture_dir: /data/model-calls`, and calls
-  through a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See
-  [Model-call capture](/model-server/model-call-capture).
-- `O` and `X` describe current producer output, not fields that the `ng_trajectory` schema is unable to represent.
-- Token fields are nullable, and provider-reported details are preserved only when available. LabBench rows with the
-  `multimodal_history_redacted` gap omit captured request and response payload copies from `ng_trajectory`.
-- Aggregate-metrics requests omit `ng_trajectory`, `ng_model_call_capture`, and `ng_agent_observations` attachments.
+For this first validation scope, model calls are assumed to route through Gym's Model Server adapters. Configure
+`observability_enabled: true`, `model_call_capture_dir`, and the rollout-prefixed Model Server route as described in
+[Model-call capture](/model-server/model-call-capture). A direct-provider path does not inherit these capture guarantees.
+There is no independent observer in this scope: inspecting saved evidence cannot prove that no call bypassed capture or
+that no event was omitted entirely.
 
-See [Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token
-fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`.
+A validator reads the final rollout artifact, such as `evaluator_rollouts.jsonl` in an evaluator run. Gym's output filename
+is configurable and commonly `rollouts.jsonl`. It checks evidence availability, structure, and internal relationships.
+Claims about request fidelity or complete attempt membership are assessed against the retained evidence under the routing
+assumption, not against an independent execution trace.
 
-## Acceptance criteria
+## Evidence records and locations
 
-| ID | Criterion |
+These are distinct concepts:
+
+- An **agent invocation** is one agent execution or conversation. A rollout may include root and child invocations.
+- An **agent turn** is one harness-level model-driven decision. A turn can involve multiple model attempts and request
+  multiple tool executions. It is not necessarily one message, one model call, or one tool execution.
+- A **model-call attempt** is an individual exchange at the declared capture boundary. Its owner, selected decision,
+  retry relationship, and auxiliary purpose are separate facts.
+
+`TrajectoryRecord`, stored as `ng_trajectory`, is an evidence container. Its `invocations`, `model_calls`, `tool_calls`,
+and `turns` collections are independent; `turns` may be empty. `TrajectoryTurn` is a decision record inside that container.
+Having turns does not establish complete turn-to-call attribution.
+
+Current rollout records can retain three attachments:
+
+| Attachment | Evidence available there |
 |---|---|
-| C1 | Model-call identity, status, error, and termination metadata |
-| C2 | Prompt, completion, reasoning, total, and cached token counts when available |
-| C3 | Canonical `TrajectoryTurn` records preserve answer, reasoning, and tool-call activity |
-| C4 | Model-visible input and output history can be reconstructed from persisted rollout JSONL |
-| C5 | Tool output, status, start and completion timestamps, and duration |
-| C6 | Independent timing for parallel tool calls |
-| C7 | Resource-server-backed and custom or sandbox-backed benchmarks |
-| C8 | Turn identity, timestamp, question, resolution, and step metadata |
-| C9 | Captured model requests and responses retain their payloads |
-| C10 | Model calls have exact ownership references on an `AgentInvocation` |
-| C11 | Model calls have exact ownership references on a `TrajectoryTurn` |
+| `ng_trajectory` | Normalized model calls and usage, invocations, producer-supplied turns, enriched tool records, and gaps |
+| `ng_agent_observations` | Harness observations, including invocations, tools, compaction, sandbox observations, source information, and gaps |
+| `ng_model_call_capture` | Captured model exchanges and metadata; some fields overlap the trajectory projection |
 
-Each criterion describes one evidence dimension. C1 describes the model-call envelope, C2 its token values, and C9 its saved
-payloads. C3 describes agent activity within canonical turns, while C8 describes turn metadata and outcome. C10 and C11
-separate invocation ownership from turn ownership. The `V`, `O`, and `X` values below express whether each dimension is
-complete, partial or path-dependent, or unavailable; completeness is not a separate criterion.
+These attachments overlap but are not interchangeable. Compaction and sandbox records currently remain in observations;
+raw capture also retains metadata not represented in the trajectory. Successful trajectory projection removes duplicate
+request/response payloads from the capture attachment. Their absence there is not evidence loss when the authoritative
+payload is retained in `ng_trajectory`.
 
-## Agent coverage
+A versioned reader should resolve each claim from its documented source locations. It must retain the source location in
+its result, avoid counting duplicate representations as separate executions, and report conflicting copies. A missing
+field, an empty collection, an unknown value, and a redacted value have different meanings. An invocation conversation is
+not a fallback for unobserved turn boundaries. This vocabulary does not require moving or deleting existing attachments.
 
-- `V`: complete for the documented path under the documented observability configuration.
-- `O`: currently partial or path-dependent.
-- `X`: currently unavailable.
+## Evidence taxonomy
 
-In practice, rely on `V` for the documented path when observability is configured as documented, inspect configuration
-and trajectory gaps before relying on `O`, and do not expect the producer to supply `X` on the evaluated path. These
-symbols are not absolute agent capabilities: alternate execution paths can produce different evidence. For C1, C2,
-C4, and C9 through C11, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside
-capture.
+TE1, TE2, and so on are families. Each decimal entry is a separately testable claim; a family does not pass merely because
+one of its fields is present. Scenario examples below describe behaviors to exercise, then inspect in saved artifacts.
+They do not imply an independent observer or an already implemented test suite.
 
-| Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 | C8 | C9 | C10 | C11 |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `anyswe_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `anyterminal_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `aviary_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `browsecomp_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `claude_code_agent` | V | V | X | V | V | V | V | X | V | V | X |
-| `cline_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `codex_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `conversational_tool_use/domain_generation` | V | V | X | V | X | X | X | X | V | X | X |
-| `conversational_tool_use/policy_tool_generation` | V | V | X | V | X | X | X | X | V | X | X |
-| `conversational_tool_use/scenario_generation` | V | V | X | V | X | X | X | X | V | X | X |
-| `conversational_tool_use/simulation` | V | V | X | V | X | X | X | X | V | X | X |
-| `critpt_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `cvdp_agent` | O | O | X | O | X | X | X | X | O | X | X |
-| `finance_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `gymnasium_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `harbor_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `harbor_agent_general` | X | O | X | O | X | X | X | X | X | X | X |
-| `hermes_agent` | V | V | X | V | V | V | V | X | V | V | X |
-| `image_tools_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `kilocode_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `labbench2_vlm_agent` | V | V | V | O | O | X | V | O | O | V | V |
-| `langgraph_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `mini_swe_agent_2` | V | V | X | V | X | X | X | X | V | X | X |
-| `nemo_fabric_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `non_executing_simple_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `openclaw_agent` | V | V | X | O | V | V | V | X | V | V | X |
-| `opencode_agent` | V | V | X | V | V | V | V | X | V | V | X |
-| `opencode_sandboxed_agent` | V | V | X | V | V | V | V | X | V | V | X |
-| `osworld_agent` | O | O | X | O | X | X | X | X | O | X | X |
-| `pi_agent` | V | V | X | V | V | V | V | X | V | V | X |
-| `pinchbench` | V | V | X | O | V | V | V | X | V | V | X |
-| `prime_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `proof_refinement_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `remote_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `scicode_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `simple_agent` | V | V | V | V | O | X | V | O | V | V | V |
-| `simple_agent_with_compaction` | V | V | V | V | O | X | V | O | V | V | V |
-| `simple_strands_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `speed_bench_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `stirrup_agent` | O | O | X | O | X | X | X | X | O | X | X |
-| `swe_agents / OpenCode (legacy)` | V | V | X | V | X | X | V | X | V | X | X |
-| `swe_agents / OpenHands (legacy)` | O | O | X | O | X | X | V | X | O | X | X |
-| `tau2` | V | V | X | V | X | X | X | X | V | X | X |
-| `terminus_2_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `terminus_2_sandboxed_agent` | V | V | V | V | X | X | V | O | V | V | V |
-| `tool_simulation_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `toolsandbox_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `vcqa_agent` | X | O | X | X | X | X | X | X | X | X | X |
-| `verifiers_agent` | V | V | X | V | X | X | X | X | V | X | X |
-| `vibench_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| Family | Evidence claims | Example artifact-validation scenario |
+|---|---|---|
+| **TE1 — Model-call attempts** | **TE1.1** Attempt identities; **TE1.2** Outcomes and termination reasons; **TE1.3** Call timing; **TE1.4** Retry relationships | Exercise successful, failed, and retried calls; inspect distinct recorded attempts, outcomes, and explicit retry references. |
+| **TE2 — Model-visible content** | **TE2.1** Actual requests/context; **TE2.2** Returned responses; **TE2.3** Returned reasoning; **TE2.4** Images/audio/other media and their references | Inspect requests and responses across multiple turns and supported modalities, including context changes. Preserve native roles and content. |
+| **TE3 — Per-call token usage** | **TE3.1** Prompt tokens; **TE3.2** Completion tokens; **TE3.3** Reasoning tokens; **TE3.4** Cached tokens; **TE3.5** Total tokens | Inspect each claimed count on the relevant calls. Missing values stay distinct from zero; each metric is assessed separately. |
+| **TE4 — Agent turns** | **TE4.1** Turn identity, ordering, and timestamp; **TE4.2** Turn content: answer, reasoning, and requested actions; **TE4.3** Selected model-response reference; **TE4.4** Associated model attempts | Exercise multiple decisions and recovery; inspect turn records and distinguish the selected response from other attempts associated with the turn. |
+| **TE5 — Tool executions** | **TE5.1** Execution identity and tool name; **TE5.2** Dispatched arguments; **TE5.3** Results/errors; **TE5.4** Execution outcome; **TE5.5** Individual execution timing; **TE5.6** Originating request/turn reference | Exercise successful and failed tools, with overlapping execution where supported. Inspect execution records and their references; a model request alone is not proof of execution. |
+| **TE6 — Invocations and subagents** | **TE6.1** Invocation identity and outcome; **TE6.2** Parent/child relationships; **TE6.3** Delegated input and returned result; **TE6.4** Invocation-to-model-call ownership | Exercise child agents and inspect their relationships, delegated work, results, and explicit ownership of recorded model calls. |
+| **TE7 — Context compaction** | **TE7.1** Compaction occurrence and outcome; **TE7.2** Before/after context references; **TE7.3** Summary or transformation evidence; **TE7.4** Compaction model-call references | Trigger completed and interrupted compaction; inspect the event, subsequent recorded context, and any explicitly identified helper calls. |
+| **TE8 — Execution resources** | **TE8.1** Resource identity and association with agent/tool activity; **TE8.2** Resource lifecycle/outcome; **TE8.3** Measured CPU usage; **TE8.4** Measured memory usage; **TE8.5** Measured GPU usage | Inspect resources associated with harness activity and the scope of available measurements. Sandbox-wide usage must not be presented as per-tool usage. |
 
-### Coverage notes
+Each claim must state its eligible population. For example, usage for root-agent decisions does not establish usage for
+subagents or compaction. Provider-unavailable reasoning/cache counts cannot earn the corresponding availability claim.
+Metrics also retain their provider semantics: do not add reasoning or cached tokens to another count that already
+includes them.
 
-- The inventory starts with the 46 built-in harnesses admitted by the
-  [agent registry](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/nemo_gym/agent_registry.py#L134)
-  and also checks configured entrypoints, including the four nested `conversational_tool_use` harnesses.
-  A harness is listed when at least one of C1, C2, C3, C9, C10, or C11 is `V` or `O`.
-  The two legacy SWE frameworks have separate rows. Custom harnesses from additional search roots require their own audit.
-- The original [`mini_swe_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/responses_api_agents/mini_swe_agent/app.py#L127)
-  is excluded: it uses an unprefixed model URL, emits no canonical observations, and returns placeholder zero usage.
-  `mini_swe_agent_2` has a separate, correlated Model Server path.
-- C2 `O` can mean usage survives only on the rollout response, without per-call capture or an `ng_trajectory`
-  attachment. Finance, Harbor, Harbor General, Image Tools, LangGraph, Remote, SciCode, and VCQA retain such usage;
-  ToolSandbox retains only the last model response's usage. Missing details, defaulted zeros, or incomplete totals
-  must not be treated as measured per-call counts. Harbor General also retains only the first Harbor task step's
-  converted conversation. The [LegalAgentBench bridge](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/resources_servers/legal_agent_bench/harbor_bridge.py#L19)
-  inherits the `harbor_agent` evidence path.
-- LangGraph includes its orchestrator, parallel-thinking, ReWOO, and reflection implementations. The
-  [reflection config](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/responses_api_agents/langgraph_agent/configs/reflection_agent.yaml#L3)
-  names `reflection_agent`, for which no matching harness directory exists in this snapshot. That config's execution
-  path remains an open issue; the row describes the available implementations.
-- Simple, Simple with Compaction, and LabBench emit canonical turns and exact response references. C8 is partial
-  because verifier responses may omit resolution status; C5 is partial because raised execution failures can prevent
-  a tool observation from being returned. Simple with Compaction records the actual compacted input in each turn's
-  `question`. LabBench image stripping makes C4 and C9 partial.
-- AnySWE and AnyTerminal pass a correlated Model Server URL into their sandbox harnesses, but return the nested
-  harness's response without forwarding its canonical observations. NeMo Fabric, Prime, Simple Strands, and
-  `terminus_2_agent` also supply model-call capture without canonical turns or ownership. A caller-provided model URL
-  or an alternative provider must preserve capture routing explicitly; it does not inherit coverage from these rows.
-- CVDP capture covers its Simple path; generic sandbox paths use different routing. OSWorld M3 and Pointer can call
-  providers directly. Stirrup capture covers the policy client; calls outside that client are not guaranteed captured.
-- OpenClaw and PinchBench use the same session-observation adapter and retain partial model-visible history.
-  PinchBench can capture both policy and judge calls, but its invocation references identify OpenClaw policy calls;
-  judge calls have no corresponding invocation. C10 describes policy-call ownership for this path.
-- Verifiers routes the client it hands to the environment through the rollout capture prefix. Calls using that client
-  can supply C1, C2, C4, and C9, but the agent emits no canonical turns or invocation ownership. An environment's
-  independently created client requires its own capture routing.
-- OpenCode includes the standalone, sandboxed, and ViBench paths. The sandboxed and ViBench paths retain OpenCode
-  observations and compose them with verifier-sandbox evidence. Invocation ownership uses the captured session header
-  matched to a saved invocation by the
-  [collector](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/nemo_gym/rollout_observability.py#L305);
-  OpenCode's configured version 1.17.11
-  [sends that header for Gym's provider](https://github.com/anomalyco/opencode/blob/v1.17.11/packages/opencode/src/session/llm/request.ts).
-  Other installed versions must preserve it. Response-ID adapters instead require an exact Model Server and response-ID match.
-- Legacy OpenHands retains one cumulative root conversation, so C4 remains partial. Its
-  [capture overlay](https://github.com/NVIDIA-NeMo/Gym/blob/609c3d150f869d45e5402eebbf7ac71b1f4ffb42/responses_api_agents/swe_agents/app.py#L3760)
-  is installed only when training-token capture is enabled for the agent. With that overlay and evaluation
-  observability enabled, its Model Server requests preserve the rollout prefix and supply C1, C2, and C9.
-  Evaluation observability alone does not install the overlay.
-- C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
-- C10 is invocation ownership and C11 is turn ownership. Exact references describe the calls they identify; they do
-  not establish that every call was assigned to a turn or included in rollout usage. Missing references and explicit
-  scope gaps still matter when deriving [rollout health checks](/evaluation/rollout-health).
-- C9 is independent from C4: saved request and response payloads can coexist with incomplete conversation evidence.
-  Raw-capture-only rows remain in this matrix even when ownership-dependent health checks cannot run.
+Retry relationships in TE1.4 require explicit evidence at the declared boundary. A harness or its own SDK may retry
+independently of Gym. Recorded transport attempts do not by themselves establish which turn caused the retry. Hidden
+retries within an upstream service are outside the capture boundary.
 
-### Terminus2 decisions and invocation ownership
+Malformed command output can be useful turn evidence. Its presence does not mean the command executed, and a parser
+rejection followed by recovery does not by itself establish an unhealthy rollout. A harness's completion claim is also
+not an authoritative verifier result.
 
-With model-call capture enabled as described above, `terminus_2_sandboxed_agent` emits an `AgentInvocation` for each
-identified rollout execution. Its execution-specific `x-session-id` header lets the collector link captured model
-calls to that invocation, including retries without a response ID and summarization calls.
+### Dependencies and derived uses
 
-The adapter records `TrajectoryTurn` entries at Harbor's main-agent decision boundary, before terminal commands
-execute. Each observed decision retains the exact input sent for its selected response, the answer and reasoning,
-and an exact model-server/response-ID reference. Its timestamp is the observed response time. `turn_no` counts main
-decision attempts; `step_count` counts completed nonempty terminal-command batch attempts before that decision. A
-returned batch timeout counts as an attempt, not proof that every command ran. One decision can request several
-commands. `resolved` remains unset because a model's completion claim does not establish task success.
+| Information or analysis | Required evidence |
+|---|---|
+| Exact context used for a turn | TE4.3 selected-response association and TE2.1 request content |
+| Tokens used by a subagent | TE6.4 invocation ownership and the relevant TE3 metrics; TE6.2 identifies the parent/child relationship |
+| Tokens used for compaction | TE7.4 helper-call references and the relevant TE3 metrics |
+| Named parallel-tool timeline | TE5.1 and TE5.5, exercised with parallel execution and comparable timing boundaries |
+| Retry cost for a turn | TE1.4 and TE4.4, plus the relevant TE3 metrics |
 
-Decisions remain available after parser errors, tool failures, or cancellation. Responses rejected by the adapter and
-synthetic Harbor fallback messages are not presented as accepted main-agent decisions. Their available model-call
-evidence remains invocation-owned, with diagnostic gaps. Known summarization boundaries also emit
-`ContextCompactionObservation` records with exact response references; auxiliary fallback calls are not mislabeled as
-main decisions. Missing or reused response IDs produce gaps instead of guessed associations. `turns_unavailable` is
-reported only when no actual decision response could be represented.
+A compaction event does not imply known compaction cost. Context sizes before and after compaction are not helper-call
+usage. Tool timing does not measure CPU utilization; token counts and model latency do not measure GPU utilization.
+Resource measurements require their own TE8 claims.
 
-Observed turns enable `rollout_missing_agent_turns` and `agent_turn_hollow`. Invocation ownership enables
-`model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
-`model_call_runaway_generation`, and `trajectory_capture_mismatch` under their documented capture and payload
-requirements. See [Rollout health checks](/evaluation/rollout-health).
+## Mapping earlier capability names and priorities
 
-The underlying HTTP transport can retry after server admission without notifying the adapter. The adapter always
-emits `transport_retry_visibility_unavailable` and `turn_model_call_scope_incomplete`. These gaps keep complete
-turn-call accounting, rollout token reconciliation, and full policy-call coverage unobserved while
-preserving those seven checks. This producer does not establish an overall healthy rollout or task success from calls.
+The following crosswalk preserves the earlier onboarding priorities rather than assigning new priorities to every TE
+claim. It is not an equivalence between old producer ratings and new test results.
+
+| Earlier capability | Earlier tier | TE mapping | Qualification |
+|---|---|---|---|
+| C1 — Model calls and statuses | P0 | TE1.1 and TE1.2 | Does not automatically include call timing or retry relationships. |
+| C2 — Token counts | P0 | TE3.1–TE3.5 | Five independent availability claims instead of one bundled criterion. |
+| C3 — Canonical turn records | P2 | TE4.1 and TE4.2 | Turn content does not imply exact model-call associations. |
+| C4 — Model-visible input/output history | P0 | TE2.1 and TE2.2; TE2.3 and TE2.4 where applicable | Explicit per-call content requirements replace a broad reconstructable-history claim. |
+| C5 — Tool calls, including names | P1 | TE5.1, TE5.3, TE5.4, and TE5.5 | Dispatched arguments (TE5.2) and originating-request associations (TE5.6) are additional requirements. |
+| C6 — Parallel tool-call timing | P1 | TE5.5 exercised with parallel calls | Separate intervals and comparable clocks are required; a parallel-capability flag is insufficient. |
+| C7 — Resource-server or sandbox-backed benchmarks | P2 | No direct equivalent; TE8.1 and TE8.2 are related | An execution arrangement is not a precise evidence contract. Requiring resource identity and lifecycle would clarify or strengthen the earlier criterion. |
+| C8 — Turn resolution and rewards in the tier summary | P2 | Outside the harness-specific TE list | Authoritative resolution and reward belong to verification, not invocation outcome or the harness's completion claim. |
+| C9 — Model-call payloads | P0 | TE2.1 and TE2.2, with reasoning/media where applicable | Substantially overlaps C4; the new taxonomy assesses the individual content claims. |
+| C10 — Invocation ownership | P0, alternative to C11 | TE6.4, with invocation identity from TE6.1 | Does not require turns or parent/child relationships. The identity dependency does not imply that C10 established invocation outcome. |
+| C11 — Turn-call ownership / complete accounting | P0 alternative; specifically required at P2 | TE4.3 and TE4.4, supported by turn/call identities | A selected-response reference is weaker than complete attempt attribution. TE1.4 and TE7.4 contribute when retries and compaction occur. |
+
+Earlier detailed C8 definitions also bundled turn identity, timestamp, question, and step metadata. Identity and timestamp
+map to TE4.1; exact turn context can be obtained through TE4.3 and TE2.1. A producer-specific step count has no standalone
+TE claim here. Keep these facts distinct from the resolution/reward shorthand used in the earlier tier summary.
+
+| Earlier tier | Evidence emphasis |
+|---|---|
+| P0 | Model-attempt identity/outcome, per-call usage, model-visible content, and explicit ownership through invocations or turns |
+| P1 | Named tool executions, results/outcomes, and individual timing, including a parallel scenario |
+| P2 | Turn records and stronger turn-call attribution; C7 needs a concrete replacement and C8 remains a verification requirement |
+
+This crosswalk does not introduce priorities for model-call timing, standalone retry relationships, dispatched tool
+arguments, subagent delegation, explicit compaction evidence, or measured resource usage. References to CPU/GPU analysis
+in an earlier tier do not automatically require measured utilization. Those priorities need separate agreement.
+
+## Example validation contract: TE3.1
+
+TE3.1 checks availability and representation of a per-call prompt-token count. Apply this JSON Schema fragment to each
+eligible model-call object at `ng_trajectory.model_calls[]`:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TE3.1 — Per-call prompt-token count",
+  "type": "object",
+  "required": ["model_call_id", "token_stats"],
+  "properties": {
+    "model_call_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "token_stats": {
+      "type": "object",
+      "required": ["prompt_tokens"],
+      "properties": {
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
+```
+
+Other properties are allowed. The call ID associates the count with a recorded attempt; uniqueness and reference
+resolution require separate checks. If the authoritative source is `ng_model_call_capture.calls[]`, a reader can map
+`tokens_in` to `token_stats.prompt_tokens` without changing its value and retain the original source location.
+
+| Value | TE3.1 field validation |
+|---|---|
+| `123` | Pass |
+| `0` | Pass |
+| Missing or `null` | Fail |
+| Negative, fractional, or a numeric string such as `"123"` | Fail |
+
+A schema match establishes valid representation, not numerical accuracy. Failed calls without usage remain valid
+rollout records; they do not satisfy token availability. The test must declare eligibility before evaluating the fields,
+for example successful model responses in a basic usage scenario. A successful call with missing usage must not be
+removed from that population. Report eligible, passed, failed, and excluded counts and exclusion reasons. An empty
+eligible population must not earn a pass.
+
+For each TE claim, define the schema properties, relationship assertions, applicable scenarios, and source locations.
+Record the harness/configuration and artifact-reader versions alongside the result. A missing or redacted field cannot
+satisfy availability, and a scenario that did not exercise a capability cannot establish it. In this first scope, these
+are artifact-based results under the Gym-routing assumption, not proof of independent execution completeness.
