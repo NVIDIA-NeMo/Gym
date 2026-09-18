@@ -18,7 +18,7 @@ import re
 import warnings
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_serializer, field_validator, model_validator
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -28,13 +28,21 @@ class _StrictModel(BaseModel):
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
-# (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
+# (e.g. slurm_script.py) detect this prefix and emit a shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.
 RUNTIME_ENV_PREFIX = "runtime:"
 
 
 class _LiteralEnvValue(str):
     """Keep resolved literal values distinct from runtime references with the same text."""
+
+
+def _serialize_env_dict(env: dict[str, str]) -> dict[str, str]:
+    """Keep the runtime-prefix escape visible in the persisted resolved config."""
+    return {
+        key: f"lit:{value}" if isinstance(value, _LiteralEnvValue) and value.startswith(RUNTIME_ENV_PREFIX) else value
+        for key, value in env.items()
+    }
 
 
 def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
@@ -105,6 +113,10 @@ class BaseServiceConfig(_StrictModel):
     @classmethod
     def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
         return resolve_env_dict(v)
+
+    @field_serializer("env", when_used="json")
+    def _serialize_resolved_env(self, env: dict[str, str]) -> dict[str, str]:
+        return _serialize_env_dict(env)
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -235,6 +247,10 @@ class DriverConfig(_StrictModel):
     @classmethod
     def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
         return resolve_env_dict(v)
+
+    @field_serializer("env", when_used="json")
+    def _serialize_resolved_env(self, env: dict[str, str]) -> dict[str, str]:
+        return _serialize_env_dict(env)
 
 
 class JobConfig(_StrictModel):
