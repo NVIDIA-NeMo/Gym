@@ -55,6 +55,11 @@ class WandbExporter(BaseExporter):
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
         )
 
+        inference_metrics = self.global_config_dict.get("inference_metrics")
+        if inference_metrics and inference_metrics.get("enabled"):
+            self.run.define_metric("progress/completion_pct")
+            self.run.define_metric("progress/*", step_metric="progress/completion_pct")
+
     def teardown(self) -> None:
         if self.run is not None:
             self.run.finish()
