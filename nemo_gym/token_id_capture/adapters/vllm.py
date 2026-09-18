@@ -11,7 +11,7 @@ from typing import Any
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
-IMAGE_CAPTURE_FIELD = "image_capture"
+MEDIA_CAPTURE_FIELD = "media_capture"
 
 
 def _message(choice: dict[str, Any]) -> dict[str, Any]:
@@ -72,9 +72,9 @@ class VLLMCaptureAdapter:
             if not isinstance(routed_experts, (str, dict, list)):
                 raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
             extras[ROUTED_EXPERTS_FIELD] = routed_experts
-        if IMAGE_CAPTURE_FIELD in response_payload:
-            geometry = response_payload[IMAGE_CAPTURE_FIELD]
+        if MEDIA_CAPTURE_FIELD in response_payload:
+            geometry = response_payload[MEDIA_CAPTURE_FIELD]
             if not isinstance(geometry, dict):
-                raise ValueError("vLLM image_capture must be an object")
-            extras[IMAGE_CAPTURE_FIELD] = geometry
+                raise ValueError("vLLM media_capture must be an object")
+            extras[MEDIA_CAPTURE_FIELD] = geometry
         return extras or None
