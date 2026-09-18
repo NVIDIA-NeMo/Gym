@@ -77,10 +77,9 @@ raw capture also retains metadata not represented in the trajectory. Successful 
 request/response payloads from the capture attachment. Their absence there is not evidence loss when the authoritative
 payload is retained in `ng_trajectory`.
 
-A versioned reader should resolve each claim from its documented source locations. It must retain the source location in
-its result, avoid counting duplicate representations as separate executions, and report conflicting copies. A missing
-field, an empty collection, an unknown value, and a redacted value have different meanings. An invocation conversation is
-not a fallback for unobserved turn boundaries. This vocabulary does not require moving or deleting existing attachments.
+The validator reads each kind of evidence from its supported locations in the rollout record. Duplicate copies count
+once; conflicting copies are reported. Evidence satisfies only the claims it explicitly supports—for example, a saved
+conversation alone does not establish agent turn boundaries.
 
 ## Evidence taxonomy
 
