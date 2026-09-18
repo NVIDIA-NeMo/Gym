@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -5226,6 +5227,23 @@ class TestEndpointFile:
         assert server.config.base_url == ["http://newer-host:8712/v1"]
         # Static base_url clients keep today's retry-forever behavior.
         assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_publish_with_unchanged_mtime_and_size(self, tmp_path) -> None:
+        endpoint_file = tmp_path / "endpoint.txt"
+        endpoint_file.write_text("http://old-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_check_interval_s=0)
+        server._maybe_rebind_endpoint()
+        previous = endpoint_file.stat()
+        server._session_id_to_client["old-session"] = server._clients[0]
+
+        endpoint_file.write_text("http://new-host:8712/v1\n")
+        os.utime(endpoint_file, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        assert endpoint_file.stat().st_size == previous.st_size
+        server._maybe_rebind_endpoint()
+
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        assert [client.base_url for client in server._clients] == ["http://new-host:8712/v1"]
+        assert not server._session_id_to_client
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"
