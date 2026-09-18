@@ -473,6 +473,34 @@ def test_gym_tar_built_on_init():
         assert agent._gym_tar == "/tmp/fake.tar.gz"
 
 
+def test_runner_marker_survives_redirected_stdout(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    mount = tmp_path / "gym_mount"
+    mount.mkdir()
+    (mount / "nemo_gym").symlink_to(root / "nemo_gym", target_is_directory=True)
+    (mount / "stub_agent.py").write_text(
+        "import io, sys\nfrom types import SimpleNamespace\n"
+        "Config = SimpleNamespace\n"
+        "class Agent:\n"
+        "    def __init__(self, **kwargs): pass\n"
+        "    async def responses(self, request, params):\n"
+        "        sys.stdout = io.StringIO()\n"
+        "        return SimpleNamespace(model_dump_json=lambda: '{}')\n"
+    )
+    for name, body in {
+        "runner_config.json": {"agent_module": "stub_agent", "agent_class": "Agent", "agent_config_class": "Config"},
+        "agent_config.json": {},
+        "request.json": {"input": "hello"},
+    }.items():
+        (tmp_path / name).write_text(json.dumps(body))
+    (tmp_path / "model_url.txt").write_text("http://127.0.0.1:8000/v1")
+    runner = tmp_path / "agent_runner.py"
+    runner.write_text((root / "responses_api_agents/harness_agent/agent_runner.py").read_text())
+    result = subprocess.run([sys.executable, str(runner)], capture_output=True, text=True, check=True)
+    assert "RUNNER_DONE" in result.stdout
+    assert json.loads((tmp_path / "response.json").read_text()) == {}
+
+
 def test_runner_config_carries_agent_symbols():
     agent = _make_agent(
         agent="opencode",
