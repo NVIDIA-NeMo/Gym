@@ -24,11 +24,11 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -415,6 +415,15 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+class PiMCPServerConfig(BaseModel):
+    """Gym's authenticated, stateless JSON MCP endpoint (timeout in milliseconds)."""
+
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    timeout: int = Field(default=60000, gt=0)
+
+
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: Optional[ModelServerRef] = None
@@ -430,7 +439,10 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     models_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
+    output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
+    auto_compaction: bool = True
     pi_version: Optional[str] = None
+    mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
 
     @property
     def command_parts(self) -> list[str]:
@@ -522,9 +534,20 @@ class PiAgent(SimpleResponsesAPIAgent):
         models_config = self._build_models_config(rollout_id)
         if models_config:
             (home / ".pi" / "agent" / "models.json").write_text(json.dumps(models_config, indent=2))
+        (home / ".pi" / "agent" / "settings.json").write_text(
+            json.dumps({"compaction": {"enabled": self.config.auto_compaction}})
+        )
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
+        if self.config.output_token_policy == "remaining_context":
+            cmd += ["--extension", str(Path(__file__).with_name("remaining-context.mjs"))]
+        if self.config.mcp_servers:
+            mcp_path = home / "mcp-servers.json"
+            with open(mcp_path, "w", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+                json.dump({name: server.model_dump() for name, server in self.config.mcp_servers.items()}, stream)
+            env["NEMO_GYM_PI_MCP_CONFIG"] = str(mcp_path)
+            cmd += ["--extension", str(Path(__file__).with_name("gym_mcp.mjs"))]
         if provider:
             cmd += ["--provider", provider, "--model", model_id]
         else:

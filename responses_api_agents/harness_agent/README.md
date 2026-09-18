@@ -15,7 +15,7 @@ Reserved keys in `responses_create_params.metadata`:
 Tasks with an external verifier (e.g. math) need none of these beyond an image.
 This is largely for swe bench now.
 
-## Offline scientific benchmarks (development)
+## Offline scientific benchmarks
 
 Compose the benchmark with one harness preset, for example in a local config:
 
@@ -29,7 +29,8 @@ Use `benchmarks/hle/harness.yaml` for HLE, or select `configs/pi.yaml` instead o
 `configs/opencode.yaml` to exercise Pi. Select one preset per configuration.
 Both benchmarks retain their existing preparation, grading and repeats. HLE
 uses its Explanation/Answer/Confidence instructions in the user message. The
-harness presets add only the network-availability note to the native agent setup.
+harness presets add brief guidance about network availability and preinstalled
+scientific tools, with a pointer to `/opt/science/README.md` for usage details.
 
 Set `HARNESS_SANDBOX_IMAGE` to an image digest containing the harness binaries,
 scientific tools, and an isolated Gym interpreter at `/opt/gym-runtime/bin/python`.
@@ -55,18 +56,23 @@ and records reward zero with `harness_failed=true`. Setup, export and judge erro
 still raise; use Gym's failure sidecar to keep unrelated rows running, and account
 for those missing rows before reporting full benchmark coverage.
 
-The OpenCode preset uses the remaining-context plugin, disables compaction, and
-sets 400 steps. Pi's preset is for plumbing validation: its native token-budget
-and compaction behavior has not yet been aligned or benchmarked. All enclosing
-benchmark rollout limits are four hours; individual tools retain native limits.
+Both presets omit the per-request output cap for Gym's model provider, letting
+vLLM calculate the remaining context budget, and disable automatic compaction.
+The serving configuration must allow the intended context length and must not impose
+a smaller default output cap. OpenCode also sets 400 steps. Pi benchmark scores
+have not yet been compared. All enclosing benchmark rollout limits are four hours;
+individual tools retain native limits.
 
 The `apex_shortlist/opencode` and `hle/opencode` benchmark entrypoints compose
 these presets. `hle/opencode_search` adds the existing Tavily resource with
 `network_access: model_and_tools`. The shared runner seeds each `tool_servers`
-entry through Gym and passes its signed per-session MCP headers to OpenCode.
+entry through Gym and passes its signed per-session MCP headers to the harness.
 Only the configured model and tool hosts are allowed; Tavily API keys remain in
-the resource process. Remote MCP injection currently supports OpenCode; other
-harnesses are rejected when tool servers are configured.
+the resource process. Connecting Gym-hosted tools supports OpenCode and Pi; other
+harnesses are rejected when tool servers are configured. Pi uses an extension for
+Gym's stateless JSON MCP endpoints, with tools named `<server>_<tool>`. Required
+tool discovery failures stop the Pi process, and tool calls honor cancellation
+and the configured rollout deadline.
 
 Tavily enforces the HLE domain/URL exclusions. Deployments can supply an additional
 policy file to the resource without changing the public benchmark. See

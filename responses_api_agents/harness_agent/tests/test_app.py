@@ -818,8 +818,11 @@ async def test_restricted_tools_allow_only_model_and_tool_hosts():
             await agent._provision_box("image", {}, "https://model.example")
 
 
-async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config():
-    agent = _make_agent(agent="opencode", agent_kwargs={"opencode_config": {"mcp": {"existing": {"enabled": False}}}})
+@pytest.mark.parametrize("kind", ["opencode", "pi"])
+async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config(kind):
+    entries = {"existing": {"enabled": False}}
+    kwargs = {"opencode_config": {"mcp": entries}} if kind == "opencode" else {"mcp_servers": entries}
+    agent = _make_agent(agent=kind, agent_kwargs=kwargs)
     agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
     agent._provider.exec = AsyncMock(return_value=SandboxExecResult("RUNNER_DONE", "", 0))
     agent._provider.close = AsyncMock()
@@ -837,11 +840,13 @@ async def test_concurrent_rollouts_keep_mcp_tokens_out_of_shared_config():
 
     with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
         await asyncio.gather(run_one("one"), run_one("two"))
-    assert agent.config.agent_kwargs == {"opencode_config": {"mcp": {"existing": {"enabled": False}}}}
+    assert agent.config.agent_kwargs == kwargs
+    assert entries == {"existing": {"enabled": False}}
     for call in agent._provision_box.await_args_list:
         files = call.args[1]
         identifier = json.loads(files["/work/runner_config.json"])["rollout_id"]
-        mcp = json.loads(files["/work/agent_config.json"])["opencode_config"]["mcp"]
+        config = json.loads(files["/work/agent_config.json"])
+        mcp = config["opencode_config"]["mcp"] if kind == "opencode" else config["mcp_servers"]
         assert mcp["search"]["headers"]["Authorization"] == identifier
         assert mcp["existing"] == {"enabled": False}
 

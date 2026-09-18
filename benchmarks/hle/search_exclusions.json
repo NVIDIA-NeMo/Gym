@@ -136,7 +136,7 @@
         },
         {
           "type": "url_substring",
-          "value": "medium.com/@82deutschmark/o3-quiet-breakthrough-1bf9f0fobafc84"
+          "value": "medium.com/@82deutschmark/o3-quiet-breakthrough-1bf9f0bafc84"
         },
         {
           "type": "url_substring",
@@ -156,11 +156,103 @@
         },
         {
           "type": "url_substring",
+          "value": "nate9389.tistory.com/1438"
+        },
+        {
+          "type": "url_substring",
+          "value": "blog.asteromorph.com/hle-is-flawed"
+        },
+        {
+          "type": "url_substring",
+          "value": "x.com/owl_posting/status/1882929601892212918"
+        },
+        {
+          "type": "url_substring",
           "value": "xiaowenz.com/episodes/humanity-last-exam-and-agi"
         },
         {
           "type": "url_substring",
           "value": "research-collection.ethz.ch/server/api/core/bitstreams/1902b5a9-4209-4529-b278-c258aad557ba/content"
+        },
+        {
+          "type": "url_substring",
+          "value": "2511.22173"
+        },
+        {
+          "type": "url_substring",
+          "value": "2509.21193"
+        },
+        {
+          "type": "url_substring",
+          "value": "2603.04737"
+        },
+        {
+          "type": "url_substring",
+          "value": "2605.22138"
+        },
+        {
+          "type": "url_substring",
+          "value": "proceedings.iclr.cc/paper_files/paper/2026/file/230072eb053908b7f9d7aca0b36bd7f2-Paper-Conference.pdf"
+        },
+        {
+          "type": "url_substring",
+          "value": "moltbook.com/post/4aa979ce-6773-4c8c-b6e2-1594c9f63367"
+        },
+        {
+          "type": "url_substring",
+          "value": "moltbook.com/post/feaa8366-7d1b-46d4-80db-f5b6309f55f5"
+        },
+        {
+          "type": "url_substring",
+          "value": "ballroompages.com/glossary/reverse-turn"
+        },
+        {
+          "type": "url_substring",
+          "value": "facebook.com/fb-answers/in-which-dance-is-it-impossible-to-overturn-a-reverse-turn"
+        },
+        {
+          "type": "url_substring",
+          "value": "facebook.com/fb-answers/what-is-the-closest-province-or-territory-to-the-waskaganish-gathering-place"
+        },
+        {
+          "type": "url_substring",
+          "value": "stackprinter.appspot.com/export?question=5084241&service=math.stackexchange"
+        },
+        {
+          "type": "url_substring",
+          "value": "reddit.com/r/ClaudeAI/comments/1ovyqzc/"
+        },
+        {
+          "type": "url_substring",
+          "value": "linkedin.com/posts/tommy-mac-bird_question-for-legal-experts-in-the-ai-benchmark-activity-7436456250693021696"
+        },
+        {
+          "type": "url_substring",
+          "value": "metasparik.com/peter-sloterdijk-the-state-is-a-metaphor-for"
+        },
+        {
+          "type": "url_substring",
+          "value": "openreview.net/pdf/b2c1149bcb05cc7914d93995e3febf22e8d1e231.pdf"
+        },
+        {
+          "type": "url_substring",
+          "value": "nate9389.tistory.com/2314"
+        },
+        {
+          "type": "url_substring",
+          "value": "huggingface-com.translate.goog/datasets/skylenage-ai/HLE-Verified"
+        },
+        {
+          "type": "url_substring",
+          "value": "cs.cornell.edu/gomes/pdf/2025_song_arxiv_sde.pdf"
+        },
+        {
+          "type": "url_substring",
+          "value": "researchgate.net/publication/410787907_Evaluating_Large_Language_Models_in_Scientific_Discovery"
+        },
+        {
+          "type": "url_substring",
+          "value": "researchgate.net/publication/398806449_Evaluating_Large_Language_Models_in_Scientific_Discovery"
         }
       ]
     }

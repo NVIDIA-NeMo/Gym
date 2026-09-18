@@ -305,6 +305,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             max_results=self.config.max_results,
             exclude_domains=self._exclude_domains,
             search_depth=self.config.search_depth,
+            # Tavily receives domain exclusions, but URL-pattern exclusions are applied locally.
+            # Its LLM-generated answer could summarize a page we later discard, so return
+            # source results only, including for domain-only policies for consistent behavior.
             include_answer=False,
             include_raw_content=False,
         )
@@ -524,7 +527,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return text[:cut], True
 
     def _postprocess_search_results(self, results: dict) -> list[str]:
-        # Generated aggregate answers cannot be checked against the URL exclusion policy.
+        # Ignore any aggregate answer even if returned despite include_answer=False:
+        # filtering source URLs cannot remove blocked content from a generated summary.
         formatted_results = ["Search Results\n==============\n"]
         for i, result in enumerate(self._allowed_results(results)[: self.config.max_results], 1):
             domain = self._extract_domain(result["url"])

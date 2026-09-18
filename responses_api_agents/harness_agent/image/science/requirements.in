@@ -1,5 +1,5 @@
 # Scientific tools available to the agent without runtime downloads.
-# Resolve for CPython 3.12 / linux x86_64; see README.md for the locking command.
+# Resolve for CPython 3.13.14 / linux x86_64; see README.md for the locking command.
 numpy
 scipy
 sympy

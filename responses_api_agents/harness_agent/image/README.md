@@ -1,9 +1,10 @@
 # Offline harness runtime
 
-This layer adds Python 3.13.14 for Gym and Node 22.23.2 / Pi 0.85.1 to the
-[scientific image](science/README.md). OpenCode and
-the scientific Python remain in that base. `/opt/gym-runtime/bin/python` runs Gym;
-`python3` on the tool's PATH continues to use the scientific package environment.
+This layer adds an isolated Python 3.13.14 environment for Gym and
+Node 22.23.2 / Pi 0.85.1 to the [scientific image](science/README.md).
+All three Python environments (Gym, scientific tools, and Sage) use 3.13.14
+with separate dependency sets. `/opt/gym-runtime/bin/python` runs Gym;
+`python3` on the tool's PATH uses the scientific package environment.
 
 Build from the Gym repository root:
 

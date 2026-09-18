@@ -167,8 +167,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        if self.config.tool_servers and self.config.agent != "opencode":
-            raise ValueError("Authenticated remote MCP tools currently require the OpenCode adapter")
+        if self.config.tool_servers and self.config.agent not in {"opencode", "pi"}:
+            raise ValueError("Authenticated remote MCP tools currently require the OpenCode or Pi adapter")
         if self.config.network_access == "model_only" and self.config.tool_servers:
             raise ValueError("Remote tools require network_access=model_and_tools or inherit")
         if self.config.network_access == "model_and_tools" and not self.config.tool_servers:
@@ -495,7 +495,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
         agent_config = deepcopy(self.config.agent_kwargs)
         if mcp := context.get("mcp"):
-            agent_config.setdefault("opencode_config", {}).setdefault("mcp", {}).update(mcp)
+            if self.config.agent == "pi":
+                agent_config.setdefault("mcp_servers", {}).update(mcp)
+            else:
+                agent_config.setdefault("opencode_config", {}).setdefault("mcp", {}).update(mcp)
         if adapter_id := _FABRIC_ADAPTERS.get(self.config.agent):
             agent_config.setdefault("adapter_id", adapter_id)
         agent_config.setdefault("resources_server", self.config.resources_server.model_dump(mode="json"))

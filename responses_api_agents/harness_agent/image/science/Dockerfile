@@ -4,7 +4,7 @@
 # OpenCode and offline scientific tools, linux/amd64.
 FROM ghcr.io/astral-sh/uv:0.12.7@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945 AS uv
 FROM mambaorg/micromamba:2.9.0@sha256:5681ae3caa12844c41d31e1d70f636fbaba31b01bdfd1b5b521742d7e490614d AS micromamba
-FROM python:3.12.14-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970 AS base
+FROM python:3.13.14-bookworm@sha256:7a6b87c02e1f4d6bb572e379235cbbdd7892add0572442c9b0b860a3f5aa9857 AS base
 
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
@@ -62,7 +62,7 @@ COPY --from=python-tools /usr/local /usr/local
 COPY requirements.in requirements.lock sage-environment.yaml sage-linux-64.lock /opt/image-provenance/
 ENV PATH=/opt/lean/bin:$PATH
 # Sage's environment is separate; ordinary python/python3 keep the scientific stack.
-RUN printf '#!/bin/sh\nexec micromamba run -p /opt/sage sage "$@"\n' > /usr/local/bin/sage && \
+RUN printf '#!/bin/sh\nif [ "$1" = "-python" ]; then\n    shift\n    exec micromamba run -p /opt/sage python "$@"\nfi\nexec micromamba run -p /opt/sage sage "$@"\n' > /usr/local/bin/sage && \
     chmod 0755 /usr/local/bin/sage && \
     mkdir -p /opt/mamba /root/.astropy/config && \
     printf '[utils.iers.iers]\nauto_download = False\n' > /root/.astropy/config/astropy.cfg

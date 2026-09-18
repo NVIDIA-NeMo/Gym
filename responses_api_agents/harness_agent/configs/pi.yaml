@@ -1,5 +1,3 @@
-# Development plumbing preset. Pi's token-budget/compaction policy is not yet
-# equivalent to the OpenCode benchmark preset; do not compare benchmark scores.
 harness_benchmark_agent:
   responses_api_agents:
     harness_agent:
@@ -9,6 +7,9 @@ harness_benchmark_agent:
         pi_version: 0.85.1
         timeout: 14400
         context_window: 262144
+        max_output_tokens: 262144
+        output_token_policy: remaining_context
+        auto_compaction: false
         system_prompt: |
           Internet access is disabled on this machine.
           Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
