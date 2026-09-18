@@ -567,7 +567,9 @@ class TestApp:
         assert res.json()["status"] == "incomplete"
         assert res.json()["incomplete_details"] is None
         assert res.json()["metadata"]["existing_key"] == "preserved"
-        assert res.json()["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+        assert res.json()["metadata"]["ng_termination_reason"] == (
+            "empty_output" if empty_output else "reasoning_only_output"
+        )
         assert res.json()["metadata"]["ng_termination_message"] in caplog.text
         assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
         if not empty_output:
@@ -664,7 +666,7 @@ class TestApp:
             if server_name == "model":
                 return _mock_response(payload)
             assert url_path == "/verify"
-            assert kwargs["json"]["response"]["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+            assert kwargs["json"]["response"]["metadata"]["ng_termination_reason"] == "reasoning_only_output"
             return _mock_response(kwargs["json"] | {"reward": 0.0})
 
         client.post = AsyncMock(side_effect=post)
@@ -672,7 +674,7 @@ class TestApp:
         saved = json.loads(result.model_dump_json())
         assert "ng_trajectory" not in saved
         assert saved["response"]["status"] == "incomplete"
-        assert saved["response"]["metadata"]["ng_termination_reason"] == "missing_assistant_message"
+        assert saved["response"]["metadata"]["ng_termination_reason"] == "reasoning_only_output"
         assert "training-level fixes" in saved["response"]["metadata"]["ng_termination_message"]
         assert sum(call.kwargs["server_name"] == "model" for call in client.post.await_args_list) == 1
 

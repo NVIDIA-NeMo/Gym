@@ -327,10 +327,16 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                         "This indicates either a badly trained model requiring training-level fixes "
                         "or a bug in the inference engine."
                     )
+                    if not output:
+                        termination_reason = "empty_output"
+                    elif all(item.type == "reasoning" for item in output):
+                        termination_reason = "reasoning_only_output"
+                    else:
+                        termination_reason = "missing_assistant_message"
                     model_response.status = "incomplete"
                     model_response.metadata = {
                         **(model_response.metadata or {}),
-                        "ng_termination_reason": "missing_assistant_message",
+                        "ng_termination_reason": termination_reason,
                         "ng_termination_message": termination_message,
                     }
                     LOG.warning(
