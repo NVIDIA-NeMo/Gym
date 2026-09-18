@@ -567,7 +567,10 @@ class TestApp:
         if not empty_output:
             assert res.json()["output"][0]["summary"] == mock_response_reasoning_data["output"][0]["summary"]
         assert "Ending trajectory" in caplog.text
-        assert "model/serving bug" in caplog.text
+        assert "finish_reason='stop'" in caplog.text
+        assert "finish_reason='length', handled separately" in caplog.text
+        assert "badly trained model requiring training-level fixes" in caplog.text
+        assert "bug in the inference engine" in caplog.text
         assert mock_response_reasoning_data["id"] in caplog.text
 
     async def test_reasoning_only_trajectory_is_incomplete(self) -> None:
@@ -686,9 +689,10 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
-    async def test_incomplete_details(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_incomplete_details(self, monkeypatch: MonkeyPatch, caplog) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})
+        assert "Ending trajectory" not in caplog.text
 
     async def _test_incomplete_details_helper(self, monkeypatch: MonkeyPatch, incomplete_details) -> None:
         config = SimpleAgentConfig(

@@ -176,8 +176,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     invocation_status = "incomplete"
                     LOG.warning(
                         "Ending trajectory: model returned no assistant message or tool calls "
-                        "(reasoning-only or empty output). This may indicate incomplete reasoning "
-                        "or a model/serving bug. model_server=%s response_id=%s rollout_id=%s step=%s",
+                        "(reasoning-only or empty output) without reported truncation. "
+                        "This is the stop-token case (finish_reason='stop'), not length truncation "
+                        "(finish_reason='length', handled separately via incomplete_details). "
+                        "This indicates either a badly trained model requiring training-level fixes "
+                        "or a bug in the inference engine. "
+                        "model_server=%s response_id=%s rollout_id=%s step=%s",
                         self.config.model_server.name,
                         model_response.id,
                         rollout_id,
