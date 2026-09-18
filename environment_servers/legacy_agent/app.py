@@ -7,11 +7,13 @@
 it relays `/run` to an agent that has not been migrated, so the agent's own contract still applies.
 """
 
+import warnings
 from collections.abc import Iterable
 from typing import Any
 
 from fastapi import Body, FastAPI, Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
+from typing_extensions import Self
 
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -22,6 +24,15 @@ from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMet
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
+
+_UNUSED_LIMITS = frozenset(
+    {
+        "max_concurrent_episodes",
+        "queue_timeout_seconds",
+        "default_episode_timeout_seconds",
+        "cleanup_timeout_seconds",
+    }
+)
 
 # Headers that describe a connection or a body, not the payload. Each hop frames its own, and
 # `cookie` is carried separately so aiohttp does not send it twice.
@@ -49,6 +60,24 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
     model_config = ConfigDict(extra="forbid")
 
     agent_server: AgentServerRef
+
+    # A relay enforces none of these; the agent keeps its own limits. They carry defaults only
+    # because the base declares them, so configs need not repeat values that do nothing.
+    max_concurrent_episodes: PositiveInt | None = None
+    queue_timeout_seconds: PositiveFloat | None = None
+    default_episode_timeout_seconds: PositiveFloat = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
+
+    @model_validator(mode="after")
+    def warn_on_unused_limits(self) -> Self:
+        set_limits = sorted(_UNUSED_LIMITS & self.model_fields_set)
+        if set_limits:
+            warnings.warn(
+                f"{self.name} sets {', '.join(set_limits)}, which a relay does not enforce. "
+                "This parameter has no effect.",
+                stacklevel=2,
+            )
+        return self
 
 
 class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
