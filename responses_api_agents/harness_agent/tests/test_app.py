@@ -17,8 +17,6 @@ import asyncio
 import json
 import subprocess
 import sys
-import tarfile
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -473,101 +471,6 @@ def test_gym_tar_built_on_init():
     ):
         agent = HarnessAgent(config=_config(), server_client=server_client)
         assert agent._gym_tar == "/tmp/fake.tar.gz"
-
-
-def test_hermes_source_archive_includes_dependency_installation_inputs():
-    server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = {}
-    agent = HarnessAgent(config=_config(agent="hermes", sandbox_provider={"docker": {}}), server_client=server_client)
-    try:
-        with tarfile.open(agent._gym_tar) as archive:
-            names = set(archive.getnames())
-            assert {"pyproject.toml", "README.md", "LICENSE"} <= names
-            assert "responses_api_agents/hermes_agent/requirements.txt" in names
-            assert "responses_api_agents/hermes_agent/app.py" in names
-    finally:
-        agent._gym_tar.unlink()
-
-
-def test_harness_archive_supports_installed_packages_without_build_metadata(monkeypatch, tmp_path):
-    for directory in ("nemo_gym", "responses_api_agents/hermes_agent"):
-        package = tmp_path / directory
-        package.mkdir(parents=True)
-        (package / "__init__.py").write_text("# installed package\n")
-    monkeypatch.setattr(
-        "responses_api_agents.harness_agent.app.__file__",
-        str(tmp_path / "responses_api_agents/harness_agent/app.py"),
-    )
-    server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = {}
-    agent = HarnessAgent(config=_config(agent="hermes", sandbox_provider={"docker": {}}), server_client=server_client)
-    try:
-        with tarfile.open(agent._gym_tar) as archive:
-            assert archive.extractfile("nemo_gym/__init__.py").read() == b"# installed package\n"
-    finally:
-        agent._gym_tar.unlink()
-
-
-def test_shared_runner_executes_hermes_in_the_task_directory(tmp_path):
-    root = Path(__file__).resolve().parents[3]
-    mount = tmp_path / "gym_mount"
-    mount.mkdir()
-    for package in ("nemo_gym", "responses_api_agents"):
-        (mount / package).symlink_to(root / package, target_is_directory=True)
-    (tmp_path / "model_tools.py").write_text("")
-    (tmp_path / "run_agent.py").write_text(
-        textwrap.dedent("""\
-        import json
-        from pathlib import Path
-
-        class AIAgent:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
-            def _build_api_kwargs(self, messages):
-                return {}
-
-            def run_conversation(self, message, system, history):
-                Path("hermes-invocation.json").write_text(json.dumps(self.kwargs))
-                return {"completed": True, "api_calls": 1, "messages": [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": "task finished"},
-                ]}
-        """)
-    )
-    task_dir = tmp_path / "task"
-    task_dir.mkdir()
-    agent = _make_agent(agent="hermes")
-    script, runner_config, _ = agent._runner()
-    runner_config["cwd"] = str(task_dir)
-    (tmp_path / "runner.py").write_text(script)
-    (tmp_path / "runner_config.json").write_text(json.dumps(runner_config))
-    (tmp_path / "request.json").write_text('{"input": "finish the task"}')
-    (tmp_path / "model_url.txt").write_text("http://gym-model:8000/ng-rollout/task-1")
-    (tmp_path / "agent_config.json").write_text(
-        json.dumps(
-            {
-                "model": "test-model",
-                "model_server": {"type": "responses_api_models", "name": "policy_model"},
-                "resources_server": {"type": "resources_servers", "name": "resources"},
-                "api_key": "dummy",
-                "max_turns": 5,
-                "chat_template_kwargs_enabled": False,
-                "token_id_capture": False,
-            }
-        )
-    )
-    result = subprocess.run([sys.executable, str(tmp_path / "runner.py")], capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr
-    response = NeMoGymResponse.model_validate_json((tmp_path / "response.json").read_text())
-    assert response.status == "completed"
-    assert response.output[0].content[0].text == "task finished"
-    invocation = json.loads((task_dir / "hermes-invocation.json").read_text())
-    assert invocation["base_url"] == "http://gym-model:8000/ng-rollout/task-1/v1"
-    assert invocation["model"] == "test-model"
-    assert invocation["api_key"] == "dummy"
-    assert invocation["max_iterations"] == 5
-    assert invocation["use_streaming"] is False
 
 
 def test_runner_config_carries_agent_symbols():

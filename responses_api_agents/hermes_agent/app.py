@@ -307,8 +307,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
-            # Gym carries reasoning in <think> blocks and rejects non-null reasoning_content.
-            insert_reasoning=False,
+            insert_reasoning=True,
             max_iterations=self.config.max_turns,
             max_tokens=self.config.max_tokens,
             enabled_toolsets=self.config.enabled_toolsets,

@@ -182,7 +182,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         agent_module, _, _ = resolve_agent(self.config.agent)
         agent_pkg = "/".join(agent_module.split(".")[:-1])
         tar_path = Path(tempfile.gettempdir()) / f"gym_src_{uuid4().hex}.tar.gz"
-        build_files = [name for name in ("pyproject.toml", "README.md", "LICENSE") if (root / name).is_file()]
         subprocess.run(
             [
                 "tar",
@@ -198,7 +197,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "--exclude=workspaces",
                 "-C",
                 str(root),
-                *build_files,
                 "nemo_gym",
                 agent_pkg,
             ],

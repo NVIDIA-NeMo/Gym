@@ -6,7 +6,7 @@ from copy import deepcopy
 from glob import glob
 from pathlib import Path
 from sys import stderr
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import NamedTemporaryFile
 from time import time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
@@ -293,10 +293,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         reward = 0.0
         if eval_result is not None:
             try:
-                with TemporaryDirectory() as temp_dir:
-                    reward_path = Path(temp_dir) / "reward.txt"
-                    await eval_sandbox.download("/logs/verifier/reward.txt", str(reward_path))
-                    reward = float(reward_path.read_text())
+                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
+                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    temp_file.seek(0)
+                    reward = float(temp_file.read())
 
                 evaluation_completed = True
             except:
