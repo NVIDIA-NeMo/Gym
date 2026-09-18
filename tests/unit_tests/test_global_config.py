@@ -28,6 +28,7 @@ from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, 
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
     AgentCompositionError,
+    AgentWithoutEnvironmentServerError,
     AlmostServerError,
     ConfigError,
     ConfigMissingValuesError,
@@ -714,6 +715,12 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
+                    "explicit_agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "explicit_agent_name"}}}
+                    },
                 }
             )
         )
@@ -774,6 +781,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -808,6 +818,9 @@ contested: second_inner
                             "domain": "other",
                         }
                     }
+                },
+                "agent_name_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                 },
                 "disallowed_ports": [11000, 12345, 123456],
             }
@@ -847,6 +860,9 @@ contested: second_inner
                                 },
                             }
                         }
+                    },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                     },
                 }
             )
@@ -905,6 +921,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -952,6 +971,9 @@ contested: second_inner
                                 "domain": "other",
                             }
                         }
+                    },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                     },
                 }
             )
@@ -1396,6 +1418,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "test_agent_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "test_agent"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -1466,6 +1491,9 @@ contested: second_inner
                                 ],
                             }
                         }
+                    },
+                    "test_agent_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "test_agent"}}}
                     },
                 }
             )
@@ -1998,6 +2026,36 @@ class TestConfigLoadErrors:
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
 
+    def test_config_without_environment_server_is_rejected(self) -> None:
+        # A pre-migration config would otherwise run, silently dispatching straight to the agent.
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "mcqa": {"resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "other"}}},
+                "mcqa_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "mcqa"},
+                        }
+                    }
+                },
+            }
+        )
+        with raises(AgentWithoutEnvironmentServerError) as exc_info:
+            parser._raise_on_agent_without_environment_server(config)
+        assert "mcqa_simple_agent" in str(exc_info.value)
+
+        config["mcqa_environment_server"] = {
+            "environment_servers": {
+                "legacy_agent": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                }
+            }
+        }
+        parser._raise_on_agent_without_environment_server(config)
+
     def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
         # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
         # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
@@ -2215,6 +2273,10 @@ class TestComposeUnboundAgent:
             "gpqa_mcqa_simple_agent": self._environment_agent("gpqa_mcqa_resources_server"),
             "gpqa_mcqa_resources_server": {
                 "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}
+            },
+            # Named after the environment, so composition swapping the agent leaves it alone.
+            "gpqa_mcqa_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "gpqa_mcqa_simple_agent"}}}
             },
         }
         config.update(extra)
@@ -2724,6 +2786,9 @@ class TestComposeUnboundAgent:
                 instance: {
                     "_inherit_from": agent_type,
                     "responses_api_agents": {agent_type: {}},
+                },
+                f"{instance}_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": instance}}}
                 },
             }
         )
