@@ -1,0 +1,30 @@
+name: livecodebench/v6_2408_2505/config
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Model must submit the right code to solve a problem
+modality: text
+licensing: unknown
+authors:
+- bxyu-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: code_gen
+agent_server: simple_agent
+datasets:
+- name: livecodebench_v6
+  type: benchmark
+  jsonl_fpath: benchmarks/livecodebench/v6_2408_2505/data/livecodebench_v6_validation.jsonl
+  prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare.py
+  prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
+lifecycle: active

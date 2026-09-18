@@ -1,0 +1,30 @@
+name: omniscience
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Omniscience factual knowledge QA with LLM judge verification
+modality: text
+licensing: unknown
+authors:
+- George Armstrong
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: omniscience
+agent_server: simple_agent
+datasets:
+- name: omniscience
+  type: benchmark
+  jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
+  prepare_script: benchmarks/omniscience/prepare.py
+  prompt_config: benchmarks/omniscience/prompts/generation.yaml
+  num_repeats: 8
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/omniscience/prompts/generation.yaml
+lifecycle: active
