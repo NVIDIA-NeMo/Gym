@@ -3,6 +3,7 @@
 
 import ast
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ import pytest
 from nemo_gym import PARENT_DIR
 from nemo_gym.environment.artifacts import build_environment_package, pull_environment_package
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
+from nemo_gym.environment.onboarding import EnvironmentOnboardingError, prepare_verifier_run
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
     ResolvedComponent,
@@ -236,6 +238,41 @@ def test_direct_endpoint_custom_loop_package_roundtrip(tmp_path: Path) -> None:
     assert report.warnings == ()
     assert all(component.role != "model_server" for component in report.components)
     assert installed_manifest.with_name("config.yaml").read_text() == config
+
+
+def test_native_verifiers_package_roundtrip_and_stale_agent_rejected(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, profile="custom-gym-agent-loop")
+    _replace_manifest(manifest_path, resources_server=None, agent_server="verifiers_agent", grading_mode=None)
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        "demo_agent:\n  responses_api_agents:\n    verifiers_agent:\n"
+        "      entrypoint: app.py\n      model_server: {type: responses_api_models, name: policy_model}\n"
+        "      vf_env_id: automationbench_env\n      vf_env_args: {reward_fn: aa_headline}\n"
+        "      datasets:\n      - name: example\n        type: example\n"
+        "        jsonl_fpath: environments/demo/data/example.jsonl\n"
+    )
+    agent_dir = tmp_path / "responses_api_agents/verifiers_agent"
+    agent_dir.mkdir(parents=True)
+    shutil.copyfile(PARENT_DIR / "responses_api_agents/verifiers_agent/app.py", agent_dir / "app.py")
+    manifest_path.with_name("package.yaml").write_text(
+        "include:\n- environments/demo\n- responses_api_agents/verifiers_agent\n"
+    )
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=config_path)
+    with pytest.raises(EnvironmentOnboardingError, match="no resources server"):
+        prepare_verifier_run(entry)
+    archive = build_environment_package(entry, tmp_path / "embedded-verifiers.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "environments/demo/manifest.yaml"
+    report = validate_environment(installed_manifest)
+    assert load_manifest(installed_manifest).resources_server is None
+    assert report.inferred_profile == "custom-gym-agent-loop"
+    assert report.warnings == ()
+    assert all(component.role != "resources_server" for component in report.components)
+    assert installed_manifest.with_name("config.yaml").read_text() == config_path.read_text()
+
+    config_path.write_text(config_path.read_text().replace("    verifiers_agent:", "    simple_agent:"))
+    with pytest.raises(EnvironmentValidationError, match="agent_server"):
+        validate_environment(manifest_path)
 
 
 @pytest.mark.parametrize(

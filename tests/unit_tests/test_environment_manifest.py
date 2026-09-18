@@ -112,6 +112,26 @@ def test_custom_loop_may_use_a_direct_model_endpoint(explicit_null: bool) -> Non
     Draft202012Validator(manifest_json_schema()).validate(raw)
 
 
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.parametrize("profile", list(IntegrationProfile))
+@pytest.mark.parametrize("agent", ["verifiers_agent", "simple_agent"])
+def test_only_native_verifiers_loop_may_omit_resources_server(explicit_null, profile, agent) -> None:
+    raw = _manifest(profile=profile)
+    raw["agent_server"] = agent
+    if explicit_null:
+        raw["resources_server"] = None
+    else:
+        raw.pop("resources_server")
+    schema = Draft202012Validator(manifest_json_schema())
+    if profile == IntegrationProfile.CUSTOM_GYM_AGENT_LOOP and agent == "verifiers_agent":
+        assert EnvironmentManifest.model_validate(raw).resources_server is None
+        schema.validate(raw)
+    else:
+        with pytest.raises(ValidationError, match="resources_server"):
+            EnvironmentManifest.model_validate(raw)
+        assert any("resources_server" in str(error) for error in schema.iter_errors(raw))
+
+
 def test_external_loop_may_omit_a_model_server() -> None:
     raw = _manifest(profile="external-agent-loop")
     raw.pop("model_server")

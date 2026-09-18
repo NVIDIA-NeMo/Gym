@@ -176,6 +176,16 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
         *(requires(profile, fields) for profile, fields in _PROFILE_REQUIRED_FIELDS.items() if fields),
         {
             "if": {
+                "properties": {
+                    "integration_profile": {"const": IntegrationProfile.CUSTOM_GYM_AGENT_LOOP.value},
+                    "agent_server": {"const": "verifiers_agent"},
+                },
+                "required": ["integration_profile", "agent_server"],
+            },
+            "else": {"properties": {"resources_server": nonempty_string}, "required": ["resources_server"]},
+        },
+        {
+            "if": {
                 "properties": {"integration_profile": {"const": IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER.value}},
                 "required": ["integration_profile"],
             },
@@ -216,7 +226,7 @@ class EnvironmentManifest(_ManifestModel):
     reward: Reward
     determinism: Determinism = Determinism.UNKNOWN
 
-    resources_server: NonEmptyString
+    resources_server: NonEmptyString | None = None
     agent_server: NonEmptyString
     datasets: list[ManifestDataset] = Field(min_length=1)
     model_server: NonEmptyString | None = None
@@ -255,6 +265,12 @@ class EnvironmentManifest(_ManifestModel):
         missing = [
             field for field in _PROFILE_REQUIRED_FIELDS[self.integration_profile] if getattr(self, field) is None
         ]
+        # verifiers_agent returns the environment's own rubric reward from /run.
+        if self.resources_server is None and not (
+            self.integration_profile == IntegrationProfile.CUSTOM_GYM_AGENT_LOOP
+            and self.agent_server == "verifiers_agent"
+        ):
+            missing.append("resources_server")
         if self.kind == EnvironmentKind.BENCHMARK:
             missing.extend(field for field in _BENCHMARK_REQUIRED_FIELDS if getattr(self, field) is None)
         if missing:
