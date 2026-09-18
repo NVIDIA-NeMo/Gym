@@ -23,6 +23,9 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym import global_config, server_utils
+from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
@@ -98,6 +101,9 @@ async def main(args):
         )
     )
     config = OmegaConf.load(root / "resources.yaml")
+    config.observability_enabled = True
+    capture_dir = args.output / "model_calls"
+    config.model_call_capture_dir = str(capture_dir)
     config.tb4_split_sandbox_endpoints = True
     config.tb4_agent_max_timeout_sec = args.agent_timeout
     config.tb4_jobs_dir = str(args.output / "resources")
@@ -149,6 +155,7 @@ async def main(args):
         await asyncio.sleep(0.1)
     manifest = json.loads((root / "manifest.json").read_text())
     rows = []
+    rollout_records = []
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def check(task):
@@ -167,10 +174,14 @@ async def main(args):
                     async with session.post(
                         f"http://127.0.0.1:{ports[agent_name]}/run",
                         json={
+                            "task_id": f"terminal-bench/{task['name']}",
                             "task_name": "terminal-bench/" + task["name"],
                             "task_ref": task["ref"],
                             "dataset_ref": manifest["ref"],
                             "rollout_id": f"{args.output.name}-{task['name']}",
+                            "_ng_rollout_id": f"{args.output.name}-{task['name']}",
+                            "_ng_task_index": manifest["tasks"].index(task),
+                            "_ng_rollout_index": 0,
                             "responses_create_params": {"input": [], "max_output_tokens": 16384},
                         },
                     ) as response:
@@ -179,6 +190,14 @@ async def main(args):
                         if response.status != 200:
                             raise RuntimeError(f"Agent HTTP {response.status}; see task response")
                         result = json.loads(text)
+                        result.update(
+                            _ng_rollout_id=f"{args.output.name}-{task['name']}",
+                            _ng_task_index=manifest["tasks"].index(task),
+                            _ng_rollout_index=0,
+                        )
+                        merge_model_call_capture_into_record(result, [capture_dir], include_payloads=True)
+                        _attach_trajectory_record(result, result)
+                        rollout_records.append(result)
                         agent_observed = bool((result.get("response") or {}).get("output"))
                         row |= {
                             "reward": result.get("reward"),
@@ -224,6 +243,12 @@ async def main(args):
         await asyncio.gather(*workers, return_exceptions=True)
         await http.close()
         server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    if rollout_records:
+        rollout_path = args.output / "evaluator_rollouts.jsonl"
+        with rollout_path.open("w") as handle:
+            for record in rollout_records:
+                handle.write(json.dumps(record) + "\n")
+        run_health_checks(rollout_path, output_dir=args.output, workers=1)
     return bool(rows) and not any(row["regression"] for row in rows)
 
 

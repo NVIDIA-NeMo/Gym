@@ -561,7 +561,12 @@ def reverify_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
-    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.reward_profile import (
+        RewardProfileConfig,
+        RewardProfiler,
+        coverage_by_agent,
+        select_measured,
+    )
     from nemo_gym.rollout_collection import loads_jsonl_line
 
     config = RewardProfileConfig.model_validate(get_global_config_dict())
@@ -586,9 +591,32 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
+
+    # Completeness is judged on what was actually collected, before any masking filter:
+    # dropping masked pairs first would hide a genuinely missing rollout behind a set that
+    # happens to align, and silently profile a partial collection as a whole one.
+    rp.align_rows_and_results(rows, results, allow_partial_rollouts=config.allow_partial_rollouts)
+
+    # Quality metrics then come from the measured subset only, the same selection the
+    # aggregation path makes, so profiling the saved rollouts of a run agrees with the
+    # metrics that run published. Completion accounting below still sees every row: a
+    # masked rollout did run, and is not a gap in the collection.
+    measured_rows, measured_results, masked, _ = select_measured(rows, results)
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
-        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
+        measured_rows, measured_results, allow_partial_rollouts=config.allow_partial_rollouts
     )
+
+    # Each agent carries its own coverage, never the run's. An agent whose every result was
+    # masked has no quality metrics at all, so it is kept as a coverage-only entry rather
+    # than disappearing from the artifact.
+    agent_coverage = coverage_by_agent(rows, results)
+    for entry in agent_level_metrics:
+        name = (entry.get("agent_ref") or {}).get("name")
+        if name in agent_coverage:
+            entry.update(agent_coverage.pop(name))
+    for name, entry_coverage in agent_coverage.items():
+        agent_level_metrics.append({"agent_ref": {"name": name}, **entry_coverage})
+
     completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
@@ -597,6 +625,7 @@ def reward_profile():  # pragma: no cover
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
+Masked from quality metrics: {len(masked)} rollout rows (kept in completion accounting above).
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")
