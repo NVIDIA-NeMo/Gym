@@ -539,6 +539,27 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    @pytest.mark.parametrize("cached,reasoning", [(None, None), (None, 8), (5, None), (0, 0)])
+    def test_unknown_usage_details_omitted(self, cached, reasoning) -> None:
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"]["cached_tokens"] = cached
+        response["usage"]["output_tokens_details"]["reasoning_tokens"] = reasoning
+        original = json.dumps(response)
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens"] == response["usage"]["input_tokens"]
+            assert usage["output_tokens"] == response["usage"]["output_tokens"]
+            for group, key, value in (
+                ("input_tokens_details", "cached_tokens", cached),
+                ("output_tokens_details", "reasoning_tokens", reasoning),
+            ):
+                if value is None:
+                    assert group not in usage
+                else:
+                    assert usage[group][key] == value
+        assert json.dumps(response) == original
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}

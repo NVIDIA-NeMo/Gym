@@ -260,6 +260,13 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     so those two are the required minimum; ``response.created`` is included for clients that wait
     for an acknowledgement before reading items.
     """
+    if response_json.get("usage"):
+        usage = dict(response_json["usage"])
+        for group, key in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+            if (usage.get(group) or {}).get(key) is None:
+                usage.pop(group, None)
+        response_json = {**response_json, "usage": usage}
+
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
 
     yield _sse_event(
