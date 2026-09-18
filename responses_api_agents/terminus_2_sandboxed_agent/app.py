@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -70,6 +71,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     debug: bool = False
     model_context_limit: int
     model_output_limit: int | None
+    interleaved_thinking: bool
 
     llm_request_timeout: int
 
@@ -195,10 +197,32 @@ class NeMoGymLLM(BaseLLM):
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
         messages = [*message_history, {"role": "user", "content": prompt}]
-        return [
-            NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
-            for message in messages
-        ]
+
+        res = []
+        for message in messages:
+            if message.get("role") in ("user", "system"):
+                res.append(
+                    NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
+                )
+            elif message.get("role") == "assistant":
+                if message.get("reasoning_content"):
+                    res.append(
+                        NeMoGymResponseReasoningItem(
+                            id="",
+                            summary=[NeMoGymSummary(text=message.get("reasoning_content"), type="summary_text")],
+                            type="reasoning",
+                        )
+                    )
+                res.append(
+                    NeMoGymResponseOutputMessage(
+                        id="",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=message.get("content", ""))],
+                    )
+                )
+            else:
+                raise NotImplementedError(f"Found an unknown role in messages: {messages}")
+
+        return res
 
     @staticmethod
     def _response_text(response: NeMoGymResponse) -> tuple[str, str | None]:
@@ -459,6 +483,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 record_terminal_session=False,
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
+                interleaved_thinking=self.config.interleaved_thinking,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")

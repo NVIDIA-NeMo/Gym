@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from nemo_gym.rollout_collection import _trajectory_identity
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import app as module
 from resources_servers.terminal_bench_4 import lifecycle
@@ -369,6 +370,7 @@ async def test_live_model_callback_preserves_cookies_and_capture_route(fixture, 
     call = f.server.server_client.post.await_args.kwargs
     assert call["url_path"] == "/ng-rollout/rollout-1/training-token-capture/v1/responses"
     assert call["cookies"] == f.request.cookies
+    assert call["headers"] == {"x-session-id": result.session_id}
     assert result.response == model_response
     f.server._sessions.clear()
     f.server._by_identity.clear()
@@ -563,3 +565,25 @@ async def test_invalid_restart_records_cannot_be_replayed(fixture, fault):
     with pytest.raises(HTTPException):
         await f.server.run(f.request, f.body)
     assert len(f.harnesses) == 1
+
+
+async def test_task_identity_uses_name_instead_of_collector_index(fixture):
+    f = fixture
+    f.body = f.body.model_copy(update={"_ng_task_index": 25, "_ng_rollout_index": 0})
+    result = await f.server.run(f.request, f.body)
+    expected = f.body.task_name
+    assert expected.startswith("terminal-bench/")
+    assert result.task_id == expected
+    assert f.harnesses[0].context.task_id == expected
+    # The response remains usable by the collector and by offline smoke tooling.
+    record = result.model_dump(mode="json") | {"_ng_task_index": 25, "_ng_rollout_index": 0}
+    assert _trajectory_identity(record)[0] == expected
+    assert record["_ng_task_index"] == 25
+
+
+@pytest.mark.parametrize("global_config", [{}, {"observability_enabled": False}, {"observability_enabled": True}])
+async def test_harness_observability_follows_global_opt_in(fixture, global_config):
+    f = fixture
+    f.server.server_client.global_config_dict = global_config
+    await f.server.run(f.request, f.body)
+    assert f.harnesses[0].observability_enabled is global_config.get("observability_enabled", False)
