@@ -14,7 +14,7 @@
 # limitations under the License.
 import asyncio
 from contextlib import nullcontext
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
 from pydantic import Field
 
@@ -24,6 +24,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -39,6 +40,11 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    additional_retry_status_codes: list[Annotated[int, Field(ge=400, le=599)]] = Field(
+        default_factory=list,
+        description="Extra retryable HTTP statuses for this model endpoint; 404 is opt-in.",
+    )
 
     max_concurrent_requests: Optional[int] = Field(
         default=None,
@@ -68,6 +74,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            max_http_attempts=self.config.max_http_attempts,
+            additional_retry_status_codes=self.config.additional_retry_status_codes,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)

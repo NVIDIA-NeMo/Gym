@@ -63,7 +63,7 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False, **kwargs):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -74,11 +74,20 @@ class TestApp:
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
             drop_input_reasoning_items=drop_input_reasoning_items,
+            **kwargs,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    async def test_retry_configuration_is_scoped_to_model_server(self):
+        judge = self._setup_server(additional_retry_status_codes=[404], max_http_attempts=5)
+        policy = self._setup_server()
+        assert judge._client.additional_retry_status_codes == [404]
+        assert judge._client.max_http_attempts == 5
+        assert policy._client.additional_retry_status_codes == []
+        assert policy._client.max_http_attempts == 3
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()

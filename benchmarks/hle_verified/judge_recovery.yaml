@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Opt-in retries for a judge endpoint known to return transient model-routing 404s.
+# Set judge_base_url, judge_api_key, and judge_model_name for that endpoint.
+# Point the benchmark resources server's judge_model_server.name at judge_model.
+config_paths:
+  - resources_servers/labbench2_vlm/configs/judge_model_openai.yaml
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      additional_retry_status_codes: [404]
+      max_http_attempts: 5

@@ -27,7 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import openai
 import pytest
@@ -126,6 +126,11 @@ def _response_with_output(output: list) -> dict:
 
 
 class TestOpenAIUtils:
+    @pytest.mark.parametrize("kwargs", [{"max_http_attempts": 0}, {"additional_retry_status_codes": [200]}])
+    def test_invalid_retry_configuration_rejected(self, kwargs):
+        with pytest.raises(ValidationError):
+            NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", **kwargs)
+
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
 
@@ -141,6 +146,69 @@ class TestOpenAIUtils:
             await client._request_with_retry()
 
         assert request.await_count == MAX_NUM_TRIES
+
+    @pytest.mark.parametrize("status,extra_statuses", [(408, []), (404, [404])])
+    async def test_retry_reuses_request_and_backs_off(self, monkeypatch, status, extra_statuses):
+        failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", additional_retry_status_codes=extra_statuses
+        )
+        payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
+        original = deepcopy(payload)
+
+        result = await client._request_with_retry(method="POST", url="https://example.com/v1/responses", json=payload)
+
+        assert result is success
+        assert request.await_count == 3
+        assert all(c.kwargs["json"] == original for c in request.await_args_list)
+        assert payload == original
+        assert sleep.await_args_list == [call(0.5), call(1.0)]
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404])
+    async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch, status):
+        response = SimpleNamespace(status=status)
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        assert await client._request_with_retry() is response
+        request.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status,extra_statuses", [(408, []), (404, [404])])
+    async def test_configured_attempt_limit_preserves_terminal_error(self, monkeypatch, status, extra_statuses):
+        replies = [
+            SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"error body")))
+            for _ in range(5)
+        ]
+        request = AsyncMock(side_effect=replies)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response):
+            assert response is replies[-1]
+            response.content.read.assert_not_awaited()
+            raise RuntimeError("terminal error")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            max_http_attempts=5,
+            additional_retry_status_codes=extra_statuses,
+        )
+        with pytest.raises(RuntimeError, match="terminal error"):
+            await client._request_with_retry()
+        assert request.await_count == 5
+        assert sleep.await_args_list == [call(0.5), call(1.0), call(2.0), call(4.0)]
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

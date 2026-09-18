@@ -1225,7 +1225,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 502 is Bad gateway (when the endpoint is overloaded)
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
-RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
+RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [408, 500]
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -1247,6 +1247,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    additional_retry_status_codes: List[Annotated[int, Field(ge=400, le=599)]] = Field(
+        default_factory=list,
+        description="Opt-in HTTP retries for this endpoint, e.g. 404 from a transient model-routing failure.",
+    )
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
@@ -1266,24 +1272,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = self.max_http_attempts
         tries = 0
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
-            if response.status in RETRY_ERROR_CODES:
+            if response.status in RETRY_ERROR_CODES or response.status in self.additional_retry_status_codes:
                 # Internal NeMo Gym servers extend max tries for retryable errors.
                 if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1
 
-                content = (await response.content.read()).decode()
-                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
+                # Preserve the final error body for raise_for_status and avoid sleeping
+                # after the last attempt. Reading intermediate bodies releases sockets.
+                if tries >= max_num_tries:
+                    break
+                content = (await response.content.read()).decode(errors="replace")
+                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
                 print(
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
-                await sleep(0.5)
+                await sleep(min(0.5 * 2 ** min(tries - 1, 6), 30.0))
                 continue
             else:
                 return response

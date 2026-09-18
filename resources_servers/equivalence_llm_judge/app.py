@@ -38,7 +38,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -137,6 +137,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
     msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
+    max_answer_chars: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Score longer final assistant answers zero without calling the judge. Thinking is excluded.",
+    )
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
@@ -189,16 +194,14 @@ class LLMJudgeVerifyRequest(LLMJudgeRunRequest, BaseVerifyRequest):
     pass
 
 
-# Marks a rollout whose verdict is absent because the judge service failed,
-# as distinct from a judge that ran and returned no parseable verdict.
+# Legacy in-band service failures remain readable when aggregating old runs.
+# New failures go through the shared judge_failed sidecar instead.
 JUDGE_ERROR_LABEL = "JUDGE_ERROR"
 
 
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    # None when the judge could not be reached or returned an unusable payload.
-    # The rollout is still recorded so the failure is visible in the artifacts
-    # rather than taking down the run that produced it.
+    # None on legacy rows whose judge call failed.
     response: Optional[NeMoGymResponse] = None
     # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
     # or JUDGE_ERROR_LABEL when the judge itself failed.
@@ -499,6 +502,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """
         # Step 1: Extract question and expected answer
         expected = _extract_expected_answer(body) or ""
+        if self.config.max_answer_chars is not None:
+            answer = _extract_last_assistant_text(body, extract_regex=None)
+            if len(answer) > self.config.max_answer_chars:
+                result = self._make_response(body, expected, reward=0.0, evaluations=[])
+                result.failure_reason = (
+                    f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
+                )
+                return result
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)
@@ -544,31 +555,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params.input = msgs
 
         async with self._judge_endpoint_max_concurrency:
-            try:
-                judge_response = await call_judge(
-                    self.server_client,
-                    server_name=cfg.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
-                    response_model=NeMoGymResponse,
-                )
-            except JudgeError as e:
-                print(
-                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {e}",
-                    flush=True,
-                )
-                # Do not re-raise. The judge is a separate service, and a
-                # transient failure from it is not a failure of the rollout:
-                # propagating here aborts the whole evaluation and discards every
-                # rollout already generated, which can be many hours of work.
-                # Record the failure on the rollout and score it not-equal, so
-                # the run completes and a downstream check can decide whether the
-                # judge-error rate makes the score untrustworthy.
-                return False, JudgeEvaluation(
-                    responses_create_params=responses_create_params,
-                    response=None,
-                    verdict_label=JUDGE_ERROR_LABEL,
-                )
+            # Let the shared verify-endpoint failsafe preserve exhausted judge
+            # failures for `gym eval reverify --judge-failed-only`.
+            judge_response = await call_judge(
+                self.server_client,
+                server_name=cfg.judge_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+                response_model=NeMoGymResponse,
+            )
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
