@@ -24,3 +24,11 @@ terminal_bench_4:
       harness:
         step_limit: ${oc.select:tb4_max_steps,500}
         step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
+
+terminal_bench_4_miniswe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_4_miniswe

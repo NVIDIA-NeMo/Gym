@@ -23,3 +23,11 @@ citation_if_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/citation_if/data/example.jsonl
+
+citation_if_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: citation_if_simple_agent

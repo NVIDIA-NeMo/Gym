@@ -18,3 +18,11 @@ swebench_multilingual_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
           prepare_script: benchmarks/swebench/multilingual/prepare.py
           num_repeats: 3
+
+swebench_multilingual_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_multilingual_opencode_sandboxed_agent

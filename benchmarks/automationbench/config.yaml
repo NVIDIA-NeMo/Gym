@@ -32,3 +32,11 @@ automationbench:
           prepare_script: benchmarks/automationbench/prepare.py
           num_repeats: 1
           license: MIT
+
+automationbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: automationbench

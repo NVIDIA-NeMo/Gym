@@ -25,3 +25,11 @@ code_fim_simple_agent:
         type: example
         jsonl_fpath: resources_servers/code_fim/data/example.jsonl
         license: MIT
+
+code_fim_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: code_fim_simple_agent

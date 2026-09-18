@@ -29,3 +29,11 @@ tavily_search_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+
+tavily_search_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: tavily_search_simple_agent

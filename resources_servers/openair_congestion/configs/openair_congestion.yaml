@@ -66,3 +66,11 @@ openair_congestion_gymnasium_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/openair_congestion/data/example.jsonl
+
+openair_congestion_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: openair_congestion_gymnasium_agent

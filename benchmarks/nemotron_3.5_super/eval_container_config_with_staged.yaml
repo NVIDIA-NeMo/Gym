@@ -51,3 +51,43 @@ swebench_pro_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
           prepare_script: benchmarks/swebench/pro/prepare.py
           num_repeats: 3
+
+swebench_verified_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_verified_opencode_sandboxed_agent
+
+swebench_multilingual_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_multilingual_opencode_sandboxed_agent
+
+deepswe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_opencode_sandboxed_agent
+
+terminal_bench_2_1_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_2_1_terminus_2_sandboxed_agent
+
+swebench_pro_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_opencode_sandboxed_agent

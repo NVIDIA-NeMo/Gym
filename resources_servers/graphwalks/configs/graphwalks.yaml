@@ -23,3 +23,11 @@ graphwalks_simple_agent:
         jsonl_fpath: resources_servers/graphwalks/data/example.jsonl
         num_repeats: 1
         license: MIT
+
+graphwalks_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: graphwalks_simple_agent

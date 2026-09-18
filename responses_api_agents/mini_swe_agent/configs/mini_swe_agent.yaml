@@ -41,3 +41,11 @@ mini_swe_simple_agent:
       skip_if_exists: False
       step_limit: 250
       collapse_limit: 3
+
+mini_swe_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mini_swe_simple_agent
