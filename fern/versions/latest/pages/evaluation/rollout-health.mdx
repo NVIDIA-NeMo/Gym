@@ -56,12 +56,13 @@ Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-he
 
 Health checks read each rollout record and its standard `ng_trajectory` attachment. `ng_trajectory` combines the agent turns,
 model-call evidence, explicit model-call references, and observation gaps produced during collection. Refer to the
-[trajectory capability matrix](/main/reference/trajectory-capabilities) for producer coverage and
+[Trajectory Evidence (TE)](/main/reference/trajectory-evidence#evidence-taxonomy) for evidence definitions and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
-The health checks runner does not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
-agent-specific response. A custom rollout driver receives the same behavior as a built-in driver: checks run when it writes a
-valid `ng_trajectory`, and checks that need missing evidence are unobserved.
+The health checks runner does not reopen raw model-call capture files, inspect `ng_model_call_capture` or
+`ng_agent_observations`, or reconstruct turns from an agent-specific response. A custom rollout driver receives the same
+behavior as a built-in driver: checks run when it writes a valid `ng_trajectory`, and checks that need missing evidence are
+unobserved.
 
 <Note>
 This single-source rule makes health results reproducible after capture files move and prevents two observability representations
@@ -71,21 +72,21 @@ are unobserved instead of being evaluated from inferred historical formats.
 
 ### Applicability by Agent Harness
 
-The matrix below maps the evidence reported in the [trajectory capability matrix](/main/reference/trajectory-capabilities) to
-the inputs that the current health runner requires. It reports whether a check can evaluate the documented agent path, not
-whether the check passes or produces a finding.
+The tables below describe the evidence used by the current health runner and the applicability of each check to the audited
+agent paths. TE identifiers refer to the [evidence taxonomy](/main/reference/trajectory-evidence#evidence-taxonomy).
+Health checks read this evidence from `ng_trajectory`, even when the same TE can be represented elsewhere in the rollout.
 
-- `V`: the evaluated path supplies the evidence required by the check when observability is configured as documented.
+The TE column names the evidence inspected, not claims that must already pass schema validation. For example,
+`model_call_missing_token_counts` reports missing TE3.1 or TE3.2 values. A check may use only part of a TE claim, as noted below.
+
+The harness matrix is a source-audit snapshot, not an automated TE qualification or a health verdict:
+
+- `V`: the audited path supplies the evidence required by the check when observability is configured as documented.
 - `O`: applicability depends on the rollout, execution path, or repeat configuration. Inspect
   `run.artifacts.coverage` in `quality_summary.json` and `ng_trajectory.gaps` in the rollout.
-- `X`: the evaluated path does not currently supply the required evidence. The check is unobserved.
+- `X`: the audited path does not currently supply the required evidence. The check is unobserved.
 
-The capability basis identifies the observability contract that a check inspects. It does not imply that every rollout passes
-that contract: for example, `model_call_missing_token_counts` cites C2 because a missing C2 token count is the defect it reports.
-The trajectory capability matrix is the source of truth for harness evidence. The rows below are derived from its
-capabilities and documented limitations, using the health runner's input requirements. Only harnesses with at least one
-`V` or `O` in the health columns below are listed. Harnesses with raw capture or aggregate usage but no canonical turns or
-ownership references remain in the capability matrix; their all-`X` health rows are omitted here.
+Only harnesses with at least one `V` or `O` in the health columns below are listed.
 
 Four checks do not distinguish harness observability and are described once rather than repeated as columns:
 
@@ -95,17 +96,21 @@ Four checks do not distinguish harness observability and are described once rath
 - H12 (`task_consistently_unhealthy`) requires at least two computable repeat verdicts. Repeated tasks alone do not make it
   observable; repeats whose verdict is `unobserved` are not computable.
 
-| ID | Health check | Capability basis |
+| ID | Health check | Trajectory evidence inspected |
 | --- | --- | --- |
-| H4 | `rollout_missing_agent_turns` | C3. |
-| H5 | `agent_turn_hollow` | C3. |
-| H6 | `trajectory_capture_mismatch` | C10 or C11. |
-| H7 | `model_call_failed` | C1 and either C10 or C11. |
-| H8 | `model_call_missing_token_counts` | C2 and either C10 or C11. |
-| H9 | `model_call_zero_completion_tokens` | C2 and either C10 or C11. |
-| H10 | `model_call_runaway_generation` | C1, C9, and either C10 or C11. |
-| H11 | `rollout_token_count_mismatch` | C2 and C11, plus complete turn-call accounting and top-level rollout token totals. |
-| H13 | `task_no_successful_model_calls` | C11 and complete turn-call accounting for every repeat. |
+| H4 | `rollout_missing_agent_turns` | Observable turn records, with TE4.2 content/actions or TE4.4 model-call references establishing activity. |
+| H5 | `agent_turn_hollow` | TE4.2 turn content/actions. A model-call reference alone does not make a turn non-hollow. |
+| H6 | `trajectory_capture_mismatch` | TE1.1 call identities and either TE6.4 invocation ownership or TE4.4 turn-call references; also recorded reference gaps. |
+| H7 | `model_call_failed` | TE1.2 failure status/error fields, on calls bound through TE6.4 or TE4.4 using TE1.1 identities. |
+| H8 | `model_call_missing_token_counts` | TE3.1 prompt and TE3.2 completion counts, on calls bound through TE6.4 or TE4.4 using TE1.1 identities. |
+| H9 | `model_call_zero_completion_tokens` | TE3.2 completion counts, on calls bound through TE6.4 or TE4.4 using TE1.1 identities. |
+| H10 | `model_call_runaway_generation` | TE1.2 finish reason and TE2.2 saved response, including TE2.3 reasoning when returned, on calls bound through TE6.4 or TE4.4 using TE1.1 identities. |
+| H11 | `rollout_token_count_mismatch` | TE3.1 and TE3.2 counts, TE1.1 identities and TE4.4 references, plus complete turn-call accounting and top-level rollout token totals. |
+| H13 | `task_no_successful_model_calls` | TE1.1 identities, TE1.2 success/failure fields and TE4.4 references, with complete turn-call accounting for every repeat. |
+
+These checks do not require TE4.1 timestamps or a separate TE4.3 selected-response annotation. Ownership checks use the
+recorded invocation or turn `model_calls` lists. Top-level rollout token totals and repeat configuration are additional
+inputs, outside the TE taxonomy.
 
 | Agent | H4 | H5 | H6 | H7 | H8 | H9 | H10 | H11 | H13 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -122,24 +127,18 @@ Four checks do not distinguish harness observability and are described once rath
 | `terminus_2_sandboxed_agent` | V | V | V | V | V | V | V | X | X |
 | `vibench_agent` | X | X | V | V | V | V | V | X | X |
 
-H6 through H10 accept either ownership scope. Claude Code, Hermes, OpenClaw, PinchBench, and Pi provide invocation ownership
-through C10. OpenCode, sandboxed OpenCode, and ViBench provide C10 when their model calls carry the exact OpenCode session
-identity. These agents can therefore run the five per-call checks even though they do not provide C3 or C11.
-The OpenCode rows assume a supported version that sends `X-Session-Id` on model calls routed through the Gym Model Server.
-Without that identity, ownership remains unavailable and C10-dependent checks are unobserved.
+H6 through H10 accept invocation ownership (TE6.4) or turn-call references (TE4.4). The invocation-only paths in the table
+can therefore run these checks without recorded turns. OpenCode, sandboxed OpenCode, and ViBench require a supported
+OpenCode version that sends `X-Session-Id` on model calls routed through the Gym Model Server. Without that identity,
+ownership-dependent checks are unobserved.
 
-H4 and H5 require C3 because invocation histories do not define individual semantic turns. H11 and H13 require C11 because an
-invocation can own support calls that should be inspected individually but must not be counted as trajectory calls in an
-aggregate claim.
+H4 and H5 inspect recorded turn activity (TE4.2 and, for H4, TE4.4); invocation histories do not define individual turns.
+H11 and H13 need complete turn-call accounting. Invocation ownership alone can include support calls outside those turns.
 
-`simple_agent`, `simple_agent_with_compaction`, and `labbench2_vlm_agent` provide C3, C10, and C11. LabBench H10 is
-path-dependent because its C9 support is path-dependent: rows carrying the `multimodal_history_redacted` gap omit saved
-response payloads.
-
-`terminus_2_sandboxed_agent` also provides C3, C10, and C11, enabling H4 through H10. It always reports
-`turn_model_call_scope_incomplete` because it cannot assign every transport retry to a decision. H11 and H13 therefore
-remain `X` despite exact references for the selected decision responses. This limitation is recorded in the
-[trajectory capability matrix](/main/reference/trajectory-capabilities#terminus2-decisions-and-invocation-ownership).
+LabBench H10 is path-dependent: rows carrying the `multimodal_history_redacted` gap omit the saved response (TE2.2).
+Terminus supplies turn content and model-call references for H4 through H10, but records `turn_model_call_scope_incomplete`
+because it cannot assign every transport retry to a decision. H11 and H13 remain unobserved even when individual decision
+responses have exact references; see [Binding Policy-Model Calls](#binding-policy-model-calls).
 
 ## Findings and Verdicts
 
