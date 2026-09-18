@@ -26,12 +26,12 @@ from harbor.job import Job
 from harbor.models.job.config import DatasetConfig, JobConfig, RetryConfig
 from harbor.models.task.paths import TaskPaths
 from harbor.models.trajectories import ContentPart, Step, Trajectory
-from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
+from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, VerifierConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseMultiRewardVerifyResponse, BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -75,7 +75,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
     harbor_reward_key: str = Field(default="reward", min_length=1)
-    harbor_dataset: DatasetConfig = Field(default_factory=DatasetConfig)
+    harbor_dataset: DatasetConfig | None = None
     harbor_environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
     harbor_agent: AgentConfig = Field(default_factory=AgentConfig)
     harbor_verifier: VerifierConfig = Field(default_factory=VerifierConfig)
@@ -88,7 +88,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             return harbor_jobs_dir.parent / "harbor"
         return harbor_jobs_dir
 
-    def build_job_config(self, task_name: str, job_name: str) -> JobConfig:
+    def build_job_config(self, task_name: str, job_name: str, *, task: TaskConfig | None = None) -> JobConfig:
+        if task is None and self.harbor_dataset is None:
+            raise ValueError("Provide harbor_dataset in the agent config or harbor_task in the input row")
         return JobConfig(
             job_name=job_name,
             jobs_dir=self.harbor_jobs_dir,
@@ -97,9 +99,10 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             debug=self.harbor_debug,
             quiet=True,
             retry=RetryConfig(max_retries=self.harbor_max_retries),
-            datasets=[
-                self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
-            ],
+            datasets=[self.harbor_dataset.model_copy(update={"task_names": [task_name]})]
+            if task is None and self.harbor_dataset is not None
+            else [],
+            tasks=[task] if task is not None else [],
             environment=self.harbor_environment.model_copy(update={"delete": True}),
             agents=[self.harbor_agent],
             verifier=self.harbor_verifier,
@@ -110,11 +113,12 @@ class HarborRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     task_name: str
+    harbor_task: TaskConfig | None = None
     task_index: int = Field(alias=TASK_INDEX_KEY_NAME)
     rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)
 
 
-class HarborVerifyResponse(BaseVerifyResponse):
+class HarborVerifyResponse(BaseMultiRewardVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
@@ -135,6 +139,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             try:
                 job_config = self.config.build_job_config(
                     task_name=body.task_name,
+                    task=body.harbor_task,
                     ## Use a stable job name to allow resume.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
@@ -403,27 +408,39 @@ class HarborAgent(SimpleResponsesAPIAgent):
             Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
         ]
         conversion_warnings: list[str] = []
-        output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
-
-        if len(output) > 1:
-            logger.warning(
-                "Multiple Harbor task steps found (%s); using the first step for Gym Input/Output and last step for reward",
-                len(path_entries),
+        outputs = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
+        harbor_steps = [
+            {
+                "name": trial.step_results[index].step_name if trial.step_results else None,
+                "input": [{"role": "user", "content": instruction_path.read_text(), "type": "message"}],
+                "output": step_output,
+                "rewards": rewards,
+                "source_trajectory_path": str(trajectory_path),
+            }
+            for index, ((instruction_path, trajectory_path), step_output, rewards) in enumerate(
+                zip(path_entries, outputs, step_rewards, strict=True)
             )
-        output = output[0]
-        step_rewards = step_rewards[-1]
-        instruction_path, _ = path_entries[0]
+        ]
+
+        if len(outputs) > 1:
+            conversion_warnings.append(
+                "Multi-step trial: response contains the final step; harbor_steps preserves each step separately. "
+                "Usage covers the entire trial."
+            )
+        output = outputs[-1]
+        # Harbor owns multi-step aggregation (for example mean versus final).
+        rewards = trial.verifier_result.rewards if trial.verifier_result is not None else None
+        instruction_path, _ = path_entries[-1]
 
         n_input_tokens, n_cache_tokens, n_output_tokens, _ = trial.compute_token_cost_totals()
 
         reward_key = self.config.harbor_reward_key
-        if step_rewards is not None and reward_key not in step_rewards:
-            logger.warning(
-                "Harbor verifier result for trial %s has no %r key; using the first available reward or 0.0",
-                trial.id,
-                reward_key,
+        if rewards is not None and reward_key not in rewards:
+            raise ValueError(
+                f"Harbor trial {trial.id} has no reward key {reward_key!r}; available keys: {sorted(rewards)}. "
+                "Set harbor_reward_key explicitly to the objective used for Gym's scalar reward."
             )
-        reward = float(step_rewards.get(reward_key, next(iter(step_rewards.values()), 0.0)) if step_rewards else 0.0)
+        reward = float(rewards.get(reward_key, 0.0) if rewards else 0.0)
 
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
@@ -463,6 +480,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     },
                 ),
                 "reward": reward,
+                "reward_components": rewards or {},
+                **{f"harbor_reward/{key}": value for key, value in (rewards or {}).items()},
+                "harbor_steps": harbor_steps,
+                "harbor_rewards": rewards,
+                "harbor_reward_selection": {"source": "trial.verifier_result", "key": reward_key},
                 "atif_conversion": {
                     "lossless": not conversion_warnings,
                     "warnings": conversion_warnings,
@@ -499,6 +521,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             | {
                 "response": response.model_dump(mode="json"),
                 "reward": 0.0,
+                "reward_components": {},
                 NG_FAILURE_CLASS_KEY: "harbor_failed",
                 "error": f"{type(err).__name__}: {err}",
             }
