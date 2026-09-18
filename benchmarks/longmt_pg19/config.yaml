@@ -18,3 +18,11 @@ longmt_pg19_agent:
         prepare_script: benchmarks/longmt_pg19/prepare.py
         num_repeats: 5
         license: Apache 2.0
+
+longmt_pg19_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: longmt_pg19_agent
