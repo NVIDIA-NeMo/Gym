@@ -1,0 +1,649 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0",
+  "title": "Trajectory Evidence P0 field contracts \u2014 draft 1",
+  "description": "Select a named $defs entry with $ref; these fragment schemas are not a complete rollout validator. The unselected bundle deliberately rejects every instance.",
+  "not": {},
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "knownString": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "enum": [
+          "unknown",
+          "unobserved"
+        ]
+      }
+    },
+    "storedPayload": {
+      "anyOf": [
+        {
+          "type": "object",
+          "minProperties": 1
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "modelRef": {
+      "type": "object",
+      "required": [
+        "type",
+        "name"
+      ],
+      "properties": {
+        "type": {
+          "const": "responses_api_models"
+        },
+        "name": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "modelCallRef": {
+      "type": "object",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "model_call_id"
+          ],
+          "properties": {
+            "model_call_id": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "model_ref",
+            "response_id"
+          ],
+          "properties": {
+            "model_ref": {
+              "$ref": "#/$defs/modelRef"
+            },
+            "response_id": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "model_call_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/identifier"
+            }
+          ]
+        },
+        "model_ref": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/modelRef"
+            }
+          ]
+        },
+        "response_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/identifier"
+            }
+          ]
+        }
+      }
+    },
+    "invocationIdentity": {
+      "type": "object",
+      "required": [
+        "invocation_id"
+      ],
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "turnIdentity": {
+      "type": "object",
+      "required": [
+        "invocation_id",
+        "task_id",
+        "rollout_id",
+        "turn_no"
+      ],
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "task_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "rollout_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "turn_no": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "TE1.1": {
+      "type": "object",
+      "required": [
+        "model_call_id"
+      ],
+      "properties": {
+        "model_call_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "TE1.2": {
+      "type": "object",
+      "required": [
+        "response_metadata"
+      ],
+      "properties": {
+        "response_metadata": {
+          "type": "object",
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "status_code"
+                  ],
+                  "properties": {
+                    "status_code": {
+                      "type": "integer",
+                      "minimum": 200,
+                      "maximum": 599
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "response_status"
+                  ],
+                  "properties": {
+                    "response_status": {
+                      "enum": [
+                        "completed",
+                        "failed",
+                        "incomplete",
+                        "cancelled"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "error_category"
+                  ],
+                  "properties": {
+                    "error_category": {
+                      "$ref": "#/$defs/knownString"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "finish_reason"
+                  ],
+                  "properties": {
+                    "finish_reason": {
+                      "$ref": "#/$defs/knownString"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "error_category"
+                  ],
+                  "properties": {
+                    "error_category": {
+                      "$ref": "#/$defs/knownString"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "response_status"
+                  ],
+                  "properties": {
+                    "response_status": {
+                      "const": "completed"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "TE2.1": {
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/storedPayload"
+        }
+      }
+    },
+    "TE2.2": {
+      "type": "object",
+      "required": [
+        "response"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/storedPayload"
+        }
+      }
+    },
+    "TE2.3": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mediaLocator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mediaSource": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "const": "url"
+            },
+            "url": {
+              "$ref": "#/$defs/mediaLocator"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "media_type",
+            "data"
+          ],
+          "properties": {
+            "type": {
+              "const": "base64"
+            },
+            "media_type": {
+              "type": "string",
+              "pattern": "^(image|audio|video)/"
+            },
+            "data": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        }
+      ]
+    },
+    "TE2.4": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "const": "input_image"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "image_url"
+                  ],
+                  "properties": {
+                    "image_url": {
+                      "$ref": "#/$defs/mediaLocator"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "file_id"
+                  ],
+                  "properties": {
+                    "file_id": {
+                      "$ref": "#/$defs/identifier"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "image_url"
+          ],
+          "properties": {
+            "type": {
+              "const": "image_url"
+            },
+            "image_url": {
+              "type": "object",
+              "required": [
+                "url"
+              ],
+              "properties": {
+                "url": {
+                  "$ref": "#/$defs/mediaLocator"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "source"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "image",
+                "audio",
+                "video"
+              ]
+            },
+            "source": {
+              "$ref": "#/$defs/mediaSource"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "input_audio"
+          ],
+          "properties": {
+            "type": {
+              "const": "input_audio"
+            },
+            "input_audio": {
+              "type": "object",
+              "required": [
+                "data",
+                "format"
+              ],
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "format": {
+                  "$ref": "#/$defs/identifier"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "data"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "data": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        }
+      ]
+    },
+    "TE3.1": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TE1.1"
+        },
+        {
+          "type": "object",
+          "required": [
+            "token_stats"
+          ],
+          "properties": {
+            "token_stats": {
+              "type": "object",
+              "required": [
+                "prompt_tokens"
+              ],
+              "properties": {
+                "prompt_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE3.2": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TE1.1"
+        },
+        {
+          "type": "object",
+          "required": [
+            "token_stats"
+          ],
+          "properties": {
+            "token_stats": {
+              "type": "object",
+              "required": [
+                "completion_tokens"
+              ],
+              "properties": {
+                "completion_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE3.3": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TE1.1"
+        },
+        {
+          "type": "object",
+          "required": [
+            "token_stats"
+          ],
+          "properties": {
+            "token_stats": {
+              "type": "object",
+              "required": [
+                "reasoning_tokens"
+              ],
+              "properties": {
+                "reasoning_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE3.4": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TE1.1"
+        },
+        {
+          "type": "object",
+          "required": [
+            "token_stats"
+          ],
+          "properties": {
+            "token_stats": {
+              "type": "object",
+              "required": [
+                "cached_tokens"
+              ],
+              "properties": {
+                "cached_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE3.5": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TE1.1"
+        },
+        {
+          "type": "object",
+          "required": [
+            "token_stats"
+          ],
+          "properties": {
+            "token_stats": {
+              "type": "object",
+              "required": [
+                "total_tokens"
+              ],
+              "properties": {
+                "total_tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE6.4": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/invocationIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "model_calls"
+          ],
+          "properties": {
+            "model_calls": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/modelCallRef"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE4.3": {
+      "description": "Proposed explicit selected-response reference. This property does not exist in TrajectoryTurn schema 1.0.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/turnIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "selected_model_call"
+          ],
+          "properties": {
+            "selected_model_call": {
+              "$ref": "#/$defs/modelCallRef"
+            }
+          }
+        }
+      ]
+    },
+    "TE4.4": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/turnIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "model_calls"
+          ],
+          "properties": {
+            "model_calls": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/modelCallRef"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
