@@ -27,6 +27,7 @@ from typing import (
     Union,
     get_args,
 )
+from uuid import uuid4
 
 from openai.types.chat import (
     ChatCompletion,
@@ -749,7 +750,22 @@ def _normalize_output_item_for_replay(item: Any) -> Any:
         return item
 
     item_type = item.get("type")
-    if item_type == "additional_tools" and item.get("role") != "developer":
+    if item_type == "reasoning" and not item.get("id"):
+        item = item.copy()
+        item["id"] = f"rs_replay_{uuid4().hex}"
+    elif (
+        item_type == "message"
+        and item.get("role") == "assistant"
+        and isinstance(item.get("content"), list)
+        and any(isinstance(part, dict) and part.get("type") == "output_text" for part in item["content"])
+    ):
+        item = item.copy()
+        item.setdefault("id", f"msg_replay_{uuid4().hex}")
+        item["content"] = [
+            {"annotations": [], **part} if isinstance(part, dict) and part.get("type") == "output_text" else part
+            for part in item.get("content") or []
+        ]
+    elif item_type == "additional_tools" and item.get("role") != "developer":
         item = item.copy()
         item["role"] = "developer"
     elif item_type == "computer_call_output" and item.get("status") == "failed":
@@ -1176,6 +1192,7 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
     audio: Optional[ChatCompletionAudioParam] = None

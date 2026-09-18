@@ -464,6 +464,22 @@ class TestDiscriminatedResponseItems:
 
 
 class TestNeMoGymChatCompletionSchemas:
+    def test_chat_template_kwargs_round_trip(self) -> None:
+        payload = {
+            "chat_template_kwargs": {
+                "enable_thinking": True,
+                "truncate_history_thinking": False,
+            },
+            "messages": [{"role": "user", "content": "hello"}],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert round_tripped == params
+        assert params.chat_template_kwargs == payload["chat_template_kwargs"]
+
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:
         payload = {
             "messages": [
@@ -1627,7 +1643,7 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
     expected = sdk_fields - {"function_call", "functions"}
-    actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
+    actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields) - {"chat_template_kwargs"}
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
         f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"

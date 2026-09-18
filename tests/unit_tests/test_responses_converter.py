@@ -1623,7 +1623,6 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
         ("background", True),
         ("context_management", []),
         ("conversation", "conv_1"),
-        ("include", ["reasoning.encrypted_content"]),
         ("max_tool_calls", 2),
         ("previous_response_id", "resp_1"),
         ("prompt", {"id": "pmpt_1"}),
@@ -1655,6 +1654,21 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     converted = converter.responses_to_chat_completion_create_params(params)
 
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_ignores_encrypted_reasoning_include(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=["reasoning.encrypted_content"])
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_rejects_other_include_values(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=["file_search_call.results"])
+
+    with pytest.raises(NotImplementedError, match="file_search_call.results"):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):

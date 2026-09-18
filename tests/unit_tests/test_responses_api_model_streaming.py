@@ -388,6 +388,29 @@ class TestSanitizeStreamingBody:
         assert "namespace" not in call
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_keeps_codex_replayed_reasoning_and_message(self) -> None:
+        cleaned, _ = sanitize_streaming_responses_body(
+            {
+                "stream": True,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "plan"}],
+                        "content": None,
+                        "encrypted_content": None,
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "working"}],
+                    },
+                ],
+            }
+        )
+        assert [item["type"] for item in cleaned["input"]] == ["reasoning", "message"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
     def test_drops_unsupported_input_items(self) -> None:
         # Codex's code_mode interleaves an `additional_tools` carrier item into the input history;
         # the Gym input union has no representation for it, so it is dropped item-by-item.

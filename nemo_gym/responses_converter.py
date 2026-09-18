@@ -170,12 +170,20 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
 
+        include = responses_create_params.pop("include", None)
+        unsupported_include = sorted(set(include or []) - {"reasoning.encrypted_content"})
+        if unsupported_include:
+            raise NotImplementedError(
+                f"Responses include value(s) {unsupported_include} have no Chat Completions "
+                "representation, so this request cannot be downconverted. Route it to a model "
+                "server that passes Responses through."
+            )
+
         unsupported_fields = sorted(
             {
                 "background",
                 "context_management",
                 "conversation",
-                "include",
                 "max_tool_calls",
                 "previous_response_id",
                 "prompt",
