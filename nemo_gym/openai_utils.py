@@ -744,6 +744,10 @@ NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 def _normalize_output_item_for_replay(item: Any) -> Any:
     """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
+        # Keep typed items intact: exclude_unset drops default type/role tags,
+        # including nested content tags, and can select the wrong union member.
+        if getattr(item, "type", None) not in {"additional_tools", "computer_call_output"}:
+            return item
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
         return item

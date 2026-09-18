@@ -99,6 +99,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
@@ -192,6 +193,22 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
         assert (
             InputAdditionalTools.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True) == replay_dump
         )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            NeMoGymResponseOutputMessage(
+                id="message-1",
+                content=[NeMoGymResponseOutputText(text="The status field was set.", annotations=[])],
+            ),
+            NeMoGymResponseFunctionToolCall(call_id="call-1", name="set_value", arguments='{"status":"done"}'),
+        ],
+    )
+    def test_replay_preserves_model_items_with_default_type_tags(self, item) -> None:
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+        replayed_item = replay.input[0]
+        assert type(replayed_item) is type(item)
+        assert replayed_item.model_dump() == item.model_dump()
 
     def test_failed_computer_output_preserved_then_status_removed_for_replay(self) -> None:
         payload = {
