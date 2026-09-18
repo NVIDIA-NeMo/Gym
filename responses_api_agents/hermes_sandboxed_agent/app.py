@@ -11,6 +11,7 @@ from pydantic import ConfigDict
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
 
@@ -48,7 +49,26 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=request.cookies,
         )
         await raise_for_status(response)
-        return HermesVerifyResponse.model_validate(await get_response_json(response))
+        result = await get_response_json(response)
+        if result.get("ng_trajectory"):
+            trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+            extra = body.model_extra or {}
+            task_id = next(
+                (
+                    str(extra[key])
+                    for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
+                    if extra.get(key) is not None
+                ),
+                "unknown",
+            )
+            identity = {"task_id": task_id, "rollout_id": rollout_id or payload["rollout_id"]}
+            result["ng_trajectory"] = trajectory.model_copy(
+                update={
+                    **identity,
+                    "turns": [turn.model_copy(update=identity) for turn in trajectory.turns],
+                }
+            ).model_dump(mode="json")
+        return HermesVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

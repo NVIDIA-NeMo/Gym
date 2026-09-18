@@ -21,6 +21,13 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import NeMoGymFunctionCallOutput, NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    TrajectoryRecord,
+    TrajectoryToolCall,
+    TrajectoryTurn,
+)
 
 
 HERMES_REVISION = "26bb847a88493342ca1b194e0455b479073ae21d"
@@ -156,6 +163,9 @@ class HermesHarness:
         responses, output, messages = [], [], []
         tool_error = None
         recorded_tools = set()
+        tool_observations = []
+        turns = []
+        invocation_id = self.context.session_id
         trajectory = self.directory / "trajectory.json"
         converter = ResponsesConverter(return_token_id_information=True)
 
@@ -189,8 +199,28 @@ class HermesHarness:
                 for item in converter.chat_completions_messages_to_responses_items(kwargs["messages"])
             ]
             params["tools"] = [{"type": "function", **TERMINAL_TOOL["function"], "strict": False}]
+            turn_started = time()
             response = await self.query(params)
             responses.append(response)
+            turns.append(
+                TrajectoryTurn(
+                    invocation_id=invocation_id,
+                    task_id="unscoped",
+                    rollout_id="unscoped",
+                    turn_no=len(responses),
+                    timestamp=turn_started,
+                    question=params["input"],
+                    answer=[item for item in response.output if item.type != "reasoning"],
+                    reasoning_content=[item for item in response.output if item.type == "reasoning"] or None,
+                    step_count=len(tool_observations),
+                    model_calls=[
+                        ModelCallRef(
+                            model_ref={"type": "responses_api_models", "name": self.model_name},
+                            response_id=response.id,
+                        )
+                    ],
+                )
+            )
             output.extend(response.output)
             if response.error:
                 raise RuntimeError(response.error.message)
@@ -280,6 +310,7 @@ class HermesHarness:
             def _execute_tool_calls(self, assistant_message, native_messages, effective_task_id, api_call_count=0):
                 nonlocal tool_error
                 for call in assistant_message.tool_calls:
+                    started_at = time()
                     try:
                         if tool_error:
                             raise RuntimeError("Tool not executed because the episode stopped")
@@ -289,6 +320,21 @@ class HermesHarness:
                         self.interrupt(tool_error)
                         result = json.dumps({"error": tool_error})
                     native_messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                    completed_at = time()
+                    tool_observations.append(
+                        TrajectoryToolCall(
+                            invocation_id=invocation_id,
+                            tool_call_id=call.id,
+                            tool_name=call.function.name,
+                            output=result,
+                            started_at=started_at,
+                            completed_at=completed_at,
+                            duration_ms=max(0, (completed_at - started_at) * 1000),
+                            timing_source="executor",
+                            status="failed" if json.loads(result).get("error") else "completed",
+                        )
+                    )
+                    turns[-1].step_count = len(tool_observations)
                     persist(native_messages)
 
         agent = SandboxedAgent(
@@ -356,4 +402,39 @@ class HermesHarness:
             parallel_tool_calls=self.params.parallel_tool_calls,
             usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in responses if r.usage]),
         )
-        return response, outcome, {"hermes_trajectory": result, "harness_revision": HERMES_REVISION}
+        trajectory_record = TrajectoryRecord(
+            task_id="unscoped",
+            rollout_id="unscoped",
+            turns=turns,
+            tool_calls=tool_observations,
+            invocations=[
+                AgentInvocation(
+                    invocation_id=invocation_id,
+                    status="completed"
+                    if outcome.reason == "completed"
+                    else "failed"
+                    if outcome.reason == "infrastructure_error"
+                    else "incomplete",
+                    conversation=[
+                        *(turns[0].question if turns else [{"role": "user", "content": instruction}]),
+                        *output,
+                    ],
+                    model_calls=[
+                        ModelCallRef(
+                            model_ref={"type": "responses_api_models", "name": self.model_name},
+                            response_id=r.id,
+                        )
+                        for r in responses
+                    ],
+                )
+            ],
+        )
+        return (
+            response,
+            outcome,
+            {
+                "hermes_trajectory": result,
+                "harness_revision": HERMES_REVISION,
+                "ng_trajectory": trajectory_record.model_dump(mode="json"),
+            },
+        )

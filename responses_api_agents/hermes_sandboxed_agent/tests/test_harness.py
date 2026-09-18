@@ -52,7 +52,7 @@ async def test_real_hermes_loop_preserves_sandbox_results_and_stops_before_retur
             ]
         )
         return NeMoGymResponse(
-            id="response",
+            id=f"response-{len(requests)}",
             created_at=0,
             model="model",
             object="response",
@@ -111,3 +111,16 @@ async def test_real_hermes_loop_preserves_sandbox_results_and_stops_before_retur
     assert any(message["role"] == "tool" and message["tool_call_id"] == "command" for message in native)
     if stop in {"timeout", "cancelled"}:
         assert closed.is_set()
+
+    trajectory = extra["ng_trajectory"]
+    invocation = trajectory["invocations"][0]
+    expected_calls = 2 if stop in {"completed", "partial"} else 1
+    assert len(invocation["model_calls"]) == len(trajectory["turns"]) == expected_calls
+    assert (
+        next(item for item in invocation["conversation"] if item["type"] == "function_call_output")["call_id"]
+        == "command"
+    )
+    tool = trajectory["tool_calls"][0]
+    assert tool["tool_call_id"] == "command"
+    assert tool["output"] == result.output
+    assert tool["status"] == ("failed" if stop == "tool_error" else "completed")

@@ -22,6 +22,11 @@ token usage. Native Hermes messages are saved to `trajectory.json` after each
 model request and tool result. Timeout and cancellation cancel pending I/O and
 join the Hermes worker before control returns to the resources runner.
 
+The harness also returns Gym's structured trajectory with model turns and tool
+timings. Enable `observability_enabled` and set an absolute
+`model_call_capture_dir` to join those turns to captured model requests and
+responses in rollout artifacts.
+
 This terminal profile exposes one foreground bash command per tool call.
 Each command starts in the task working directory. Hermes context compression,
 memory, delegation, and additional toolsets are disabled. Hermes uses an isolated
