@@ -859,8 +859,13 @@ class FileLineageStore(IncrementalLineageStore):
         if not fingerprint:
             return None
         with self._locked(rollout_id):
-            # Failure rows carry no fingerprint and can never resolve as parents.
-            records = [record for record in self._read(rollout_id) if record.get("fingerprint") == fingerprint]
+            # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
+            records = [
+                record
+                for record in self._read(rollout_id)
+                if record.get("fingerprint") == fingerprint
+                and record.get("fingerprint_version") == FINGERPRINT_VERSION
+            ]
         if len(records) != 1:
             return None
         record = records[0]
