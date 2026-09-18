@@ -43,3 +43,11 @@ harbor_agent_general:
       #
       # harbor_verifier:
       #   disable: false
+
+harbor_agent_general_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent_general

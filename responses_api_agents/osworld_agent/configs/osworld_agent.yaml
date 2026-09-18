@@ -128,3 +128,11 @@ osworld_sandbox:
       timeout_s: 30
       deadline_s: 120
       stable_count: 1
+
+osworld_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: osworld_simple_agent

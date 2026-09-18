@@ -21,3 +21,11 @@ ifbench_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/ifbench/data/example.jsonl
+
+ifbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ifbench_simple_agent

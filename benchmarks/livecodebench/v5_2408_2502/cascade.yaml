@@ -19,3 +19,10 @@ livecodebench_v5_cascade_code_gen_simple_agent:
         prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
         prepare_script: benchmarks/livecodebench/v5_2408_2502/prepare_cascade.py
         num_repeats: 3
+
+livecodebench_v5_cascade_code_gen_environment_server:
+  _inherit_from: code_gen_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: livecodebench_v5_cascade_code_gen_simple_agent

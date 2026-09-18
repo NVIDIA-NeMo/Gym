@@ -44,3 +44,10 @@ osworld_nano_omni_agent:
       top_p: 0.95
       sleep_after_execution: 5.0
       task_timeout: 7200
+
+osworld_nano_omni_environment_server:
+  _inherit_from: osworld_simple_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: osworld_nano_omni_agent
