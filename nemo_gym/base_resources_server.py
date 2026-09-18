@@ -17,6 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -146,7 +147,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     config: BaseResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(default_response_class=ORJSONResponse)
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
