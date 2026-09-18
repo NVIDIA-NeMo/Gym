@@ -18,3 +18,11 @@ nemo_fabric_hermes:
           max_turns: 30
         tools:
           enabled: [terminal, file, code_execution, skills, todo]
+
+nemo_fabric_hermes_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nemo_fabric_hermes

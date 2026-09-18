@@ -36,3 +36,11 @@ verifif_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/verifif/data/example.jsonl
+
+verifif_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: verifif_simple_agent

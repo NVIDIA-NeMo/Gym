@@ -41,3 +41,11 @@ browsecomp_advanced_harness_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/browsecomp_advanced_harness/data/example.jsonl
+
+browsecomp_advanced_harness_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: browsecomp_advanced_harness_agent

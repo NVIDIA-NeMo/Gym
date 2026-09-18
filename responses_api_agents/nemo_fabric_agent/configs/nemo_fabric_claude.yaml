@@ -13,3 +13,11 @@ nemo_fabric_claude:
           max_turns: 30
         tools:
           enabled: [Bash, Read, Write]
+
+nemo_fabric_claude_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nemo_fabric_claude

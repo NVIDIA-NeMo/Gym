@@ -256,3 +256,43 @@ jailbreak_hard_refusal_with_helplines:
       - name: jailbreak_hard_refusal_with_helplines
         type: example
         jsonl_fpath: resources_servers/jailbreak_detection/data/example.jsonl
+
+jailbreak_detection_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jailbreak_detection_simple_agent
+
+jailbreak_engagement_with_disclaimer_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jailbreak_engagement_with_disclaimer
+
+jailbreak_refusal_with_explanation_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jailbreak_refusal_with_explanation
+
+jailbreak_hard_refusal_no_redirection_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jailbreak_hard_refusal_no_redirection
+
+jailbreak_hard_refusal_with_helplines_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jailbreak_hard_refusal_with_helplines

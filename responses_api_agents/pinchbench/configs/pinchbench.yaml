@@ -48,3 +48,11 @@ pinchbench_agent:
       - name: example
         type: example
         jsonl_fpath: responses_api_agents/pinchbench/data/example.jsonl
+
+pinchbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: pinchbench_agent
