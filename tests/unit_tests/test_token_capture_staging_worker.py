@@ -34,6 +34,61 @@ from nemo_gym.token_id_capture.staging.capture import (
     StreamingUnsupportedError,
     install_capture,
 )
+from nemo_gym.token_id_capture.staging.protocols import TensorAttachment
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_attachments_are_acknowledged_with_the_token_record(reject):
+    class AttachmentSink(_MemorySink):
+        def stage_with_attachments(self, record, *, attachments):
+            self.events.append("attachments")
+            assert attachments == (attachment,)
+            assert record.extras == {"image_capture": descriptor}
+            return self.stage(record)
+
+    descriptor = {"adapter": "test", "images": [{"height": 1, "width": 1}]}
+    attachment = TensorAttachment("pixel_values", "float32", (3,), b"pixels")
+    sink = AttachmentSink(reject=reject)
+    capture, _ = _capture(sink, adapter=VLLMCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        {
+            "prompt_token_ids": [10],
+            "image_capture": descriptor,
+            "choices": [{"message": {"generation_token_ids": [11], "generation_log_probs": [-0.25]}}],
+        },
+        attachments=(attachment,),
+    )
+    assert sink.events == ["attachments", "stage"]
+    assert coords.disposition == ("capture_failed" if reject else "staged")
+
+
+def test_token_only_sink_rejects_attachments_without_acknowledging_tokens():
+    capture, sink = _capture()
+    coords = capture.complete_call(
+        capture.begin_call(_root()),
+        prompt_token_ids=[10],
+        generated_token_ids=[11],
+        generated_logprobs=[-0.25],
+        attachments=(TensorAttachment("pixels", "float32", (1,), b"1234"),),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.records == []
+
+
+@pytest.mark.parametrize("routes", [None, [[[1, 2]]]])
+def test_vllm_adapter_preserves_image_metadata_with_optional_routes(routes):
+    descriptor = {"adapter": "test", "images": []}
+    message = {} if routes is None else {"routed_experts": routes}
+    extras = VLLMCaptureAdapter().extract_extras({"image_capture": descriptor, "choices": [{"message": message}]})
+    assert extras["image_capture"] == descriptor
+    if routes is not None:
+        assert extras["routed_experts"] == routes
+
+
+def test_vllm_adapter_rejects_non_object_image_metadata():
+    with pytest.raises(ValueError, match="image_capture"):
+        VLLMCaptureAdapter().extract_extras({"image_capture": [], "choices": [{"message": {}}]})
 
 
 class _MemorySink:

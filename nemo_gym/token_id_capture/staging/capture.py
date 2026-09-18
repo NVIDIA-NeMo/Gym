@@ -20,8 +20,10 @@ from nemo_gym.token_id_capture.staging.digest import (
     hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.protocols import (
+    AttachmentStagingSink,
     CaptureAdapter,
     StagingSink,
+    TensorAttachment,
     WeightVersionProvider,
 )
 from nemo_gym.token_id_capture.staging.records import (
@@ -152,6 +154,7 @@ class RolloutTokenCapture:
         generated_token_ids: list[int],
         generated_logprobs: list[float],
         extras: dict[str, Any] | None = None,
+        attachments: tuple[TensorAttachment, ...] = (),
     ) -> CommitCoords:
         """Stage a normalized delta before returning lightweight coordinates."""
         self._claim_completion(call)
@@ -222,7 +225,12 @@ class RolloutTokenCapture:
             # (a child is only admitted after its parent's coords returned).
             # Serializing here would head-of-line block every concurrent
             # completion on the worker behind one sink round trip.
-            result = self._sink.stage(record)
+            if attachments:
+                if not isinstance(self._sink, AttachmentStagingSink):
+                    raise TypeError("staging sink does not support tensor attachments")
+                result = self._sink.stage_with_attachments(record, attachments=attachments)
+            else:
+                result = self._sink.stage(record)
             if not isinstance(result, StageResult):
                 raise TypeError(f"StagingSink.stage returned {type(result).__name__}, expected StageResult")
         except Exception:
@@ -263,6 +271,8 @@ class RolloutTokenCapture:
         self,
         call: ActiveCall,
         response_payload: dict[str, Any],
+        *,
+        attachments: tuple[TensorAttachment, ...] = (),
     ) -> CommitCoords:
         """Extract engine-native material and stage it as one atomic lifecycle step."""
         if self._adapter is None:
@@ -287,6 +297,7 @@ class RolloutTokenCapture:
             generated_token_ids=generated_token_ids,
             generated_logprobs=generated_logprobs,
             extras=extras,
+            attachments=attachments,
         )
 
     def fail_call(self, call: ActiveCall, *, reason: str) -> CommitCoords:
