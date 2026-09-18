@@ -235,6 +235,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 async with asyncio.timeout(lifecycle.SETUP_TIMEOUT_SEC):
                     context = HarnessContext(
                         session_id=session.session_id,
+                        task_id=body.task_name,
+                        rollout_id=body.capture_rollout_id or body.rollout_id,
                         instruction=session.task.instruction,
                         user=session.task.config.agent.user,
                         workdir=await session.environment.agent_workdir(),
@@ -255,6 +257,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                             server_name=self.config.model_server.name,
                             url_path=prefix + "/v1/responses",
                             json=params,
+                            # Exact invocation ownership, including transport
+                            # failures/retries that have no model response ID.
+                            headers={"x-session-id": session.session_id},
                             cookies=cookies,
                         )
                         await raise_for_status(model_response)
@@ -326,7 +331,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
-            **(session.verify_body.model_dump(exclude={"termination"}) | extra),
+            **(
+                session.verify_body.model_dump(exclude={"termination"})
+                | extra
+                | {"task_id": session.request.task_name}
+            ),
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,
             termination=session.termination,

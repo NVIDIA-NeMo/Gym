@@ -30,7 +30,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
         side_effect=[
             SimpleNamespace(
                 value={
-                    "id": "resp_test",
+                    "id": f"resp_test_{index}",
                     "created_at": 0,
                     "object": "response",
                     "model": "test",
@@ -117,9 +117,25 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     assert result.termination.artifacts == [str(directory / "trajectory.json")]
     assert result.response.model == "model"
     assert result.response.tool_choice == "required"
-    assert len(result.response.output) == 6
+    assert len(result.response.output) == 9
     assert result.response.usage.total_tokens == 39
     assert result.termination.reason == "completed"
+    observations = extra["ng_agent_observations"]
+    invocation = observations["records"][0]
+    assert invocation["invocation_id"] == seed.session_id
+    assert invocation["status"] == "completed"
+    assert [ref["response_id"] for ref in invocation["model_calls"]] == [f"resp_test_{i}" for i in range(3)]
+    tools = observations["records"][1:]
+    assert [tool["status"] for tool in tools] == ["completed", "timeout", "completed"]
+    assert [tool["tool_call_id"] for tool in tools] == [f"call_{i}" for i in range(3)]
+    assert all(tool["duration_ms"] >= 0 and tool["completed_at"] >= tool["started_at"] for tool in tools)
+    assert all(left["completed_at"] <= right["started_at"] for left, right in zip(tools, tools[1:]))
+    outcomes = [item for item in response.output if item.type == "function_call_output"]
+    assert len(outcomes) == 3
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in outcomes[-1].output
+    turns = extra["ng_trajectory"]["turns"]
+    assert [turn["step_count"] for turn in turns] == [1, 2, 3]
+    assert all(turn["resolved"] is None for turn in turns)
     requests = [call.kwargs["json"] for call in client.post.await_args_list]
     for request in requests:
         NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
