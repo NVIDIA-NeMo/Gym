@@ -150,6 +150,13 @@ gdpval_resources_server:
         minimax_m3:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/minimax_m3
           elo: 1304
+        # 0813 release at MAX effort, matching AA's only 0813 row (1493).
+        # An earlier high-effort collection was discarded: the board has no
+        # 0813 high row. Not a duplicate of deepseek_v4_pro (1223), which is
+        # the older unversioned/0424 release.
+        deepseek_v4_pro_0813_max:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro_0813_max
+          elo: 1493
       # Pairwise trials per (task x reference x repeat). 4 debiases position with
       # swap/no-swap; lower to 2 for a faster smoke test.
       num_comparison_trials: 4
