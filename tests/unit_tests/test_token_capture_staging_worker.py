@@ -467,6 +467,51 @@ def test_megatron_adapter_reads_mapping_payloads_and_casts_scalars() -> None:
     assert adapter.extract_extras(payload) is None
 
 
+_MEDIA_GEOMETRY = {"modality": "image", "imgs_sizes": [[4, 4]], "num_frames": None, "num_tiles": None}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        # Text payload: no extras.
+        ({}, None),
+        # Root VLM call: the whole compact prompt plus the generation is new.
+        (
+            {"compact_prompt_token_ids": [10, 99, 11], "media": SimpleNamespace(**_MEDIA_GEOMETRY)},
+            {"compact_token_ids_delta": [10, 99, 11, 12, 13], "media": _MEDIA_GEOMETRY},
+        ),
+        # Child call: the worker spliced a 3-token compact parent chain; only the suffix is new.
+        (
+            {"compact_prompt_token_ids": [10, 99, 11, 30], "compact_prev_len": 3, "media": _MEDIA_GEOMETRY},
+            {"compact_token_ids_delta": [30, 12, 13], "media": _MEDIA_GEOMETRY},
+        ),
+        # Pre-expanded engine prompt: geometry alone.
+        ({"media": _MEDIA_GEOMETRY}, {"media": _MEDIA_GEOMETRY}),
+    ],
+    ids=["text", "root", "child", "preexpanded"],
+)
+def test_megatron_adapter_stages_multimodal_extras(overrides: dict[str, Any], expected: Any) -> None:
+    assert MegatronCaptureAdapter().extract_extras(_minf_payload(**overrides)) == expected
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        (
+            {"compact_prompt_token_ids": [10, 99], "compact_prev_len": 9, "media": _MEDIA_GEOMETRY},
+            "outside the compact prompt length",
+        ),
+        (
+            {"compact_prompt_token_ids": [10, 99], "compact_prev_len": "1", "media": _MEDIA_GEOMETRY},
+            "compact_prev_len must be an int",
+        ),
+    ],
+)
+def test_megatron_adapter_rejects_inconsistent_compact_prefix(overrides: dict[str, Any], error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        MegatronCaptureAdapter().extract_extras(_minf_payload(**overrides))
+
+
 @pytest.mark.parametrize("missing", ["prompt_token_ids", "generated_token_ids", "generated_log_probs"])
 def test_megatron_adapter_missing_field_poisons_capture(missing: str) -> None:
     capture, sink = _capture(adapter=MegatronCaptureAdapter())
