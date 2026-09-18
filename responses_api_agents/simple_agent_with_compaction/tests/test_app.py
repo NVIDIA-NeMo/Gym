@@ -1097,7 +1097,7 @@ class TestApp:
         assert res.json()["incomplete_details"] is None
         assert res.json()["metadata"]["existing_key"] == "preserved"
         assert res.json()["metadata"]["ng_termination_reason"] == (
-            "empty_output" if empty_output else "reasoning_only_output"
+            "empty_output" if empty_output else "incomplete_reasoning"
         )
         assert res.json()["metadata"]["ng_termination_message"] in caplog.text
         assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])

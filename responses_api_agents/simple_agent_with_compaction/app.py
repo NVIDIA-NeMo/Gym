@@ -330,7 +330,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                     if not output:
                         termination_reason = "empty_output"
                     elif all(item.type == "reasoning" for item in output):
-                        termination_reason = "reasoning_only_output"
+                        termination_reason = "incomplete_reasoning"
                     else:
                         termination_reason = "missing_assistant_message"
                     model_response.status = "incomplete"
