@@ -32,9 +32,9 @@ def _sequence(payload: Any, name: str) -> Sequence[Any]:
 
 
 class MegatronCaptureAdapter:
-    """Translate MInf request/response material at the framework boundary.
+    """Translate Megatron inference request/response material at the framework boundary.
 
-    MInf offloads exact prompt ids, generated ids, and selected-token log
+    Megatron inference offloads exact prompt ids, generated ids, and selected-token log
     probabilities as attributes on a payload object rather than as a chat
     completion dict. The adapter reads either shape so extraction failures
     flow through ``RolloutTokenCapture.complete_call_from_response`` and
