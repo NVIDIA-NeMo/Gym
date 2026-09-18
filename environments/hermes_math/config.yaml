@@ -42,3 +42,11 @@ hermes_math_agent:
             version: 0.0.1
             artifact_fpath: dapo17k_train.jsonl
           license: Apache 2.0
+
+hermes_math_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: hermes_math_agent
