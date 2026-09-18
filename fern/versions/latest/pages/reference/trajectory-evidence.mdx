@@ -1,0 +1,73 @@
+---
+title: "Harness: Trajectory Evidence"
+description: "Harness evidence contracts and artifact validation"
+position: 5
+---
+
+# Harness: Trajectory Evidence
+
+Trajectory Evidence (TE) describes the execution artifacts available from a particular harness integration and their schemas.
+This page defines a proposed vocabulary for harness onboarding and artifact validation. It does not certify individual
+harnesses.
+
+## Scope and assumptions
+
+The unit being assessed is a harness integration. We will consider harnesses that correctly adapt to Gym and do not
+bypass Gym interfaces defining capture, collection, serialization, request routing, aggregation, and verification.
+We only consider the case where `observability_enabled: true` and `model_call_capture_dir` is set. See [Model-call capture](/model-server/model-call-capture).
+When these are unset, produced artifacts cannot fullfill these claims since the required evidence is missing.
+
+## Sources of trajectory evidence
+
+Evidence is stored in each record of `evaluator_rollouts.jsonl`. These JSON fields correspond to the following Python
+classes:
+
+| JSON field | Python class | What it contains |
+|---|---|---|
+| `ng_trajectory` | `TrajectoryRecord` | The container for invocations, turns, model calls, tool calls and evidence gaps. |
+| `ng_trajectory.invocations[]` | `AgentInvocation` | One agent execution or conversation, including its identity, parent invocation and model-call references. Also appears in `ng_agent_observations.records[]` with `kind: agent_invocation`. |
+| `ng_trajectory.turns[]` | `TrajectoryTurn` | One agent decision, with its content, invocation ID and model-call references. |
+| `ng_trajectory.model_calls[]` | `TrajectoryModelCall` | A normalized model exchange, including request, response, metadata and token counts. |
+| `ng_agent_observations` | `AgentObservationBundle` | Harness observations in `records[]`: invocations, tools, compaction and sandbox activity. |
+| `ng_model_call_capture.calls[]` | `ModelCallRecord` | Captured model exchanges and their metadata. |
+
+A turn belongs to an invocation through `invocation_id`. Invocation and turn `model_calls` lists contain references to
+model-call records. A `TrajectoryRecord` can contain invocations and model calls without any turns.
+
+These classes are defined in [rollout_observability.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_observability.py),
+except `ModelCallRecord`, which is defined in [base_responses_api_model.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_model.py).
+
+## Evidence taxonomy
+
+TE1, TE2, and so on are families. Each decimal entry is a separately testable claim; a family does not pass merely because
+one of its fields is present. Scenario examples below describe behaviors to exercise, then inspect in saved artifacts.
+They do not imply an independent observer or an already implemented test suite.
+
+| Family | Evidence claims | Example artifact-validation scenario |
+|---|---|---|
+| **TE1 — Model-call attempts** | **TE1.1** Attempt identities; **TE1.2** Outcomes and termination reasons; **TE1.3** Call timing; **TE1.4** Retry relationships | Exercise successful, failed, and retried calls; inspect distinct recorded attempts, outcomes, and explicit retry references. |
+| **TE2 — Model-visible content** | **TE2.1** Actual requests/context; **TE2.2** Returned responses; **TE2.3** Returned reasoning; **TE2.4** Images/audio/other media and their references | Inspect requests and responses across multiple turns and supported modalities, including context changes. Preserve native roles and content. |
+| **TE3 — Per-call token usage** | **TE3.1** Prompt tokens; **TE3.2** Completion tokens; **TE3.3** Reasoning tokens; **TE3.4** Cached tokens; **TE3.5** Total tokens | Inspect each claimed count on the relevant calls. Missing values stay distinct from zero; each metric is assessed separately. |
+| **TE4 — Agent turns** | **TE4.1** Turn identity, ordering, and timestamp; **TE4.2** Turn content: answer, reasoning, and requested actions; **TE4.3** Selected model-response reference; **TE4.4** Associated model attempts | Exercise multiple decisions and recovery; inspect turn records and distinguish the selected response from other attempts associated with the turn. |
+| **TE5 — Tool executions** | **TE5.1** Execution identity and tool name; **TE5.2** Dispatched arguments; **TE5.3** Results/errors; **TE5.4** Execution outcome; **TE5.5** Individual execution timing; **TE5.6** Originating request/turn reference | Exercise successful and failed tools, with overlapping execution where supported. Inspect execution records and their references; a model request alone is not proof of execution. |
+| **TE6 — Invocations and subagents** | **TE6.1** Invocation identity and outcome; **TE6.2** Parent/child relationships; **TE6.3** Delegated input and returned result; **TE6.4** Invocation-to-model-call ownership | Exercise child agents and inspect their relationships, delegated work, results, and explicit ownership of recorded model calls. |
+| **TE7 — Context compaction** | **TE7.1** Compaction occurrence and outcome; **TE7.2** Before/after context references; **TE7.3** Summary or transformation evidence; **TE7.4** Compaction model-call references | Trigger completed and interrupted compaction; inspect the event, subsequent recorded context, and any explicitly identified helper calls. |
+| **TE8 — Execution resources** | **TE8.1** Resource identity and association with agent/tool activity; **TE8.2** Resource lifecycle/outcome; **TE8.3** Measured CPU usage; **TE8.4** Measured memory usage; **TE8.5** Measured GPU usage | Inspect resources associated with harness activity and the scope of available measurements. Sandbox-wide usage must not be presented as per-tool usage. |
+
+### Examples: combining evidence
+
+An analysis may require more than one kind of evidence. The examples below show which claims must be satisfied together
+to answer them.
+
+| Information or analysis | Required evidence |
+|---|---|
+| Exact context used for a turn | TE4.3 selected-response association and TE2.1 request content |
+| Tokens used by a subagent | TE6.4 invocation ownership and the relevant TE3 metrics; TE6.2 identifies the parent/child relationship |
+| Tokens used for compaction | TE7.4 helper-call references and the relevant TE3 metrics |
+| Named parallel-tool timeline | TE5.1 and TE5.5, exercised with parallel execution and comparable timing boundaries |
+| Retry cost for a turn | TE1.4 and TE4.4, plus the relevant TE3 metrics |
+
+## Validation
+
+Each TE is validated by matching the records in `evaluator_rollouts.jsonl` against its JSON Schema.
+Schemas can use `anyOf` when the same evidence may appear in different locations.
