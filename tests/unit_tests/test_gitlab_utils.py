@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
-from mlflow.exceptions import RestException
+from mlflow.exceptions import MlflowException, RestException
 
 import nemo_gym.gitlab_utils as gitlab_utils
 from nemo_gym.config_types import ConfigError, DownloadJsonlDatasetGitlabConfig, MLFlowConfig
@@ -96,14 +96,17 @@ class TestGetModelVersion:
         assert excinfo.value is error
 
     def test_transport_failure_is_preserved(self) -> None:
-        error = requests.Timeout("timed out")
+        timeout = requests.Timeout("timed out")
+        error = MlflowException("API request failed with timeout")
+        error.__cause__ = timeout
         client = MagicMock()
         client.get_model_version.side_effect = error
 
-        with pytest.raises(requests.Timeout) as excinfo:
+        with pytest.raises(MlflowException) as excinfo:
             _get_model_version(client, "sample_dataset", "1")
 
         assert excinfo.value is error
+        assert excinfo.value.__cause__ is timeout
 
 
 def test_dataset_download_reports_missing_version_before_writing(
