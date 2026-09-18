@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
 
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -175,11 +177,9 @@ Reply as JSON, with a verdict of CORRECT or INCORRECT."""
             ("CORRECT", "CORRECT"),
             (" INCORRECT\n", "INCORRECT"),
             ("NOT A VERDICT", None),
-            ("", None),
-            (" \n", None),
         ],
     )
-    def test_legacy_parser_preserves_previous_verdict_behavior(self, text: str, expected: str | None) -> None:
+    def test_legacy_parser_preserves_nonempty_verdict_behavior(self, text: str, expected: str | None) -> None:
         assert _parse_judge_verdict(text, LEGACY_JUDGE_PROTOCOL) == expected
 
     @pytest.mark.parametrize(
@@ -248,11 +248,9 @@ Reply as JSON, with a verdict of CORRECT or INCORRECT."""
             ("CORRECT", 1.0, False),
             ("INCORRECT", 0.0, False),
             ("NOT A VERDICT", 0.0, True),
-            ("", 0.0, True),
-            (" \n", 0.0, True),
         ],
     )
-    async def test_legacy_verdict_preserves_previous_reward(
+    async def test_legacy_nonempty_verdict_preserves_previous_reward(
         self, judge_text: str, expected_reward: float, expected_invalid: bool
     ) -> None:
         server = AalcrResourcesServer(
@@ -266,3 +264,31 @@ Reply as JSON, with a verdict of CORRECT or INCORRECT."""
 
         assert result.reward == expected_reward
         assert result.invalid_judge_response is expected_invalid
+
+    @pytest.mark.parametrize("judge_protocol", [LEGACY_JUDGE_PROTOCOL, V1_1_JUDGE_PROTOCOL])
+    @pytest.mark.parametrize("judge_text", ["", " \n"])
+    async def test_empty_judge_response_is_retryable_failure(self, judge_protocol: str, judge_text: str) -> None:
+        server = AalcrResourcesServer(config=_config(judge_protocol), server_client=MagicMock(spec=ServerClient))
+        request = _request(judge_protocol)
+
+        with patch("resources_servers.aalcr.app.call_judge", AsyncMock(return_value=_response(judge_text))):
+            result = await judge_failsafe(server.verify)(body=request)
+
+        assert isinstance(result, JSONResponse)
+        data = json.loads(result.body)
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_error"] == "empty judge response"
+        assert "_ng_failure_terminal" not in data
+        assert data["response"] == request.response.model_dump(mode="json")
+
+    async def test_empty_candidate_answer_remains_zero_reward(self) -> None:
+        server = AalcrResourcesServer(config=_config(), server_client=MagicMock(spec=ServerClient))
+        request = _request(LEGACY_JUDGE_PROTOCOL)
+        request.response = _response(" \n")
+
+        with patch("resources_servers.aalcr.app.call_judge", AsyncMock()) as judge:
+            result = await server.verify(request)
+
+        assert result.reward == 0.0
+        assert result.invalid_model_response is True
+        judge.assert_not_awaited()
