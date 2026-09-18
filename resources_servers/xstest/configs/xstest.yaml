@@ -48,3 +48,11 @@ xstest_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/xstest/data/example.jsonl
+
+xstest_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: xstest_simple_agent

@@ -26,3 +26,11 @@ spider2_lite_benchmark_resources_server:
   resources_servers:
     spider2_lite:
       max_concurrency: 128
+
+ruler_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ruler_benchmark_simple_agent

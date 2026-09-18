@@ -44,3 +44,11 @@ swerl_gen_simple_agent:
         type: example
         jsonl_fpath: resources_servers/swerl_gen/data/example.jsonl
         num_repeats: 1
+
+swerl_gen_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swerl_gen_simple_agent
