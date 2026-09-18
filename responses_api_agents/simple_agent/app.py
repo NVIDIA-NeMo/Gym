@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from collections.abc import Mapping
 from time import perf_counter, time
 from typing import Any, List
@@ -52,6 +53,8 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
+
+LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
@@ -168,7 +171,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
-            if not all_fn_calls and all_output_messages:
+            if not all_fn_calls:
+                if not all_output_messages:
+                    invocation_status = "incomplete"
+                    LOG.warning(
+                        "Ending trajectory: model returned no assistant message or tool calls "
+                        "(reasoning-only or empty output). This may indicate incomplete reasoning "
+                        "or a model/serving bug. model_server=%s response_id=%s rollout_id=%s step=%s",
+                        self.config.model_server.name,
+                        model_response.id,
+                        rollout_id,
+                        step,
+                    )
                 break
 
             for output_function_call in all_fn_calls:
