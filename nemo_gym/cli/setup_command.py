@@ -24,7 +24,7 @@ from typing import IO, Any
 
 from omegaconf import DictConfig
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -209,17 +209,20 @@ def run_command(
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
-    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
-    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
-    # this generic helper doesn't bake a layout assumption in for its other callers.
+    # Entry points can import sibling components before importing nemo_gym. Resolve explicit
+    # package roots before the command changes directory so those imports work at process startup.
     py_path_entries = [work_dir]
+    py_path_entries.extend(
+        str(Path(root).resolve())
+        for root in custom_env.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep)
+        if root
+    )
     if project_root is not None:
         py_path_entries.append(f"{project_root.absolute()}")
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)
-    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
+    custom_env["PYTHONPATH"] = os.pathsep.join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 

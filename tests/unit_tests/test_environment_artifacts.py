@@ -4,7 +4,9 @@
 import hashlib
 import io
 import json
+import shlex
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ import pytest
 import yaml
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.cli.setup_command import run_command
 from nemo_gym.config_types import ConfigError
 from nemo_gym.environment import artifacts
 
@@ -46,6 +49,42 @@ def test_deterministic_roundtrip_and_cache_integrity(release, tmp_path, monkeypa
     (root / metadata["config_path"]).write_text("tampered")
     with pytest.raises(ConfigError, match="checksum mismatch"):
         artifacts.pull_environment_package(str(first))
+
+
+@pytest.mark.parametrize("relative_root", [False, True])
+def test_pulled_server_imports_packaged_sibling_before_gym(release, tmp_path, monkeypatch, relative_root):
+    author = release.manifest_path.parents[2]
+    server = author / "resources_servers/packaged_server"
+    server.mkdir(parents=True)
+    (server / "setup_server.py").write_text("VALUE = 'from registry package'\n")
+    (server / "app.py").write_text(
+        "from resources_servers.packaged_server.setup_server import VALUE\n"
+        "from pathlib import Path\n"
+        "Path('import-result.txt').write_text(VALUE)\n"
+    )
+    release.manifest_path.with_name("package.yaml").write_text(
+        "include:\n- environments/example_single_tool_call\n- resources_servers/packaged_server\n"
+    )
+    archive = artifacts.build_environment_package(release, tmp_path / "server.tar.gz")
+    installed = artifacts.pull_environment_package(str(archive), tmp_path / "installed")
+    installed_server = installed / "resources_servers/packaged_server"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", "installed" if relative_root else str(installed))
+    command = f"cd {shlex.quote(str(installed_server))} && {shlex.quote(sys.executable)} -S app.py"
+
+    # -S prevents editable installs/site-packages from masking a missing package import path.
+    with (tmp_path / "server.log").open("w") as log:
+        process = run_command(
+            command,
+            installed_server,
+            global_config_dict={"uv_cache_dir": str(tmp_path / "uv-cache")},
+            stdout_target=log,
+            stderr_target=log,
+        )
+        assert process.wait(timeout=30) == 0
+
+    assert (installed_server / "import-result.txt").read_text() == "from registry package"
 
 
 @pytest.mark.parametrize("include", ["../outside", "/etc/passwd", "environments/missing"])
