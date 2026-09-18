@@ -20,14 +20,17 @@ import statistics
 import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from scipy import stats
-from wandb import Histogram
+
+
+if TYPE_CHECKING:
+    from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -196,11 +199,20 @@ class RewardProfiler:
 
         return rollout_info
 
-    def histogram(self, data: Series) -> Optional[Histogram]:
+    def histogram(self, data: Series) -> Optional["Histogram"]:
         # W&B doesn't accept empty histograms
         data = data.dropna()
         if data.empty:
             return
+
+        # wandb is an optional extra (`nemo-gym[wandb]`). This stat is always dropped by
+        # prepare_for_serialization before it reaches any JSON output or exporter (it exists
+        # only for a wandb-native run that reads group_level_metrics/agent_metrics directly),
+        # so skipping it when wandb isn't installed changes nothing observable.
+        try:
+            from wandb import Histogram
+        except ImportError:
+            return None
 
         return Histogram(data)
 
