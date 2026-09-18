@@ -57,6 +57,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -187,6 +188,25 @@ NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfig) -> str:
+    """Return the environment server declared for an agent, so collection never posts to the agent.
+
+    Resolving from the agent only describes an episode that has exactly one. Routing should name
+    the server directly once tasksets can.
+    """
+    for name, instance in global_config_dict.items():
+        if not isinstance(instance, DictConfig):
+            continue
+        servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+        if not isinstance(servers, DictConfig):
+            continue
+        for server in servers.values():
+            reference = server.get("agent_server") if isinstance(server, DictConfig) else None
+            if isinstance(reference, DictConfig) and reference.get("name") == agent_name:
+                return str(name)
+    return agent_name
 
 
 @dataclass(frozen=True)
@@ -1758,7 +1778,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=agent_name,
+                server_name=_environment_server_for_agent(agent_name, server_client.global_config_dict),
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -1980,7 +2000,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    server_name = _environment_server_for_agent(
+                        row[AGENT_REF_KEY_NAME]["name"], server_client.global_config_dict
+                    )
+                    res = await server_client.post(server_name=server_name, url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
