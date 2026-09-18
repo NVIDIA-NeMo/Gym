@@ -368,3 +368,67 @@ async def test_total_cache_hit_rate_is_query_weighted(monkeypatch):
     assert result["vllm/mean/prefix_cache_hit_rate"] == 70
     assert result["vllm/total/prompt_tokens_by_source_per_second/source/local_compute"] == 10
     assert result["vllm/mean/prompt_tokens_by_source_per_second/source/local_compute"] == 5
+
+
+def test_router_counters_labels_and_reset():
+    collector = InferenceMetricsCollector(config())
+
+    def sample(value, now):
+        return collector.parse(
+            "main",
+            '# TYPE vllm_router_processed_requests_total counter\n'
+            f'vllm_router_processed_requests_total{{worker="http://worker:8001"}} {value}\n'
+            '# TYPE vllm_router_worker_load gauge\n'
+            'vllm_router_worker_load{worker="http://worker:8001"} 12\n',
+            now,
+        )
+
+    prefix = "router/main/"
+    suffix = "/worker/http://worker:8001"
+    rate = prefix + "processed_requests_per_second" + suffix
+    first = sample(100, 10)
+    assert first[prefix + "worker_load" + suffix] == 12
+    assert rate not in first
+    assert sample(160, 12)[rate] == 30
+    assert rate not in sample(5, 14)
+    assert sample(25, 16)[rate] == 10
+
+
+async def test_router_endpoint_does_not_remove_replica_aggregates(monkeypatch):
+    cfg = config(router_endpoints={"main": "http://localhost:29000/metrics"})
+    collector = InferenceMetricsCollector(cfg)
+    stop = asyncio.Event()
+    publish = MagicMock()
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+
+    async def scrape(name, url):
+        if name == "main":
+            stop.set()
+            return {"router/main/worker_load/worker/backend": 20}
+        return {f"vllm/{name}/num_requests_running": 7}
+
+    collector.scrape = AsyncMock(side_effect=scrape)
+    await collector.run(stop)
+    assert collector.scrape.await_count == 2
+    publish.assert_called_once_with({"vllm/total/num_requests_running": 7, "vllm/mean/num_requests_running": 7})
+
+
+def test_router_only_and_endpoint_validation():
+    cfg = InferenceMetricsConfig(enabled=True, router_endpoints={"main": "http://localhost:29000/metrics"})
+    assert cfg.enabled
+    with pytest.raises(ValidationError):
+        config(router_endpoints={"replica0": "http://localhost:29000/metrics"})
+    with pytest.raises(ValidationError):
+        config(router_endpoints={"bad/name": "http://localhost:29000/metrics"})
+
+
+def test_router_routes_are_readable_metric_paths():
+    collector = InferenceMetricsCollector(config())
+    payload = (
+        '# TYPE vllm_router_requests_total counter\n'
+        'vllm_router_requests_total{route="/v1/chat/completions"} 10\n'
+    )
+    first = collector.parse("main", payload, 10)
+    assert first == {"router/main/requests_total/route/v1/chat/completions": 10}
+    second = collector.parse("main", payload.replace(" 10", " 20"), 12)
+    assert second["router/main/requests_per_second/route/v1/chat/completions"] == 5

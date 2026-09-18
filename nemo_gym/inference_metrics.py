@@ -20,7 +20,7 @@ import math
 from contextlib import asynccontextmanager
 from time import monotonic
 from typing import AsyncIterator
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from aiohttp import ClientTimeout
 from prometheus_client.parser import text_string_to_metric_families
@@ -34,22 +34,26 @@ logger = logging.getLogger(__name__)
 
 
 class InferenceMetricsConfig(BaseModel, extra="forbid"):
-    """Opt-in sampling of explicitly configured vLLM Prometheus endpoints."""
+    """Opt-in sampling of vLLM and router Prometheus endpoints."""
 
     enabled: bool = False
     endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Replica name to full /metrics URL.")
+    router_endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Router name to /metrics URL.")
     interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     timeout_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     metrics: list[str] | None = Field(
         default=None,
-        description="Optional exact sample allowlist; by default export all vLLM gauges and counters.",
+        description="Optional exact sample allowlist; by default export all vLLM and router gauges and counters.",
     )
 
     @model_validator(mode="after")
     def validate_enabled(self) -> "InferenceMetricsConfig":
-        if self.enabled and not self.endpoints:
+        if self.enabled and not (self.endpoints or self.router_endpoints):
             raise ValueError("Enabled inference_metrics requires endpoints")
-        if any(not name or not all(c.isalnum() or c in "_-" for c in name) for name in self.endpoints):
+        if self.endpoints.keys() & self.router_endpoints.keys():
+            raise ValueError("Replica and router endpoint names must be distinct")
+        names = [*self.endpoints, *self.router_endpoints]
+        if any(not name or not all(c.isalnum() or c in "_-" for c in name) for name in names):
             raise ValueError(
                 "Inference metrics replica names must contain only letters, numbers, underscores or hyphens"
             )
@@ -74,19 +78,20 @@ class InferenceMetricsCollector:
                 continue
             for sample in family.samples:
                 if (
-                    not sample.name.startswith("vllm:")
+                    not sample.name.startswith(("vllm:", "vllm_router_"))
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
                     or not math.isfinite(sample.value)
                 ):
                     continue
-                name = sample.name.removeprefix("vllm:")
+                namespace = "router" if sample.name.startswith("vllm_router_") else "vllm"
+                name = sample.name.removeprefix("vllm_router_").removeprefix("vllm:")
                 labels = urlencode(sorted(sample.labels.items()))
                 suffix = "".join(
-                    f"/{quote(label, safe='')}/{quote(value, safe='')}"
+                    f"/{label}/{value.strip('/')}"
                     for label, value in sorted(sample.labels.items())
                     if label not in {"engine", "model_name"}
                 )
-                key = f"vllm/{replica}/{name}{suffix}"
+                key = f"{namespace}/{replica}/{name}{suffix}"
                 series_key = f"{key}/{labels}"
                 result[key] = result.get(key, 0.0) + sample.value
                 if family.type == "gauge" and name == "kv_cache_usage_perc":
@@ -94,7 +99,7 @@ class InferenceMetricsCollector:
                 if family.type == "counter":
                     previous = self.previous.get(series_key)
                     self.previous[series_key] = (sampled_at, sample.value)
-                    rate_key = f"vllm/{replica}/{name.removesuffix('_total')}_per_second{suffix}"
+                    rate_key = f"{namespace}/{replica}/{name.removesuffix('_total')}_per_second{suffix}"
                     if previous is not None:
                         previous_time, previous_value = previous
                         # A reset has an unknown start time: establish a fresh baseline.
@@ -156,7 +161,10 @@ class InferenceMetricsCollector:
     async def run(self, stop: asyncio.Event) -> None:
         """Sample immediately, then periodically until the rollout scope closes."""
         while not stop.is_set():
-            snapshots = await asyncio.gather(*(self.scrape(name, url) for name, url in self.config.endpoints.items()))
+            snapshots = await asyncio.gather(
+                *(self.scrape(name, url) for name, url in self.config.endpoints.items()),
+                *(self.scrape(name, url) for name, url in self.config.router_endpoints.items()),
+            )
             # Match metric and label paths; missing replicas/series are not zeros.
             replica_metrics = [
                 {
@@ -198,6 +206,7 @@ async def collect_inference_metrics(config: InferenceMetricsConfig) -> AsyncIter
     exporter_names = ", ".join(type(exporter).__name__ for exporter in exporters)
     print(
         f"Inference metrics collection enabled: {len(config.endpoints)} replicas, "
+        f"{len(config.router_endpoints)} routers, "
         f"interval={config.interval_s:g}s, timeout={config.timeout_s:g}s, "
         f"exporters={exporter_names}",
         flush=True,
