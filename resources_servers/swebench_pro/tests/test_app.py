@@ -22,7 +22,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.base_resources_server import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.single_agent_turn_types import (
+    SingleAgentTurnResourcesVerifyRequest,
+    SingleAgentTurnVerificationInput,
+)
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
@@ -210,6 +220,169 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     sandbox.upload.assert_not_awaited()
     # anti-cheat is skipped, but the container is still normalized and snapshotted
     assert sandbox.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(),
+        serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.resolve_provider_config",
+        lambda name, config: {"opensandbox": {}},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    task_data = request_body()
+    task_data.pop("responses_create_params")
+    task_data.pop("response")
+
+    response = await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+    )
+
+    assert response.resources_session_id == "session"
+    assert response.sandbox_access.connection.provider_config_ref == server.config.sandbox_provider
+    assert response.sandbox_access.connection.descriptor == {"sandbox_id": "sandbox-id"}
+    assert server._session_id_to_identity["session"] == (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    repeated = await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+    )
+    assert repeated.resources_session_id == "session"
+    server._create_sandbox.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+    with pytest.raises(ValueError, match="Verification identity"):
+        await server.verify(
+            request,
+            SingleAgentTurnResourcesVerifyRequest(
+                episode_id=EpisodeId(rollout_id="different"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                verification_input=SingleAgentTurnVerificationInput(
+                    responses_create_params={"input": "task"},
+                    response=NeMoGymResponse.model_construct(id="response", output=[]),
+                ),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="episode_id does not match"):
+        await server.close_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="different"),
+            ),
+        )
+    sandbox.stop.assert_not_awaited()
+
+    await server.close_session(
+        request,
+        ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ),
+    )
+    sandbox.stop.assert_awaited_once()
+    await server.close_session(
+        request,
+        ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ),
+    )
+    sandbox.stop.assert_awaited_once()
+    with pytest.raises(ValueError, match="already closed"):
+        await server.seed_session(
+            request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                task_data=task_data,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(),
+        serialize=AsyncMock(side_effect=RuntimeError("cannot serialize")),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.resolve_provider_config",
+        lambda name, config: {"opensandbox": {}},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    task_data = request_body()
+    task_data.pop("responses_create_params")
+    task_data.pop("response")
+
+    with pytest.raises(RuntimeError, match="cannot serialize"):
+        await server.seed_session(
+            request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                task_data=task_data,
+            ),
+        )
+
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_task
+
+
+@pytest.mark.asyncio
+async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")))
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_task["session"] = SWEBenchProInstanceRequest.model_validate(request_body())
+    server._session_id_to_identity["session"] = identity
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.close_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=identity[0],
+            ),
+        )
+
+    assert server._session_id_to_sandbox["session"] is sandbox
+    assert server._session_id_to_identity["session"] == identity
 
 
 @pytest.mark.asyncio
