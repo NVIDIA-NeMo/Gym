@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -531,3 +532,92 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
+
+
+async def test_reasoning_survives_a_tool_turn_without_provider_only_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from copy import deepcopy
+
+    from omegaconf import OmegaConf
+    from openai.resources.chat.completions import Completions
+    from openai.types.chat import ChatCompletion
+
+    from nemo_gym.openai_utils import (
+        NeMoGymChatCompletionCreateParamsNonStreaming,
+        NeMoGymResponseCreateParamsNonStreaming,
+    )
+    from nemo_gym.server_utils import BaseServerConfig
+
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    requests = []
+    reasoning = "<think>Check the working directory.</think>"
+
+    tool_call = {
+        "id": "terminal-1",
+        "type": "function",
+        "function": {"name": "terminal", "arguments": '{"command": "printf ready"}'},
+    }
+
+    def complete(_client, **kwargs):
+        requests.append(deepcopy(kwargs["messages"]))
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": kwargs["messages"]})
+        message = {"role": "assistant", "content": "done"}
+        if len(requests) == 1:
+            message = {
+                "role": "assistant",
+                "content": reasoning,
+                "tool_calls": [tool_call],
+            }
+        return ChatCompletion.model_validate(
+            {
+                "id": "completion-1",
+                "created": 0,
+                "model": "test-model",
+                "object": "chat.completion",
+                "choices": [
+                    {"index": 0, "message": message, "finish_reason": "tool_calls" if len(requests) == 1 else "stop"}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            }
+        )
+
+    monkeypatch.setattr(Completions, "create", complete)
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+        global_config_dict=OmegaConf.create(
+            {
+                "policy_model": {
+                    "responses_api_models": {
+                        "vllm_model": {
+                            "host": "127.0.0.1",
+                            "port": 1,
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    agent = HermesAgent(
+        config=_config(
+            model="test-model",
+            api_key="dummy",
+            enabled_toolsets=["terminal"],
+            max_turns=3,
+            compression_enabled=False,
+            chat_template_kwargs_enabled=False,
+            token_id_capture=False,
+        ),
+        server_client=client,
+    )
+    agent.config.model_server.name = "policy_model"
+    response = await agent.responses(
+        request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="Check then finish.")
+    )
+    assert response.status == "completed"
+    assert response.metadata["turns"] == "2"
+    assistant = next(message for message in requests[1] if message["role"] == "assistant")
+    assert assistant["content"] == reasoning
+    assert "reasoning_content" not in assistant
+    tool_result = next(item for item in response.output if item.type == "function_call_output")
+    assert json.loads(tool_result.output)["output"] == "ready"
