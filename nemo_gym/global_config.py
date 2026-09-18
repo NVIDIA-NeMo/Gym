@@ -792,10 +792,29 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
+            self._retarget_environment_servers(global_config_dict, renames)
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
 
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
+
+    @staticmethod
+    def _retarget_environment_servers(global_config_dict: DictConfig, renames: dict[str, str]) -> None:
+        """Point each environment server at the agent composition put in place of the one it named.
+
+        The server is named after the environment, not the agent, so a swap leaves its own name
+        alone and only its `agent_server` reference has to follow.
+        """
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                reference = server.get("agent_server") if isinstance(server, DictConfig) else None
+                if isinstance(reference, DictConfig) and reference.get("name") in renames:
+                    reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1220,6 +1239,8 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
+        # NOTE(martas): this is the logic for legacy config structure. after migration
+        # to environment servers, this should be updated.
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
         self.apply_legacy_agent_aliases(global_config_dict)
