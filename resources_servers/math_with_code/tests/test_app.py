@@ -14,7 +14,14 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from app import PythonExecutorResourcesServer, PythonExecutorResourcesServerConfig
+import pytest
+from app import (
+    PythonExecutorResourcesServer,
+    PythonExecutorResourcesServerConfig,
+    _answers_match,
+    _extract_boxed_answer,
+    _normalize_answer,
+)
 
 from nemo_gym.server_utils import ServerClient
 
@@ -32,4 +39,88 @@ class TestApp:
             entrypoint="",
             name="",
         )
-        PythonExecutorResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        PythonExecutorResourcesServer(
+            config=config,
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"The answer is \boxed{42}.", "42"),
+            (r"First \boxed{41}, then \boxed{42}.", "42"),
+            (r"The answer is \boxed{\frac{1}{2}}.", r"\frac{1}{2}"),
+            (r"The answer is \boxed{}.", None),
+            (r"The answer is \boxed{42", None),
+            ("The answer is 42.", None),
+        ],
+        ids=[
+            "single-boxed-answer",
+            "last-boxed-answer",
+            "nested-braces",
+            "empty-box",
+            "unclosed-box",
+            "missing-box",
+        ],
+    )
+    def test_extract_boxed_answer(
+        self,
+        text: str,
+        expected: str | None,
+    ) -> None:
+        assert _extract_boxed_answer(text) == expected
+
+    @pytest.mark.parametrize(
+        ("answer", "expected"),
+        [
+            ("42", "42"),
+            ("  42  ", "42"),
+            (r"\(42\)", "42"),
+            ("$42$", "42"),
+            (r"\text{42}", "42"),
+            ("1   2", "1 2"),
+        ],
+        ids=[
+            "plain",
+            "whitespace",
+            "latex-parentheses",
+            "dollar-delimiters",
+            "text-wrapper",
+            "internal-whitespace",
+        ],
+    )
+    def test_normalize_answer(
+        self,
+        answer: str,
+        expected: str,
+    ) -> None:
+        assert _normalize_answer(answer) == expected
+
+    @pytest.mark.parametrize(
+        ("actual", "expected", "matches"),
+        [
+            ("42", "42", True),
+            (r"\(42\)", "42", True),
+            ("42", "42.0", True),
+            ("0.5", ".5", True),
+            ("43", "42", False),
+            ("not-a-number", "42", False),
+            (None, "42", False),
+        ],
+        ids=[
+            "exact-match",
+            "normalized-exact-match",
+            "numeric-equivalent",
+            "decimal-equivalent",
+            "numeric-mismatch",
+            "non-numeric-mismatch",
+            "missing-answer",
+        ],
+    )
+    def test_answers_match(
+        self,
+        actual: str | None,
+        expected: str,
+        matches: bool,
+    ) -> None:
+        assert _answers_match(actual, expected) is matches
