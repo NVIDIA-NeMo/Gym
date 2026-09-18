@@ -22520,6 +22520,44 @@ copyright notices and license terms - please see the file ACKNOWLEDGEMENTS.
 
 ---
 
+## SWE-rebench-V2 public example log parser
+
+- **Upstream:** https://github.com/SWE-rebench/SWE-rebench-V2
+- **Revision:** `c71902a8cf8d2b725f63d51f199f4d3e56f68d2d`
+- **License:** MIT
+- **Location:** Embedded test assets in
+  `resources_servers/swe_external1/data/example.jsonl`.
+- **Modifications:** Parser source and upstream license are retained unchanged.
+  The surrounding asset packaging, task scripts, and grading wrapper are
+  NVIDIA-authored Apache-2.0 code. Public task rows are separately attributed
+  to the CC-BY-4.0 SWE-rebench-V2 dataset in the server README and test fixtures.
+
+```text
+MIT License
+
+Copyright (c) 2026 SWE-rebench
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## SPDX Identifiers
 
 Each NVIDIA-authored source file in this project includes an SPDX identifier
