@@ -567,6 +567,7 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
 @exit_cleanly_on_config_error
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     import rich
+    import yaml
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
@@ -609,6 +610,13 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         if invalid:
             parts.append(f"invalid configuration: {'; '.join(invalid)}")
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
+
+    if args.resolve_only:
+        if args.json:
+            print(config.model_dump_json(indent=2))
+        else:
+            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+        return
 
     record = submit(config, dry_run=args.dry_run)
     if record is None:
@@ -1174,7 +1182,17 @@ COMMANDS = {
             ),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Emit the submission record as JSON."
+                    "--resolve-only",
+                    action="store_true",
+                    help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
+                    "and stop before any job script is rendered or anything is submitted.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json",
+                    action="store_true",
+                    help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
         ),
