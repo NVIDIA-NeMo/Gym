@@ -23,9 +23,10 @@ from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientSession, web
 from pytest import MonkeyPatch, fixture, mark
 
-from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig
+from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig, start_turn_counter_proxy
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -58,6 +59,65 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
+    @mark.parametrize("limit", [31, 47, 69])
+    async def test_policy_route_enforces_budget_and_delivers_reminders(self, monkeypatch: MonkeyPatch, limit: int):
+        received = []
+
+        async def policy(request: web.Request) -> web.Response:
+            received.append(await request.json())
+            return web.json_response({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", policy)
+        runner = web.AppRunner(upstream)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        constraint = TurnConstraintConfig(
+            enforcement="proxy", limit=limit, reminder={"trigger": "per_turn", "position": "system_message"}
+        )
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            exhaustion_status=400,
+        )
+        try:
+            client = MagicMock(spec=ServerClient)
+            client.global_config_dict = {}
+            config = self._create_config()
+            config.turn_constraint = constraint
+            server = OpenCodeSandboxedAgent(config=config, server_client=client)
+            monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+            request = SimpleNamespace(
+                json=AsyncMock(return_value={}), state=SimpleNamespace(_ng_turn_proxy_base_url=proxy.base_url)
+            )
+            opencode_config = await server._create_opencode_config(request)
+            url = opencode_config["provider"]["nemo_gym"]["options"]["baseURL"] + "/chat/completions"
+            payload = {"model": "dummy_model", "messages": [{"role": "user", "content": "solve"}]}
+            async with ClientSession() as session:
+                for _ in range(limit):
+                    async with session.post(url, json=payload) as response:
+                        assert response.status == 200
+                        await response.read()
+                async with session.post(url, json=payload) as response:
+                    assert response.status == 400
+                    assert (await response.json())["error"]["code"] == "session_budget_exhausted"
+            assert len(received) == limit
+            for turn, body in enumerate(received, start=1):
+                assert body["messages"][0] == payload["messages"][0]
+                assert body["messages"][-1]["role"] == "system"
+                assert f"{limit - turn} turn(s) left" in body["messages"][-1]["content"]
+            assert "MUST provide your final answer NOW" in received[-1]["messages"][-1]["content"]
+            assert proxy.turns_used == limit + 1
+            assert len(payload["messages"]) == 1
+        finally:
+            await proxy.stop()
+            await runner.cleanup()
+
     def test_import_does_not_load_standalone_opencode_agent(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
