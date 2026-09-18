@@ -4045,3 +4045,60 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+@pytest.mark.parametrize("num_chunks", [1, 2, 3, 8])
+def test_input_chunks_partition_expanded_rows_without_changing_identity(tmp_path: Path, num_chunks: int) -> None:
+    a = {"agent_ref": {"name": "agent_a"}, "responses_create_params": {"input": "first"}}
+    b = {"agent_ref": {"name": "agent_b"}, "responses_create_params": {"input": "second"}, TASK_INDEX_KEY_NAME: 42}
+    c = {"agent_ref": {"name": "agent_a"}, "responses_create_params": {"input": "third"}}
+    source_rows = [a, b, a, c, a]
+    input_path = tmp_path / "inputs.jsonl"
+    input_path.write_text("".join(json.dumps(row) + "\n" for row in source_rows))
+    original_bytes = input_path.read_bytes()
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(input_path),
+        output_jsonl_fpath=str(tmp_path / "all.jsonl"),
+        num_repeats={"agent_a": 2, "agent_b": 3},
+        fan_out={"agent_a": ["agent_a", "agent_c"]},
+        num_repeats_add_seed=True,
+    )
+    helper = RolloutCollectionHelper()
+    expected = helper._preprocess_rows_from_config(config)
+    chunks = [
+        helper._preprocess_rows_from_config(config.model_copy(update={"idx": idx, "num_chunks": num_chunks}))
+        for idx in range(num_chunks)
+    ]
+    assert [row for chunk in chunks for row in chunk] == expected
+    assert len(expected) == 19
+    assert {row[TASK_INDEX_KEY_NAME] for row in expected if row["responses_create_params"]["input"] == "second"} == {
+        42
+    }
+    assert input_path.read_bytes() == original_bytes
+    if num_chunks == 8:
+        assert all(not chunk for chunk in chunks[:-1])
+
+
+def test_input_chunks_apply_after_input_limit(tmp_path: Path) -> None:
+    input_path = tmp_path / "inputs.jsonl"
+    input_path.write_text("".join(json.dumps({"responses_create_params": {"input": str(i)}}) + "\n" for i in range(7)))
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(input_path),
+        output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        agent_name="agent",
+        limit=5,
+        idx=1,
+        num_chunks=2,
+        num_repeats=2,
+    )
+    rows = RolloutCollectionHelper()._preprocess_rows_from_config(config)
+    assert [row["responses_create_params"]["input"] for row in rows] == ["2", "2", "3", "3", "4", "4"]
+    assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [2, 2, 3, 3, 4, 4]
+
+
+@pytest.mark.parametrize("idx,num_chunks", [(-1, 1), (0, 0), (1, 1), (3, 2)])
+def test_input_chunks_reject_invalid_selection(idx: int, num_chunks: int) -> None:
+    with pytest.raises(ValidationError):
+        RolloutCollectionConfig(
+            input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", idx=idx, num_chunks=num_chunks
+        )
