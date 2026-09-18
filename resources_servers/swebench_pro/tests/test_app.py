@@ -433,29 +433,25 @@ def test_local_image_template_preserves_case() -> None:
 
 
 @pytest.mark.asyncio
-async def test_command_harness_seeds_without_pty_and_receives_reconnect_descriptor() -> None:
+async def test_seed_returns_reconnect_descriptor_and_cleanup_releases_container() -> None:
     server = make_server(golden=False)
     descriptor = {"sandbox_id": "sandbox-id", "workdir": "/app", "staging_dir": "/tmp/shared"}
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
         _provider=SimpleNamespace(connect=AsyncMock(), serialize_handle=AsyncMock()),
         serialize=AsyncMock(return_value=descriptor),
-        pty=fake_pty(),
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
         upload=AsyncMock(),
         stop=AsyncMock(),
     )
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
-    body = SWEBenchProSeedSessionRequest.model_validate(request_body() | {"create_pty": False})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
 
     response = await server.seed_session(request, body)
 
-    sandbox.pty.create.assert_not_awaited()
     assert response.sandbox_descriptor == descriptor
-    assert "pty_session_id" not in response.model_dump()
     assert server._session_id_to_sandbox["session"] is sandbox
-    assert server._session_id_to_pty == {}
 
     # An agent that fails before verification must still release the benchmark's state.
     await server.close_session(request)
@@ -466,24 +462,18 @@ async def test_command_harness_seeds_without_pty_and_receives_reconnect_descript
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("create_pty", [False, True])
-async def test_failed_seed_releases_container_and_optional_terminal(create_pty) -> None:
+async def test_failed_seed_releases_container() -> None:
     server = make_server(golden=False)
-    sandbox = SimpleNamespace(pty=fake_pty(), upload=AsyncMock(side_effect=OSError("upload failed")), stop=AsyncMock())
+    sandbox = SimpleNamespace(upload=AsyncMock(side_effect=OSError("upload failed")), stop=AsyncMock())
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
-    body = SWEBenchProSeedSessionRequest.model_validate(request_body() | {"create_pty": create_pty})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
 
     with pytest.raises(OSError, match="upload failed"):
         await server.seed_session(request, body)
 
     sandbox.stop.assert_awaited_once()
-    if create_pty:
-        sandbox.pty.create.return_value.close.assert_awaited_once()
-    else:
-        sandbox.pty.create.assert_not_awaited()
     assert server._session_id_to_sandbox == {}
-    assert server._session_id_to_pty == {}
     assert server._session_id_to_pristine_untracked == {}
 
 

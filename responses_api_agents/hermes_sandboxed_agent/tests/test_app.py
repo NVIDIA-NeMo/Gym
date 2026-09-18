@@ -282,7 +282,6 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             assert wire["reward"] == verifier_reward
             assert wire["response"]["status"] == ("completed" if finished else "incomplete")
             assert "_ng_failure_class" not in wire
-    assert agent.server_client.post.call_args_list[0].kwargs["json"]["create_pty"] is False
     assert agent.server_client.post.call_args.kwargs["url_path"] == "/close_session"
     assert agent.server_client.post.call_args.kwargs["cookies"] == {"original": "cookie", "session": "seeded"}
     connected.assert_awaited_once_with({"sandbox_id": "box"}, provider="provider")

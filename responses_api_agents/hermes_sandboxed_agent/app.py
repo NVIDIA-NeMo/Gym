@@ -247,7 +247,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 seeded = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/seed_session",
-                    json=body.model_dump(mode="json") | {"create_pty": False},
+                    json=body.model_dump(mode="json"),
                     cookies=cookies,
                 )
                 await raise_for_status(seeded)
