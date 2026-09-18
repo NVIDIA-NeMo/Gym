@@ -80,6 +80,7 @@ async def test_real_hermes_loop_preserves_sandbox_results_and_stops_before_retur
         return SandboxExecResult("sandbox-result", "", 0)
 
     harness = HermesHarness(
+        observability_enabled=True,
         sandbox=SimpleNamespace(exec=execute),
         context=HarnessContext(session_id="test", instruction="Inspect the sandbox", workdir="/task"),
         config=HermesConfig(name="hermes", max_turns=1 if stop == "turn_limit" else 3),
@@ -220,6 +221,7 @@ async def test_native_file_and_process_tools_use_supplied_backend(tmp_path):
         )
 
     harness = HermesHarness(
+        observability_enabled=True,
         sandbox=SimpleNamespace(exec=execute),
         context=HarnessContext(session_id=session_id, instruction="Use the supplied tools", workdir=str(tmp_path)),
         config=HermesConfig(name="hermes", max_turns=6),
@@ -283,6 +285,7 @@ async def test_cancellation_retains_completed_tool_in_batch(tmp_path, tool_name)
         )
 
     harness = HermesHarness(
+        observability_enabled=True,
         sandbox=SimpleNamespace(exec=execute),
         context=HarnessContext(session_id="parallel", instruction="Read both files", workdir="/task"),
         config=HermesConfig(name="hermes", max_turns=3),

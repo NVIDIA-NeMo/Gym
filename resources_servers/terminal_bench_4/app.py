@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import monotonic, time
@@ -23,6 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.sandbox.harness import HarnessContext
@@ -244,6 +246,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 async with asyncio.timeout(lifecycle.SETUP_TIMEOUT_SEC):
                     context = HarnessContext(
                         session_id=session.session_id,
+                        task_id=body.task_name,
+                        rollout_id=body.capture_rollout_id or body.rollout_id,
                         instruction=session.task.instruction,
                         user=session.task.config.agent.user,
                         workdir=await session.environment.agent_workdir(),
@@ -264,16 +268,22 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                             server_name=self.config.model_server.name,
                             url_path=prefix + "/v1/responses",
                             json=params,
+                            # Exact invocation ownership, including transport
+                            # failures/retries that have no model response ID.
+                            headers={"x-session-id": session.session_id},
                             cookies=cookies,
                         )
                         await raise_for_status(model_response)
                         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
+                    global_config = getattr(self.server_client, "global_config_dict", None)
                     harness_class = HermesHarness if isinstance(self.config.harness, HermesConfig) else MiniSWEHarness
                     harness = harness_class(
                         sandbox=session.environment.main,
                         context=context,
                         config=self.config.harness,
+                        observability_enabled=isinstance(global_config, Mapping)
+                        and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                         params=body.responses_create_params,
                         query=query,
                         model_name=self.config.model_server.name,
@@ -336,7 +346,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
-            **(session.verify_body.model_dump(exclude={"termination"}) | extra),
+            **(
+                session.verify_body.model_dump(exclude={"termination"})
+                | extra
+                | {"task_id": session.request.task_name}
+            ),
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,
             termination=session.termination,

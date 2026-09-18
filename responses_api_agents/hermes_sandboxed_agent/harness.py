@@ -42,6 +42,8 @@ class HermesConfig(BaseModel):
 
 class TrajectoryRecorder:
     def __init__(self, context, directory):
+        self.task_id = context.task_id or context.session_id
+        self.rollout_id = context.rollout_id or context.session_id
         self.invocation_id = context.session_id
         self.trajectory = directory / "trajectory.json"
         self.responses = []
@@ -132,8 +134,8 @@ class GymModel:
         self.recorder.turns.append(
             TrajectoryTurn(
                 invocation_id=self.recorder.invocation_id,
-                task_id="unscoped",
-                rollout_id="unscoped",
+                task_id=self.recorder.task_id,
+                rollout_id=self.recorder.rollout_id,
                 turn_no=len(self.recorder.responses),
                 timestamp=turn_started,
                 question=params["input"],
@@ -233,9 +235,21 @@ class SandboxEnvironment:
 class HermesHarness:
     """Execute only; provisioning, verification and cleanup belong to the caller."""
 
-    def __init__(self, *, sandbox, context: HarnessContext, config, params, query, model_name, directory: Path):
+    def __init__(
+        self,
+        *,
+        sandbox,
+        context: HarnessContext,
+        config,
+        params,
+        query,
+        model_name,
+        directory: Path,
+        observability_enabled: bool = False,
+    ):
         self.sandbox = sandbox
         self.context = context
+        self.observability_enabled = observability_enabled
         self.config = config
         self.params = params
         self.query = query
@@ -371,11 +385,13 @@ class HermesHarness:
             tool_choice=self.params.tool_choice,
             tools=self.params.tools,
             parallel_tool_calls=self.params.parallel_tool_calls,
-            usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in recorder.responses if r.usage]),
+            usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in recorder.responses])
+            if recorder.responses and all(r.usage is not None for r in recorder.responses)
+            else None,
         )
         trajectory_record = TrajectoryRecord(
-            task_id="unscoped",
-            rollout_id="unscoped",
+            task_id=recorder.task_id,
+            rollout_id=recorder.rollout_id,
             turns=recorder.turns,
             tool_calls=recorder.tool_observations,
             invocations=[
@@ -410,6 +426,6 @@ class HermesHarness:
             {
                 "hermes_trajectory": result,
                 "harness_revision": HERMES_REVISION,
-                "ng_trajectory": trajectory_record.model_dump(mode="json"),
+                **({"ng_trajectory": trajectory_record.model_dump(mode="json")} if self.observability_enabled else {}),
             },
         )

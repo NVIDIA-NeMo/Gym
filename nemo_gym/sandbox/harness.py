@@ -20,6 +20,8 @@ class HarnessOutcome(BaseModel):
 
 class HarnessContext(BaseModel):
     session_id: str
+    task_id: str | None = None
+    rollout_id: str | None = None
     instruction: str
     user: str | int | None = None
     workdir: str | None = None
