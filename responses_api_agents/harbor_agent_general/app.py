@@ -529,8 +529,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
-                if trial_result.exception_info is not None:
-                    exception_info = trial_result.exception_info
+                exception_info = trial_result.exception_info or next(
+                    (
+                        step.exception_info
+                        for step in trial_result.step_results or []
+                        if step.exception_info is not None
+                    ),
+                    None,
+                )
+                if exception_info is not None:
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
                     raise RuntimeError(

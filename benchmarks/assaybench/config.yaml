@@ -1,0 +1,24 @@
+# AssayBench (https://arxiv.org/abs/2605.10876), temporal test split: 334 screens.
+# See resources_servers/assaybench/README.md for the task, metrics and published numbers.
+config_paths:
+  - resources_servers/assaybench/configs/assaybench.yaml
+
+assaybench_assaybench_resources_server:
+  _inherit_from: assaybench
+
+assaybench_assaybench_simple_agent:
+  _inherit_from: assaybench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: assaybench_assaybench_resources_server
+      datasets:
+      - name: assaybench
+        type: benchmark
+        jsonl_fpath: benchmarks/assaybench/data/assaybench_benchmark.jsonl
+        prepare_script: benchmarks/assaybench/prepare.py
+        license: MIT
+        prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+        # The paper's open-weight protocol (proprietary APIs were run once).
+        num_repeats: 5

@@ -28,9 +28,9 @@ permissions:
 
 jobs:
   validate-codeowners-membership:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@055534323643bfbb0406bbd4303e1bc51c182bee # v1.10.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@b0a3760374f50b3d6a7d5f8629e826dddca3b931 # v1.10.1
     with:
-      workflow_ref: 055534323643bfbb0406bbd4303e1bc51c182bee  # pragma: allowlist secret
+      workflow_ref: b0a3760374f50b3d6a7d5f8629e826dddca3b931  # pragma: allowlist secret
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
