@@ -1239,6 +1239,12 @@ repr(e): {repr(e)}"""
         uvicorn_kwargs = dict(
             host=server.config.host,
             port=server.config.port,
+            # Stock asyncio loop, not uvloop. Under uvloop a connect cancelled by a
+            # timeout leaves a transport registered on its file descriptor, and every
+            # later connection that reuses that descriptor fails with "File descriptor
+            # N is used by transport" for the rest of the process. Sandbox-heavy
+            # servers hit this at scale; the event loop is not their bottleneck.
+            loop="asyncio",
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
@@ -1341,6 +1347,7 @@ class HeadServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
+            loop="asyncio",
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
