@@ -57,11 +57,12 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
-    def test_import_does_not_load_standalone_opencode_agent(self) -> None:
+    def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
-            "assert not any(name == 'responses_api_agents.opencode_agent' "
-            "or name.startswith('responses_api_agents.opencode_agent.') for name in sys.modules)"
+            "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
+            "or name.startswith('responses_api_agents.opencode_agent.')} == "
+            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 

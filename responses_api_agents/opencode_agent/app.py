@@ -62,8 +62,8 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
-from responses_api_agents.opencode_trajectory import append_opencode_turns, scope_opencode_trajectory
 
 
 LOG = logging.getLogger(__name__)
