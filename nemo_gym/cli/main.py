@@ -299,12 +299,12 @@ REWARD_RANGE = Flag(
     register=lambda p: p.add_argument(
         "--reward-range",
         nargs=2,
-        type=float,
+        type=lambda value: None if value.lower() == "null" else float(value),
         metavar=("LOW", "HIGH"),
-        help="Declared inclusive reward range.",
+        help="Declared inclusive reward range; use null for an unbounded endpoint.",
     ),
     translate_to_hydra=lambda args: (
-        [f"+reward_range=[{args.reward_range[0]},{args.reward_range[1]}]"] if args.reward_range else []
+        ["+reward_range=" + json.dumps(args.reward_range, separators=(",", ":"))] if args.reward_range else []
     ),
 )
 

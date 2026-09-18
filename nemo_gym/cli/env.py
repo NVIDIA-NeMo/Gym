@@ -1130,7 +1130,7 @@ class InitEnvironmentConfig(BaseNeMoGymCLIConfig):
     scaffold_name: str
     profile: IntegrationProfile = IntegrationProfile.CUSTOM_GYM_VERIFIER
     reuse_verifier: Optional[str] = None
-    reward_range: Optional[Tuple[float, float]] = None
+    reward_range: Optional[Tuple[Optional[float], Optional[float]]] = None
     higher_is_better: Optional[bool] = None
 
 

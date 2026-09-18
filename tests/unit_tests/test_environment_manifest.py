@@ -326,3 +326,21 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
+
+
+@pytest.mark.parametrize("bounds", [(None, 1), (0, None), (None, None), (-1, 1)])
+def test_reward_bounds_round_trip_with_unbounded_endpoints(bounds: tuple) -> None:
+    raw = _manifest()
+    raw["reward"]["range"] = list(bounds)
+    manifest = EnvironmentManifest.model_validate(raw)
+    assert manifest.reward.range == bounds
+    Draft202012Validator(manifest_json_schema()).validate(manifest.model_dump(mode="json"))
+    assert EnvironmentManifest.model_validate_json(manifest.model_dump_json()).reward.range == bounds
+
+
+@pytest.mark.parametrize("bounds", [(float("nan"), None), (None, float("inf")), (-float("inf"), 1), (1, 0), (1, 1)])
+def test_reward_bounds_reject_nonfinite_or_unordered_endpoints(bounds: tuple) -> None:
+    raw = _manifest()
+    raw["reward"]["range"] = list(bounds)
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)

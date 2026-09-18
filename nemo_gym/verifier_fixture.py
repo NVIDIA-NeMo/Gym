@@ -163,7 +163,7 @@ def _write_fixture(path: Path, cases: list[VerifierFixtureCase]) -> None:
 async def exercise_verifier_fixture(
     fixture: VerifierFixture,
     *,
-    reward_range: Sequence[float],
+    reward_range: Sequence[float | None],
     higher_is_better: bool = True,
     determinism: str | Enum,
     update_expected: bool = False,
@@ -174,11 +174,14 @@ async def exercise_verifier_fixture(
     if len(reward_range) != 2:
         raise VerifierFixtureError("reward_range must contain exactly two endpoints")
     lower, upper = reward_range
-    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in (lower, upper)):
-        raise VerifierFixtureError("reward_range endpoints must be finite numbers")
-    lower, upper = float(lower), float(upper)
-    if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
-        raise VerifierFixtureError("reward_range must contain finite endpoints with lower < upper")
+    if any(
+        value is not None
+        and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value))
+        for value in (lower, upper)
+    ):
+        raise VerifierFixtureError("reward_range endpoints must be finite numbers or null")
+    if lower is not None and upper is not None and lower >= upper:
+        raise VerifierFixtureError("reward_range must have lower < upper")
     if not isinstance(higher_is_better, bool):
         raise VerifierFixtureError("higher_is_better must be a boolean")
     full_reward, zero_reward = (upper, lower) if higher_is_better else (lower, upper)
@@ -215,18 +218,18 @@ async def exercise_verifier_fixture(
             continue
 
         observed = await _observe(fixture, case, reseed=case.kind == "determinism")
-        if not lower <= observed <= upper:
+        if (lower is not None and observed < lower) or (upper is not None and observed > upper):
             raise VerifierFixtureError(
                 f"Case '{case.name}' returned reward {observed} outside declared range [{lower}, {upper}]"
             )
         observations = [observed]
-        if case.kind == "full_reward":
+        if case.kind == "full_reward" and full_reward is not None:
             _assert_equal(
                 observed,
                 full_reward,
                 f"Full-reward case '{case.name}' does not pin the {full_endpoint} endpoint",
             )
-        elif case.kind == "zero_reward":
+        elif case.kind == "zero_reward" and zero_reward is not None:
             _assert_equal(
                 observed,
                 zero_reward,

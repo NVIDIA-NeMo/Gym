@@ -350,3 +350,12 @@ For multi-step scenarios, the model returns training information on response mes
 
 - [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
 - [Environment Components](/about/architecture) - Environment component architecture
+
+### Unbounded rewards
+
+Set either endpoint in `reward.range` to `null` when rewards are unbounded on that side:
+`[null, 1]`, `[0, null]`, or `[null, null]`. Numeric endpoints and actual rewards must remain
+finite; two numeric endpoints must satisfy `lower < upper`. The CLI also accepts
+`--reward-range null null`. Verifier fixtures still require finite expected rewards and
+check every finite bound. A full/zero-reward case pins its corresponding endpoint only
+when that endpoint exists; otherwise it checks the case's expected reward.

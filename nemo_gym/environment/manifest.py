@@ -92,12 +92,15 @@ class _ManifestModel(BaseModel):
 
 
 class Reward(_ManifestModel):
-    range: tuple[FiniteFloat, FiniteFloat] = Field(description="Inclusive lower and upper reward endpoints.")
+    range: tuple[FiniteFloat | None, FiniteFloat | None] = Field(
+        description="Inclusive lower and upper reward endpoints; null means unbounded on that side."
+    )
     higher_is_better: bool
 
     @model_validator(mode="after")
     def validate_range(self) -> "Reward":
-        if self.range[0] >= self.range[1]:
+        lower, upper = self.range
+        if lower is not None and upper is not None and lower >= upper:
             raise ValueError("reward.range must be ordered with lower < upper")
         return self
 
