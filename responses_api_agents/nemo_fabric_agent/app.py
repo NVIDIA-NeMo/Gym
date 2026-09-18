@@ -29,7 +29,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -196,6 +198,14 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
                     )
                 )
                 continue
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
+                    )
+                )
             text = _content_text(message.get("content"))
             if text:
                 items.append(
