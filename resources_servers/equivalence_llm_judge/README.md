@@ -41,8 +41,9 @@ When enabled, longer final assistant answers score zero without a judge call.
 The full response is retained, with `failure_reason` starting with
 `final_answer_too_long`. The check counts characters in the last assistant message
 before regex extraction, excludes reasoning and earlier messages, and does not
-stop generation early. The limit changes grading semantics and should be selected
-by the evaluation configuration; Gym's benchmark configs do not enable it.
+stop generation early. Enabling the limit changes reward assignment, so choose it
+explicitly in the configuration for your workload (evaluation, synthetic data
+generation, or RL).
 
 If judge calls exhaust their retries, the shared judge failsafe saves the policy
 response in the failures sidecar as `judge_failed`, excluded from scored aggregates.
