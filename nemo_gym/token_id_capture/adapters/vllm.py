@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from nemo_gym.token_id_capture.staging.media import build_multimodal_extras
+
 
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
-MEDIA_CAPTURE_FIELD = "media_capture"
+MEDIA_FIELD = "media"
+MEDIA_SPANS_FIELD = "media_spans"
 
 
 def _message(choice: dict[str, Any]) -> dict[str, Any]:
@@ -66,15 +69,17 @@ class VLLMCaptureAdapter:
         return extract_generation_token_info(_single_choice(response_payload))
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
-        extras = {}
+        extras = build_multimodal_extras(compact_token_ids_delta=None, media=response_payload.get(MEDIA_FIELD)) or {}
         routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
         if routed_experts is not None:
             if not isinstance(routed_experts, (str, dict, list)):
                 raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
             extras[ROUTED_EXPERTS_FIELD] = routed_experts
-        if MEDIA_CAPTURE_FIELD in response_payload:
-            geometry = response_payload[MEDIA_CAPTURE_FIELD]
-            if not isinstance(geometry, dict):
-                raise ValueError("vLLM media_capture must be an object")
-            extras[MEDIA_CAPTURE_FIELD] = geometry
+        # Expanded-space prefix replacement needs the original placeholder
+        # positions. Pixels use the shared media contract and framework storage.
+        if MEDIA_SPANS_FIELD in response_payload:
+            spans = response_payload[MEDIA_SPANS_FIELD]
+            if not isinstance(spans, list) or any(not isinstance(span, dict) for span in spans):
+                raise ValueError("vLLM media_spans must be a list of objects")
+            extras[MEDIA_SPANS_FIELD] = spans
         return extras or None

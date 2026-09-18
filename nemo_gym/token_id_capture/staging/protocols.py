@@ -25,7 +25,6 @@ Implementations must synchronize their own shared state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.staging.records import StagedCallBaseSnapshot, StagedCallRecord, StageResult
@@ -40,30 +39,6 @@ class StagingSink(Protocol):
     """
 
     def stage(self, record: StagedCallRecord) -> StageResult: ...
-
-
-@dataclass(frozen=True)
-class TensorAttachment:
-    """Owned tensor bytes passed locally to a sink, never serialized in a receipt.
-
-    The framework defines supported field names/dtypes and binds the payload's
-    shape and content hash into ``record.extras`` before completing the call.
-    Immutable bytes keep concurrent completion hooks independent of engine caches.
-    """
-
-    name: str
-    dtype: str
-    shape: tuple[int, ...]
-    data: bytes
-
-
-@runtime_checkable
-class AttachmentStagingSink(StagingSink, Protocol):
-    """A sink that acknowledges a call only after its attachments are stored too."""
-
-    def stage_with_attachments(
-        self, record: StagedCallRecord, *, attachments: tuple[TensorAttachment, ...]
-    ) -> StageResult: ...
 
 
 @runtime_checkable
