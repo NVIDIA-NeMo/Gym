@@ -33,6 +33,10 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUNTIME_ENV_PREFIX = "runtime:"
 
 
+class _LiteralEnvValue(str):
+    """Keep resolved literal values distinct from runtime references with the same text."""
+
+
 def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
     """Resolve `lit:`/`host:`/`runtime:` prefixes on `env` values. Every value must use one
     of these prefixes; a missing or misspelled prefix raises rather than being guessed at.
@@ -46,7 +50,7 @@ def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
     resolved = {}
     for key, raw in env.items():
         if raw.startswith("lit:"):
-            resolved[key] = raw[len("lit:") :]
+            resolved[key] = _LiteralEnvValue(raw[len("lit:") :])
         elif raw.startswith("host:"):
             var = raw[len("host:") :]
             if not _ENV_VAR_NAME_RE.match(var):
@@ -56,7 +60,7 @@ def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
                 raise ValueError(
                     f"env[{key!r}] references host:{var}, but {var!r} is not set in the submitting shell's environment"
                 )
-            resolved[key] = value
+            resolved[key] = _LiteralEnvValue(value)
         elif raw.startswith(RUNTIME_ENV_PREFIX):
             var = raw[len(RUNTIME_ENV_PREFIX) :]
             if not _ENV_VAR_NAME_RE.match(var):

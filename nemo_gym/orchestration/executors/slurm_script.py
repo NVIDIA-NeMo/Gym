@@ -27,6 +27,7 @@ from nemo_gym.orchestration.api import (
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    _LiteralEnvValue,
     effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.script_templates import (
@@ -108,7 +109,9 @@ def _resolve_env(env: dict[str, str]) -> str:
     for k in env:
         _validate_env_key(k)
     pairs = " ".join(
-        f"{k}=${{{v[len(RUNTIME_ENV_PREFIX) :]}}}" if v.startswith(RUNTIME_ENV_PREFIX) else f"{k}={shlex.quote(v)}"
+        f"{k}=${{{v[len(RUNTIME_ENV_PREFIX) :]}}}"
+        if v.startswith(RUNTIME_ENV_PREFIX) and not isinstance(v, _LiteralEnvValue)
+        else f"{k}={shlex.quote(v)}"
         for k, v in env.items()
     )
     return f"env {pairs} "

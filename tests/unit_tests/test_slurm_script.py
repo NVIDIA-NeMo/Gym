@@ -901,6 +901,35 @@ def test_resolve_env_runtime_marker_alongside_literal():
     assert "RUN=${NEL_INVOCATION_ID}" in out
 
 
+@pytest.mark.parametrize("target", ["service", "driver"])
+def test_env_literal_runtime_prefix_reaches_process_unchanged(target, submit_config, bench_dir, monkeypatch):
+    monkeypatch.setenv("WORKER", "expanded")
+    monkeypatch.setenv("SOURCE", "runtime:WORKER")
+    raw = submit_config.model_dump()
+    target_config = raw["services"]["vllm_model"] if target == "service" else raw["driver"]
+    target_config["env"] = {
+        "LITERAL": "lit:runtime:WORKER",
+        "HOST": "host:SOURCE",
+        "RUNTIME": "runtime:WORKER",
+        "ORDINARY": "lit:ordinary value",
+    }
+    config = SubmitConfig.model_validate(raw)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], config.compute["cluster"], bench_dir
+    )
+    # Execute the actual generated environment prefix with a local process instead of srun.
+    launch = next(line for line in script.splitlines() if line.startswith("env LITERAL="))
+    prefix, separator, _ = launch.partition("srun ")
+    assert separator
+    result = subprocess.run(
+        ["bash", "-c", prefix + 'bash -c \'printf "%s\\n" "$LITERAL" "$HOST" "$RUNTIME" "$ORDINARY"\''],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == ["runtime:WORKER", "runtime:WORKER", "expanded", "ordinary value"]
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script — env injection
 # ---------------------------------------------------------------------------
