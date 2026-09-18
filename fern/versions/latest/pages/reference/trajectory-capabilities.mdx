@@ -1,6 +1,6 @@
 ---
 title: "Trajectory Evidence"
-description: "Harness evidence contracts, artifact validation, and legacy capability mapping"
+description: "Harness evidence contracts and artifact validation"
 position: 5
 ---
 
@@ -109,39 +109,6 @@ not an authoritative verifier result.
 A compaction event does not imply known compaction cost. Context sizes before and after compaction are not helper-call
 usage. Tool timing does not measure CPU utilization; token counts and model latency do not measure GPU utilization.
 Resource measurements require their own TE8 claims.
-
-## Mapping earlier capability names and priorities
-
-The following crosswalk preserves the earlier onboarding priorities rather than assigning new priorities to every TE
-claim. It is not an equivalence between old producer ratings and new test results.
-
-| Earlier capability | Earlier tier | TE mapping | Qualification |
-|---|---|---|---|
-| C1 — Model calls and statuses | P0 | TE1.1 and TE1.2 | Does not automatically include call timing or retry relationships. |
-| C2 — Token counts | P0 | TE3.1–TE3.5 | Five independent availability claims instead of one bundled criterion. |
-| C3 — Canonical turn records | P2 | TE4.1 and TE4.2 | Turn content does not imply exact model-call associations. |
-| C4 — Model-visible input/output history | P0 | TE2.1 and TE2.2; TE2.3 and TE2.4 where applicable | Explicit per-call content requirements replace a broad reconstructable-history claim. |
-| C5 — Tool calls, including names | P1 | TE5.1, TE5.3, TE5.4, and TE5.5 | Dispatched arguments (TE5.2) and originating-request associations (TE5.6) are additional requirements. |
-| C6 — Parallel tool-call timing | P1 | TE5.5 exercised with parallel calls | Separate intervals and comparable clocks are required; a parallel-capability flag is insufficient. |
-| C7 — Resource-server or sandbox-backed benchmarks | P2 | No direct equivalent; TE8.1 and TE8.2 are related | An execution arrangement is not a precise evidence contract. Requiring resource identity and lifecycle would clarify or strengthen the earlier criterion. |
-| C8 — Turn resolution and rewards in the tier summary | P2 | Outside the harness-specific TE list | Authoritative resolution and reward belong to verification, not invocation outcome or the harness's completion claim. |
-| C9 — Model-call payloads | P0 | TE2.1 and TE2.2, with reasoning/media where applicable | Substantially overlaps C4; the new taxonomy assesses the individual content claims. |
-| C10 — Invocation ownership | P0, alternative to C11 | TE6.4, with invocation identity from TE6.1 | Does not require turns or parent/child relationships. The identity dependency does not imply that C10 established invocation outcome. |
-| C11 — Turn-call ownership / complete accounting | P0 alternative; specifically required at P2 | TE4.3 and TE4.4, supported by turn/call identities | A selected-response reference is weaker than complete attempt attribution. TE1.4 and TE7.4 contribute when retries and compaction occur. |
-
-Earlier detailed C8 definitions also bundled turn identity, timestamp, question, and step metadata. Identity and timestamp
-map to TE4.1; exact turn context can be obtained through TE4.3 and TE2.1. A producer-specific step count has no standalone
-TE claim here. Keep these facts distinct from the resolution/reward shorthand used in the earlier tier summary.
-
-| Earlier tier | Evidence emphasis |
-|---|---|
-| P0 | Model-attempt identity/outcome, per-call usage, model-visible content, and explicit ownership through invocations or turns |
-| P1 | Named tool executions, results/outcomes, and individual timing, including a parallel scenario |
-| P2 | Turn records and stronger turn-call attribution; C7 needs a concrete replacement and C8 remains a verification requirement |
-
-This crosswalk does not introduce priorities for model-call timing, standalone retry relationships, dispatched tool
-arguments, subagent delegation, explicit compaction evidence, or measured resource usage. References to CPU/GPU analysis
-in an earlier tier do not automatically require measured utilization. Those priorities need separate agreement.
 
 ## Example validation contract: TE3.1
 
