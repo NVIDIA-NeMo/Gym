@@ -490,6 +490,8 @@ class TestTokenAccounting:
         assert body.model_dump() == original
         assert result.key_metrics["token_usage_complete"] is not missing_usage
         assert result.key_metrics["generation_coverage"] == 1.0
+        assert all("subtask_accuracy" in repeat for repeat in result.repeat_level_metrics)
+        assert "mean_across_repeats/subtask_accuracy" in result.agent_metrics
         for section in (result.agent_metrics, result.key_metrics):
             assert all(value is not None and not isinstance(value, str) for value in section.values())
         if missing_usage:

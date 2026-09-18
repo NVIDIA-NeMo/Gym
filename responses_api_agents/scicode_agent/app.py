@@ -321,6 +321,9 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         metrics.update(_token_metrics(tasks))
         return metrics
 
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self.compute_metrics(tasks)
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         return {
             k: v

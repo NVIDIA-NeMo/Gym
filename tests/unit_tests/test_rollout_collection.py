@@ -2059,6 +2059,7 @@ class TestRolloutCollection:
                     "min/reward": 1.0,
                     "median/reward": 1.0,
                     "std/reward": 0.0,
+                    "num_repeats": 1,
                 },
                 "key_metrics": {"mean/reward": 1.0},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],

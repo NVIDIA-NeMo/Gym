@@ -12,13 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffing two loaded runs: metric rows and per-task sample flips.
+"""Diffing two loaded runs: metric rows, difference confidence intervals, and per-task sample flips."""
 
-Pure computation -- no filesystem access, no statistics. Confidence intervals are read verbatim
-from what the runs already recorded; for now nothing here estimates, tests, or judges.
-"""
-
+import math
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from scipy import stats
 
 from nemo_gym.comparison.loading import LoadedRun
 from nemo_gym.comparison.schema import (
@@ -33,51 +33,35 @@ from nemo_gym.comparison.schema import (
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import (
     ACROSS_REPEATS_MARKER,
-    AVG_SAMPLE_STD_DEV_SUFFIX,
-    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
-    CI_HIGH_95_PREFIX,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
-    CI_LOW_95_PREFIX,
-    MAX_PREFIX,
-    MEAN_ACROSS_REPEATS_PREFIX,
-    MEAN_PREFIX,
-    MEDIAN_PREFIX,
-    MIN_PREFIX,
-    P25_PREFIX,
-    P75_PREFIX,
+    DISPERSION_PREFIXES,
+    PASS_MAJORITY_STAT_SUFFIXES,
     REWARD_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
-    SE_ACROSS_REPEATS_PREFIX,
-    SEM_PREFIX,
-    STD_DEV_ACROSS_RUNS_SUFFIX,
-    STD_ERR_ACROSS_RUNS_SUFFIX,
-    STD_PREFIX,
+    STAT_SEPARATOR,
     TASK_INDEX_KEY_NAME,
+    PassMajorityStat,
+    Stat,
 )
 
 
-# Dispersion companions of a `mean/<field>` metric. They are summary statistics of the same
-# underlying field, not metrics in their own right, so they never get their own row.
-DISPERSION_PREFIXES = (
-    MEDIAN_PREFIX,
-    STD_PREFIX,
-    MIN_PREFIX,
-    MAX_PREFIX,
-    P25_PREFIX,
-    P75_PREFIX,
-    SEM_PREFIX,
-    CI_LOW_95_PREFIX,
-    CI_HIGH_95_PREFIX,
-)
-# Companion statistics of the `pass@k` family, likewise not metrics of their own.
-STAT_SUFFIXES = (STD_DEV_ACROSS_RUNS_SUFFIX, STD_ERR_ACROSS_RUNS_SUFFIX, AVG_SAMPLE_STD_DEV_SUFFIX)
+# Suffix-form companion statistics, likewise not metrics of their own.
+COMPARISON_UNWORTHY_SUFFIXES = (
+    f"{STAT_SEPARATOR}{Stat.CI_LOW_95}",
+    f"{STAT_SEPARATOR}{Stat.CI_HIGH_95}",
+    f"{STAT_SEPARATOR}ci_lower",
+    f"{STAT_SEPARATOR}ci_upper",
+    "_ci_lower",
+    "_ci_upper",
+    "_ci95_lower",
+    "_ci95_upper",
+) + PASS_MAJORITY_STAT_SUFFIXES
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
 FLIP_FIELD = REWARD_KEY_NAME
-TASK_MEAN_KEY = f"{MEAN_PREFIX}{FLIP_FIELD}"
-TASK_MIN_KEY = f"{MIN_PREFIX}{FLIP_FIELD}"
-TASK_MAX_KEY = f"{MAX_PREFIX}{FLIP_FIELD}"
+TASK_MEAN_KEY = f"{Stat.MEAN.prefix}{FLIP_FIELD}"
+TASK_MIN_KEY = f"{Stat.MIN.prefix}{FLIP_FIELD}"
+TASK_MAX_KEY = f"{Stat.MAX.prefix}{FLIP_FIELD}"
 # A task "passes" when the majority of its repeats scored a pass.
 PASS_THRESHOLD = 0.5
 
@@ -90,13 +74,15 @@ def _numeric(value: Any) -> Optional[float]:
     return float(value) if _is_number(value) else None
 
 
-def is_comparable_metric(name: str) -> bool:
+def is_comparison_worthy_metric(name: str) -> bool:
     """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
+    if name == "num_repeats":
+        return False
     if name.startswith(DISPERSION_PREFIXES):
         return False
     if ACROSS_REPEATS_MARKER in name:
         return False
-    return not name.endswith(STAT_SUFFIXES)
+    return not name.endswith(COMPARISON_UNWORTHY_SUFFIXES)
 
 
 def _ordered_metric_names(baseline: Dict[str, Any], candidates: Sequence[Dict[str, Any]]) -> List[str]:
@@ -117,23 +103,74 @@ def _metric_value(metrics: Dict[str, Any], name: str) -> Optional[MetricValue]:
         return None
     return MetricValue(
         value=value,
-        ci_low=_numeric(metrics.get(f"{CI_LOW_95_ACROSS_REPEATS_PREFIX}{name}")),
-        ci_high=_numeric(metrics.get(f"{CI_HIGH_95_ACROSS_REPEATS_PREFIX}{name}")),
-        se_across_repeats=_numeric(metrics.get(f"{SE_ACROSS_REPEATS_PREFIX}{name}")),
-        mean_across_repeats=_numeric(metrics.get(f"{MEAN_ACROSS_REPEATS_PREFIX}{name}")),
-        std_err_across_runs=_numeric(metrics.get(f"{name}{STD_ERR_ACROSS_RUNS_SUFFIX}")),
+        ci_low=_numeric(metrics.get(f"{Stat.CI_LOW_95.across_repeats_prefix}{name}")),
+        ci_high=_numeric(metrics.get(f"{Stat.CI_HIGH_95.across_repeats_prefix}{name}")),
+        se_across_repeats=_numeric(metrics.get(f"{Stat.SE.across_repeats_prefix}{name}")),
+        mean_across_repeats=_numeric(metrics.get(f"{Stat.MEAN.across_repeats_prefix}{name}")),
+        std_err_across_runs=_numeric(metrics.get(f"{name}{PassMajorityStat.STD_ERR_ACROSS_RUNS.suffix}")),
     )
 
 
+def _comparison_value(metric: MetricValue) -> float:
+    return metric.mean_across_repeats if metric.mean_across_repeats is not None else metric.value
+
+
+def _repeat_metric_values(run: LoadedRun, name: str) -> List[float]:
+    """Finite numeric values for one metric, with one observation per repeat."""
+    values = [_numeric(entry.get(name)) for entry in run.repeat_level_metrics if isinstance(entry, dict)]
+    return [value for value in values if value is not None and math.isfinite(value)]
+
+
+def _warn_if_repeat_samples_differ(run: LoadedRun, label: str) -> None:
+    """Warn when repeat estimates cover incomplete or unequal task samples."""
+    sample_counts = {entry.get("sample_count") for entry in run.repeat_level_metrics}
+    if any(entry.get("missing_count", 0) > 0 for entry in run.repeat_level_metrics) or len(sample_counts) > 1:
+        warnings.warn(
+            f"{label} agent {run.agent_name!r} has incomplete or unequal task coverage across repeats; "
+            "delta confidence intervals may mix task-difficulty differences with repeat variance.",
+            stacklevel=2,
+        )
+
+
+def _welch_delta_confidence_interval(
+    baseline: LoadedRun, candidate: LoadedRun, name: str
+) -> Tuple[Optional[float], Optional[float]]:
+    """Two-sided 95% Welch interval for candidate minus baseline."""
+    mean_across_repeats_name = f"{Stat.MEAN.across_repeats_prefix}{name}"
+    if any(_numeric(run.agent_metrics.get(mean_across_repeats_name)) is None for run in (baseline, candidate)):
+        return None, None
+
+    baseline_values = _repeat_metric_values(baseline, name)
+    candidate_values = _repeat_metric_values(candidate, name)
+    if len(baseline_values) < 2 or len(candidate_values) < 2:
+        return None, None
+
+    test_result = stats.ttest_ind(candidate_values, baseline_values, equal_var=False)
+    interval = test_result.confidence_interval(confidence_level=0.95)
+
+    return float(interval.low), float(interval.high)
+
+
 def _candidate_metric_value(
-    metrics: Dict[str, Any], name: str, baseline_value: Optional[float]
+    metrics: Dict[str, Any],
+    name: str,
+    baseline_value: Optional[float],
+    delta_ci: Tuple[Optional[float], Optional[float]],
 ) -> Optional[CandidateMetricValue]:
     base = _metric_value(metrics, name)
     if base is None:
         return None
-    delta = None if baseline_value is None else base.value - baseline_value
+    value = _comparison_value(base)
+    delta = None if baseline_value is None else value - baseline_value
     delta_pct = None if delta is None or not baseline_value else delta / abs(baseline_value) * 100.0
-    return CandidateMetricValue(**base.model_dump(), delta=delta, delta_pct=delta_pct)
+    delta_ci_low, delta_ci_high = delta_ci
+    return CandidateMetricValue(
+        **base.model_dump(),
+        delta=delta,
+        delta_pct=delta_pct,
+        delta_ci_low=delta_ci_low,
+        delta_ci_high=delta_ci_high,
+    )
 
 
 def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> List[MetricRow]:
@@ -143,18 +180,28 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
     server's `corpus_wer@k=N` -> `wer`), so rows are built from the union of both, taking the value
     from `key_metrics` only when `agent_metrics` doesn't already carry that name.
     """
+    _warn_if_repeat_samples_differ(baseline, "Baseline")
+    for index, candidate in enumerate(candidates):
+        _warn_if_repeat_samples_differ(candidate, f"Candidate[{index}]")
+
     baseline_metrics = {**baseline.key_metrics, **baseline.agent_metrics}
     candidate_metrics = [{**run.key_metrics, **run.agent_metrics} for run in candidates]
     key_metric_names = set(baseline.key_metrics) | {name for run in candidates for name in run.key_metrics}
 
     rows: List[MetricRow] = []
     for name in _ordered_metric_names(baseline_metrics, candidate_metrics):
-        if not is_comparable_metric(name):
+        if not is_comparison_worthy_metric(name):
             continue
         baseline_value = _metric_value(baseline_metrics, name)
+        baseline_point = _comparison_value(baseline_value) if baseline_value else None
         candidate_values = [
-            _candidate_metric_value(metrics, name, baseline_value.value if baseline_value else None)
-            for metrics in candidate_metrics
+            _candidate_metric_value(
+                metrics,
+                name,
+                baseline_point,
+                _welch_delta_confidence_interval(baseline, candidate, name) if baseline_value else (None, None),
+            )
+            for candidate, metrics in zip(candidates, candidate_metrics)
         ]
         present_in = ["baseline"] if baseline_value else []
         present_in += [f"candidate[{i}]" for i, value in enumerate(candidate_values) if value is not None]
@@ -365,8 +412,8 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
         )
     if not baseline.has_repeat_cis and not any(run.has_repeat_cis for run in candidates):
         notes.append(
-            "Neither run recorded cross-repeat confidence intervals, so every CI cell is empty. "
-            "They are written for `mean/*` metrics when a run has 2 or more repeats."
+            "Neither run recorded per-run cross-repeat confidence intervals, so every baseline/candidate "
+            "CI cell is empty. They are written for repeat-aggregated metrics when a run has 2 or more repeats."
         )
     one_sided = [row.metric for row in rows if len(row.present_in) < 1 + len(candidates)]
     if one_sided:

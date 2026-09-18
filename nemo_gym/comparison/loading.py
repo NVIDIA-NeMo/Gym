@@ -15,8 +15,9 @@
 """Reading `*_aggregate_metrics.json` for `gym eval compare`, and picking which agent to compare.
 
 All filesystem I/O for the compare feature lives here. The rollouts JSONL a user points at is
-never opened: it is the run's identity and the handle its `_aggregate_metrics.json` sibling is
-derived from.
+never opened: it is the run's identity and the handle from which its `_aggregate_metrics.json`
+sibling is derived. Aggregate files written before repeat-level statistics existed are enriched from
+their already-recorded per-rollout summaries and cached alongside the aggregate file.
 """
 
 from dataclasses import dataclass
@@ -31,8 +32,9 @@ from nemo_gym.comparison.schema import RunFile
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
+    ROLLOUT_INFOS_KEY_NAME,
+    Stat,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -42,16 +44,13 @@ RunRole = Literal["baseline", "candidate"]
 
 @dataclass(frozen=True)
 class LoadedRun:
-    """One side of the comparison, narrowed to a single agent.
-
-    Only what the diff actually consumes. Run identity (role, paths, label) stays on `RunFile`,
-    which the report carries directly, so it is deliberately not duplicated here.
-    """
+    """One side of the comparison, narrowed to a single agent."""
 
     agent_name: str
     agent_metrics: Dict[str, Any]
     key_metrics: Dict[str, Any]
     group_level_metrics: List[Dict[str, Any]]
+    repeat_level_metrics: List[Dict[str, Any]]
     num_tasks: int = 0
     num_repeats: Optional[int] = None
     has_repeat_cis: bool = False
@@ -70,6 +69,11 @@ def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optiona
     if override:
         return _resolve_under_cwd_or_install(override)
     return aggregate_metrics_path_for(_resolve_under_cwd_or_install(rollouts_jsonl_fpath))
+
+
+def _repeat_metrics_cache_path(metrics_fpath: Path) -> Path:
+    """Return the cache path for a legacy aggregate without per-repeat statistics."""
+    return metrics_fpath.with_stem(f"{metrics_fpath.stem}_repeat_metrics_cache")
 
 
 def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
@@ -105,6 +109,42 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     return entries
 
 
+def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Add repeat metrics to one legacy aggregate entry."""
+    from nemo_gym.reward_profile import compute_aggregate_metrics
+
+    computed = compute_aggregate_metrics(
+        [info for group in entry.get("group_level_metrics", []) for info in group.get(ROLLOUT_INFOS_KEY_NAME, [])]
+    )
+    return entry | {
+        "agent_metrics": computed.agent_metrics
+        | (entry.get("agent_metrics") or {})
+        | {"num_repeats": _derive_num_repeats(entry.get("group_level_metrics", []), computed.repeat_level_metrics)},
+        "repeat_level_metrics": computed.repeat_level_metrics,
+    }
+
+
+def _load_repeat_metrics_cache_if_needed(
+    entries: Dict[str, Dict[str, Any]], metrics_fpath: Path
+) -> Dict[str, Dict[str, Any]]:
+    """Use the cache only when the aggregate predates repeat-level metrics."""
+    key = "repeat_level_metrics"
+    if all(key in entry for entry in entries.values()):
+        return entries
+    cache_fpath = _repeat_metrics_cache_path(metrics_fpath)
+    if cache_fpath.exists():
+        return _read_agent_entries(cache_fpath)
+    entries = {name: entry if key in entry else _compute_repeat_metrics(entry) for name, entry in entries.items()}
+    with cache_fpath.open("wb") as cache_file:
+        cache_file.write(
+            orjson.dumps(
+                list(entries.values()),
+                option=orjson.OPT_INDENT_2,
+            )
+        )
+    return entries
+
+
 def load_agg_metrics_file(
     rollouts_jsonl_fpath: str,
     role: RunRole,
@@ -121,13 +161,14 @@ def load_agg_metrics_file(
             "or point at the metrics file directly with "
             "'baseline_aggregate_metrics_fpath' or 'candidate_aggregate_metrics_fpaths'."
         )
-
+    entries_by_agent = _read_agent_entries(metrics_path)
+    entries_by_agent = _load_repeat_metrics_cache_if_needed(entries_by_agent, metrics_path)
     return RunFile(
         role=role,
         index=index,
         rollouts_jsonl_fpath=_resolve_under_cwd_or_install(rollouts_jsonl_fpath),
         aggregate_metrics_fpath=metrics_path,
-        entries_by_agent=_read_agent_entries(metrics_path),
+        entries_by_agent=entries_by_agent,
     )
 
 
@@ -250,7 +291,8 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         agent_metrics=agent_metrics,
         key_metrics=key_metrics,
         group_level_metrics=group_level_metrics,
+        repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
         num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
-        has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
+        has_repeat_cis=any(key.startswith(Stat.CI_LOW_95.across_repeats_prefix) for key in agent_metrics),
     )

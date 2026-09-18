@@ -45,11 +45,14 @@ JSON_REPORT_NAME = "compare_report.json"
 MISSING = "—"
 
 CI_FOOTNOTE = (
-    "CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
-    "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`. "
-    f"`{MISSING}` means no interval was written: the metric is not a `mean/*` field, the run has fewer "
-    "than 2 repeats, or the run predates repeat-level metrics. Units differ by family — `pass@*` and "
-    "`majority@*` are on 0–100, `mean/*` are in the verifier's own units."
+    "For each delta, comparison uses `mean_across_repeats/<metric>` when recorded and otherwise uses "
+    "the metric value. "
+    "Delta CI = two-sided independent-sample 95% Welch t-interval for candidate minus baseline, "
+    "computed from the named metric's values in each run's `repeat_level_metrics`. "
+    f"`{MISSING}` means the required interval data was unavailable: "
+    "delta intervals require at least 2 finite repeat-level values on each side. "
+    "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
+    "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
 )
 
 
@@ -77,6 +80,12 @@ def _fmt_delta_cell(candidate) -> str:
     if candidate.delta_pct is None:
         return f"{_fmt_signed(candidate.delta)} (n/a)"
     return f"{_fmt_signed(candidate.delta)} ({candidate.delta_pct:+.1f}%)"
+
+
+def _fmt_delta_ci(candidate) -> str:
+    if candidate is None or candidate.delta_ci_low is None or candidate.delta_ci_high is None:
+        return MISSING
+    return f"[{_fmt_signed(candidate.delta_ci_low)}, {_fmt_signed(candidate.delta_ci_high)}]"
 
 
 def _fmt_rewards(rewards: Optional[Sequence[float]]) -> str:
@@ -136,11 +145,12 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
 
 
 DELTA_HEADER = "Δ (cand − base)"
+DELTA_CI_HEADER = f"95% CI for {DELTA_HEADER}"
 
 
 def _metric_table(rows: Sequence[MetricRow], candidate_labels: Sequence[str]) -> List[str]:
-    header = ["Metric", DELTA_HEADER]
-    alignments = ["---", "---:"]
+    header = ["Metric", DELTA_HEADER, DELTA_CI_HEADER]
+    alignments = ["---", "---:", "---"]
     header += ["Baseline", "Baseline 95% CI"]
     alignments += ["---:", "---"]
     for label in candidate_labels:
@@ -149,7 +159,11 @@ def _metric_table(rows: Sequence[MetricRow], candidate_labels: Sequence[str]) ->
 
     table_rows = []
     for row in rows:
-        cells = [f"`{row.metric}`", " / ".join(_fmt_delta_cell(candidate) for candidate in row.candidates)]
+        cells = [
+            f"`{row.metric}`",
+            " / ".join(_fmt_delta_cell(candidate) for candidate in row.candidates),
+            " / ".join(_fmt_delta_ci(candidate) for candidate in row.candidates),
+        ]
         cells += [_fmt(row.baseline.value if row.baseline else None), _fmt_ci(row.baseline)]
         for candidate in row.candidates:
             cells += [_fmt(candidate.value if candidate else None), _fmt_ci(candidate)]
@@ -334,6 +348,7 @@ def render_key_metrics_tables(result: ComparisonResult) -> List["Table"]:
         table = Table(title=f"Key metrics — {comparison.baseline_agent}")
         table.add_column("Metric")
         table.add_column(DELTA_HEADER, justify="right")
+        table.add_column(DELTA_CI_HEADER)
         table.add_column("Baseline", justify="right")
         table.add_column("Baseline 95% CI")
         table.add_column("Candidate", justify="right")
@@ -346,6 +361,7 @@ def render_key_metrics_tables(result: ComparisonResult) -> List["Table"]:
             table.add_row(
                 escape(row.metric),
                 _fmt_delta_cell(candidate),
+                _fmt_delta_ci(candidate),
                 _fmt(row.baseline.value if row.baseline else None),
                 _fmt_ci(row.baseline),
                 _fmt(candidate.value if candidate else None),

@@ -43,7 +43,9 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
     pass, and writes `compare_report.md` and/or `compare_report.json`. The rollouts JSONL itself is
-    never opened -- it is the run's identity and the handle the sibling path is derived from.
+    never opened -- it is the run's identity and the handle from which the sibling path is derived. When
+    a legacy aggregate lacks repeat statistics, they are reconstructed from its embedded rollout
+    summaries and saved in a sibling aggregate cache for later comparisons.
 
     Examples:
 
@@ -125,8 +127,8 @@ class MetricValue(BaseModel):
     """One side's reading of a metric, plus whatever uncertainty the run recorded for it."""
 
     value: float
-    # `ci_{low,high}_95_across_repeats/<metric>`: only written for `mean/*` metrics on runs with >= 2
-    # repeats, so these are None for pass@k families and single-repeat runs.
+    # `ci_{low,high}_95_across_repeats/<metric>`: written for eligible point metrics,
+    # including benchmark-defined metrics, on runs with >= 2 repeat values.
     ci_low: Optional[float] = None
     ci_high: Optional[float] = None
     se_across_repeats: Optional[float] = None
@@ -141,6 +143,10 @@ class CandidateMetricValue(MetricValue):
 
     delta: Optional[float] = None
     delta_pct: Optional[float] = None
+    # Two-sided 95% Welch t-interval for candidate minus baseline, computed from each run's
+    # repeat-level values. Only available when both runs have `mean_across_repeats/<metric>`.
+    delta_ci_low: Optional[float] = None
+    delta_ci_high: Optional[float] = None
 
 
 class MetricRow(BaseModel):

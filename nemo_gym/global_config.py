@@ -20,6 +20,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
+from enum import StrEnum
 from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
@@ -196,49 +197,52 @@ TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
 
-# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
-# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
-# live here, where both sides can import them without pulling in pandas/scipy/wandb.
-MEAN_STAT_NAME = "mean"
-MAX_STAT_NAME = "max"
-MIN_STAT_NAME = "min"
-MEDIAN_STAT_NAME = "median"
-STD_STAT_NAME = "std"
-SEM_STAT_NAME = "sem"
-P25_STAT_NAME = "p25"
-P75_STAT_NAME = "p75"
-CI_LOW_95_STAT_NAME = "ci_low_95"
-CI_HIGH_95_STAT_NAME = "ci_high_95"
-HISTOGRAM_STAT_NAME = "histogram"
-
-# `<stat>/<field>`, e.g. `mean/reward`.
+# Metric name components shared by producers and consumers.
 STAT_SEPARATOR = "/"
-MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
-MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
-MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
-MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
-STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
-SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
-P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
-P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
-CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
-CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
-
-# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
 ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
-MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
-CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
 
-# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
-STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
-STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
-AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
+
+class Stat(StrEnum):
+    MEAN = "mean"
+    MAX = "max"
+    MIN = "min"
+    MEDIAN = "median"
+    STD = "std"
+    SEM = "sem"
+    SE = "se"
+    P25 = "p25"
+    P75 = "p75"
+    CI_LOW_95 = "ci_low_95"
+    CI_HIGH_95 = "ci_high_95"
+    HISTOGRAM = "histogram"
+
+    @property
+    def prefix(self) -> str:
+        return f"{self.value}{STAT_SEPARATOR}"
+
+    @property
+    def across_repeats_prefix(self) -> str:
+        return f"{self.value}{ACROSS_REPEATS_MARKER}"
+
+
+# Statistics that describe the spread of an underlying field rather than being an estimate of their own.
+DISPERSION_STATS: Tuple[Stat, ...] = tuple(stat for stat in Stat if stat not in (Stat.MEAN, Stat.HISTOGRAM))
+DISPERSION_PREFIXES: Tuple[str, ...] = tuple(stat.prefix for stat in DISPERSION_STATS)
+
+
+# Companion statistics `compute_pass_majority_metrics` appends to a pass@k metric name.
+# TODO: Merge this into Stat or remove it when working on https://github.com/NVIDIA-NeMo/Gym/issues/3471.
+class PassMajorityStat(StrEnum):
+    STD_DEV_ACROSS_RUNS = "std_dev_across_runs"
+    STD_ERR_ACROSS_RUNS = "std_err_across_runs"
+    AVG_SAMPLE_STD_DEV = "avg_sample_std_dev"
+
+    @property
+    def suffix(self) -> str:
+        return f"{STAT_SEPARATOR}{self.value}"
+
+
+PASS_MAJORITY_STAT_SUFFIXES: Tuple[str, ...] = tuple(stat.suffix for stat in PassMajorityStat)
 
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
