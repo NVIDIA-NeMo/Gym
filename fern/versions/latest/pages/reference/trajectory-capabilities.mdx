@@ -138,75 +138,57 @@ because those families include identity. Parent/child relationships, tool execut
 additional mandatory P0 claims.
 
 These are proposed validation contracts, not an implemented qualification runner. The JSON Schema bundle contains one
-named fragment per claim:
+named rollout-record schema per claim:
 
 <Download src="../../../../assets/trajectory-evidence-p0.schema.json">Download the P0 JSON Schema bundle</Download>
 
-Each fragment uses JSON Schema Draft 2020-12 and accepts unrelated properties. Select the relevant `$defs` entry; the
+Each schema uses JSON Schema Draft 2020-12 and accepts unrelated properties. Select the relevant `$defs` entry; the
 bundle itself deliberately rejects instances to prevent accidentally treating it as a complete rollout validator.
 
-### Reading the output
+### Evidence in the rollout file
 
-Read each JSON object from the saved rollout JSONL. For the current `ng_trajectory` schema version `1.0`, select
-`model_calls[]`, `invocations[]`, and `turns[]`. Resolve invocation observations from
-`ng_agent_observations.records[]` where `kind` is `agent_invocation` when that is the authoritative source.
+`evaluator_rollouts.jsonl` contains the evidence. Evidence may appear in different fields depending on the harness and
+Gym version. Each TE schema validates a complete rollout record and accepts the supported locations for that evidence.
+There is no need to extract or rename fields before validation.
 
-When using `ng_model_call_capture.calls[]`, a reader can construct the same call-shaped fragment without modifying the
-artifact: copy the call ID and payloads, place response metadata under `response_metadata`, and map token names below.
-Use `request_raw` or `response_raw` when the corresponding parsed payload is absent. Retain the original JSON pointer
-for every extracted value. Do not replace nulls with zeros or use rollout totals as per-call usage. If a payload was
-moved into `ng_trajectory`, read it there; missing duplicate copies in capture are not a failure.
+For example, TE3.1 accepts prompt-token counts in **either**
+`ng_trajectory.model_calls[].token_stats.prompt_tokens` **or** `ng_model_call_capture.calls[].tokens_in`.
+The schema expresses this choice with `anyOf`. The chosen call collection must be nonempty, and every call in it must
+have a valid count. Missing or empty collections cannot pass.
 
-| Capture property | Call-fragment property |
+### Schemas and supported locations
+
+All named TE schemas take one complete JSON object from the rollout file. The table shows where they look inside it.
+These are evidence checks, not replacements for Gym's full artifact schema.
+
+| Claim / schema entry | Supported evidence locations and requirements |
 |---|---|
-| `model_call_id` | `model_call_id` |
-| `status_code`, `response_status`, `finish_reason`, `error_category` | Same names inside `response_metadata` |
-| `tokens_in` | `token_stats.prompt_tokens` |
-| `tokens_out` | `token_stats.completion_tokens` |
-| `tokens_reasoning` | `token_stats.reasoning_tokens` |
-| `cached_tokens` | `token_stats.cached_tokens` |
-| `tokens_total` | `token_stats.total_tokens` |
+| **TE1.1** | Nonempty `model_call_id` on every call in `ng_trajectory.model_calls[]` **or** `ng_model_call_capture.calls[]`. |
+| **TE1.2** | Outcome and termination fields in each trajectory call's `response_metadata` **or** directly on each capture call. HTTP status alone is insufficient; termination needs a known reason/error or `response_status: completed`. |
+| **TE2.1** | Each trajectory call's `request` **or** each capture call's `request` / `request_raw`, as a nonempty object or string. |
+| **TE2.2** | Each trajectory call's `response` **or** each capture call's `response` / `response_raw`, as a nonempty object or string. |
+| **TE2.3** | Reasoning within each trajectory call's `response` **or** each capture call's `response` / `reasoning_content`. Supported response paths are Chat Completions `choices[].message.reasoning_content` / `reasoning`, Responses reasoning items' `summary[].text` / `content[].text`, and Messages `thinking` blocks. Ordinary answer text and token counts do not satisfy this claim. |
+| **TE2.4** | Media in each call's parsed `request` or `response`, under either call collection. Supported paths include request `input` / `messages` content blocks, response `output` / `content` blocks, and Chat Completions `choices[].message.content` / `audio`. |
+| **TE3.1** | `ng_trajectory.model_calls[].token_stats.prompt_tokens` **or** `ng_model_call_capture.calls[].tokens_in`. |
+| **TE3.2** | `ng_trajectory.model_calls[].token_stats.completion_tokens` **or** `ng_model_call_capture.calls[].tokens_out`. |
+| **TE3.3** | `ng_trajectory.model_calls[].token_stats.reasoning_tokens` **or** `ng_model_call_capture.calls[].tokens_reasoning`. |
+| **TE3.4** | `ng_trajectory.model_calls[].token_stats.cached_tokens` **or** `ng_model_call_capture.calls[].cached_tokens`. |
+| **TE3.5** | `ng_trajectory.model_calls[].token_stats.total_tokens` **or** `ng_model_call_capture.calls[].tokens_total`. |
+| **TE6.4** — invocation ownership route | Invocation identity and explicit `model_calls` references in `ng_trajectory.invocations[]` **or** `ng_agent_observations.records[]` entries with `kind: agent_invocation`. At least one invocation must reference a call; other observation types do not count as invocations. |
+| **TE4.3** — turn ownership route | Turn identity and `selected_model_call` in `ng_trajectory.turns[]`. **This field is proposed, not present in current `TrajectoryTurn` 1.0.** |
+| **TE4.4** — turn ownership route | Turn identity and nonempty `model_calls` references in `ng_trajectory.turns[]`. Reference lists alone do not establish complete membership. |
 
-Resolve each logical record once, preserve its provenance, and report conflicting representations. Unsupported artifact
-versions or payload dialects are reader limitations; they do not establish a harness instrumentation failure.
+The token schemas require nonnegative integer counts and a nonempty call ID. Call references require either
+`model_call_id` or both `model_ref` and `response_id`. Turn identity consists of `task_id`, `rollout_id`, `invocation_id`,
+and positive integer `turn_no`. The trajectory branches target `ng_trajectory.schema_version: "1.0"`.
 
-### Field schemas
+The reasoning schemas check returned text, not hidden or encrypted-only reasoning. Media schemas recognize the listed
+native image/audio/media blocks and their required data or references. They do not parse raw JSON strings to look for
+reasoning or media, and they do not search arbitrary nested objects. Additional formats need explicit schema support.
 
-`Call` below means one selected model-call object after the reader mapping above. `Invocation` and `Turn` are the
-corresponding saved records. Reasoning and media fragments are selected from their original locations within a call;
-the reader must keep their association with that call. These schemas check representation. The assertions in the next
-section are also required before awarding a claim.
-
-| Claim / schema entry | Input fragment | Required evidence |
-|---|---|---|
-| **TE1.1** | Call | Nonempty `model_call_id`. |
-| **TE1.2** | Call | `response_metadata` provides an outcome and termination evidence. A recorded HTTP status alone is insufficient: require a nonempty `finish_reason`, a known `error_category`, or `response_status: completed`. |
-| **TE2.1** | Call | Nonempty `request` object or retained raw string for the nonempty-request scenario. |
-| **TE2.2** | Call | Nonempty `response` object or retained raw string for the nonempty-response scenario. A failed attempt with no response is not eligible for response-body availability. |
-| **TE2.3** | A returned reasoning text segment | Nonempty string at a documented reasoning location. A reasoning-token count or ordinary answer text is not a substitute. |
-| **TE2.4** | A native media block, or a Chat Completions output `audio` object | A supported image/audio/media representation with its inline data or reference and required native metadata. The bundled profiles cover Responses input images, Chat Completions input images/audio and output audio, and typed media source blocks with URL or base64 sources. |
-| **TE3.1** | Call | `model_call_id` and nonnegative integer `token_stats.prompt_tokens`. |
-| **TE3.2** | Call | `model_call_id` and nonnegative integer `token_stats.completion_tokens`. |
-| **TE3.3** | Call | `model_call_id` and nonnegative integer `token_stats.reasoning_tokens`. |
-| **TE3.4** | Call | `model_call_id` and nonnegative integer `token_stats.cached_tokens`. |
-| **TE3.5** | Call | `model_call_id` and nonnegative integer `token_stats.total_tokens`. |
-| **TE6.4** — invocation ownership route | Invocation | Nonempty `invocation_id` and a nonempty `model_calls` list of explicit call references. Only the identity portion of TE6.1 is a prerequisite here. |
-| **TE4.3** — turn ownership route | Turn | Turn identity and an explicit `selected_model_call` reference. **This is a proposed field, absent from `TrajectoryTurn` 1.0; see below.** |
-| **TE4.4** — turn ownership route | Turn | Turn identity and a nonempty `model_calls` list of associated attempts. This shape alone does not establish complete membership. |
-
-A call reference must contain either `model_call_id` or both `model_ref` and `response_id`. `model_ref` contains
-`type: responses_api_models` and a nonempty `name`. Turn identity consists of `task_id`, `rollout_id`, `invocation_id`,
-and positive integer `turn_no`. Reference consistency and uniqueness are relationship checks, not schema assertions.
-
-For TE2.3, supported reasoning locations include Chat Completions `choices[].message.reasoning_content`, Responses
-reasoning items' `summary[].text` or `content[].text`, and Messages `thinking` blocks' `thinking` text. A versioned reader
-must select only actual reasoning fields for its dialect. This text profile does not claim visibility into provider-hidden
-reasoning or encrypted-only content.
-
-For TE2.4, select the profile by its documented native payload location and dialect. For example, an object with `id`
-and `data` is eligible for the output-audio profile only at Chat Completions
-`response.choices[].message.audio`. A matching object elsewhere is not evidence of audio. Formats whose native representation is not covered need an additional reader/profile; the bundle is not a
-universal multimedia schema.
+An OR branch must supply a complete representation for the tested claim. The schemas do not join partial call records
+across attachments. If both attachments are present, agreement between their values and call populations remains an
+additional validation check; a schema match alone does not establish that agreement.
 
 ### Required assertions and scenarios
 
@@ -217,7 +199,7 @@ universal multimedia schema.
 | TE2.1–TE2.2 | Compare the retained native payload with known fixture fields, including roles, tool arguments/results, and distinguishable content across calls. A generic object/string match alone does not establish fidelity. Preserve malformed returned content when it was actually received. | Two calls with different context and scripted responses, including tool feedback where supported. |
 | TE2.3 | Every expected returned reasoning segment survives at its dialect-specific location and remains associated with the correct call. | A fixture that explicitly returns reasoning text; no claim if the provider does not expose it. |
 | TE2.4 | Retain the expected media content and metadata. Decode inline data or resolve references in the declared validation environment and compare with the fixture. Check audio format metadata in the request when the output object does not carry it. A nonempty URL or file ID alone is insufficient. | A known image/audio fixture for each claimed modality and direction. |
-| TE3.1–TE3.5 | Compare each available count with the scripted provider usage after the reader's documented provider mapping. Do not add reasoning or cache counts to totals that already include them. | Known usage values, including a reported zero; missing, null, negative, fractional, and string-valued cases. |
+| TE3.1–TE3.5 | Compare each available count with the scripted provider usage under the documented provider token semantics. Do not add reasoning or cache counts to totals that already include them. | Known usage values, including a reported zero; missing, null, negative, fractional, and string-valued cases. |
 | TE6.4 | Every reference resolves to exactly one recorded call. All populated reference fields agree. Each eligible call has one invocation owner; IDs are unique after deduplication. | Multiple calls with explicit invocation ownership; child invocations only when claimed. |
 | TE4.3 | The selected reference resolves to exactly one recorded response and agrees with the decision's content/context. A reference list alone does not identify selection. | Distinguishable model responses where the harness makes an explicit decision. |
 | TE4.4 | References resolve uniquely, turn identity matches the containing rollout, and `(invocation_id, turn_no)` is unique. Compare attempt membership against the declared scenario and explicit associations; a known incomplete-scope gap prevents a completeness claim. | A basic decision followed by a retry scenario where supported. If compaction is in scope, helper calls need explicit attribution rather than being guessed into a turn. |
@@ -229,19 +211,18 @@ coverage. A complete claim must state which behaviors and call population were e
 ### Selected response and current schema limits
 
 `TrajectoryTurn` 1.0 has `model_calls`, but no generic discriminator for which response was selected. A list of one or
-more references is therefore insufficient by itself to establish TE4.3 across all harnesses. The TE4.3 fragment in the
+more references is therefore insufficient by itself to establish TE4.3 across all harnesses. The TE4.3 schema in the
 bundle specifies a proposed `selected_model_call` property; it does **not** add that field to Gym's Python models or
 change existing artifacts.
 
-A versioned, harness-specific reader may instead extract selection from an existing explicit producer convention,
-retaining the source location and documenting that convention. It must not choose the first or last call, or assume a
-single reference means selection without that semantic contract. Otherwise TE4.3 is unavailable in the current output.
-The invocation ownership route remains available without turn records. TE4.4's reference list similarly needs the
-membership assertions above; the schema cannot prove that unrecorded attempts did not occur.
+Existing producer conventions would need an explicit supported schema branch before they can establish selection with
+this bundle. It does not assume that the first, last, or only reference is the selected response. The invocation
+ownership route remains available without turn records. TE4.4's reference list similarly needs the membership assertions
+above; the schema cannot prove that unrecorded attempts did not occur.
 
-### Running a fragment check
+### Checking a rollout file
 
-For example, validate TE3.1 on one selected call with a Draft 2020-12 validator:
+Select a TE schema and apply it directly to each record. For example, check TE3.1 with a Draft 2020-12 validator:
 
 ```python
 import json
@@ -255,23 +236,29 @@ schema = {
     "$ref": "#/$defs/TE3.1",
 }
 validator = Draft202012Validator(schema)
-validator.validate({
-    "model_call_id": "call-1",
-    "token_stats": {"prompt_tokens": 123},
-})
+records_checked = 0
+with Path("evaluator_rollouts.jsonl").open() as rollouts:
+    for line in rollouts:
+        validator.validate(json.loads(line))
+        records_checked += 1
+if records_checked == 0:
+    raise ValueError("No rollout records to validate")
 ```
 
-Select other claims by changing the `$ref` and providing the fragment from the corresponding table row. The five token
-schemas accept reported zero and reject missing/null values, negatives, fractional counts, numeric strings, and booleans.
-They establish valid representation; numerical correctness requires the fixture comparison above.
+Change the `$ref` to check another TE. Both storage locations are handled by the schema. A bare token count, an extracted
+call object, or an aggregate metrics summary is not a valid input to these rollout-record schemas.
 
-Declare eligibility before inspecting results. Token checks normally select successful calls for which the declared
-provider/protocol exposes that metric. Reasoning and media claims require a scenario exercising those features. A
-successful eligible call with missing usage must remain a failure, not be excluded after inspection. Provider-unavailable
-metrics can be recorded as not applicable to the declared profile, but cannot earn an availability pass. Failed calls
-without usage remain legitimate rollout records.
+These schemas describe focused test outputs where every call in the chosen collection is expected to supply the tested
+evidence. For example, use known usage values for the token scenario, and explicitly returned reasoning for the reasoning
+scenario. A mixed run containing failed calls without usage needs an explicit eligibility profile; these schemas do not
+silently exclude calls with missing fields. Such calls can be legitimate execution records without satisfying a token
+availability test.
 
-Report eligible, passed, failed, and excluded counts with reasons for each claim, plus the harness/configuration, reader,
-contract version, and source pointers. An empty eligible population cannot pass. Unsupported readers and unexercised
-scenarios must be distinguished from missing evidence. There is no unconditional overall P0 pass obtained simply by
-validating whichever fields happened to be present.
+Reported zero is valid; missing/null counts, negatives, fractional counts, numeric strings, and booleans fail. Declare
+applicability before running a scenario. Provider-unavailable metrics and unexercised modalities cannot earn an
+availability pass. Unsupported artifact formats must be distinguished from missing evidence.
+
+Report the claim, scenario, contract version, harness/configuration, and results alongside the additional assertions.
+An empty file or empty evidence collection cannot pass. Passing these schemas establishes the supported evidence shapes;
+reference resolution, agreement between duplicate copies, expected content, and scope coverage still need the checks
+listed above.

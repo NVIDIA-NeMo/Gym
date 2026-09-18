@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$comment": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0",
-  "title": "Trajectory Evidence P0 field contracts \u2014 draft 1",
-  "description": "Select a named $defs entry with $ref; these fragment schemas are not a complete rollout validator. The unselected bundle deliberately rejects every instance.",
+  "title": "Trajectory Evidence P0 rollout-record contracts — draft 2",
+  "description": "Select a TE entry with $ref and validate each full JSON object from evaluator_rollouts.jsonl. Supported source locations are encoded in anyOf branches. The unselected bundle rejects every instance.",
   "not": {},
   "$defs": {
     "identifier": {
@@ -144,137 +144,6 @@
         }
       }
     },
-    "TE1.1": {
-      "type": "object",
-      "required": [
-        "model_call_id"
-      ],
-      "properties": {
-        "model_call_id": {
-          "$ref": "#/$defs/identifier"
-        }
-      }
-    },
-    "TE1.2": {
-      "type": "object",
-      "required": [
-        "response_metadata"
-      ],
-      "properties": {
-        "response_metadata": {
-          "type": "object",
-          "allOf": [
-            {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "required": [
-                    "status_code"
-                  ],
-                  "properties": {
-                    "status_code": {
-                      "type": "integer",
-                      "minimum": 200,
-                      "maximum": 599
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "required": [
-                    "response_status"
-                  ],
-                  "properties": {
-                    "response_status": {
-                      "enum": [
-                        "completed",
-                        "failed",
-                        "incomplete",
-                        "cancelled"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "required": [
-                    "error_category"
-                  ],
-                  "properties": {
-                    "error_category": {
-                      "$ref": "#/$defs/knownString"
-                    }
-                  }
-                }
-              ]
-            },
-            {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "required": [
-                    "finish_reason"
-                  ],
-                  "properties": {
-                    "finish_reason": {
-                      "$ref": "#/$defs/knownString"
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "required": [
-                    "error_category"
-                  ],
-                  "properties": {
-                    "error_category": {
-                      "$ref": "#/$defs/knownString"
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "required": [
-                    "response_status"
-                  ],
-                  "properties": {
-                    "response_status": {
-                      "const": "completed"
-                    }
-                  }
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "TE2.1": {
-      "type": "object",
-      "required": [
-        "request"
-      ],
-      "properties": {
-        "request": {
-          "$ref": "#/$defs/storedPayload"
-        }
-      }
-    },
-    "TE2.2": {
-      "type": "object",
-      "required": [
-        "response"
-      ],
-      "properties": {
-        "response": {
-          "$ref": "#/$defs/storedPayload"
-        }
-      }
-    },
-    "TE2.3": {
-      "type": "string",
-      "minLength": 1
-    },
     "mediaLocator": {
       "type": "string",
       "minLength": 1
@@ -318,7 +187,370 @@
         }
       ]
     },
-    "TE2.4": {
+    "callIdentity": {
+      "type": "object",
+      "required": [
+        "model_call_id"
+      ],
+      "properties": {
+        "model_call_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "callOutcome": {
+      "type": "object",
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "status_code"
+              ],
+              "properties": {
+                "status_code": {
+                  "type": "integer",
+                  "minimum": 200,
+                  "maximum": 599
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "response_status"
+              ],
+              "properties": {
+                "response_status": {
+                  "enum": [
+                    "completed",
+                    "failed",
+                    "incomplete",
+                    "cancelled"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "error_category"
+              ],
+              "properties": {
+                "error_category": {
+                  "$ref": "#/$defs/knownString"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "finish_reason"
+              ],
+              "properties": {
+                "finish_reason": {
+                  "$ref": "#/$defs/knownString"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "error_category"
+              ],
+              "properties": {
+                "error_category": {
+                  "$ref": "#/$defs/knownString"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "response_status"
+              ],
+              "properties": {
+                "response_status": {
+                  "const": "completed"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "nonnegativeTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "invocationCalls": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/invocationIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "model_calls"
+          ],
+          "properties": {
+            "model_calls": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/modelCallRef"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "selectedTurnCall": {
+      "description": "Proposed explicit selected-response reference. This property does not exist in TrajectoryTurn schema 1.0.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/turnIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "selected_model_call"
+          ],
+          "properties": {
+            "selected_model_call": {
+              "$ref": "#/$defs/modelCallRef"
+            }
+          }
+        }
+      ]
+    },
+    "turnCalls": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/turnIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "model_calls"
+          ],
+          "properties": {
+            "model_calls": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/modelCallRef"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "reasoningText": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reasoningMessage": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "reasoning_content"
+          ],
+          "properties": {
+            "reasoning_content": {
+              "$ref": "#/$defs/reasoningText"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "reasoning"
+          ],
+          "properties": {
+            "reasoning": {
+              "$ref": "#/$defs/reasoningText"
+            }
+          }
+        }
+      ]
+    },
+    "reasoningItem": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "reasoning"
+            }
+          }
+        },
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "summary"
+              ],
+              "properties": {
+                "summary": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "text"
+                    ],
+                    "properties": {
+                      "text": {
+                        "$ref": "#/$defs/reasoningText"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "content"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "text"
+                    ],
+                    "properties": {
+                      "text": {
+                        "$ref": "#/$defs/reasoningText"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "thinkingBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "thinking"
+      ],
+      "properties": {
+        "type": {
+          "const": "thinking"
+        },
+        "thinking": {
+          "$ref": "#/$defs/reasoningText"
+        }
+      }
+    },
+    "reasoningResponse": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "choices"
+          ],
+          "properties": {
+            "choices": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "$ref": "#/$defs/reasoningMessage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "output"
+          ],
+          "properties": {
+            "output": {
+              "type": "array",
+              "minItems": 1,
+              "contains": {
+                "$ref": "#/$defs/reasoningItem"
+              },
+              "items": {
+                "if": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "reasoning"
+                    }
+                  }
+                },
+                "then": {
+                  "$ref": "#/$defs/reasoningItem"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content"
+          ],
+          "properties": {
+            "content": {
+              "type": "array",
+              "minItems": 1,
+              "contains": {
+                "$ref": "#/$defs/thinkingBlock"
+              },
+              "items": {
+                "if": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "thinking"
+                    }
+                  }
+                },
+                "then": {
+                  "$ref": "#/$defs/thinkingBlock"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mediaBlock": {
       "anyOf": [
         {
           "allOf": [
@@ -429,44 +661,782 @@
               }
             }
           }
+        }
+      ]
+    },
+    "outputAudio": {
+      "type": "object",
+      "required": [
+        "id",
+        "data"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "data": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "validMediaBlocks": {
+      "type": "array",
+      "items": {
+        "if": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "input_image",
+                "image_url",
+                "image",
+                "audio",
+                "video",
+                "input_audio"
+              ]
+            }
+          }
+        },
+        "then": {
+          "$ref": "#/$defs/mediaBlock"
+        }
+      }
+    },
+    "mediaBlocks": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/validMediaBlocks"
+        },
+        {
+          "contains": {
+            "$ref": "#/$defs/mediaBlock"
+          },
+          "minItems": 1
+        }
+      ]
+    },
+    "mediaInputItem": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/mediaBlock"
         },
         {
           "type": "object",
           "required": [
-            "id",
-            "data"
+            "content"
           ],
           "properties": {
-            "id": {
-              "$ref": "#/$defs/identifier"
+            "content": {
+              "$ref": "#/$defs/mediaBlocks"
+            }
+          }
+        }
+      ]
+    },
+    "mediaInputArray": {
+      "type": "array",
+      "minItems": 1,
+      "contains": {
+        "$ref": "#/$defs/mediaInputItem"
+      },
+      "items": {
+        "allOf": [
+          {
+            "if": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "input_image",
+                    "image_url",
+                    "image",
+                    "audio",
+                    "video",
+                    "input_audio"
+                  ]
+                }
+              }
             },
-            "data": {
-              "$ref": "#/$defs/identifier"
+            "then": {
+              "$ref": "#/$defs/mediaBlock"
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "required": [
+                "content"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array"
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "required": [
+                "content"
+              ],
+              "properties": {
+                "content": {
+                  "$ref": "#/$defs/validMediaBlocks"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "mediaRequest": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "input"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/$defs/mediaInputArray"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "messages"
+          ],
+          "properties": {
+            "messages": {
+              "$ref": "#/$defs/mediaInputArray"
+            }
+          }
+        }
+      ]
+    },
+    "mediaResponse": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "output"
+          ],
+          "properties": {
+            "output": {
+              "$ref": "#/$defs/mediaInputArray"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/mediaBlocks"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "choices"
+          ],
+          "properties": {
+            "choices": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "audio"
+                        ],
+                        "properties": {
+                          "audio": {
+                            "$ref": "#/$defs/outputAudio"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "content"
+                        ],
+                        "properties": {
+                          "content": {
+                            "$ref": "#/$defs/mediaBlocks"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "callMedia": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "request"
+          ],
+          "properties": {
+            "request": {
+              "$ref": "#/$defs/mediaRequest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "response"
+          ],
+          "properties": {
+            "response": {
+              "$ref": "#/$defs/mediaResponse"
+            }
+          }
+        }
+      ]
+    },
+    "TE1.1": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/callIdentity"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/callIdentity"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE1.2": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "response_metadata"
+                    ],
+                    "properties": {
+                      "response_metadata": {
+                        "$ref": "#/$defs/callOutcome"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/callOutcome"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE2.1": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "request"
+                    ],
+                    "properties": {
+                      "request": {
+                        "$ref": "#/$defs/storedPayload"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "request"
+                        ],
+                        "properties": {
+                          "request": {
+                            "$ref": "#/$defs/storedPayload"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "request_raw"
+                        ],
+                        "properties": {
+                          "request_raw": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE2.2": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "response"
+                    ],
+                    "properties": {
+                      "response": {
+                        "$ref": "#/$defs/storedPayload"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "response"
+                        ],
+                        "properties": {
+                          "response": {
+                            "$ref": "#/$defs/storedPayload"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "response_raw"
+                        ],
+                        "properties": {
+                          "response_raw": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE2.3": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "response"
+                    ],
+                    "properties": {
+                      "response": {
+                        "$ref": "#/$defs/reasoningResponse"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "reasoning_content"
+                        ],
+                        "properties": {
+                          "reasoning_content": {
+                            "$ref": "#/$defs/reasoningText"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "response"
+                        ],
+                        "properties": {
+                          "response": {
+                            "$ref": "#/$defs/reasoningResponse"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE2.4": {
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/callMedia"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_model_call_capture"
+          ],
+          "properties": {
+            "ng_model_call_capture": {
+              "type": "object",
+              "required": [
+                "calls"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/callMedia"
+                  }
+                }
+              }
             }
           }
         }
       ]
     },
     "TE3.1": {
-      "allOf": [
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
         {
-          "$ref": "#/$defs/TE1.1"
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "token_stats"
+                        ],
+                        "properties": {
+                          "token_stats": {
+                            "type": "object",
+                            "required": [
+                              "prompt_tokens"
+                            ],
+                            "properties": {
+                              "prompt_tokens": {
+                                "$ref": "#/$defs/nonnegativeTokens"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
         {
           "type": "object",
           "required": [
-            "token_stats"
+            "ng_model_call_capture"
           ],
           "properties": {
-            "token_stats": {
+            "ng_model_call_capture": {
               "type": "object",
               "required": [
-                "prompt_tokens"
+                "calls"
               ],
               "properties": {
-                "prompt_tokens": {
-                  "type": "integer",
-                  "minimum": 0
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "tokens_in"
+                        ],
+                        "properties": {
+                          "tokens_in": {
+                            "$ref": "#/$defs/nonnegativeTokens"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -475,25 +1445,91 @@
       ]
     },
     "TE3.2": {
-      "allOf": [
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
         {
-          "$ref": "#/$defs/TE1.1"
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "token_stats"
+                        ],
+                        "properties": {
+                          "token_stats": {
+                            "type": "object",
+                            "required": [
+                              "completion_tokens"
+                            ],
+                            "properties": {
+                              "completion_tokens": {
+                                "$ref": "#/$defs/nonnegativeTokens"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
         {
           "type": "object",
           "required": [
-            "token_stats"
+            "ng_model_call_capture"
           ],
           "properties": {
-            "token_stats": {
+            "ng_model_call_capture": {
               "type": "object",
               "required": [
-                "completion_tokens"
+                "calls"
               ],
               "properties": {
-                "completion_tokens": {
-                  "type": "integer",
-                  "minimum": 0
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "tokens_out"
+                        ],
+                        "properties": {
+                          "tokens_out": {
+                            "$ref": "#/$defs/nonnegativeTokens"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -502,25 +1538,91 @@
       ]
     },
     "TE3.3": {
-      "allOf": [
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
         {
-          "$ref": "#/$defs/TE1.1"
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "token_stats"
+                        ],
+                        "properties": {
+                          "token_stats": {
+                            "type": "object",
+                            "required": [
+                              "reasoning_tokens"
+                            ],
+                            "properties": {
+                              "reasoning_tokens": {
+                                "$ref": "#/$defs/nonnegativeTokens"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
         {
           "type": "object",
           "required": [
-            "token_stats"
+            "ng_model_call_capture"
           ],
           "properties": {
-            "token_stats": {
+            "ng_model_call_capture": {
               "type": "object",
               "required": [
-                "reasoning_tokens"
+                "calls"
               ],
               "properties": {
-                "reasoning_tokens": {
-                  "type": "integer",
-                  "minimum": 0
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "tokens_reasoning"
+                        ],
+                        "properties": {
+                          "tokens_reasoning": {
+                            "$ref": "#/$defs/nonnegativeTokens"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -529,25 +1631,91 @@
       ]
     },
     "TE3.4": {
-      "allOf": [
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
         {
-          "$ref": "#/$defs/TE1.1"
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "token_stats"
+                        ],
+                        "properties": {
+                          "token_stats": {
+                            "type": "object",
+                            "required": [
+                              "cached_tokens"
+                            ],
+                            "properties": {
+                              "cached_tokens": {
+                                "$ref": "#/$defs/nonnegativeTokens"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
         {
           "type": "object",
           "required": [
-            "token_stats"
+            "ng_model_call_capture"
           ],
           "properties": {
-            "token_stats": {
+            "ng_model_call_capture": {
               "type": "object",
               "required": [
-                "cached_tokens"
+                "calls"
               ],
               "properties": {
-                "cached_tokens": {
-                  "type": "integer",
-                  "minimum": 0
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "cached_tokens"
+                        ],
+                        "properties": {
+                          "cached_tokens": {
+                            "$ref": "#/$defs/nonnegativeTokens"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -556,25 +1724,91 @@
       ]
     },
     "TE3.5": {
-      "allOf": [
+      "description": "Validate one rollout record. Every call in a qualifying nonempty collection must satisfy this claim.",
+      "anyOf": [
         {
-          "$ref": "#/$defs/TE1.1"
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "model_calls"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "model_calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "token_stats"
+                        ],
+                        "properties": {
+                          "token_stats": {
+                            "type": "object",
+                            "required": [
+                              "total_tokens"
+                            ],
+                            "properties": {
+                              "total_tokens": {
+                                "$ref": "#/$defs/nonnegativeTokens"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
         {
           "type": "object",
           "required": [
-            "token_stats"
+            "ng_model_call_capture"
           ],
           "properties": {
-            "token_stats": {
+            "ng_model_call_capture": {
               "type": "object",
               "required": [
-                "total_tokens"
+                "calls"
               ],
               "properties": {
-                "total_tokens": {
-                  "type": "integer",
-                  "minimum": 0
+                "calls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/callIdentity"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "tokens_total"
+                        ],
+                        "properties": {
+                          "tokens_total": {
+                            "$ref": "#/$defs/nonnegativeTokens"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -583,6 +1817,150 @@
       ]
     },
     "TE6.4": {
+      "description": "Validate invocation ownership records in trajectory OR observations. Non-invocation observations do not satisfy or fail this claim.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "ng_trajectory"
+          ],
+          "properties": {
+            "ng_trajectory": {
+              "type": "object",
+              "required": [
+                "schema_version",
+                "invocations"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "1.0"
+                },
+                "invocations": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/invocationRecord"
+                  },
+                  "contains": {
+                    "$ref": "#/$defs/invocationCalls"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ng_agent_observations"
+          ],
+          "properties": {
+            "ng_agent_observations": {
+              "type": "object",
+              "required": [
+                "records"
+              ],
+              "properties": {
+                "records": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "if": {
+                      "type": "object",
+                      "required": [
+                        "kind"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "agent_invocation"
+                        }
+                      }
+                    },
+                    "then": {
+                      "$ref": "#/$defs/invocationRecord"
+                    }
+                  },
+                  "contains": {
+                    "allOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "kind"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "const": "agent_invocation"
+                          }
+                        }
+                      },
+                      {
+                        "$ref": "#/$defs/invocationCalls"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TE4.3": {
+      "type": "object",
+      "required": [
+        "ng_trajectory"
+      ],
+      "properties": {
+        "ng_trajectory": {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "turns"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "1.0"
+            },
+            "turns": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/selectedTurnCall"
+              }
+            }
+          }
+        }
+      },
+      "description": "Proposed selected_model_call field, not present in current TrajectoryTurn 1.0. This evidence schema is not validation against the runtime Python model."
+    },
+    "TE4.4": {
+      "type": "object",
+      "required": [
+        "ng_trajectory"
+      ],
+      "properties": {
+        "ng_trajectory": {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "turns"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "1.0"
+            },
+            "turns": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/turnCalls"
+              }
+            }
+          }
+        }
+      }
+    },
+    "invocationRecord": {
       "allOf": [
         {
           "$ref": "#/$defs/invocationIdentity"
@@ -595,48 +1973,6 @@
           "properties": {
             "model_calls": {
               "type": "array",
-              "minItems": 1,
-              "items": {
-                "$ref": "#/$defs/modelCallRef"
-              }
-            }
-          }
-        }
-      ]
-    },
-    "TE4.3": {
-      "description": "Proposed explicit selected-response reference. This property does not exist in TrajectoryTurn schema 1.0.",
-      "allOf": [
-        {
-          "$ref": "#/$defs/turnIdentity"
-        },
-        {
-          "type": "object",
-          "required": [
-            "selected_model_call"
-          ],
-          "properties": {
-            "selected_model_call": {
-              "$ref": "#/$defs/modelCallRef"
-            }
-          }
-        }
-      ]
-    },
-    "TE4.4": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/turnIdentity"
-        },
-        {
-          "type": "object",
-          "required": [
-            "model_calls"
-          ],
-          "properties": {
-            "model_calls": {
-              "type": "array",
-              "minItems": 1,
               "items": {
                 "$ref": "#/$defs/modelCallRef"
               }
