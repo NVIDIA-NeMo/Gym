@@ -14,19 +14,28 @@
 # limitations under the License.
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+)
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
@@ -78,6 +87,155 @@ class TestSanity:
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
+
+    async def test_sandbox_access_selects_runtime_provider(self, monkeypatch) -> None:
+        hermes = HermesAgent(
+            config=_config(enabled_toolsets=["terminal", "web"]),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        provider_config = {"opensandbox": {"connection": {}}}
+        resolve = MagicMock(return_value=provider_config)
+        provider = AsyncMock()
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        connect = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox.connect", connect)
+
+        state = await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(
+                        provider_config_ref="runtime",
+                        descriptor={"sandbox_id": "sandbox"},
+                    ),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        resolve.assert_called_once_with("runtime", {"runtime": {}})
+        connect.assert_awaited_once_with(
+            {"sandbox_id": "sandbox"},
+            provider=provider,
+        )
+        assert state.sandbox is sandbox
+        assert state.workdir == "/app"
+        assert state.session_dir.endswith("/session")
+        assert sandbox.exec.await_count == 2
+        assert sandbox.upload.await_count == 3
+
+    async def test_missing_sandbox_access_uses_configured_fallback(self, monkeypatch) -> None:
+        hermes = HermesAgent(
+            config=_config(
+                enabled_toolsets=["terminal", "web"],
+                sandbox_provider="runtime",
+                sandbox_config={"workdir": "/fallback"},
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        provider = AsyncMock()
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        sandbox_factory = MagicMock(return_value=sandbox)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.resolve_provider_config",
+            MagicMock(return_value={"local": {}}),
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox", sandbox_factory)
+
+        state = await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+            ),
+        )
+
+        sandbox_factory.assert_called_once_with(provider)
+        sandbox.start.assert_awaited_once_with(SandboxSpec(workdir="/fallback"))
+        assert state.sandbox is sandbox
+        assert state.workdir == "/fallback"
+        assert state.owns_sandbox is True
+        await hermes._close_agent_session_state(state)
+        sandbox.stop.assert_awaited_once()
+        sandbox.disconnect.assert_not_awaited()
+
+    async def test_close_rejects_a_different_episode(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        seeded = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        hermes._agent_sessions["session"] = MagicMock(request=seeded)
+        hermes._close_agent_session_state = AsyncMock()
+        request = SimpleNamespace(session={"agent_session_id": "session"})
+
+        with pytest.raises(ValueError, match="episode_id does not match"):
+            await hermes.close_agent_session(
+                request,
+                AgentCloseSessionRequest(
+                    agent_session_id="session",
+                    episode_id=EpisodeId(rollout_id="other"),
+                ),
+            )
+
+        hermes._close_agent_session_state.assert_not_awaited()
+
+    async def test_session_seed_and_close_are_idempotent(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        state = MagicMock(request=body)
+        hermes._initialize_agent_session_state = AsyncMock(return_value=state)
+        hermes._close_agent_session_state = AsyncMock(return_value=None)
+        request = SimpleNamespace(session={})
+
+        first = await hermes.seed_agent_session(request, body)
+        second = await hermes.seed_agent_session(request, body)
+        assert first == second
+        hermes._initialize_agent_session_state.assert_awaited_once()
+
+        close_body = AgentCloseSessionRequest(
+            agent_session_id="session",
+            episode_id=body.episode_id,
+        )
+        await hermes.close_agent_session(request, close_body)
+        await hermes.close_agent_session(request, close_body)
+        hermes._close_agent_session_state.assert_awaited_once_with(state)
+
+    async def test_close_before_seed_prevents_late_creation(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        request = SimpleNamespace(session={})
+
+        await hermes.close_agent_session(
+            request,
+            AgentCloseSessionRequest(
+                agent_session_id="session",
+                episode_id=body.episode_id,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="already closed"):
+            await hermes.seed_agent_session(request, body)
 
 
 class _FakeAgent:
@@ -185,6 +343,16 @@ class TestSigtermHandler:
 
         assert hermes.active_agents == set()
         assert hermes.interrupted_agents == set()
+
+    def test_session_activation_rejects_hermes_error_result(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        with pytest.raises(RuntimeError, match="model request failed"):
+            hermes._response_from_result(
+                body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+                result={"error": "model request failed", "messages": []},
+                model_name="model",
+                fail_on_error=True,
+            )
 
 
 class TestSplitInputToUserAndHistory:
