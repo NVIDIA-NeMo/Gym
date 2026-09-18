@@ -92,13 +92,52 @@ def test_manifest_requires_base_composition(missing_field: str) -> None:
         EnvironmentManifest.model_validate(raw)
 
 
-@pytest.mark.parametrize("profile", ["custom-gym-verifier", "custom-gym-agent-loop"])
-def test_in_process_profiles_require_a_model_server(profile: str) -> None:
-    raw = _manifest(profile=profile)
+def test_standard_verifier_requires_a_model_server() -> None:
+    raw = _manifest(profile="custom-gym-verifier")
     raw.pop("model_server")
 
     with pytest.raises(ValidationError, match="model_server"):
         EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_custom_loop_may_use_a_direct_model_endpoint(explicit_null: bool) -> None:
+    raw = _manifest(profile="custom-gym-agent-loop")
+    if explicit_null:
+        raw["model_server"] = None
+    else:
+        raw.pop("model_server")
+
+    assert EnvironmentManifest.model_validate(raw).model_server is None
+    Draft202012Validator(manifest_json_schema()).validate(raw)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.parametrize("profile", list(IntegrationProfile))
+@pytest.mark.parametrize(
+    "agent", ["verifiers_agent", "tau2", "pinchbench", "harbor_agent", "osworld_agent", "simple_agent"]
+)
+def test_only_native_embedded_grading_agents_may_omit_resources_server(explicit_null, profile, agent) -> None:
+    raw = _manifest(profile=profile)
+    raw["agent_server"] = agent
+    if explicit_null:
+        raw["resources_server"] = None
+    else:
+        raw.pop("resources_server")
+    schema = Draft202012Validator(manifest_json_schema())
+    if (profile, agent) in {
+        (IntegrationProfile.CUSTOM_GYM_AGENT_LOOP, "verifiers_agent"),
+        (IntegrationProfile.EXTERNAL_AGENT_LOOP, "tau2"),
+        (IntegrationProfile.EXTERNAL_AGENT_LOOP, "pinchbench"),
+        (IntegrationProfile.EXTERNAL_AGENT_LOOP, "harbor_agent"),
+        (IntegrationProfile.EXTERNAL_AGENT_LOOP, "osworld_agent"),
+    }:
+        assert EnvironmentManifest.model_validate(raw).resources_server is None
+        schema.validate(raw)
+    else:
+        with pytest.raises(ValidationError, match="resources_server"):
+            EnvironmentManifest.model_validate(raw)
+        assert any("resources_server" in str(error) for error in schema.iter_errors(raw))
 
 
 def test_external_loop_may_omit_a_model_server() -> None:
@@ -128,13 +167,24 @@ def test_rollout_driver_is_custom_profile_only() -> None:
         EnvironmentManifest.model_validate(custom)
 
 
-@pytest.mark.parametrize("missing_field", ["canonical_split", "standard_prompt_config"])
-def test_benchmark_requires_protocol_fields(missing_field: str) -> None:
+def test_benchmark_requires_canonical_split() -> None:
     raw = _manifest(kind="benchmark")
-    raw.pop(missing_field)
+    raw.pop("canonical_split")
 
-    with pytest.raises(ValidationError, match=missing_field):
+    with pytest.raises(ValidationError, match="canonical_split"):
         EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_preformatted_benchmark_can_omit_prompt(explicit_null: bool) -> None:
+    raw = _manifest(kind="benchmark")
+    if explicit_null:
+        raw["standard_prompt_config"] = None
+    else:
+        raw.pop("standard_prompt_config")
+
+    assert EnvironmentManifest.model_validate(raw).standard_prompt_config is None
+    Draft202012Validator(manifest_json_schema()).validate(raw)
 
 
 def test_benchmark_requires_a_benchmark_dataset() -> None:
@@ -276,10 +326,9 @@ def test_generated_schema_is_machine_readable() -> None:
 
     invalid_manifests = []
 
-    for profile in ("custom-gym-verifier", "custom-gym-agent-loop"):
-        invalid = _manifest(profile=profile)
-        invalid.pop("model_server")
-        invalid_manifests.append(invalid)
+    invalid = _manifest(profile="custom-gym-verifier")
+    invalid.pop("model_server")
+    invalid_manifests.append(invalid)
 
     invalid = _manifest(profile="external-rollout-driver")
     invalid.pop("rollout_driver")
@@ -289,10 +338,9 @@ def test_generated_schema_is_machine_readable() -> None:
     invalid["rollout_driver"] = "package.driver:collect"
     invalid_manifests.append(invalid)
 
-    for field in ("canonical_split", "standard_prompt_config"):
-        invalid = _manifest(kind="benchmark")
-        invalid.pop(field)
-        invalid_manifests.append(invalid)
+    invalid = _manifest(kind="benchmark")
+    invalid.pop("canonical_split")
+    invalid_manifests.append(invalid)
 
     invalid = _manifest(kind="benchmark")
     invalid["datasets"][0]["type"] = "validation"
@@ -306,3 +354,21 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
+
+
+@pytest.mark.parametrize("bounds", [(None, 1), (0, None), (None, None), (-1, 1)])
+def test_reward_bounds_round_trip_with_unbounded_endpoints(bounds: tuple) -> None:
+    raw = _manifest()
+    raw["reward"]["range"] = list(bounds)
+    manifest = EnvironmentManifest.model_validate(raw)
+    assert manifest.reward.range == bounds
+    Draft202012Validator(manifest_json_schema()).validate(manifest.model_dump(mode="json"))
+    assert EnvironmentManifest.model_validate_json(manifest.model_dump_json()).reward.range == bounds
+
+
+@pytest.mark.parametrize("bounds", [(float("nan"), None), (None, float("inf")), (-float("inf"), 1), (1, 0), (1, 1)])
+def test_reward_bounds_reject_nonfinite_or_unordered_endpoints(bounds: tuple) -> None:
+    raw = _manifest()
+    raw["reward"]["range"] = list(bounds)
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)

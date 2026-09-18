@@ -3,11 +3,16 @@
 
 import ast
 import json
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym import PARENT_DIR
+from nemo_gym.environment.artifacts import build_environment_package, pull_environment_package
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
+from nemo_gym.environment.onboarding import EnvironmentOnboardingError, prepare_verifier_run
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
     ResolvedComponent,
@@ -16,6 +21,7 @@ from nemo_gym.environment.validation import (
     _infer_profile,
     _only_delegates_to_super,
     _only_raises_not_implemented,
+    _resolve_manifest_composition,
     _with_component_root,
     validate_environment,
 )
@@ -189,6 +195,98 @@ def test_reports_resolved_composition_and_declared_profile(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
+    "name", ["codex_math", "claude_code_reasoning_gym", "opencode_math", "opencode_reasoning_gym", "pi_math"]
+)
+def test_native_direct_endpoint_agent_composition(name: str, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"config_paths:\n- {PARENT_DIR / 'environments' / name / 'config.yaml'}\n"
+        "anthropic_model_name: test-model\nanthropic_api_key: unset\n"
+        "anthropic_base_url: https://example.invalid\n"
+    )
+    composition = _resolve_manifest_composition(config_path)
+
+    assert composition.model_server is None
+    assert all(component.role != "model_server" for component in composition.components)
+    assert _infer_profile(composition)[0] == "custom-gym-agent-loop"
+
+
+def test_direct_endpoint_custom_loop_package_roundtrip(tmp_path: Path) -> None:
+    manifest_path = _custom_agent_asset(
+        tmp_path,
+        profile="custom-gym-agent-loop",
+        source="class CustomAgent:\n    async def responses(self):\n        return None\n\nCustomAgent.run_webserver()\n",
+    )
+    _replace_manifest(manifest_path, model_server=None)
+    config_path = manifest_path.with_name("config.yaml")
+    config = config_path.read_text().replace(
+        "      model_server:\n        type: responses_api_models\n        name: policy_model\n",
+        "      openai_base_url: https://example.invalid/v1\n      openai_api_key: ${oc.env:TEST_DIRECT_API_KEY,unset}\n",
+    )
+    config_path.write_text(config)
+    manifest_path.with_name("package.yaml").write_text(
+        "include:\n- environments/demo\n- responses_api_agents/custom_agent\n"
+    )
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=config_path)
+    archive = build_environment_package(entry, tmp_path / "direct-model.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "environments/demo/manifest.yaml"
+    report = validate_environment(installed_manifest)
+
+    assert load_manifest(installed_manifest).model_server is None
+    assert report.inferred_profile == "custom-gym-agent-loop"
+    assert report.warnings == ()
+    assert all(component.role != "model_server" for component in report.components)
+    assert installed_manifest.with_name("config.yaml").read_text() == config
+
+
+@pytest.mark.parametrize(
+    ("agent", "profile"),
+    [
+        ("verifiers_agent", "custom-gym-agent-loop"),
+        ("tau2", "external-agent-loop"),
+        ("pinchbench", "external-agent-loop"),
+        ("harbor_agent", "external-agent-loop"),
+        ("osworld_agent", "external-agent-loop"),
+    ],
+)
+def test_native_embedded_grading_package_roundtrip_and_stale_agent_rejected(tmp_path: Path, agent, profile) -> None:
+    manifest_path = _asset(tmp_path, profile=profile)
+    _replace_manifest(
+        manifest_path, resources_server=None, agent_server=agent, model_server="policy_model", grading_mode=None
+    )
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        f"demo_agent:\n  responses_api_agents:\n    {agent}:\n"
+        "      entrypoint: app.py\n      model_server: {type: responses_api_models, name: policy_model}\n"
+        "      datasets:\n      - name: example\n        type: example\n"
+        "        jsonl_fpath: environments/demo/data/example.jsonl\n"
+    )
+    agent_dir = tmp_path / f"responses_api_agents/{agent}"
+    agent_dir.mkdir(parents=True)
+    shutil.copyfile(PARENT_DIR / f"responses_api_agents/{agent}/app.py", agent_dir / "app.py")
+    manifest_path.with_name("package.yaml").write_text(
+        f"include:\n- environments/demo\n- responses_api_agents/{agent}\n"
+    )
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=config_path)
+    with pytest.raises(EnvironmentOnboardingError, match="no resources server"):
+        prepare_verifier_run(entry)
+    archive = build_environment_package(entry, tmp_path / "embedded-verifiers.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "environments/demo/manifest.yaml"
+    report = validate_environment(installed_manifest)
+    assert load_manifest(installed_manifest).resources_server is None
+    assert report.inferred_profile == profile
+    assert report.warnings == ()
+    assert all(component.role != "resources_server" for component in report.components)
+    assert installed_manifest.with_name("config.yaml").read_text() == config_path.read_text()
+
+    config_path.write_text(config_path.read_text().replace(f"    {agent}:", "    simple_agent:"))
+    with pytest.raises(EnvironmentValidationError, match="agent_server"):
+        validate_environment(manifest_path)
+
+
+@pytest.mark.parametrize(
     ("profile", "responses_body", "evidence"),
     [
         (
@@ -357,6 +455,46 @@ def test_benchmark_uses_root_prompt_without_executing_prepare(tmp_path: Path) ->
     assert report.datasets[0].prompt_config.endswith("prompts/default.yaml")
 
 
+def test_benchmark_accepts_preformatted_rows_without_prompt(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, standard_prompt_config=None)
+    row = {
+        "responses_create_params": {"input": [{"role": "user", "content": "Follow the instruction."}]},
+        "instruction_id_list": ["keywords:existence"],
+        "kwargs": [{"keywords": ["example"]}],
+    }
+    data_path = manifest_path.parent / "data/example.jsonl"
+    data_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    report = validate_environment(manifest_path)
+
+    assert report.datasets[0].rows == 1
+    assert report.datasets[0].prompt_config is None
+    assert json.loads(data_path.read_text()) == row
+
+    manifest_path.with_name("package.yaml").write_text("include:\n- benchmarks/demo\n", encoding="utf-8")
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=manifest_path.with_name("config.yaml"))
+    archive = build_environment_package(entry, tmp_path / "native-benchmark.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "benchmarks/demo/manifest.yaml"
+
+    assert load_manifest(installed_manifest).standard_prompt_config is None
+    assert validate_environment(installed_manifest).datasets[0].prompt_config is None
+    assert json.loads(installed_manifest.parent.joinpath("data/example.jsonl").read_text()) == row
+
+
+@pytest.mark.parametrize("row", [{"question": "What is 1 + 1?"}, {"responses_create_params": {"input": 42}}])
+def test_benchmark_without_prompt_rejects_invalid_rollout_inputs(tmp_path: Path, row: dict) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, standard_prompt_config=None)
+    manifest_path.parent.joinpath("data/example.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        EnvironmentValidationError, match="row 1 is not a valid rollout input at responses_create_params"
+    ):
+        validate_environment(manifest_path)
+
+
 def test_malformed_benchmark_prompt_is_an_actionable_validation_error(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path, kind="benchmark")
     manifest_path.parent.joinpath("prompts/default.yaml").write_text("user: [broken\n", encoding="utf-8")
@@ -492,3 +630,44 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+def test_missing_data_requires_explicit_preparation_contract(tmp_path: Path, kind: str) -> None:
+    manifest_path = _asset(tmp_path, kind=kind)
+    manifest_path.parent.joinpath("data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    _replace_manifest(manifest_path, data_delivery="prepare")
+    if kind == "environment":
+        with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+            validate_environment(manifest_path)
+    else:
+        report = validate_environment(manifest_path)
+        assert report.datasets[0].rows is None
+        assert "not prepared" in report.warnings[0]
+        manifest_path.parent.joinpath("prepare.py").write_text("def wrong_name(): pass\n")
+        with pytest.raises(EnvironmentValidationError, match="synchronous prepare"):
+            validate_environment(manifest_path)
+
+
+def test_unprepared_package_roundtrip_then_validates_materialized_data(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, data_delivery="prepare")
+    manifest_path.parent.joinpath("data/example.jsonl").unlink()
+    manifest_path.with_name("package.yaml").write_text("include:\n- benchmarks/demo\n")
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=manifest_path.with_name("config.yaml"))
+    archive = build_environment_package(entry, tmp_path / "unprepared.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "benchmarks/demo/manifest.yaml"
+    assert load_manifest(installed_manifest).data_delivery == "prepare"
+    assert validate_environment(installed_manifest).datasets[0].rows is None
+    data_path = installed_manifest.parent / "data/example.jsonl"
+    data_path.parent.mkdir()
+    data_path.write_text('{"question":"What is 1+1?","expected_answer":"2"}\n')
+    report = validate_environment(installed_manifest)
+    assert report.datasets[0].rows == 1
+    assert not report.warnings
+    data_path.write_text('{"wrong_field":"not a valid prompt row"}\n')
+    with pytest.raises(EnvironmentValidationError, match="Could not materialize"):
+        validate_environment(installed_manifest)

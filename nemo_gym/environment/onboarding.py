@@ -38,7 +38,7 @@ class VerifierRunSpec:
     component_root: str
     server_dir: str
     bundled_component: bool
-    reward_range: tuple[float, float]
+    reward_range: tuple[float | None, float | None]
     higher_is_better: bool
     determinism: str
 

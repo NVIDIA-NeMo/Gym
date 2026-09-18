@@ -17,6 +17,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 
@@ -75,7 +76,8 @@ class TestApp:
         )
         VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def test_convert_completion_keeps_tool_outputs_as_response_items(self) -> None:
+    @pytest.mark.parametrize("training_tokens", [True, False])
+    def test_convert_completion_keeps_tool_outputs_as_response_items(self, training_tokens) -> None:
         config = VerifiersAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -137,18 +139,42 @@ class TestApp:
             ],
         }
 
+        if not training_tokens:
+            for step in rollout_output["trajectory"]:
+                step["tokens"] = None
         output = agent._convert_trajectory_to_output(rollout_output)
 
         assert [item["type"] for item in output] == ["function_call", "function_call_output", "message"]
         assert output[0]["call_id"] == "call_1"
         assert output[0]["name"] == "python"
         assert output[0]["arguments"] == json.dumps({"expr": "2+2"})
-        assert output[0]["prompt_token_ids"] == [1]
-        assert output[0]["routed_experts"] == [[[0, 1]], [[2, 3]]]
         assert output[1]["call_id"] == "call_1"
         assert output[1]["output"] == "4"
         assert output[2]["content"][0]["text"] == "answer"
-        assert output[2]["prompt_token_ids"] == [3]
+        if training_tokens:
+            assert output[0]["prompt_token_ids"] == [1]
+            assert output[0]["generation_token_ids"] == [2]
+            assert output[0]["generation_log_probs"] == [0.0]
+            assert output[0]["routed_experts"] == [[[0, 1]], [[2, 3]]]
+            assert output[2]["prompt_token_ids"] == [3]
+            assert output[2]["generation_token_ids"] == [4]
+            assert output[2]["generation_log_probs"] == [-0.1]
+        else:
+            assert all("generation_token_ids" not in item for item in output)
+            assert all(item.get("id") != "msg_empty" for item in output)
+
+    @pytest.mark.parametrize("completion", [[], [{"role": "assistant", "content": "partial answer"}]])
+    def test_failed_rollout_is_not_a_successful_partial_trajectory(self, completion) -> None:
+        agent = VerifiersAgent.model_construct()
+        with pytest.raises(RuntimeError, match="Verifiers rollout failed.*upstream HTTP 400"):
+            agent._convert_trajectory_to_output(
+                {"completion": completion, "error": {"error": "upstream HTTP 400"}, "reward": 0.0}
+            )
+
+    def test_empty_completion_does_not_fabricate_training_tokens(self) -> None:
+        agent = VerifiersAgent.model_construct()
+        with pytest.raises(RuntimeError, match="empty completion"):
+            agent._convert_trajectory_to_output({"completion": [], "error": None, "reward": 0.0})
 
 
 class TestPolicyClient:
@@ -282,7 +308,14 @@ class TestPrefixedResponsesRoute:
 
         async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
             seen.append(str(client.client.base_url).rstrip("/"))
-            return [{"reward": 0.0, "metrics": {}, "completion": [], "trajectory": []}]
+            return [
+                {
+                    "reward": 0.0,
+                    "metrics": {},
+                    "completion": [{"role": "assistant", "content": "ok"}],
+                    "trajectory": [],
+                }
+            ]
 
         env = MagicMock()
         env.run_group = fake_run_group
@@ -300,6 +333,8 @@ class TestPrefixedResponsesRoute:
                 },
             )
         assert response.status_code == 200, response.text
+        assert response.json()["status"] == "completed"
+        assert response.json()["reward"] == 0.0
         assert seen, "run_group was never reached; the route did not execute"
         return seen[0]
 

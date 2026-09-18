@@ -292,6 +292,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return NeMoRLChatCompletionsClient(shared_client.client.copy(base_url=model_server_url))
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
+        if rollout_output.get("error"):
+            raise RuntimeError(f"Verifiers rollout failed: {rollout_output['error']}")
+        if not rollout_output.get("completion"):
+            raise RuntimeError("Verifiers rollout returned an empty completion")
+
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
 
         output: list[dict] = []
@@ -308,24 +313,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 output.extend(_build_assistant_items(msg, raw, tokens))
             else:
                 output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
-
-        if not any(item.get("generation_token_ids") for item in output):
-            err = rollout_output.get("error") or {}
-            err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
-            logger.warning(
-                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
-                "Underlying error: %s",
-                err_msg,
-            )
-            output.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id="msg_empty",
-                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    prompt_token_ids=[0],
-                    generation_token_ids=[0],
-                    generation_log_probs=[0.0],
-                ).model_dump()
-            )
 
         return output
 
@@ -386,16 +373,16 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             )
 
             rollout_output = outputs[0]
-            reward = rollout_output.get("reward", 0.0) or 0.0
-            metrics = rollout_output.get("metrics", {}) or {}
-
             output = self._convert_trajectory_to_output(rollout_output)
+            reward = rollout_output["reward"]
+            metrics = rollout_output.get("metrics", {}) or {}
 
             return VerifiersNeMoGymResponse(
                 id=f"verifiers-{vf_env_id}-{task_idx}",
                 created_at=0,
                 model=self.config.model_name,
                 object="response",
+                status="completed",
                 output=output,
                 env_id=vf_env_id,
                 group_id=str(task_idx),

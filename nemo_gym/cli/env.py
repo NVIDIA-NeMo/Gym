@@ -1130,7 +1130,7 @@ class InitEnvironmentConfig(BaseNeMoGymCLIConfig):
     scaffold_name: str
     profile: IntegrationProfile = IntegrationProfile.CUSTOM_GYM_VERIFIER
     reuse_verifier: Optional[str] = None
-    reward_range: Optional[Tuple[float, float]] = None
+    reward_range: Optional[Tuple[Optional[float], Optional[float]]] = None
     higher_is_better: Optional[bool] = None
 
 
@@ -1212,11 +1212,15 @@ class ManifestCommandConfig(BaseNeMoGymCLIConfig):
     manifest_path: Optional[Path] = None
     sync: bool = False
     update_expected: bool = False
+    package_registry: Optional[str] = None
+    package_output: Optional[Path] = None
 
 
 _MANIFEST_VALIDATE_KEYS = frozenset({"onboarding_name", "catalog_kind", "manifest_path", "sync", "json", "verbose"})
 _MANIFEST_TEST_KEYS = frozenset({"onboarding_name", "catalog_kind", "update_expected", "json", "verbose"})
-_MANIFEST_PUBLISH_KEYS = frozenset({"onboarding_name", "catalog_kind", "json", "verbose"})
+_MANIFEST_PUBLISH_KEYS = frozenset(
+    {"onboarding_name", "catalog_kind", "json", "verbose", "package_registry", "package_output"}
+)
 
 
 def _reject_manifest_command_extras(command_dict: DictConfig, allowed: frozenset[str]) -> None:
@@ -1328,7 +1332,7 @@ def test_environment_manifest() -> None:
 
 @exit_cleanly_on_config_error
 def publish_environment_manifest() -> None:
-    """Run local publication checks and confirm a workload is cataloged."""
+    """Run publication checks, then optionally package and push the workload."""
     command_dict = _command_overrides()
     command_config = ManifestCommandConfig.model_validate(command_dict)
     entry = _manifest_entry(command_config)
@@ -1341,14 +1345,47 @@ def publish_environment_manifest() -> None:
     validation = validate_environment(entry.manifest_path, entry.config_path)
     verifier = _run_manifest_verifier(entry, update_expected=False, validation=validation)
     report = finalize_publication(entry, validation, verifier)
+    package_path = registry_reference = hub_submission = None
+    if command_config.package_registry or command_config.package_output:
+        from nemo_gym.environment.artifacts import build_environment_package, push_environment_package
+
+        output = (
+            command_config.package_output or Path("dist") / f"{report.name.replace('/', '-')}-{report.version}.tar.gz"
+        )
+        package_path = build_environment_package(entry, output)
+        if command_config.package_registry:
+            registry_reference = push_environment_package(package_path, command_config.package_registry)
+            from nemo_gym.environment.artifacts import HUB_REGISTRY, submit_environment_package
+
+            if registry_reference.startswith(HUB_REGISTRY + "/"):
+                try:
+                    hub_submission = submit_environment_package(registry_reference)
+                except ConfigError as error:
+                    raise ConfigError(
+                        f"Package published: {registry_reference}\nHub submission failed: {error}\n"
+                        f"Retry without uploading again: gym env submit {registry_reference}"
+                    ) from error
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
-        print(json.dumps(report.to_dict()))
+        payload = report.to_dict()
+        if package_path is not None:
+            payload["package_path"] = str(package_path)
+        if registry_reference is not None:
+            payload["registry_reference"] = registry_reference
+        if hub_submission is not None:
+            payload["hub_submission"] = hub_submission
+        print(json.dumps(payload))
         return
     annotation = f"catalog status={report.status} " if report.status else ""
     rich.print(
         f"[green]✓[/green] Publication checks passed for {report.kind} {report.name} {report.version}; "
         f"{annotation}({report.verifier_cases} verifier cases)."
     )
+    if package_path is not None:
+        print(f"Package: {package_path}")
+    if registry_reference is not None:
+        print(f"Published: {registry_reference}")
+    if hub_submission is not None:
+        print(f"Submitted for review: {hub_submission}")
 
 
 def _run_manifest_verifier(

@@ -14,6 +14,8 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import re
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -22,7 +24,7 @@ from typing import IO, Any
 
 from omegaconf import DictConfig
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -130,6 +132,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    # Downloaded components can reuse a development checkout even before its version reaches PyPI.
+    package_core = ""
+    if (dir_path.resolve().parents[1] / "gym-package.json").is_file() and (PARENT_DIR / "pyproject.toml").is_file():
+        package_core = f"-e {shlex.quote(str(PARENT_DIR))}"
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
@@ -146,12 +152,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
                 )
             else:
-                # install nemo-gym from pypi instead of relative path in pyproject.toml
-                # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                core_requirement = package_core or f"nemo-gym{version_spec}"
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{core_requirement} && """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
@@ -160,13 +165,26 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             if is_editable_install:
                 install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
-                # install nemo-gym from pypi instead of relative path in requirements.txt
-                # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                local_extras = re.findall(
+                    r"(?m)^\s*(?:-e\s+)?nemo[-_]gym\[([^]]+)\]\s*@\s*\.\./\.\.",
+                    (dir_path / "requirements.txt").read_text(),
+                )
+                extras = sorted({extra.strip() for group in local_extras for extra in group.split(",")})
+                extras_spec = f"[{','.join(extras)}]" if extras else ""
+                if package_core:
+                    package_core = f"-e {shlex.quote(f'{PARENT_DIR}{extras_spec}')}"
+                requirements_source = (
+                    r"grep -v -E '^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym(\[[^]]+\])?"
+                    r"[[:space:]]*@[[:space:]]*\.\./\.\./?([[:space:]]|$)' requirements.txt"
+                )
+                if not package_core:
+                    requirements_source = f"(echo 'nemo-gym{extras_spec}{version_spec}' && {requirements_source})"
+                core_flag = f"{package_core} " if package_core else ""
                 install_cmd = (
-                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""{requirements_source} | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}{core_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
@@ -194,17 +212,20 @@ def run_command(
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
-    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
-    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
-    # this generic helper doesn't bake a layout assumption in for its other callers.
+    # Entry points can import sibling components before importing nemo_gym. Resolve explicit
+    # package roots before the command changes directory so those imports work at process startup.
     py_path_entries = [work_dir]
+    py_path_entries.extend(
+        str(Path(root).resolve())
+        for root in custom_env.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep)
+        if root
+    )
     if project_root is not None:
         py_path_entries.append(f"{project_root.absolute()}")
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)
-    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
+    custom_env["PYTHONPATH"] = os.pathsep.join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 

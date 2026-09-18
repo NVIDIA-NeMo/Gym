@@ -89,7 +89,7 @@ def scaffold_environment(
     name: str,
     profile: IntegrationProfile | str = IntegrationProfile.CUSTOM_GYM_VERIFIER,
     reuse_verifier: str | None = None,
-    reward_range: tuple[float, float] | None = None,
+    reward_range: tuple[float | None, float | None] | None = None,
     higher_is_better: bool | None = None,
     root: str | Path | None = None,
 ) -> ScaffoldResult:

@@ -330,3 +330,52 @@ async def test_supports_async_reseed(tmp_path: Path) -> None:
     )
 
     await exercise_verifier_fixture(fixture, reward_range=(0, 1), determinism="seeded")
+
+
+@pytest.mark.parametrize(
+    ("bounds", "full", "zero", "higher"),
+    [
+        ((None, None), 12, -5, True),
+        ((None, 1), 1, -5, True),
+        ((0, None), 12, 0, True),
+        ((None, 1), -5, 1, False),
+        ((0, None), 0, 12, False),
+    ],
+)
+async def test_unbounded_fixture_checks_finite_expected_rewards(
+    tmp_path: Path, bounds: tuple, full: float, zero: float, higher: bool
+) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, expected_full=full, expected_zero=zero, determinism=False)
+    results = await exercise_verifier_fixture(
+        _fixture(path, full_reward=full, zero_reward=zero),
+        reward_range=bounds,
+        higher_is_better=higher,
+        determinism="unknown",
+    )
+    assert results[0].observed_rewards == (full,)
+    with pytest.raises(VerifierFixtureError, match="reward mismatch|endpoint|outside declared range"):
+        await exercise_verifier_fixture(
+            _fixture(path, full_reward=full + 1, zero_reward=zero),
+            reward_range=bounds,
+            higher_is_better=higher,
+            determinism="unknown",
+        )
+
+
+@pytest.mark.parametrize("reward", [float("nan"), float("inf"), -float("inf")])
+async def test_unbounded_fixture_rejects_nonfinite_actual_rewards(tmp_path: Path, reward: float) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, determinism=False)
+    with pytest.raises(VerifierFixtureError, match="non-finite"):
+        await exercise_verifier_fixture(
+            _fixture(path, full_reward=reward), reward_range=(None, None), determinism="unknown"
+        )
+
+
+@pytest.mark.parametrize("bounds", [(float("nan"), None), (None, float("inf")), (-float("inf"), 1)])
+async def test_unbounded_fixture_rejects_nonfinite_endpoints(tmp_path: Path, bounds: tuple) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, determinism=False)
+    with pytest.raises(VerifierFixtureError, match="finite numbers"):
+        await exercise_verifier_fixture(_fixture(path), reward_range=bounds, determinism="unknown")

@@ -109,14 +109,8 @@ class TestExtractCode:
         assert extract_code_strict(text) == "y=2"
 
     def test_falls_back_to_generic_fence(self):
-        # Generic ``` fallback only kicks in when ```python is absent. Because
-        # we use rfind for parity with Skills' preprocess_code, a single
-        # generic fence pair has its closing fence as the "last" ``` and
-        # nothing follows it -> strict mode returns "". This matches Skills.
-        # When ```python is also present (the realistic case), the python
-        # fence wins via the prior rfind branch.
         text = "no language tag ```\nz=3\n```"
-        assert extract_code_strict(text) == ""
+        assert extract_code_strict(text) == "z=3"
 
     def test_strict_mode_no_closing_fence(self):
         text = "```python\nincomplete"
@@ -132,6 +126,38 @@ class TestExtractCode:
     def test_chooses_last_when_multiple_blocks(self):
         text = "Step 1: ```python\nx=1\n```\nStep 2: ```python\nfinal_answer=42\n```"
         assert extract_code_strict(text) == "final_answer=42"
+
+    @pytest.mark.parametrize("fence", ["python", ""])
+    @pytest.mark.parametrize("indent", ["    ", "\t"])
+    def test_assembled_function_body_executes(self, fence, indent):
+        prompt = f'def f(x):\n{indent}"""Return the absolute value."""\n'
+        body = f"{indent}if x < 0:\n{indent}{indent}return -x\n{indent}return x"
+        code = extract_code_strict(f"```{fence}\n{body}\n```")
+        assert code == body
+        namespace = {}
+        exec(prompt + code, namespace)
+        assert namespace["f"](-2) == 2
+        assert namespace["f"](3) == 3
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("```python\nx=1\n```\n```\nx=2\n```", "x=2"),
+            ("```\nx=1\n```\n```python\nx=2\n```", "x=2"),
+            ("```python\nx=1\n```\n```python\nincomplete", "x=1"),
+            ("```javascript\nlet x=1;\n```", ""),
+            ("```\nincomplete", ""),
+        ],
+    )
+    def test_last_complete_supported_fence(self, text, expected):
+        assert extract_code_strict(text) == expected
+
+    def test_full_program_after_mbpp_prompt_executes(self):
+        prompt = '\n"""Return the absolute value."""\n'
+        text = "```python\ndef f(x):\n    return abs(x)\n```"
+        namespace = {}
+        exec(prompt + extract_code_strict(text), namespace)
+        assert namespace["f"](-2) == 2
 
 
 # ----------------------------
@@ -260,7 +286,7 @@ class TestApp:
             # Body-only completion (no `def` line, no imports) — Skills-style
             self._post_verify(evalplus_client, "```python\n    return x\n```")
         assert captured["solution"].startswith(_MOCK_PROMPT)
-        assert captured["solution"] == _MOCK_PROMPT + "return x"
+        assert captured["solution"] == _MOCK_PROMPT + "    return x"
 
     async def test_verify_does_not_double_prepend(self, evalplus_client):
         """If extracted code already starts with problem['prompt'], we should NOT
@@ -483,3 +509,39 @@ class TestGetKeyMetrics:
         assert "pass@1[avg-of-3]/passing_plus_tests" in km
         assert not any("std_dev" in k for k in km)
         assert not any("no_answer" in k for k in km)
+
+
+@pytest.mark.parametrize("indent", ["    ", "\t"])
+async def test_verify_executes_indented_completion_with_prepared_prompt(indent):
+    dataset = {"HumanEval/0": {**_MOCK_DATASET["HumanEval/0"], "prompt": 'def f(x):\n    """Return x."""\n'}}
+
+    def check_assembled_code(*args):
+        namespace = {}
+        exec(args[2], namespace)
+        assert namespace["f"](7) == 7
+        return _FakeFuture({"base_status": "pass", "plus_status": "pass"})
+
+    with (
+        patch("app._load_dataset_and_expected", return_value=(dataset, _MOCK_EXPECTED_OUTPUT)),
+        patch("app.check_correctness_remote.remote", side_effect=check_assembled_code),
+        patch("app.ray.get", side_effect=lambda future: future._result),
+    ):
+        server = EvalPlusResourcesServer(
+            config=EvalPlusResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                dataset="humaneval",
+                num_processes=1,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        result = await server.verify(
+            EvalPlusVerifyRequest(
+                responses_create_params={"input": "complete f"},
+                response=_make_response(f"```python\n{indent}return x\n```"),
+                verifier_metadata={"task_id": "HumanEval/0"},
+            )
+        )
+        assert result.reward == 1.0

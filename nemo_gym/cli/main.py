@@ -299,12 +299,12 @@ REWARD_RANGE = Flag(
     register=lambda p: p.add_argument(
         "--reward-range",
         nargs=2,
-        type=float,
+        type=lambda value: None if value.lower() == "null" else float(value),
         metavar=("LOW", "HIGH"),
-        help="Declared inclusive reward range.",
+        help="Declared inclusive reward range; use null for an unbounded endpoint.",
     ),
     translate_to_hydra=lambda args: (
-        [f"+reward_range=[{args.reward_range[0]},{args.reward_range[1]}]"] if args.reward_range else []
+        ["+reward_range=" + json.dumps(args.reward_range, separators=(",", ":"))] if args.reward_range else []
     ),
 )
 
@@ -528,6 +528,45 @@ SEARCH_DIR = Flag(
         help="Extra root directory to search for components; repeatable.",
     ),
 )
+
+PACKAGE = Flag(
+    register=lambda p: p.add_argument(
+        "--package", metavar="REFERENCE", help="Load an environment package from an OCI registry or local archive."
+    ),
+)
+
+PACKAGE_REFERENCE = Flag(
+    register=lambda p: p.add_argument(
+        "package_reference",
+        nargs="?",
+        metavar="ENVIRONMENT",
+        help="namespace/name:VERSION (uses GYM_ENV_REGISTRY), full OCI reference, or local archive.",
+    ),
+)
+
+
+def _env_pull(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.environment.artifacts import pull_environment_package
+
+    if overrides != (["+verbose=true"] if args.verbose else []):
+        args._parser.error("env pull does not accept Hydra overrides")
+    try:
+        print(pull_environment_package(args.reference, args.output_dir))
+    except ConfigError as exc:
+        args._parser.error(str(exc))
+
+
+def _env_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.environment.artifacts import submit_environment_package
+
+    if overrides != (["+verbose=true"] if args.verbose else []):
+        args._parser.error("env submit does not accept Hydra overrides")
+    try:
+        print(f"Submitted for review: {submit_environment_package(args.reference)}")
+    except ConfigError as exc:
+        args._parser.error(str(exc))
 
 
 def _merge_config_paths(overrides: list[str]) -> list[str]:
@@ -959,13 +998,46 @@ COMMANDS = {
     ),
     "env publish": Command(
         target="nemo_gym.cli.env:publish_environment_manifest",
-        summary="Run local publication checks and confirm catalog discovery.",
-        flags=(ONBOARDING_NAME, CATALOG_KIND, JSON, SEARCH_DIR),
+        summary="Check and publish an environment package; hub uploads are submitted to Development for review.",
+        flags=(
+            ONBOARDING_NAME,
+            CATALOG_KIND,
+            JSON,
+            SEARCH_DIR,
+            _value_flag(
+                "registry", "package_registry", "OCI destination (REGISTRY/NAMESPACE/NAME:VERSION).", quote=True
+            ),
+            _value_flag("output", "package_output", "Write the environment package to this .tar.gz path.", quote=True),
+        ),
+    ),
+    "env submit": Command(
+        target=_env_submit,
+        summary="Submit an existing registry package to the hub Development review queue.",
+        flags=(Flag(register=lambda p: p.add_argument("reference", help="Published environment tag or digest.")),),
+    ),
+    "env pull": Command(
+        target=_env_pull,
+        summary="Download and unpack an environment package.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "reference",
+                    help="namespace/name:VERSION (uses GYM_ENV_REGISTRY), full OCI reference, or local archive.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--output-dir", type=Path, metavar="DIR", help="Extract here (default: Gym package cache)."
+                )
+            ),
+        ),
     ),
     "env start": Command(
         target="nemo_gym.cli.env:run",
         summary="Start the servers.",
         flags=(
+            PACKAGE_REFERENCE,
+            PACKAGE,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -997,12 +1069,14 @@ COMMANDS = {
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
+        flags=(PACKAGE_REFERENCE, PACKAGE, CONFIG, BENCHMARK, SEARCH_DIR),
     ),
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
         flags=(
+            PACKAGE_REFERENCE,
+            PACKAGE,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -1026,7 +1100,7 @@ COMMANDS = {
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
-            _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
+            _value_flag("split", "split", "Dataset split to use (train, validation, benchmark, or example)."),
             MODEL,
             MODEL_URL,
             MODEL_API_KEY,
@@ -1395,6 +1469,24 @@ def main() -> None:
             for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
+
+    package_reference = getattr(args, "package_reference", None)
+    if package_reference and "=" in package_reference:
+        overrides.insert(0, package_reference)
+        package_reference = None
+    if package_reference and getattr(args, "package", None):
+        args._parser.error("Use either a positional environment reference or --package, not both.")
+    if package := package_reference or getattr(args, "package", None):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.environment.artifacts import pull_environment_package
+
+        try:
+            package_root = pull_environment_package(package)
+        except ConfigError as exc:
+            args._parser.error(str(exc))
+        metadata = json.loads((package_root / "gym-package.json").read_text(encoding="utf-8"))
+        args.config = [str(package_root / metadata["config_path"]), *(args.config or [])]
+        args.search_dir = [str(package_root), *(args.search_dir or [])]
 
     # set NEMO_GYM_EXTRA_ROOTS from --search-dir for the duration of the command
     with _extra_roots_from_search_dir(getattr(args, "search_dir", None)):

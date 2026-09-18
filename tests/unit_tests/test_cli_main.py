@@ -839,6 +839,24 @@ class TestEnvInitFlags:
         with pytest.raises(SystemExit):
             main()
 
+    def test_unbounded_reward_range(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "env",
+                "init",
+                "--environment",
+                "sample",
+                "--reuse-verifier",
+                "shared",
+                "--reward-range",
+                "null",
+                "1",
+                "--higher-is-better",
+            ],
+        )
+        assert "+reward_range=[null,1.0]" in overrides
+
     def test_profile_is_closed(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "sample", "--profile", "other"])
         with pytest.raises(SystemExit):

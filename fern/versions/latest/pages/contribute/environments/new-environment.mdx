@@ -22,7 +22,7 @@ The manifest is the place to read this declaration, but not every field is autho
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
-| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+| Benchmark protocol: `canonical_split` and optional `standard_prompt_config` | Manifest |
 
 When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
 
@@ -72,19 +72,19 @@ New manifests are `experimental: true` by default. The NeMo Gym team can manuall
 | `modality` | string | Required; non-empty |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
-| `reward` | object | Required; `range` is two finite increasing numbers and `higher_is_better` is boolean |
+| `reward` | object | Required; `range` has finite lower/upper endpoints (increasing when both are set), or `null` for an unbounded side and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
-| `resources_server` | string | Required; mirrored from config |
+| `resources_server` | string or null | Required except for native embedded-grading agents listed below; mirrored from config |
 | `agent_server` | string | Required; mirrored from config |
 | `datasets` | list of objects | Required and non-empty; dataset names must be unique |
-| `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
+| `model_server` | string or null | Required for `custom-gym-verifier`; optional for custom agent loops using direct endpoints |
 | `rollout_driver` | string or null | Required only for `external-rollout-driver`; Python `module:function` form |
 | `grading_mode` | string or null | Optional resources-server-specific selector |
 | `session_model` | string or null | Optional; `episode` or `step` |
 | `state` | string or null | Optional; `none` or `per_session` |
 | `sandbox` | string or null | Optional sandbox requirement |
 | `canonical_split` | string or null | Required for benchmarks |
-| `standard_prompt_config` | string or null | Required for benchmarks |
+| `standard_prompt_config` | string or null | Benchmark prompt template; omit for rows with valid `responses_create_params` |
 | `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
 | `lifecycle` | string | Optional; `active` (default) or `deprecated` |
 
@@ -97,11 +97,13 @@ Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `trai
 | Profile | Use when | Additional requirement | Generated extension point |
 | --- | --- | --- | --- |
 | `custom-gym-verifier` | Gym drives the standard agent loop and only the model's answers are measured | `model_server` | None |
-| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | `model_server` | Agent `responses()` |
+| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | None | Agent `responses()` |
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
-Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
+Every profile requires an `agent_server` and at least one dataset. A `resources_server` is also required, except for `custom-gym-agent-loop` with `verifiers_agent` or `external-agent-loop` with `tau2` or `pinchbench`, which return their environment’s own reward directly from `/run`. These exceptions does not provide standalone resources-server verifier fixtures. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`. Set `standard_prompt_config` to materialize raw dataset rows, or omit it when every row already contains valid `responses_create_params`. Dataset-level `prompt_config` remains optional and, when supplied, must match `standard_prompt_config`.
+
+Custom agent loops may omit `model_server` when the harness config supplies its own provider/model fields and credentials. These fields remain harness-specific: selecting a Gym model server does not automatically reconfigure a direct provider. Direct model calls may also lack Gym model-call ownership and token traces required by training integrations. Generated scaffolds continue to use a Gym model server.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 
@@ -150,6 +152,22 @@ Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicti
 <Note>
 Publication includes an `experimental` annotation only when the manifest's flag is `true`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not yet automated.
 </Note>
+
+## Packages with separately prepared data
+
+Set `data_delivery: prepare` in the manifest when benchmark data is fetched by the consumer instead of included in the package. Include the original `prepare.py`, prompt, required helper modules, and source/access instructions. This supports large datasets and datasets that require the consumer's own credentials or acceptance of access terms.
+
+```bash
+gym env pull publisher/benchmark:1.0.0
+gym eval prepare publisher/benchmark:1.0.0
+gym eval run publisher/benchmark:1.0.0 --split benchmark
+```
+
+If preparation needs additional Python libraries, include `prepare-requirements.txt` beside its preparation script. Use pinned package requirements such as `tiktoken==0.14.0`. `gym eval prepare` uses uv to install the selected recipes' requirements into a temporary environment layered over Gym, then runs their original preparation functions. It does not install these libraries into your Gym environment. Requirements from multiple selected recipes must be compatible. Relative local paths in requirements are resolved from the command's working directory; prefer package-index requirements for portable releases.
+
+The package digest identifies its preparation code, not data fetched later. Pin upstream revisions or checksums in that recipe when exact dataset reproducibility is required.
+
+Validation still checks the preparation function, prompt and component composition. Missing benchmark data is reported with an unknown row count and an explicit warning; it is not a successful dataset or runtime check. Once preparation writes the dataset, validation checks its rows normally. Missing example or training data still fails validation. The default `data_delivery: bundled` retains the requirement that every dataset exists and is nonempty.
 
 ## Verifier Fixture Contract
 
@@ -359,3 +377,12 @@ For multi-step scenarios, the model returns training information on response mes
 
 - [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
 - [Environment Components](/about/architecture) - Environment component architecture
+
+### Unbounded rewards
+
+Set either endpoint in `reward.range` to `null` when rewards are unbounded on that side:
+`[null, 1]`, `[0, null]`, or `[null, null]`. Numeric endpoints and actual rewards must remain
+finite; two numeric endpoints must satisfy `lower < upper`. The CLI also accepts
+`--reward-range null null`. Verifier fixtures still require finite expected rewards and
+check every finite bound. A full/zero-reward case pins its corresponding endpoint only
+when that endpoint exists; otherwise it checks the case's expected reward.

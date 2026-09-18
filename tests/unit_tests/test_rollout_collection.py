@@ -3505,11 +3505,13 @@ class TestE2EInputJsonlFpathRejected:
         assert config.input_jsonl_fpath == "my_data.jsonl"
 
 
-class TestE2EExampleSplitRejected:
+class TestE2EExampleSplit:
     @pytest.mark.parametrize("wrap", [dict, DictConfig])
-    def test_example_split_gets_actionable_error_not_literal_error(self, wrap) -> None:
-        with pytest.raises(ConfigError, match=r"--no-serve --agent <agent> --input"):
-            E2ERolloutCollectionConfig.model_validate(wrap({"output_jsonl_fpath": "out.jsonl", "split": "example"}))
+    def test_example_split_is_supported(self, wrap) -> None:
+        config = E2ERolloutCollectionConfig.model_validate(
+            wrap({"output_jsonl_fpath": "out.jsonl", "split": "example"})
+        )
+        assert config.split == "example"
 
     def test_other_invalid_splits_still_fail_literal_validation(self) -> None:
         with pytest.raises(ValidationError, match=r"split"):

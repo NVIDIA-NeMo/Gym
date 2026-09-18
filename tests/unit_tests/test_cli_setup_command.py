@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import shlex
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -220,7 +222,11 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        requirements_source = (
+            r"grep -v -E '^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym(\[[^]]+\])?"
+            r"[[:space:]]*@[[:space:]]*\.\./\.\./?([[:space:]]|$)' requirements.txt"
+        )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && {requirements_source}) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
@@ -262,6 +268,66 @@ class TestCLISetupCommandSetupEnvCommand:
 
         expected_command = f"cd {server_dir} && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate"
         assert expected_command == actual_command
+
+    @pytest.mark.parametrize("extras", ["", "[sandbox]", "[dev,sandbox]"])
+    @pytest.mark.parametrize("dependency_file", ["requirements.txt", "pyproject.toml"])
+    @pytest.mark.parametrize("package,editable_core", [(True, True), (True, False), (False, True)])
+    def test_detached_package_uses_installed_core(
+        self, monkeypatch, tmp_path, dependency_file, package, editable_core, extras
+    ):
+        server_dir = tmp_path / "resources_servers/alpha"
+        server_dir.mkdir(parents=True)
+        (server_dir / dependency_file).write_text(
+            (
+                f"-e nemo-gym{extras} @ ../../\nnemo_gym{extras} @ ../..\npytest\n"
+                "-e ../../benchmarks/automationbench\n"
+                "other-package @ ../../shared/other_package\n"
+            )
+            if dependency_file == "requirements.txt"
+            else ""
+        )
+        if package:
+            (tmp_path / "gym-package.json").write_text("{}")
+        core = tmp_path / "core checkout"
+        core.mkdir()
+        if editable_core:
+            (core / "pyproject.toml").write_text("")
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", core)
+        monkeypatch.setattr(importlib.metadata, "version", lambda _: "9.8.7")
+        config = self._debug_global_config_dict(tmp_path)
+        activate = get_venv_path(server_dir, config) / "bin/activate"
+        activate.parent.mkdir(parents=True)
+        activate.touch()
+        command = setup_env_command(server_dir, config, "alpha")
+        arguments_log, requirements_log = tmp_path / "arguments", tmp_path / "requirements"
+        uv_stub = f"""
+uv() {{
+    printf '%s\\n' "$@" >> {shlex.quote(str(arguments_log))}
+    if [[ "$*" == *"/dev/stdin"* ]]; then cat >> {shlex.quote(str(requirements_log))}; fi
+}}
+"""
+
+        subprocess.run(["/bin/bash", "-c", uv_stub + command], check=True, capture_output=True, timeout=5)
+
+        arguments = arguments_log.read_text().splitlines()
+        requirements = requirements_log.read_text() if requirements_log.exists() else ""
+        expected_extras = extras if dependency_file == "requirements.txt" else ""
+        if package and editable_core:
+            expected_core = f"{core}{expected_extras}"
+            assert expected_core in arguments
+            assert arguments[arguments.index(expected_core) - 1] == "-e"
+            assert f"nemo-gym{expected_extras}==9.8.7" not in arguments + requirements.splitlines()
+        else:
+            assert str(core) not in arguments
+            assert f"nemo-gym{expected_extras}==9.8.7" in arguments + requirements.splitlines()
+        if dependency_file == "requirements.txt":
+            assert "pytest" in requirements.splitlines()
+            assert f"-e nemo-gym{extras} @ ../../" not in requirements.splitlines()
+            assert f"nemo_gym{extras} @ ../.." not in requirements.splitlines()
+            assert "-e ../../benchmarks/automationbench" in requirements.splitlines()
+            assert "other-package @ ../../shared/other_package" in requirements.splitlines()
+        else:
+            assert "--no-sources" in arguments
 
 
 class TestCLISetupCommandRunCommand:

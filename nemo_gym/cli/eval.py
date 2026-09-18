@@ -16,8 +16,13 @@ import asyncio
 import importlib
 import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
 from collections.abc import Sequence
 from copy import deepcopy
+from itertools import islice
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -27,6 +32,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import _augment_sys_path, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -199,11 +205,15 @@ def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
     prepare_script_args: Dict[str, Any]
-    (benchmark_config, prepare_module_path, prepare_script_args) = args
+    (benchmark_config, prepare_module_path, prepare_script_args, prepare_root) = args
 
     print(f"Preparing benchmark: {benchmark_config.name}")
 
+    sys.path.insert(0, str(prepare_root))
+    _augment_sys_path()
     module = importlib.import_module(prepare_module_path)
+    if Path(module.__file__).resolve() != benchmark_config.dataset.prepare_script:
+        raise ConfigError(f"Preparation imported the wrong script: {module.__file__}")
     output_fpath = module.prepare(**prepare_script_args)
     if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
         raise ConfigError(
@@ -284,19 +294,69 @@ def prepare_benchmark() -> None:
         )
 
     # Validate all benchmarks before preparing any
+    requirements = sorted(
+        {
+            path
+            for benchmark in benchmarks_dict.values()
+            if (
+                path := _resolve_under_cwd_or_install(benchmark.dataset.prepare_script)
+                .resolve()
+                .with_name("prepare-requirements.txt")
+            ).is_file()
+        }
+    )
+    requirement_set = os.pathsep.join(map(str, requirements))
+    if requirements and os.environ.get("NEMO_GYM_PREPARE_ENV") != requirement_set:
+        if not shutil.which("uv"):
+            raise ConfigError("Install uv to provision the benchmark preparation dependencies.")
+        command = ["uv", "run", "--no-project", "--python", sys.executable]
+        for path in requirements:
+            command.extend(["--with-requirements", str(path)])
+        command.extend(
+            [
+                "python",
+                "-c",
+                "from nemo_gym.cli.eval import prepare_benchmark; prepare_benchmark()",
+                *sys.argv[1:],
+            ]
+        )
+        subprocess.run(
+            command,
+            check=True,
+            env=dict(os.environ, VIRTUAL_ENV=sys.prefix, NEMO_GYM_PREPARE_ENV=requirement_set),
+        )
+        return
+
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, str]] = []
+    validated: List[Tuple[BenchmarkConfig, str, Dict[str, Any], Path]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
+        prepare_script_path = _resolve_under_cwd_or_install(benchmark_config.dataset.prepare_script).resolve()
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
 
-        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        prepare_root = next(
+            (
+                root.resolve()
+                for root in component_search_roots()
+                if prepare_script_path.is_relative_to(root.resolve())
+            ),
+            prepare_script_path.parent,
+        )
+        benchmark_config.dataset.prepare_script = prepare_script_path
+        if not benchmark_config.dataset.jsonl_fpath.is_absolute():
+            benchmark_config.dataset.jsonl_fpath = prepare_root / benchmark_config.dataset.jsonl_fpath
+        prepare_module_path = ".".join(prepare_script_path.relative_to(prepare_root).with_suffix("").parts)
+        sys.path.insert(0, str(prepare_root))
+        _augment_sys_path()
         module = importlib.import_module(prepare_module_path)
+        if Path(module.__file__).resolve() != prepare_script_path:
+            raise ConfigError(
+                f"Preparation imported the wrong script: {module.__file__}; expected {prepare_script_path}"
+            )
         if not hasattr(module, "prepare"):
             prepare_function_missing.append(benchmark_config)
             continue
@@ -306,7 +366,9 @@ def prepare_benchmark() -> None:
             already_prepared.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
+        validated.append(
+            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), prepare_root)
+        )
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
@@ -353,15 +415,12 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
     """
     declared_lines: List[str] = []
     declared_types: set = set()
-    example_fpaths: List[str] = []
     for c in server_instance_configs:
         if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers"):
             continue
         for d in c.datasets or []:
             declared_types.add(d.type)
             declared_lines.append(f"- {c.name}: {d.name} (type: {d.type})")
-            if d.type == "example":
-                example_fpaths.append(str(d.jsonl_fpath))
     if split in declared_types:
         return
 
@@ -370,15 +429,8 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
         f"No dataset of type `{split}` is declared in this config, so `--split {split}` has nothing to run.\n"
         f"Declared datasets:\n{declared_str}"
     )
-    if example_fpaths:
-        example_fpaths_str = "\n".join(
-            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
-        )
-        message += (
-            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
-            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
-            f"{example_fpaths_str}"
-        )
+    if "example" in declared_types:
+        message += "\nTo run the committed smoke-test samples, use `--split example` with the same environment config."
     raise ConfigError(message)
 
 
@@ -400,7 +452,7 @@ def e2e_rollout_collection():  # pragma: no cover
         RolloutCollectionConfig,
         RolloutCollectionHelper,
     )
-    from nemo_gym.train_data_utils import TrainDataProcessor
+    from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
 
     global_config_dict = get_global_config_dict()
 
@@ -411,7 +463,9 @@ def e2e_rollout_collection():  # pragma: no cover
     data_processor_config_dict = deepcopy(global_config_dict)
     with open_dict(data_processor_config_dict):
         data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = "train_preparation"
+        data_processor_config_dict["mode"] = (
+            "example_validation" if e2e_rollout_collection_config.split == "example" else "train_preparation"
+        )
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
@@ -431,6 +485,43 @@ def e2e_rollout_collection():  # pragma: no cover
             )
 
         data_processor = TrainDataProcessor()
+        limit = global_config_dict.get("limit")
+        remaining = limit if limit is not None and limit > 0 else None
+        if remaining is not None or e2e_rollout_collection_config.split == "example":
+            # Stage only the prefix the collector will consume, before validation and
+            # prompt expansion. Dataset repeats precede the limit; rollout repeats follow it.
+            for server_index, server in enumerate(
+                GlobalConfigDictParser().filter_for_server_instance_configs(data_processor_config_dict)
+            ):
+                inner = server.get_inner_run_server_config_dict()
+                datasets = inner.get("datasets") or []
+                selected = []
+                for dataset_index, dataset in enumerate(datasets):
+                    if dataset.type != e2e_rollout_collection_config.split or remaining == 0:
+                        continue
+                    source = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
+                    if remaining is not None and not source.exists():
+                        download_server = deepcopy(server)
+                        download_server.get_inner_run_server_config().datasets = [server.datasets[dataset_index]]
+                        data_processor.load_datasets(
+                            TrainDataProcessorConfig.model_validate(data_processor_config_dict), [download_server]
+                        )
+                        source = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
+                    staged = data_process_output_dir / "inputs" / str(server_index) / str(dataset_index) / source.name
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    if remaining is None:
+                        shutil.copyfile(source, staged)
+                    else:
+                        repeats = dataset.get("num_repeats", 1)
+                        with source.open() as infile, staged.open("w") as outfile:
+                            for line in islice(infile, (remaining + repeats - 1) // repeats):
+                                outfile.write(line)
+                                remaining = max(0, remaining - repeats)
+                    dataset.jsonl_fpath = str(staged.absolute())
+                    selected.append(dataset)
+                if limit is not None and limit > 0 and "datasets" in inner:
+                    inner.datasets = selected
+
         data_processor.run(data_processor_config_dict)
     else:
         print(
