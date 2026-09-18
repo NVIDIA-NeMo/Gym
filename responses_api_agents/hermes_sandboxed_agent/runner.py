@@ -18,9 +18,6 @@ from shlex import quote
 from threading import Lock
 
 
-HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"  # pragma: allowlist secret (pinned Git commit)
-
-
 def progress_result(agent, n_input):
     # Hermes persists the assistant's tool call before executing it, but updates
     # _session_messages only after the tool returns. Keep that in-flight call on timeout.
@@ -102,14 +99,7 @@ def run(params):
     import yaml
 
     runtime_manifest = json.loads((Path(sys.prefix) / "hermes-runtime.json").read_text())
-    if runtime_manifest["hermes_commit"] != HERMES_COMMIT:
-        raise RuntimeError("Runtime must contain NousResearch/hermes-agent@v2026.9.7")
     source = Path(sys.prefix) / "hermes-src"
-    commit = subprocess.check_output(
-        ["git", "-c", f"safe.directory={source}", "-C", str(source), "rev-parse", "HEAD"], text=True
-    ).strip()
-    if commit != HERMES_COMMIT:
-        raise RuntimeError("Installed Hermes provenance does not match the required commit")
 
     home = Path(params["run_dir"]) / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -233,7 +223,7 @@ def run(params):
         "reasoning_tokens": agent.session_reasoning_tokens,
     }
     result["runtime"] = {
-        "hermes_commit": HERMES_COMMIT,
+        "hermes_commit": runtime_manifest["hermes_commit"],
         "python": sys.version,
         "run_agent_path": sys.modules["run_agent"].__file__,
         "sys_path": sys.path,

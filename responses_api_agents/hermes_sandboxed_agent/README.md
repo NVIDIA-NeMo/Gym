@@ -20,8 +20,8 @@ DEPS_DIR=/absolute/path/hermes-runtime/musl ARCH=x86_64-unknown-linux-musl \
 Mount that directory read-only at `/opt/hermes` in task containers. Gym and
 Hermes have conflicting OpenAI SDK pins, so keep their Python installations
 separate. The runtime contains the exact source checkout, its Python interpreter,
-resolved dependency versions and a commit manifest. Task startup verifies the
-runtime and does not download or install Hermes. The default `hermes-python`
+resolved dependency versions and a commit manifest. Preparation validates the pin;
+task startup records it without downloading or installing Hermes. The default `hermes-python`
 launcher selects the interpreter for each task image.
 
 ## Launch with Pro
