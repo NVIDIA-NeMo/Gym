@@ -120,6 +120,22 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
     return runner(**params)
 
 
+class _LiteLLMReplayModel:
+    """Remove LiteLLM's response-only null refusal before Mini-SWE replays it."""
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    def query(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        message = self._model.query(*args, **kwargs)
+        if message.get("provider_specific_fields") == {"refusal": None}:
+            message.pop("provider_specific_fields")
+        return message
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+
 def _json_dict_from_metadata(value: Any, *, field_name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -599,7 +615,7 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         env = get_environment(environment_config)
         print(f"[EVAL]{instance_id} Environment created", flush=True)
 
-        model = get_model(config=model_config)
+        model = _LiteLLMReplayModel(get_model(config=model_config))
         agent = DefaultAgent(model, env, **agent_config)
 
         if params["run_golden"]:

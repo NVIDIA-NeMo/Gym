@@ -55,6 +55,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     MiniSWEAgentVerifyResponse,
     _is_resolved,
     _json_dict_from_metadata,
+    _LiteLLMReplayModel,
     _message_content_to_text,
     _responses_create_params_to_model_kwargs,
     _restore_sandbox_provider_secrets,
@@ -1083,3 +1084,18 @@ class TestApp:
 
         aggregate_response = client.post("/aggregate_metrics", json={"verify_responses": []})
         assert aggregate_response.status_code == 200
+
+
+def test_litellm_replay_model_drops_null_refusal() -> None:
+    message = {
+        "role": "assistant",
+        "provider_specific_fields": {"refusal": None},
+        "extra": {"response": {"refusal": None}},
+    }
+    delegate = MagicMock()
+    delegate.query.return_value = message
+
+    result = _LiteLLMReplayModel(delegate).query([])
+
+    assert "provider_specific_fields" not in result
+    assert result["extra"]["response"] == {"refusal": None}
