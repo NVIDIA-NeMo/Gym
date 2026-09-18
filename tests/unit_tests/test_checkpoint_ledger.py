@@ -1065,6 +1065,81 @@ def test_model_checkpoint_artifacts_are_namespaced_by_server(tmp_path) -> None:
         CaptureLedgerCheckpointer(tmp_path / "restore-copy", server_name="policy-copy").restore(checkpoint)
 
 
+def test_namespaced_restore_validates_the_shared_model_ledger_union(tmp_path) -> None:
+    first = tmp_path / "first"
+    expected = _write_custody(first, "rollout-a")
+    second = tmp_path / "second"
+    second.mkdir()
+    checkpoint = tmp_path / "checkpoint"
+
+    CaptureLedgerCheckpointer(first, server_name="policy-model").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a")],
+    )
+    CaptureLedgerCheckpointer(second, server_name="policy-model-reasoning-off").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[],
+    )
+
+    restored = tmp_path / "restored"
+    CaptureLedgerCheckpointer(restored, server_name="policy-model").restore(checkpoint)
+    CaptureLedgerCheckpointer(restored, server_name="policy-model-reasoning-off").restore(checkpoint)
+
+    assert (restored / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_namespaced_restore_deduplicates_matching_shared_lineage(tmp_path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    expected = _write_custody(first, "rollout-a")
+    _write_custody(second, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+
+    for server_name, source in (("policy-a", first), ("policy-b", second)):
+        CaptureLedgerCheckpointer(source, server_name=server_name).commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            continuation_roots=[_continuation_root("rollout-a")],
+        )
+
+    restored = tmp_path / "restored"
+    CaptureLedgerCheckpointer(restored, server_name="policy-a").restore(checkpoint)
+    CaptureLedgerCheckpointer(restored, server_name="policy-b").restore(checkpoint)
+
+    assert (restored / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_namespaced_restore_rejects_conflicting_shared_lineage(tmp_path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_custody(first, "rollout-a", call_count=2)
+    _write_custody(second, "rollout-a", call_count=1)
+    checkpoint = tmp_path / "checkpoint"
+
+    CaptureLedgerCheckpointer(first, server_name="policy-a").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a")],
+    )
+    CaptureLedgerCheckpointer(second, server_name="policy-b").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a", last_call_index=0)],
+    )
+
+    restored = tmp_path / "restored"
+    with pytest.raises(LedgerMismatchError, match="conflicting lineage"):
+        CaptureLedgerCheckpointer(restored, server_name="policy-a").restore(checkpoint)
+    assert not restored.exists()
+
+
 @pytest.mark.parametrize(
     ("retry_tombstones", "retry_source_attempts", "message"),
     [

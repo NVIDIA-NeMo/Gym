@@ -541,24 +541,10 @@ def _validate_lineage_archives(
     manifest: dict[str, Any],
 ) -> tuple[list[_LineageArchiveReference], list[_LineageArchiveMember]]:
     """Validate the complete v3 archive set without extracting any files."""
-    archive_references = _load_lineage_archive_references(manifest)
-    members = _load_lineage_archive_index(checkpoint_root, manifest)
-    members_by_archive: dict[str, list[_LineageArchiveMember]] = {}
-    for member in members:
-        members_by_archive.setdefault(member.archive, []).append(member)
-    archive_names = {reference.name for reference in archive_references}
-    referenced_names = set(members_by_archive)
-    if archive_names != referenced_names:
-        raise LedgerMismatchError(
-            "lineage archive inventory does not match its index: "
-            f"missing={sorted(referenced_names - archive_names)!r}, "
-            f"unreferenced={sorted(archive_names - referenced_names)!r}"
-        )
-    if int(manifest.get("rollout_count", -1)) != len(members):
-        raise LedgerMismatchError("lineage archive rollout count does not match its index")
-    total_rows = sum(member.rows for member in members)
-    if int(manifest.get("row_count", -1)) != total_rows:
-        raise LedgerMismatchError("lineage archive row count does not match its index")
+    archive_references, members, members_by_archive = _validate_lineage_archive_inventory(
+        checkpoint_root,
+        manifest,
+    )
 
     for reference in archive_references:
         path = ledger_dir / reference.name
@@ -599,6 +585,85 @@ def _validate_lineage_archives(
         except (OSError, tarfile.TarError) as error:
             raise LedgerMismatchError(f"lineage archive {reference.name!r} cannot be read") from error
     return archive_references, members
+
+
+def _validate_lineage_archive_inventory(
+    checkpoint_root: Path,
+    manifest: dict[str, Any],
+) -> tuple[
+    list[_LineageArchiveReference],
+    list[_LineageArchiveMember],
+    dict[str, list[_LineageArchiveMember]],
+]:
+    """Validate the authenticated v3 archive inventory without reading tar payloads."""
+    archive_references = _load_lineage_archive_references(manifest)
+    members = _load_lineage_archive_index(checkpoint_root, manifest)
+    members_by_archive: dict[str, list[_LineageArchiveMember]] = {}
+    for member in members:
+        members_by_archive.setdefault(member.archive, []).append(member)
+    archive_names = {reference.name for reference in archive_references}
+    referenced_names = set(members_by_archive)
+    if archive_names != referenced_names:
+        raise LedgerMismatchError(
+            "lineage archive inventory does not match its index: "
+            f"missing={sorted(referenced_names - archive_names)!r}, "
+            f"unreferenced={sorted(archive_names - referenced_names)!r}"
+        )
+    if int(manifest.get("rollout_count", -1)) != len(members):
+        raise LedgerMismatchError("lineage archive rollout count does not match its index")
+    total_rows = sum(member.rows for member in members)
+    if int(manifest.get("row_count", -1)) != total_rows:
+        raise LedgerMismatchError("lineage archive row count does not match its index")
+    return archive_references, members, members_by_archive
+
+
+def _checkpoint_lineage_union(checkpoint_root: Path, checkpoint_id: object) -> dict[str, tuple[str, int, int]]:
+    """Return the deduplicated lineage inventory owned by all model participants."""
+    model_ledger_root = checkpoint_root / MODEL_LEDGER_SUBDIR
+    participant_dirs = sorted(path for path in model_ledger_root.iterdir() if path.is_dir())
+    expected: dict[str, tuple[str, int, int]] = {}
+    for participant_dir in participant_dirs:
+        manifest_path = participant_dir / LEDGER_MANIFEST_NAME
+        if not manifest_path.is_file():
+            raise LedgerMismatchError(f"model-ledger participant {participant_dir.name!r} is missing its manifest")
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise LedgerMismatchError(
+                f"model-ledger participant {participant_dir.name!r} has an invalid manifest"
+            ) from error
+        schema_version = manifest.get("schema_version", 0)
+        if not isinstance(schema_version, int) or schema_version > LEDGER_SCHEMA_VERSION:
+            raise LedgerMismatchError(
+                f"model-ledger participant {participant_dir.name!r} has an unsupported schema version"
+            )
+        if manifest.get("server_name") != participant_dir.name:
+            raise LedgerMismatchError(
+                f"model-ledger participant directory {participant_dir.name!r} does not match its manifest"
+            )
+        if manifest.get("checkpoint_id") != checkpoint_id:
+            raise LedgerMismatchError(
+                f"model-ledger participant {participant_dir.name!r} belongs to a different checkpoint transaction"
+            )
+        _validate_storage_reference_index(checkpoint_root, manifest)
+
+        if schema_version >= 3:
+            _, members, _ = _validate_lineage_archive_inventory(checkpoint_root, manifest)
+            inventory = {member.member: (member.sha256, member.bytes, member.rows) for member in members}
+        else:
+            inventory = {}
+            for metadata in manifest["rollouts"].values():
+                for name, digest in metadata["files"].items():
+                    inventory[name] = (digest, int(metadata.get("bytes", -1)), int(metadata.get("rows", -1)))
+
+        for name, identity in inventory.items():
+            previous = expected.get(name)
+            if previous is not None and previous != identity:
+                raise LedgerMismatchError(
+                    f"model-ledger participants contain conflicting lineage for the same rollout: member={name!r}"
+                )
+            expected[name] = identity
+    return expected
 
 
 def _write_payload_fsynced(payload: bytes, target: Path) -> None:
@@ -852,17 +917,30 @@ class CaptureLedgerCheckpointer:
 
         if schema_version >= 3:
             archive_references, archive_members = _validate_lineage_archives(checkpoint_dir, ledger_dir, manifest)
-            expected_names = {member.member for member in archive_members}
         else:
             archive_references = []
             archive_members = []
-            expected_names = {name for metadata in manifest["rollouts"].values() for name in metadata["files"]}
-        existing_names = {path.name for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}")}
-        unexpected = existing_names - expected_names
+        if self.server_name is None:
+            expected = {member.member: (member.sha256, member.bytes, member.rows) for member in archive_members}
+            if schema_version < 3:
+                expected = {
+                    name: (digest, int(metadata.get("bytes", -1)), int(metadata.get("rows", -1)))
+                    for metadata in manifest["rollouts"].values()
+                    for name, digest in metadata["files"].items()
+                }
+        else:
+            expected = _checkpoint_lineage_union(checkpoint_dir, manifest.get("checkpoint_id"))
+        existing = {path.name: path for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}")}
+        unexpected = set(existing) - set(expected)
         if unexpected:
             raise LedgerMismatchError(
-                "restore requires a fresh capture-ledger namespace; "
-                f"found files absent from the checkpoint: {sorted(unexpected)}"
+                "restore requires a checkpoint-owned capture-ledger namespace; "
+                f"found files absent from the checkpoint union: {sorted(unexpected)}"
+            )
+        corrupted = sorted(name for name, path in existing.items() if _file_digest(path) != expected[name][0])
+        if corrupted:
+            raise LedgerMismatchError(
+                f"live capture-ledger files do not match the checkpoint union: members={corrupted}"
             )
 
         # Validate the complete source before changing the live namespace.
