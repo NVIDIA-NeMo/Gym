@@ -213,6 +213,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
             staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
             generation_token_count=1,
             digest=cut.digest,
+            effective_output_limit=128,
         ),
     )
     resumed_capture, _ = _capture(sink, weight_version=9)
@@ -260,6 +261,7 @@ def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:
             staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
             generation_token_count=1,
             digest=cut.digest,
+            effective_output_limit=128,
         ),
     )
     older_capture, _ = _capture(weight_version=7)
