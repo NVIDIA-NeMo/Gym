@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import shutil
 from pathlib import Path
 
 
@@ -46,7 +47,7 @@ def prepare(split: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     downloaded = hf_hub_download(repo_id=REPO_ID, filename=ARTIFACTS[split], repo_type="dataset")
-    Path(downloaded).rename(output_path)
+    shutil.copyfile(downloaded, output_path)
     print(f"Wrote {output_path}")
 
 
