@@ -1,0 +1,19 @@
+config_paths:
+- benchmarks/terminal_bench_4/miniswe.yaml
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Official pinned TB4 setup, state, separate verification, and cleanup.
+terminal_bench_4_miniswe:
+  responses_api_agents:
+    miniswe_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_4
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/terminal_bench_4/data/example.jsonl

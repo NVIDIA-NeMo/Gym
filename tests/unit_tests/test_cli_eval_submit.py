@@ -19,11 +19,11 @@ import sys
 import pytest
 import yaml
 from hydra.errors import ConfigCompositionException
-from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.cli.main import _eval_submit, main
+from nemo_gym.config_types import ConfigError
 from nemo_gym.orchestration.api import SlurmComputeConfig
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
@@ -174,8 +174,8 @@ class TestEvalSubmitScratchNamespace:
         namespace — it must still hit SubmitConfig's strict validation instead of being silently dropped."""
         config_path = self._write_config(tmp_path, drivver=DRIVER)
 
-        with pytest.raises(ValidationError):
-            _eval_submit(_args(config_path), overrides=[])
+        with pytest.raises(ConfigError, match=r"drivver \(Extra inputs are not permitted\)"):
+            _eval_submit.__wrapped__(_args(config_path), overrides=[])
 
     def test_without_scratch_namespace_still_validates(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         captured = _capture_submit(monkeypatch)
@@ -184,6 +184,84 @@ class TestEvalSubmitScratchNamespace:
         _eval_submit(_args(config_path), overrides=[])
 
         assert captured["config"].job.output_path == "/tmp/gym-jobs"
+
+
+class TestEvalSubmitConfigFileErrors:
+    """A missing or invalid `--config` is a user mistake, not a bug (#2688): it must surface as one actionable
+    `ConfigError` naming the offending path — which `exit_cleanly_on_config_error` turns into a single
+    `Error:` line and exit 1 — never as a Hydra `MissingConfigException` or pydantic `ValidationError`
+    traceback. Messages are asserted on the undecorated function so the checks are about content;
+    `TestEvalSubmitThroughTheRealCli` covers the exit contract."""
+
+    def test_missing_file_names_the_path_and_submits_nothing(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+        missing = tmp_path / "missing.yaml"
+
+        with pytest.raises(ConfigError, match="was not found") as exc_info:
+            _eval_submit.__wrapped__(_args(missing), overrides=[])
+
+        assert str(missing) in str(exc_info.value)
+        assert captured == {}
+
+    def test_directory_is_reported_as_a_directory(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        _capture_submit(monkeypatch)
+
+        with pytest.raises(ConfigError, match="is a directory, not a file") as exc_info:
+            _eval_submit.__wrapped__(_args(tmp_path), overrides=[])
+
+        assert str(tmp_path) in str(exc_info.value)
+
+    def test_wrong_shape_lists_missing_and_unknown_fields(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(yaml.dump({"foo": 1}))
+
+        with pytest.raises(ConfigError, match="is invalid") as exc_info:
+            _eval_submit.__wrapped__(_args(config_path), overrides=[])
+
+        message = str(exc_info.value)
+        assert str(config_path) in message
+        assert "missing required configuration: services, compute, driver, job" in message
+        assert "invalid configuration: foo (Extra inputs are not permitted)" in message
+
+    def test_nested_field_error_carries_its_dotted_path(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(
+            yaml.dump(
+                {
+                    "services": {"svc": SERVICE},
+                    "compute": COMPUTE,
+                    "driver": DRIVER,
+                    "job": {**JOB, "output_path": 123},
+                }
+            )
+        )
+
+        with pytest.raises(ConfigError, match=r"job\.output_path \(Input should be a valid string\)"):
+            _eval_submit.__wrapped__(_args(config_path), overrides=[])
+
+    def test_cross_field_validator_error_is_rendered_cleanly(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """`SubmitConfig`'s own `@model_validator` rejects inconsistent-but-well-typed configs with a bare
+        `ValueError`; pydantic reports those with an empty location, which must still read as a config
+        problem (not a traceback) and carry the validator's explanation."""
+        _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(
+            yaml.dump(
+                {
+                    "services": {"svc": SERVICE},
+                    "compute": COMPUTE,
+                    "driver": {**DRIVER, "policy_model": "nope"},
+                    "job": JOB,
+                }
+            )
+        )
+
+        with pytest.raises(ConfigError, match="is invalid") as exc_info:
+            _eval_submit.__wrapped__(_args(config_path), overrides=[])
+
+        assert "driver.policy_model 'nope' does not match any service (svc)" in str(exc_info.value)
 
 
 class TestEvalSubmitConfigGroupComposition:
@@ -378,6 +456,35 @@ class TestEvalSubmitThroughTheRealCli:
 
         assert exit_info.value.code == 1
         assert json.loads(capsys.readouterr().out)["benchmarks"][0]["job_id"] is None
+
+    def test_a_missing_config_exits_one_with_a_message_and_no_traceback(self, tmp_path, monkeypatch, capsys):
+        # Rich soft-wraps at 80 columns when stdout is not a TTY, which would split the path mid-token.
+        monkeypatch.setenv("COLUMNS", "1000")
+        missing = tmp_path / "missing.yaml"
+        self._argv(monkeypatch, missing, "--dry-run")
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert f"Error: Submit config '{missing}' was not found" in captured.out
+        assert "Traceback" not in captured.out + captured.err
+
+    def test_an_invalid_config_exits_one_with_a_message_and_no_traceback(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("COLUMNS", "1000")
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(yaml.dump({"services": {"svc": SERVICE}}))
+        self._argv(monkeypatch, config_path, "--dry-run")
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert f"Error: Submit config '{config_path}' is invalid" in captured.out
+        assert "missing required configuration: compute, driver, job" in captured.out
+        assert "Traceback" not in captured.out + captured.err
 
     def test_human_output_survives_an_error_containing_markup(self, tmp_path, monkeypatch, capsys):
         # An sbatch message with square brackets is markup to rich: without
