@@ -49,81 +49,11 @@ def create_mlflow_client() -> MlflowClient:  # pragma: no cover
     return client
 
 
-_MLFLOW_URI_SUFFIX = "/ml/mlflow"
-
-
-def _gitlab_project_url(tracking_uri: str) -> str | None:
-    """The GitLab project endpoint behind an MLflow tracking URI, if it looks like one."""
-    base = tracking_uri.rstrip("/")
-    if not base.endswith(_MLFLOW_URI_SUFFIX):
-        return None
-    return base[: -len(_MLFLOW_URI_SUFFIX)]
-
-
-def _token_is_project_member(project_url: str, token: str) -> bool | None:
-    """Whether the token's user is a member of the project. None if that cannot be established."""
-    try:
-        response = requests.get(
-            project_url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-            allow_redirects=False,
-        )
-        if response.status_code != 200:
-            return None
-        permissions = response.json()["permissions"]
-        return bool(permissions.get("project_access") or permissions.get("group_access"))
-    except (requests.RequestException, ValueError, KeyError, AttributeError, TypeError):
-        return None
-
-
-def _describe_missing_dataset(registry: str, dataset_name: str) -> str:
-    project_url = _gitlab_project_url(registry)
-    is_member = _token_is_project_member(project_url, MLFLOW_TRACKING_TOKEN.get() or "") if project_url else None
-
-    if is_member is False:
-        return (
-            f"The mlflow_tracking_token cannot read the model registry at {registry}: its user is not a "
-            f"member of the project. Check project membership and registry access before assuming "
-            f"dataset '{dataset_name}' is missing."
-        )
-
-    if is_member:
-        return (
-            f"Dataset '{dataset_name}' was not found in the model registry at {registry} despite project membership."
-        )
-
-    return (
-        f"Dataset '{dataset_name}' was not found in the model registry at {registry}. Either it was never "
-        f"published, or the mlflow_tracking_token's user cannot read the registry -- GitLab answers 404 in "
-        f"both cases."
-    )
-
-
-def _describe_registry_404(client: MlflowClient, dataset_name: str, version: str) -> str:
-    """Explain a 404 from the GitLab model registry.
-
-    A missing version and inaccessible registry can both appear as 404. Probe the model
-    and project permissions for diagnostic context without treating an unavailable probe
-    as proof that the dataset does not exist.
-    """
-    registry = client.tracking_uri
-    try:
-        client.get_registered_model(dataset_name)
-    except RestException as error:
-        if not _is_registry_404(error):
-            return (
-                f"Could not resolve dataset '{dataset_name}' version '{version}' in the model registry at {registry}."
-            )
-        return _describe_missing_dataset(registry, dataset_name)
-
-    return f"Dataset '{dataset_name}' exists in the model registry at {registry}, but not at version '{version}'."
-
-
 def _is_registry_404(error: RestException) -> bool:
     # GitLab may wrap its HTTP 404 in MLflow's INTERNAL_ERROR code.
+    message = error.json.get("message")
     return error.get_http_status_code() == 404 or (
-        error.error_code == "INTERNAL_ERROR" and error.json.get("message", "").strip() == "404 Not Found"
+        error.error_code == "INTERNAL_ERROR" and isinstance(message, str) and message.strip() == "404 Not Found"
     )
 
 
@@ -133,7 +63,12 @@ def _get_model_version(client: MlflowClient, dataset_name: str, version: str) ->
     except RestException as e:
         if not _is_registry_404(e):
             raise
-        raise ConfigError(_describe_registry_404(client, dataset_name, version)) from e
+        raise ConfigError(
+            f"Could not access dataset '{dataset_name}' version '{version}' in the GitLab model registry. "
+            "Confirm that the dataset and version exist, the MLflow tracking URI points to the correct project, "
+            "and the tracking token can access that project's model registry. GitLab can return 404 for both "
+            "missing and inaccessible resources."
+        ) from e
 
 
 def upload_jsonl_dataset(
