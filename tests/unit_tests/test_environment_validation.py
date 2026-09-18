@@ -246,6 +246,8 @@ def test_direct_endpoint_custom_loop_package_roundtrip(tmp_path: Path) -> None:
         ("verifiers_agent", "custom-gym-agent-loop"),
         ("tau2", "external-agent-loop"),
         ("pinchbench", "external-agent-loop"),
+        ("harbor_agent", "external-agent-loop"),
+        ("osworld_agent", "external-agent-loop"),
     ],
 )
 def test_native_embedded_grading_package_roundtrip_and_stale_agent_rejected(tmp_path: Path, agent, profile) -> None:

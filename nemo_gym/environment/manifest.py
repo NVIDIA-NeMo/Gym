@@ -90,6 +90,8 @@ _EMBEDDED_GRADING_AGENTS = {
     "verifiers_agent": IntegrationProfile.CUSTOM_GYM_AGENT_LOOP,
     "tau2": IntegrationProfile.EXTERNAL_AGENT_LOOP,
     "pinchbench": IntegrationProfile.EXTERNAL_AGENT_LOOP,
+    "harbor_agent": IntegrationProfile.EXTERNAL_AGENT_LOOP,
+    "osworld_agent": IntegrationProfile.EXTERNAL_AGENT_LOOP,
 }
 
 
