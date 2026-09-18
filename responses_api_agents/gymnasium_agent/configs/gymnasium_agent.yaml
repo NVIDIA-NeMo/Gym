@@ -2,3 +2,11 @@ gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
       entrypoint: app.py
+
+gymnasium_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gymnasium_agent
