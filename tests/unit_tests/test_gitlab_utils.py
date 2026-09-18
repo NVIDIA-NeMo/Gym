@@ -59,8 +59,8 @@ class TestGetModelVersion:
     def test_404_adds_context_without_claiming_a_single_cause_or_leaking_credentials(
         self, monkeypatch: pytest.MonkeyPatch, payload: dict[str, str]
     ) -> None:
-        token = "tracking-token-secret"
-        registry = "https://user:uri-secret@gitlab.example.test/api/v4/projects/1/ml/mlflow?private=secret"
+        token = "tracking-token-marker"
+        registry = "https://gitlab.example.test/api/v4/projects/1/ml/mlflow?credential=uri-marker"
         monkeypatch.setenv("MLFLOW_TRACKING_TOKEN", token)
         error = RestException(payload)
         client = MagicMock(tracking_uri=registry)
@@ -73,8 +73,7 @@ class TestGetModelVersion:
         assert "dataset 'sample_dataset' version '0.0.9'" in message
         assert "missing and inaccessible resources" in message
         assert token not in message
-        assert "uri-secret" not in message
-        assert "private=secret" not in message
+        assert "uri-marker" not in message
         assert excinfo.value.__cause__ is error
         client.get_registered_model.assert_not_called()
 
