@@ -417,6 +417,8 @@ class TestEvalSubmitThroughTheRealCli:
 
     def _fake_executor(self, monkeypatch, record):
         class _FakeExecutor:
+            supports_resumable = False
+
             def run(self, config, *, dry_run: bool = False):
                 return record
 

@@ -141,6 +141,8 @@ class SlurmExecutor(BaseExecutor):
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
 
+    supports_resumable = True
+
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))

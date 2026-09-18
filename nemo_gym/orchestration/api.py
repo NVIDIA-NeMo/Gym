@@ -190,12 +190,33 @@ ComputeConfig = Annotated[
 ]
 
 
+class ResumeConfig(_StrictModel):
+    # Non-timeout failures (job script bugs, OOM, etc.) get a bounded number of
+    # infra retries so a broken benchmark doesn't requeue forever.
+    max_retries: int = 3
+    # Optional cap on the chain's total accumulated walltime, as a Slurm-style
+    # duration string (e.g. "48:00:00"). None means resume until max_retries is
+    # hit on a non-timeout failure, or the job completes/is cancelled.
+    max_walltime: str | None = None
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # True enables auto-resume with ResumeConfig defaults; pass a ResumeConfig to tune
+    # max_retries/max_walltime. False (default) leaves fire-and-forget submission unchanged.
+    # Only executors that declare `supports_resumable = True` may set this (see
+    # SubmitConfig validation in submit.py).
+    resumable: bool | ResumeConfig = False
+
+    @property
+    def resume_config(self) -> ResumeConfig | None:
+        if self.resumable is False:
+            return None
+        return ResumeConfig() if self.resumable is True else self.resumable
 
 
 class GymInstallConfig(_StrictModel):
