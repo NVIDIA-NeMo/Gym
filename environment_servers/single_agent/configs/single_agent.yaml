@@ -1,0 +1,14 @@
+single_agent_environment_server:
+  environment_servers:
+    single_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
