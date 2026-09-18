@@ -24,3 +24,11 @@ swebench_verified_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
           num_repeats: 3
+
+swebench_verified_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_verified_opencode_sandboxed_agent

@@ -23,3 +23,11 @@ lc_equivalence_rule_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/equivalence_rule/data/example.jsonl
+
+lc_equivalence_rule_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: lc_equivalence_rule_simple_agent
