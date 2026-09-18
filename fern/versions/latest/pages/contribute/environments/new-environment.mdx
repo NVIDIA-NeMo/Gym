@@ -77,7 +77,7 @@ New manifests are `experimental: true` by default. The NeMo Gym team can manuall
 | `resources_server` | string | Required; mirrored from config |
 | `agent_server` | string | Required; mirrored from config |
 | `datasets` | list of objects | Required and non-empty; dataset names must be unique |
-| `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
+| `model_server` | string or null | Required for `custom-gym-verifier`; optional for custom agent loops using direct endpoints |
 | `rollout_driver` | string or null | Required only for `external-rollout-driver`; Python `module:function` form |
 | `grading_mode` | string or null | Optional resources-server-specific selector |
 | `session_model` | string or null | Optional; `episode` or `step` |
@@ -97,11 +97,13 @@ Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `trai
 | Profile | Use when | Additional requirement | Generated extension point |
 | --- | --- | --- | --- |
 | `custom-gym-verifier` | Gym drives the standard agent loop and only the model's answers are measured | `model_server` | None |
-| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | `model_server` | Agent `responses()` |
+| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | None | Agent `responses()` |
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
 Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`. Set `standard_prompt_config` to materialize raw dataset rows, or omit it when every row already contains valid `responses_create_params`. Dataset-level `prompt_config` remains optional and, when supplied, must match `standard_prompt_config`.
+
+Custom agent loops may omit `model_server` when the harness config supplies its own provider/model fields and credentials. These fields remain harness-specific: selecting a Gym model server does not automatically reconfigure a direct provider. Direct model calls may also lack Gym model-call ownership and token traces required by training integrations. Generated scaffolds continue to use a Gym model server.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 

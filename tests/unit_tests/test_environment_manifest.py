@@ -92,13 +92,24 @@ def test_manifest_requires_base_composition(missing_field: str) -> None:
         EnvironmentManifest.model_validate(raw)
 
 
-@pytest.mark.parametrize("profile", ["custom-gym-verifier", "custom-gym-agent-loop"])
-def test_in_process_profiles_require_a_model_server(profile: str) -> None:
-    raw = _manifest(profile=profile)
+def test_standard_verifier_requires_a_model_server() -> None:
+    raw = _manifest(profile="custom-gym-verifier")
     raw.pop("model_server")
 
     with pytest.raises(ValidationError, match="model_server"):
         EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_custom_loop_may_use_a_direct_model_endpoint(explicit_null: bool) -> None:
+    raw = _manifest(profile="custom-gym-agent-loop")
+    if explicit_null:
+        raw["model_server"] = None
+    else:
+        raw.pop("model_server")
+
+    assert EnvironmentManifest.model_validate(raw).model_server is None
+    Draft202012Validator(manifest_json_schema()).validate(raw)
 
 
 def test_external_loop_may_omit_a_model_server() -> None:
@@ -287,10 +298,9 @@ def test_generated_schema_is_machine_readable() -> None:
 
     invalid_manifests = []
 
-    for profile in ("custom-gym-verifier", "custom-gym-agent-loop"):
-        invalid = _manifest(profile=profile)
-        invalid.pop("model_server")
-        invalid_manifests.append(invalid)
+    invalid = _manifest(profile="custom-gym-verifier")
+    invalid.pop("model_server")
+    invalid_manifests.append(invalid)
 
     invalid = _manifest(profile="external-rollout-driver")
     invalid.pop("rollout_driver")

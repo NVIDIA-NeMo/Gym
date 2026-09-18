@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.environment.artifacts import build_environment_package, pull_environment_package
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
@@ -18,6 +19,7 @@ from nemo_gym.environment.validation import (
     _infer_profile,
     _only_delegates_to_super,
     _only_raises_not_implemented,
+    _resolve_manifest_composition,
     _with_component_root,
     validate_environment,
 )
@@ -188,6 +190,52 @@ def test_reports_resolved_composition_and_declared_profile(tmp_path: Path) -> No
         ("model_server", "runtime-selected"),
     ]
     assert report.components[0].entrypoint == "app.py"
+
+
+@pytest.mark.parametrize(
+    "name", ["codex_math", "claude_code_reasoning_gym", "opencode_math", "opencode_reasoning_gym", "pi_math"]
+)
+def test_native_direct_endpoint_agent_composition(name: str, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"config_paths:\n- {PARENT_DIR / 'environments' / name / 'config.yaml'}\n"
+        "anthropic_model_name: test-model\nanthropic_api_key: unset\n"
+        "anthropic_base_url: https://example.invalid\n"
+    )
+    composition = _resolve_manifest_composition(config_path)
+
+    assert composition.model_server is None
+    assert all(component.role != "model_server" for component in composition.components)
+    assert _infer_profile(composition)[0] == "custom-gym-agent-loop"
+
+
+def test_direct_endpoint_custom_loop_package_roundtrip(tmp_path: Path) -> None:
+    manifest_path = _custom_agent_asset(
+        tmp_path,
+        profile="custom-gym-agent-loop",
+        source="class CustomAgent:\n    async def responses(self):\n        return None\n\nCustomAgent.run_webserver()\n",
+    )
+    _replace_manifest(manifest_path, model_server=None)
+    config_path = manifest_path.with_name("config.yaml")
+    config = config_path.read_text().replace(
+        "      model_server:\n        type: responses_api_models\n        name: policy_model\n",
+        "      openai_base_url: https://example.invalid/v1\n      openai_api_key: ${oc.env:TEST_DIRECT_API_KEY,unset}\n",
+    )
+    config_path.write_text(config)
+    manifest_path.with_name("package.yaml").write_text(
+        "include:\n- environments/demo\n- responses_api_agents/custom_agent\n"
+    )
+    entry = SimpleNamespace(manifest_path=manifest_path, config_path=config_path)
+    archive = build_environment_package(entry, tmp_path / "direct-model.tar.gz")
+    installed = pull_environment_package(str(archive), tmp_path / "installed")
+    installed_manifest = installed / "environments/demo/manifest.yaml"
+    report = validate_environment(installed_manifest)
+
+    assert load_manifest(installed_manifest).model_server is None
+    assert report.inferred_profile == "custom-gym-agent-loop"
+    assert report.warnings == ()
+    assert all(component.role != "model_server" for component in report.components)
+    assert installed_manifest.with_name("config.yaml").read_text() == config
 
 
 @pytest.mark.parametrize(

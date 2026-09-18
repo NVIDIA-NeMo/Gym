@@ -80,7 +80,7 @@ class DatasetKind(StrEnum):
 
 _PROFILE_REQUIRED_FIELDS = {
     IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server",),
-    IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: ("model_server",),
+    IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: (),
     IntegrationProfile.EXTERNAL_AGENT_LOOP: (),
     IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER: ("rollout_driver",),
 }
