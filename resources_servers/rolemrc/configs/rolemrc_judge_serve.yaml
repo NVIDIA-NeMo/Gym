@@ -1,0 +1,76 @@
+# Serve ONLY the rolemrc judge scorer (the 5-aspect LLM-as-judge /verify), for
+# driving from an external evaluation harness that owns the policy model and
+# generation. The judge counterpart of rolemrc_serve.yaml.
+#
+#   ng_run "+config_paths=[resources_servers/rolemrc/configs/rolemrc_judge_serve.yaml]" \
+#     +judge_base_url=https://api.openai.com/v1/ \
+#     +judge_api_key=$OPEN_AI_KEY \
+#     +judge_model_name=gpt-4.1
+#
+# Unlike rolemrc_judge.yaml this registers NO agent, so nothing here references
+# `policy_model`: the caller generates the answer itself and POSTs it to /verify.
+# Composing rolemrc_judge.yaml into a generation-free service instead fails
+# validation on its agent's unresolvable `policy_model` reference.
+#
+# The judge still needs its own endpoint — it runs on the dedicated `judge_model`
+# instance below, never on the model under test, which would be self-grading.
+#
+# `judge_api: chat_completions` posts the aspect prompts to /v1/chat/completions.
+# Keep it: the same judge model scores measurably lower through /v1/responses, so
+# runs compared against each other must all use the same surface.
+#
+# A reasoning judge (gpt-5.x and friends) needs `reasoning_effort` set and the
+# sampling params dropped. Explicit nulls are omitted rather than sent, so:
+#   ++<instance>.…judge_chat_completion_create_params.reasoning_effort=low
+#   ++<instance>.…judge_chat_completion_create_params.max_completion_tokens=2048
+#   ++<instance>.…judge_chat_completion_create_params.temperature=null
+#   ++<instance>.…judge_chat_completion_create_params.max_tokens=null
+# sends {messages, n, max_completion_tokens, reasoning_effort} (`model` is
+# injected by the judge model server). The effort must be explicit because a
+# newer provider default (`none`) fails reply validation against the pinned
+# `openai` SDK. Such a judge samples at the provider's defaults, so its verdicts
+# are not deterministic.
+#
+# Judge failures are loud rather than scored 0: an empty reply raises JudgeError
+# and lands in the failures sidecar, and a `<think>…</think>` wrapper on the
+# judge reply is stripped before parsing.
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      openai_default_headers: {}
+
+rolemrc_judge:
+  resources_servers:
+    rolemrc:
+      entrypoint: app.py
+      host: 0.0.0.0
+      port: 8002
+      domain: rlhf
+      verified: false
+      description: RoleMRC role-play MRC scored by a 5-aspect LLM-as-judge (knowledge range, style, nested/multi-turn instruction, instruction priority).
+      value: Improve role-play instruction following under knowledge-range and instruction-priority constraints.
+      mode: judge
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_api: chat_completions
+      # Non-reasoning judge body: `temperature` + `max_tokens`, no `top_p`.
+      # A reasoning judge swaps this for `reasoning_effort` +
+      # `max_completion_tokens` — see the header.
+      judge_chat_completion_create_params:
+        messages: []
+        n: 1
+        temperature: 0.0
+        max_tokens: 2048
+      judge_endpoint_max_concurrency: 64
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides (needed
+# for config listing). Recommended judge: gpt-4.1.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

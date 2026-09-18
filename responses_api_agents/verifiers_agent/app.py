@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from collections.abc import Mapping
 from http.cookiejar import CookieJar
-from typing import Any
+from typing import Any, Optional
 
 import verifiers as vf
 from fastapi import Body, Request, Response
@@ -29,7 +30,6 @@ from verifiers.clients import NeMoRLChatCompletionsClient
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -207,20 +207,32 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _policy_model_server_url(self) -> str:
-        server_config_dict = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+    def _rollout_id_for(self, body: Any = None, request: Optional[Request] = None) -> Optional[str]:
+        """The capture id for this call, from the run body or the request path.
 
-        if not model_server_url.endswith("/v1"):
-            model_server_url = model_server_url.rstrip("/") + "/v1"
+        ``rollout_id_from_run`` only covers ``/run``, where rollout collection
+        injects ``_ng_rollout_id`` into the body. A direct
+        ``/ng-rollout/<id>/v1/responses`` call carries the id in the path
+        instead, and agents get no ``RolloutContextMiddleware`` -- that is
+        installed on resources servers, not here -- so the contextvar is unset
+        on that route. Without reading the path, a supported prefixed call
+        builds an unprefixed client and its model calls are never correlated,
+        which is the same silent capture loss this agent already had.
 
-        return model_server_url
+        Gated on the same ``_capture_correlation_enabled`` as the body path, so
+        a run with capture off keeps the shared unprefixed client.
+        """
+        if body is not None and (from_body := self.rollout_id_from_run(body)):
+            return from_body
+        if request is None or not self._capture_correlation_enabled():
+            return None
+        path_params = getattr(request, "path_params", None)
+        if not isinstance(path_params, Mapping):
+            return None
+        return path_params.get("rollout_id") or None
 
-    def _get_client(self) -> NeMoRLChatCompletionsClient:
-        """One shared policy client per process, with a cookie jar that never stores.
+    def _get_client(self, body: Any = None, request: Optional[Request] = None) -> NeMoRLChatCompletionsClient:
+        """Return a rollout-prefixed client over one shared policy transport.
 
         The vllm_model server picks a vLLM engine per session
         (``sha256(session_id) % len(base_urls)`` in
@@ -242,11 +254,26 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         shared-client runs before it had zero. One shared pool keeps connections
         hot. The price is per-turn engine affinity, which Gym's own client does
         not have either.
+
+        Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix. The
+        lightweight per-run OpenAI client copy changes only ``base_url`` and
+        shares the cached client's transport, so calls remain correlated without
+        accumulating a connection pool per rollout. ``rollout_id_from_run``
+        returns ``None`` when capture is disabled, preserving the shared
+        unprefixed client path.
+
+        The per-run client BORROWS that transport rather than owning it, so it
+        must never be closed: ``Client.close()`` closes the underlying httpx
+        client, which every later rollout is still using. Nothing on the current
+        path closes it -- neither this agent nor ``run_group``/``generate`` on
+        the verifiers legacy API, and every ``.close()`` call site in verifiers
+        sits under ``verifiers/v1/``, which this agent does not use -- but the
+        wrapper looks disposable, so the rule is written down here.
         """
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
             openai_client = AsyncOpenAI(
-                base_url=self._policy_model_server_url(),
+                base_url=self.resolve_model_base_url(self.config.model_server.name),
                 api_key="EMPTY",  # pragma: allowlist secret
                 # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
                 # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
@@ -256,7 +283,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
-        return self.client_cache[cache_key]
+        shared_client = self.client_cache[cache_key]
+        rollout_id = self._rollout_id_for(body, request)
+        if rollout_id is None:
+            return shared_client
+
+        model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        return NeMoRLChatCompletionsClient(shared_client.client.copy(base_url=model_server_url))
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
@@ -335,7 +368,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_client()
+            client = self._get_client(body, request)
 
             # prefer NeMo RL generation config set in responses_create_params
             # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046

@@ -1,0 +1,8 @@
+#!/bin/bash
+if [[ -f "$STUB_DIR/squeue_timeout" ]]; then
+    echo "slurm_load_jobs error: Socket timed out on send/recv operation" >&2; exit 1
+fi
+if [[ -f "$STUB_DIR/squeue_purged" ]]; then
+    echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
+fi
+cat "$STUB_DIR/live" 2>/dev/null || true

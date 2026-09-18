@@ -20,20 +20,25 @@ from typing import Any
 
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
+    RUNTIME_ENV_PREFIX,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.script_templates import (
+    ENSURE_RAY_INSTALLED,
     bash_var,
+    escape_for_single_quoted_block,
     render_driver_entrypoint,
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
+    render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -60,7 +65,8 @@ def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benc
     lines.append(f"#SBATCH --account={compute.account}")
     if compute.walltime:
         lines.append(f"#SBATCH --time={compute.walltime}")
-    # --chdir makes relative paths (logs/, artifacts/) resolve correctly inside the job.
+    # --chdir sets the batch script's cwd on the HOST, so srun --output=logs/... resolves there.
+    # Container-side cwd is set separately per step (see driver_workdir_flag).
     lines.append(f"#SBATCH --chdir={remote_bench_dir}")
     for key, val in compute.extra_args.items():
         lines.append(f"#SBATCH --{key}={val}")
@@ -91,12 +97,20 @@ def _validate_env_key(key: str) -> None:
 
 
 def _resolve_env(env: dict[str, str]) -> str:
-    """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty."""
+    """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty.
+
+    A `runtime:VAR` value (see resolve_env_dict in api.py) is emitted as an unquoted `K=$VAR`
+    shell reference instead of a literal, so it's resolved from the job's own environment when
+    the command actually runs on the compute node, rather than baked in at script-generation time.
+    """
     if not env:
         return ""
     for k in env:
         _validate_env_key(k)
-    pairs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    pairs = " ".join(
+        f"{k}=${{{v[len(RUNTIME_ENV_PREFIX) :]}}}" if v.startswith(RUNTIME_ENV_PREFIX) else f"{k}={shlex.quote(v)}"
+        for k, v in env.items()
+    )
     return f"env {pairs} "
 
 
@@ -170,6 +184,17 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
     return render_vllm_ray_symmetric_run(inner_cmd, total_nodes, resource_flags)
 
 
+# vLLM refuses `--api-server-count` in headless mode ("no API servers are started in headless
+# mode") and exits before loading anything. The flag is legitimate on the head node and reaches us
+# through a service's own extra_args, so it is stripped from the worker command rather than
+# rejected: Gym decides which nodes run headless, so Gym keeps their command valid.
+_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--api-server-count(?:[= ]\S+)?")
+
+
+def _strip_headless_incompatible_flags(cmd: str) -> str:
+    return _HEADLESS_INCOMPATIBLE_FLAG.sub("", cmd)
+
+
 def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
     # Data-parallel replicas span nodes. vLLM's Ray-based DP auto-placement doesn't spread ranks
     # across physical nodes - launching a single `vllm serve --data-parallel-size N` from one node
@@ -191,18 +216,23 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
     trust_flag = " --trust-remote-code" if service.trust_remote_code else ""
     head_cmd = common + dp_flags + trust_flag
     worker_cmd = (
-        common
+        _strip_headless_incompatible_flags(common)
         + dp_flags
         + trust_flag
         + " --headless"
         + f" --data-parallel-start-rank $(( SLURM_NODEID * {dp_size_local} ))"
     )
+    # Both branches go inside a single-quoted `bash -lc '...'`, and this service's
+    # command carries JSON flags that are themselves single-quoted
+    # (--hf-overrides, --limit-mm-per-prompt, --media-io-kwargs). Unescaped they
+    # end the block early and the whole invocation word-splits; mmlu-prox died
+    # that way with "/usr/bin/env: Argument list too long".
     return (
         "bash -lc '\n"
         '    if [ "$SLURM_NODEID" = "0" ]; then\n'
-        f"        {head_cmd}\n"
+        f"        {escape_for_single_quoted_block(head_cmd)}\n"
         "    else\n"
-        f"        {worker_cmd}\n"
+        f"        {escape_for_single_quoted_block(worker_cmd)}\n"
         "    fi\n"
         "'"
     )
@@ -212,6 +242,56 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     if service.number_of_instances > 1:
         return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
+
+
+def _escape_for_double_quoted_bash(text: str) -> str:
+    """Escape text for safe embedding inside a double-quoted bash string ("...")."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+_RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parent.parent / "ray_serve_gateway.py"
+
+
+def _build_vllm_ray_serve_command(
+    service: VllmServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
+) -> str:
+    # Launches ray_serve_gateway.py, which creates the instances and routes requests via ray.serve.
+    gateway_args = (
+        f"--model {shlex.quote(service.model)}"
+        f" --port {service.port}"
+        f" --tensor-parallel-size {service.tensor_parallel_size}"
+        f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+        f" --number-of-instances {service.number_of_instances}"
+    )
+    if gpus_per_node_values:
+        gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
+    if service.trust_remote_code:
+        gateway_args += " --trust-remote-code"
+    if service.served_model_name:
+        gateway_args += f" --served-model-name {shlex.quote(service.served_model_name)}"
+    if service.extra_args:
+        gateway_args += f" --extra-args {shlex.quote(service.extra_args)}"
+
+    # Embeds the gateway's source directly rather than git-cloning/installing nemo_gym into the
+    # vLLM container - no driver.gym_install needed for this path.
+    write_gateway = render_write_file_from_base64(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text(), "ray_serve_gateway.py")
+    fetch_and_run = (
+        f"{write_gateway}"
+        " && pip install --quiet aiohttp"
+        f" && ({ENSURE_RAY_INSTALLED})"
+        f" && python3 ray_serve_gateway.py {gateway_args}"
+    )
+    if total_nodes <= 1:
+        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance.
+        return f'bash -lc "{_escape_for_double_quoted_bash(fetch_and_run)}"'
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
+    # Double-quote escaping keeps the whole &&-chain as one opaque token for ray symmetric-run's
+    # entrypoint, immune to the outer bash -lc live-parsing its own && operators.
+    return render_vllm_ray_symmetric_run(
+        f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
+    )
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:
@@ -231,7 +311,13 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
     return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig,
+    total_nodes: int,
+    gpus_per_node_values: list[int],
+) -> str:
+    if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
+        return _build_vllm_ray_serve_command(service, total_nodes, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -269,6 +355,9 @@ def build_sbatch_script(
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
+    gpus_per_node_values = [
+        pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+    ]
 
     ray_prelude = (
         render_ray_prelude()
@@ -280,7 +369,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, gpus_per_node_values),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/
@@ -307,8 +396,15 @@ def build_sbatch_script(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
-    extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
+    # ABSOLUTE, not relative. The driver `cd`s into the Gym checkout so that a
+    # benchmark's own relative `prepare_script` / `jsonl_fpath` resolve, which
+    # means a relative output path would write every artifact inside that
+    # checkout instead of the job directory -- the run completes, exits 0, and
+    # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
+    # in the job directory without constraining cwd.
+    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
+    policy_type = config.driver.policy_model_type
+    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
@@ -319,12 +415,21 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
-    driver_mounts_flag = (
-        f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}" if config.driver.mounts else ""
-    )
+    # The driver writes everything relative to the job directory -- `output_path`
+    # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
+    # BATCH script on the host, but inside a Pyxis container the cwd is whatever
+    # the image declares and the job directory is not visible at all unless it is
+    # mounted. Without both of these the run completes cleanly, exits 0, and
+    # writes every artifact into the container's ephemeral overlay, which is
+    # discarded on exit: no rollouts, no metrics, no preprocessed data, and
+    # nothing to say so. Logs survive only because srun resolves `--output` on
+    # the host, which is what makes the loss so easy to miss.
+    driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
+    driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
     driver_command = (
         f"{gym_cmd}\n"
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
