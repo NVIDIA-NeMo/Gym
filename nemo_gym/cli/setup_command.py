@@ -174,7 +174,14 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        # hermes-agent refuses to build as a wheel unless HERMES_NIX_BUILD=1 is set (it's normally
+        # installed via its own shell installer, Docker image, or Nix). Set it only for this one
+        # server's install; every other server's command is unaffected.
+        extra_env_exports = "export HERMES_NIX_BUILD=1 && " if dir_path.name == "hermes_agent" else ""
+        env_setup_cmd = (
+            f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && "
+            f"{extra_env_exports}{install_cmd}{prefix_cmd}"
+        )
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
