@@ -1,6 +1,6 @@
 # Sandboxed Hermes with SWE-bench Pro
 
-Runs **NousResearch/hermes-agent@v2026.9.7** inside the task container prepared by
+Runs **NousResearch/hermes-agent** inside the task container prepared by
 Gym's existing SWE-bench Pro resources server. Hermes uses its terminal and file
 tools in `/app`; Pro extracts and grades the patch through its existing verifier.
 The model server runs separately. See [ASSESSMENT.md](ASSESSMENT.md) for the
@@ -11,6 +11,7 @@ component map and code review order.
 On Linux x86_64, build both runtimes once. Pro includes GNU and Alpine/musl images:
 
 ```bash
+export HERMES_VERSION=v2026.9.7  # A Git commit, tag, or branch; defaults to this release's commit.
 DEPS_DIR=/absolute/path/hermes-runtime \
   bash responses_api_agents/hermes_sandboxed_agent/prepare_runtime.sh
 DEPS_DIR=/absolute/path/hermes-runtime/musl ARCH=x86_64-unknown-linux-musl \
@@ -20,7 +21,7 @@ DEPS_DIR=/absolute/path/hermes-runtime/musl ARCH=x86_64-unknown-linux-musl \
 Mount that directory read-only at `/opt/hermes` in task containers. Gym and
 Hermes have conflicting OpenAI SDK pins, so keep their Python installations
 separate. The runtime contains the exact source checkout, its Python interpreter,
-resolved dependency versions and a commit manifest. Preparation validates the pin;
+resolved dependency versions and a commit manifest. Preparation resolves the requested version;
 task startup records it without downloading or installing Hermes. The default `hermes-python`
 launcher selects the interpreter for each task image.
 

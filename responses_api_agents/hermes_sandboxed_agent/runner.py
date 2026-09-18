@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Standalone runner for NousResearch/hermes-agent@v2026.9.7. No Gym imports.
+"""Standalone runner for NousResearch/hermes-agent. No Gym imports.
 
 Launch with the dedicated runtime's ``python -I runner.py request.json`` from
 outside the task repository. TERMINAL_CWD independently selects the tool cwd.

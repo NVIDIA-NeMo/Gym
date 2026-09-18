@@ -16,8 +16,16 @@ source "$SCRIPT_DIR/../anyswe_agent/setup_scripts/_portable_python.sh"
 export UV_PYTHON="$PYTHON_VERSION"
 mkdir -p "$DEPS_DIR/bin"
 install -m 755 "$SCRIPT_DIR/runtime_python.sh" "$DEPS_DIR/bin/hermes-python"
-HERMES_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
+HERMES_VERSION="${HERMES_VERSION:-2237be355906fbe6065ce1815711eee52b2d646e}"
 HERMES_REPO_URL="${HERMES_REPO_URL:-https://github.com/NousResearch/hermes-agent.git}"
+if [ ! -d "$DEPS_DIR/hermes-src/.git" ]; then
+    git init "$DEPS_DIR/hermes-src"
+    git -C "$DEPS_DIR/hermes-src" remote add origin "$HERMES_REPO_URL"
+else
+    git -C "$DEPS_DIR/hermes-src" remote set-url origin "$HERMES_REPO_URL"
+fi
+git -C "$DEPS_DIR/hermes-src" fetch --depth=1 origin "$HERMES_VERSION"
+HERMES_COMMIT="$(git -C "$DEPS_DIR/hermes-src" rev-parse 'FETCH_HEAD^{commit}')"
 # Hermes's grep fallback requires GNU options absent from Alpine's BusyBox.
 # Keep this static binary separate from Python so task tools retain their interpreter.
 if [[ ! -x "$DEPS_DIR/tools/bin/rg" ]]; then
@@ -66,13 +74,6 @@ then
     fi
 fi
 install_portable_python
-if [ ! -d "$DEPS_DIR/hermes-src/.git" ]; then
-    git init "$DEPS_DIR/hermes-src"
-    git -C "$DEPS_DIR/hermes-src" remote add origin "$HERMES_REPO_URL"
-else
-    git -C "$DEPS_DIR/hermes-src" remote set-url origin "$HERMES_REPO_URL"
-fi
-git -C "$DEPS_DIR/hermes-src" fetch --depth=1 origin "$HERMES_COMMIT"
 git -C "$DEPS_DIR/hermes-src" checkout --detach "$HERMES_COMMIT"
 # This release intentionally rejects wheels; retain its source assets and use
 # setuptools' simple .pth editable mode, then make that path relocatable.
@@ -108,7 +109,7 @@ import json
 import pathlib
 import sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
-    "hermes_commit": sys.argv[2], "tag": "v2026.9.7", "hermes_repo_url": sys.argv[3], "arch": sys.argv[4],
+    "hermes_commit": sys.argv[2], "hermes_repo_url": sys.argv[3], "arch": sys.argv[4],
     "uv_link_mode": "copy",
     "python_version": sys.argv[5],
 }) + "\n")
