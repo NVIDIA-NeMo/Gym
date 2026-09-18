@@ -309,4 +309,5 @@ jobs:
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`
+            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
             • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
