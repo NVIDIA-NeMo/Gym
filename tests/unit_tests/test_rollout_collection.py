@@ -909,6 +909,7 @@ class TestRolloutCollection:
         started = 0
         peak_started = 0
         release = asyncio.Event()
+        resident_window_started = asyncio.Event()
 
         rows = [
             {
@@ -923,6 +924,8 @@ class TestRolloutCollection:
             nonlocal started, peak_started
             started += 1
             peak_started = max(peak_started, started)
+            if started == max_resident_tasks:
+                resident_window_started.set()
             await release.wait()
             started -= 1
             return FakeResponse(200)
@@ -941,11 +944,7 @@ class TestRolloutCollection:
 
         first = asyncio.create_task(next(futures))
 
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if peak_started == max_resident_tasks:
-                break
-
+        await asyncio.wait_for(resident_window_started.wait(), timeout=1)
         assert peak_started == max_resident_tasks
         assert started == max_resident_tasks
 
@@ -969,6 +968,7 @@ class TestRolloutCollection:
             for i in range(16)
         ]
         release = asyncio.Event()
+        request_started = asyncio.Event()
         active_requests = 0
         peak_active_requests = 0
 
@@ -976,6 +976,7 @@ class TestRolloutCollection:
             nonlocal active_requests, peak_active_requests
             active_requests += 1
             peak_active_requests = max(peak_active_requests, active_requests)
+            request_started.set()
             await release.wait()
             active_requests -= 1
             return FakeResponse(200)
@@ -995,11 +996,7 @@ class TestRolloutCollection:
 
         first = asyncio.create_task(next(completions))
 
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if completions._resident_task_count == 4 and active_requests == 1:
-                break
-
+        await asyncio.wait_for(request_started.wait(), timeout=1)
         assert completions._resident_task_count == 4
         assert active_requests == 1
         assert peak_active_requests == 1
@@ -1023,10 +1020,16 @@ class TestRolloutCollection:
             for i in range(num_rows)
         ]
         release = asyncio.Event()
+        resident_window_started = asyncio.Event()
+        started = 0
         seen: list[int] = []
 
         async def post(*args, **kwargs):
+            nonlocal started
             row = kwargs["json"]
+            started += 1
+            if started == 8:
+                resident_window_started.set()
             await release.wait()
             seen.append(row[TASK_INDEX_KEY_NAME])
             return FakeResponse(200)
@@ -1045,11 +1048,7 @@ class TestRolloutCollection:
 
         first = asyncio.create_task(next(completions))
 
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if completions._resident_task_count == 8:
-                break
-
+        await asyncio.wait_for(resident_window_started.wait(), timeout=1)
         assert completions._resident_task_count == 8
 
         release.set()
@@ -1063,6 +1062,37 @@ class TestRolloutCollection:
         assert sorted(completed) == list(range(num_rows))
         assert sorted(seen) == list(range(num_rows))
         assert completions._resident_task_count == 0
+
+    async def test_bounded_failure_propagates_with_concurrent_consumers(self) -> None:
+        fail = asyncio.Event()
+        block = asyncio.Event()
+
+        async def failing_rollout():
+            await fail.wait()
+            raise RuntimeError("rollout failed")
+
+        async def blocked_rollout():
+            await block.wait()
+
+        completions = nemo_gym.rollout_collection._BoundedCompletionIterator(
+            iter([failing_rollout(), blocked_rollout()]),
+            max_resident_tasks=2,
+            total=2,
+        )
+        first = asyncio.create_task(next(completions))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(next(completions))
+        await asyncio.sleep(0)
+
+        fail.set()
+        with pytest.raises(RuntimeError, match="rollout failed"):
+            await asyncio.wait_for(first, timeout=1)
+
+        assert not second.done()
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        await completions.aclose()
 
     async def test_bounded_admission_aclose_cancels_only_resident_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         num_rows = 32
@@ -1078,11 +1108,14 @@ class TestRolloutCollection:
         started: set[int] = set()
         cancelled: set[int] = set()
         blocker = asyncio.Event()
+        resident_window_started = asyncio.Event()
 
         async def post(*args, **kwargs):
             row = kwargs["json"]
             task_index = row[TASK_INDEX_KEY_NAME]
             started.add(task_index)
+            if len(started) == max_resident_tasks:
+                resident_window_started.set()
             try:
                 await blocker.wait()
             except asyncio.CancelledError:
@@ -1099,17 +1132,14 @@ class TestRolloutCollection:
 
         first = asyncio.create_task(next(completions))
 
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if len(started) == max_resident_tasks:
-                break
-
+        await asyncio.wait_for(resident_window_started.wait(), timeout=1)
         assert len(started) == max_resident_tasks
         assert completions._resident_task_count == max_resident_tasks
 
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
+        await completions.aclose()
 
         assert len(started) == max_resident_tasks
         assert cancelled == started
@@ -1415,6 +1445,34 @@ class TestRolloutCollection:
         # The attempt is still on disk, so resume can pick it up.
         failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
         assert [row[NG_FAILURE_CLASS_KEY] for row in failures] == [AGENT_RUN_ERROR_FAILURE_CLASS]
+
+    async def test_run_from_config_all_failure_non_retaining_upload_removes_spool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        export_rollouts = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", export_rollouts)
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
+            retain_results_in_memory=False,
+            upload_rollouts=True,
+            disable_health_check=True,
+        )
+
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        export_rollouts.assert_not_called()
+        assert not output_jsonl_fpath.with_suffix(".jsonl.upload.tmp").exists()
 
     async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -2077,6 +2135,52 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
+    async def test_run_from_config_dispatch_setup_failure_closes_artifacts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + "\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        failures_fpath = _failures_path_for(output_fpath)
+        upload_spool_fpath = output_fpath.with_suffix(".jsonl.upload.tmp")
+        tracked_paths = {output_fpath, failures_fpath, upload_spool_fpath}
+        opened_files = []
+        original_open = Path.open
+
+        def tracked_open(path: Path, *args, **kwargs):
+            file = original_open(path, *args, **kwargs)
+            if path in tracked_paths:
+                opened_files.append(file)
+            return file
+
+        monkeypatch.setattr(Path, "open", tracked_open)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, *args, **kwargs):
+                raise ValueError("dispatch validation failed")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            retain_results_in_memory=False,
+            upload_rollouts=True,
+            disable_aggregation=True,
+            disable_health_check=True,
+        )
+
+        with pytest.raises(ValueError, match="dispatch validation failed"):
+            await Helper().run_from_config(config)
+
+        assert len(opened_files) == 3
+        assert all(file.closed for file in opened_files)
+        assert not upload_spool_fpath.exists()
+
     async def test_run_from_config_processing_failure_cancels_bounded_resident_tasks(
         self,
         tmp_path: Path,
@@ -2393,6 +2497,58 @@ class TestRolloutCollection:
         assert [row["case"] for row in failure_rows] == ["failure"]
         assert b"no-persist" not in retaining_main
         assert b"no-persist" not in retaining_failures
+
+    async def test_run_from_config_non_retaining_runs_aggregation_and_health(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        import nemo_gym.rollout_health
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + "\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        aggregated = {}
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=examples[0],
+                        result={"reward": 1.0, "case": "success"},
+                        rollout_latency_ms=None,
+                    )
+                )
+                return [future]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                aggregated["results"] = results
+                aggregated["rows"] = rows
+                return None
+
+        health_result = object()
+        run_health_checks = MagicMock(return_value=health_result)
+        format_health_report = MagicMock(return_value="health checks passed")
+        monkeypatch.setattr(nemo_gym.rollout_health, "run_health_checks", run_health_checks)
+        monkeypatch.setattr(nemo_gym.rollout_health, "format_health_report", format_health_report)
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            retain_results_in_memory=False,
+        )
+
+        returned = await Helper().run_from_config(config)
+
+        assert returned == []
+        assert [result["case"] for result in aggregated["results"]] == ["success"]
+        assert aggregated["rows"] == aggregated["results"]
+        run_health_checks.assert_called_once_with(output_fpath, workers=None, ignored_checks=[])
+        format_health_report.assert_called_once_with(health_result)
 
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

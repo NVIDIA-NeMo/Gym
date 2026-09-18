@@ -176,5 +176,7 @@ sequenceDiagram
 The client first queries the Head Server to discover server addresses from the global config, then reads input JSONL and dispatches prompts to the Agent. Completed rollouts are written to output JSONL.
 
 **Concurrency behavior differs by use case:**
-- **Standalone rollout collection** (`gym eval run --no-serve`): A semaphore gates concurrency via `num_samples_in_parallel` to control load.
+- **Standalone rollout collection** (`gym eval run --no-serve`): `num_samples_in_parallel` limits active requests. The independent `max_resident_rollout_tasks` setting limits how many rollout tasks the driver admits at once; when unset, the driver admits the complete workload as before.
 - **Training framework integration** (e.g., NeMo RL): All requests are sent without gating; the training framework manages concurrency externally.
+
+For artifact-oriented standalone runs, `retain_results_in_memory=false` writes each completion without keeping the complete return list, and `run_from_config()` returns an empty list. This bounds completed-result residency during collection, but aggregation and rollout upload can still load all applicable records. Set `disable_aggregation=true` and aggregate later when the collection process must avoid that final reload; fully streaming aggregation and upload require separate streaming interfaces.

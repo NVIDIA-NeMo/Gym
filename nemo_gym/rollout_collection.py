@@ -22,7 +22,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
@@ -589,7 +589,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         default=True,
         description=(
             "Retain completed rollout rows and results in driver memory and return the full ordered result list. "
-            "When false, completed results are persisted incrementally and run_from_config returns an empty list."
+            "When false, completed results are not retained during collection, are persisted incrementally, and "
+            "run_from_config returns an empty list. Aggregation and upload may still load all applicable results."
         ),
     )
     responses_create_params: Dict[str, Any] = Field(
@@ -1003,33 +1004,32 @@ class _BoundedCompletionIterator:
             pass
 
     async def _next_completed(self):
-        try:
-            async with self._lock:
-                if self._closed:
-                    raise asyncio.CancelledError
+        async with self._lock:
+            if self._closed:
+                raise asyncio.CancelledError
 
-                if not self._started:
-                    self._started = True
-                    self._fill()
-
-                if not self._ready:
-                    if not self._pending:
-                        raise RuntimeError("rollout completion iterator exhausted unexpectedly")
-
-                    done, self._pending = await asyncio.wait(
-                        self._pending,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    self._ready.extend(done)
-
-                task = self._ready.pop()
+            if not self._started:
+                self._started = True
                 self._fill()
-                self._progress.update(1)
 
-            return await task
-        except BaseException:
-            await self.aclose()
-            raise
+            if not self._ready:
+                if not self._pending:
+                    raise RuntimeError("rollout completion iterator exhausted unexpectedly")
+
+                done, self._pending = await asyncio.wait(
+                    self._pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                self._ready.extend(done)
+
+            task = self._ready.pop()
+            self._fill()
+            self._progress.update(1)
+
+        # The collection owner closes the iterator and cancels resident work.
+        # Direct callers retain asyncio.as_completed semantics: one failed
+        # completion does not implicitly cancel unrelated completions.
+        return await task
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -1470,9 +1470,6 @@ class RolloutCollectionHelper(BaseModel):
         token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
         if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
             token_source = installed_token_source()
-            if token_source is None and token_capture_dirs:
-                token_source = TokenCaptureStore(token_capture_dirs[0])
-                owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
@@ -1484,7 +1481,12 @@ class RolloutCollectionHelper(BaseModel):
             for row in input_rows
             if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
         ]
-        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+        if (
+            token_capture_config.token_id_capture.rebuild_response
+            and token_capture_rows
+            and token_source is None
+            and not token_capture_dirs
+        ):
             raise ValueError(
                 "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
                 "Call install_token_source before starting collection or configure token_id_capture.dir."
@@ -1516,18 +1518,11 @@ class RolloutCollectionHelper(BaseModel):
                 flush=True,
             )
 
-        results_file = output_fpath.open("ab")
-        failures_file = failures_fpath.open("ab")
         exporters_enabled = bool(get_exporters())
         upload_spool_fpath = output_fpath.with_suffix(output_fpath.suffix + ".upload.tmp")
+        resource_stack = ExitStack()
+        completion_iterator = None
         upload_spool = None
-        if not config.retain_results_in_memory and config.upload_rollouts and exporters_enabled:
-            upload_spool = upload_spool_fpath.open("w+b")
-            if config.resume_from_cache and output_fpath.exists():
-                with output_fpath.open("rb") as existing_results:
-                    for line in existing_results:
-                        if line.strip():
-                            upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + bytes([10]))
         failure_counts: Counter = Counter()
         completed_count = 0
         if config.retain_results_in_memory:
@@ -1537,13 +1532,32 @@ class RolloutCollectionHelper(BaseModel):
                 sum(1 for line in output_fpath.open("rb") if line.strip()) if output_fpath.exists() else 0
             )
 
-        completion_iterator = self._run_examples_with_metadata(
-            input_rows,
-            semaphore=semaphore,
-            route_failures_to_sidecar=config.route_failures_to_sidecar,
-            max_resident_tasks=config.max_resident_rollout_tasks,
-        )
         try:
+            if (
+                token_source is None
+                and token_capture_dirs
+                and token_capture_config.enabled
+                and token_capture_config.token_id_capture.rebuild_response
+            ):
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+                owned_token_source = token_source
+
+            results_file = resource_stack.enter_context(output_fpath.open("ab"))
+            failures_file = resource_stack.enter_context(failures_fpath.open("ab"))
+            if not config.retain_results_in_memory and config.upload_rollouts and exporters_enabled:
+                upload_spool = resource_stack.enter_context(upload_spool_fpath.open("w+b"))
+                if config.resume_from_cache and output_fpath.exists():
+                    with output_fpath.open("rb") as existing_results:
+                        for line in existing_results:
+                            if line.strip():
+                                upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + bytes([10]))
+
+            completion_iterator = self._run_examples_with_metadata(
+                input_rows,
+                semaphore=semaphore,
+                route_failures_to_sidecar=config.route_failures_to_sidecar,
+                max_resident_tasks=config.max_resident_rollout_tasks,
+            )
             for future in completion_iterator:
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
@@ -1728,25 +1742,24 @@ class RolloutCollectionHelper(BaseModel):
 
                         export_metrics(step_metrics, step=int(current_pct))
 
+            if input_rows and persisted_count == 0:
+                raise RuntimeError(
+                    f"None of the {len(input_rows)} dispatched rollouts produced a result "
+                    f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
+                )
         finally:
-            if isinstance(completion_iterator, _BoundedCompletionIterator):
-                await completion_iterator.aclose()
-            results_file.close()
-            failures_file.close()
-            if upload_spool is not None and sys.exc_info()[0] is not None:
-                upload_spool.close()
-                upload_spool_fpath.unlink(missing_ok=True)
-            if owned_token_source is not None:
-                await owned_token_source.close()
-
-        if input_rows and persisted_count == 0:
-            raise RuntimeError(
-                f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
-            )
-        if not config.retain_results_in_memory and not config.disable_aggregation:
-            # Aggregation consumes only successful rows from the main artifact.
-            persisted_results = _read_jsonl(output_fpath)
+            failed = sys.exc_info()[0] is not None
+            try:
+                if isinstance(completion_iterator, _BoundedCompletionIterator):
+                    await completion_iterator.aclose()
+            finally:
+                try:
+                    resource_stack.close()
+                finally:
+                    if upload_spool is not None and failed:
+                        upload_spool_fpath.unlink(missing_ok=True)
+                    if owned_token_source is not None:
+                        await owned_token_source.close()
 
         if config.upload_rollouts and exporters_enabled:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
@@ -1756,12 +1769,15 @@ class RolloutCollectionHelper(BaseModel):
             else:
                 assert upload_spool is not None
                 try:
-                    upload_spool.seek(0)
-                    upload_results = [orjson.loads(line) for line in upload_spool if line.strip()]
+                    with upload_spool_fpath.open("rb") as upload_spool_reader:
+                        upload_results = [orjson.loads(line) for line in upload_spool_reader if line.strip()]
                     export_rollouts(upload_results)
                 finally:
-                    upload_spool.close()
                     upload_spool_fpath.unlink(missing_ok=True)
+
+        if not config.retain_results_in_memory and not config.disable_aggregation:
+            # Aggregation consumes only successful rows from the main artifact.
+            persisted_results = _read_jsonl(output_fpath)
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
