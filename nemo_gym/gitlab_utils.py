@@ -51,7 +51,7 @@ def create_mlflow_client() -> MlflowClient:  # pragma: no cover
 
 def _is_registry_404(error: RestException) -> bool:
     # GitLab may wrap its HTTP 404 in MLflow's INTERNAL_ERROR code.
-    message = error.json.get("message")
+    message = error.json.get("message", error.json.get("error"))
     return error.get_http_status_code() == 404 or (
         error.error_code == "INTERNAL_ERROR" and isinstance(message, str) and message.strip() == "404 Not Found"
     )

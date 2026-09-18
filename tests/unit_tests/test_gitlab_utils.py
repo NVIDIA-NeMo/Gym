@@ -54,6 +54,7 @@ class TestGetModelVersion:
             {"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "Not found"},
             {"error_code": "404", "message": "Not found"},
             {"error_code": "INTERNAL_ERROR", "message": " 404 Not Found "},
+            {"error": "404 Not Found"},
         ],
     )
     def test_404_adds_context_without_claiming_a_single_cause_or_leaking_credentials(
