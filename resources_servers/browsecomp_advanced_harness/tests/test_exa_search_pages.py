@@ -21,15 +21,18 @@ written. Checked across 1,239 exa search outputs in a control run, ZERO contain
 '[Saved to]'. The workspace affordance covered `browse` only, and bash_command was
 called 3x less often than search with 4.0% of its calls hitting 'No such file'.
 
-exa_search_writes_pages (default False) closes that gap: exa search asks for full text
-alongside highlights, writes each result to pages/, and returns the same
+exa_search_writes_pages closes that gap: exa search asks for full text alongside
+highlights, writes each result to pages/, and returns the same
 title/url/snippet/[Saved to] shape the tavily disk path already returns.
 
-Default stays False because turning it on changes what the provider is asked for on
-every query. MEASURED 2026-09-02 against the live exa API: the change is NOT a dollar
-cost — costDollars is {"total": 0.007, "search": {"neural": 0.007}} with and without
-text, since exa bills per query, not per result. What it costs is response size and
-latency: ~243k characters per 10-result query versus ~19k for highlights alone.
+It defaults to True so the prompt and the harness agree out of the box. It was
+introduced defaulting to False, which left every exa run shipping a prompt the harness
+did not honour, and a run had to know to opt in. MEASURED 2026-09-02 against the live
+exa API: asking for text is NOT a dollar cost — costDollars is
+{"total": 0.007, "search": {"neural": 0.007}} with and without text, since exa bills
+per query, not per result. What it costs is response size and latency: ~243k characters
+per 10-result query versus ~19k for highlights alone. Set it to False to get the
+smaller response back.
 """
 
 import os
@@ -82,11 +85,41 @@ class TestExaSearchPages:
         m.session = {SESSION_ID_KEY: "test_session_id"}
         return m
 
-    # ---- default is unchanged: inline highlights, no pages ----
+    # ---- default: pages are written, so the prompt's promise holds ----
 
-    async def test_default_still_inline_and_writes_no_pages(self, req: MagicMock, tmp_path) -> None:
+    async def test_default_writes_pages(self, req: MagicMock, tmp_path) -> None:
+        """The prompt promises search results are saved to pages/.
+
+        The default has to make that true. Otherwise every exa run ships a prompt
+        that lies, and the workspace affordance covers `browse` only.
+        """
         server = self._server(ws_root=str(tmp_path))
-        assert server.config.exa_search_writes_pages is False
+        assert server.config.exa_search_writes_pages is True
+        mock = MagicMock()
+        mock.search = AsyncMock(return_value={"results": [_result("a", text="FULL TEXT")]})
+        server._exa_clients = [mock]
+
+        resp = await server.search(req, TavilySearchRequest(queries=["q"]))
+
+        assert "[Saved to]" in resp.results_string
+        assert list(tmp_path.rglob("*_search_*.txt"))
+
+    async def test_default_requests_text_from_the_provider(self, req: MagicMock, tmp_path) -> None:
+        """Full text is what gets written to pages/, so the default must ask for it."""
+        server = self._server(ws_root=str(tmp_path))
+        mock = MagicMock()
+        mock.search = AsyncMock(return_value={"results": [_result("a")]})
+        server._exa_clients = [mock]
+
+        await server.search(req, TavilySearchRequest(queries=["q"]))
+
+        _, kwargs = mock.search.call_args
+        assert kwargs.get("include_text")
+
+    # ---- opt-out: highlights stay inline, nothing written ----
+
+    async def test_opt_out_is_inline_and_writes_no_pages(self, req: MagicMock, tmp_path) -> None:
+        server = self._server(ws_root=str(tmp_path), exa_search_writes_pages=False)
         mock = MagicMock()
         mock.search = AsyncMock(return_value={"results": [_result("a", text="FULL TEXT")]})
         server._exa_clients = [mock]
@@ -96,9 +129,9 @@ class TestExaSearchPages:
         assert "[Saved to]" not in resp.results_string
         assert not list(tmp_path.rglob("*_search_*.txt"))
 
-    async def test_default_does_not_request_text_from_the_provider(self, req: MagicMock, tmp_path) -> None:
-        """Asking for text multiplies response size ~13x on every query; keep it opt-in."""
-        server = self._server(ws_root=str(tmp_path))
+    async def test_opt_out_does_not_request_text_from_the_provider(self, req: MagicMock, tmp_path) -> None:
+        """Opting out keeps the ~13x smaller response for a run that does not want pages."""
+        server = self._server(ws_root=str(tmp_path), exa_search_writes_pages=False)
         mock = MagicMock()
         mock.search = AsyncMock(return_value={"results": [_result("a")]})
         server._exa_clients = [mock]
