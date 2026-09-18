@@ -425,11 +425,14 @@ def runner_config(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("route_failures", [False, True])
 @pytest.mark.parametrize("append", [False, True])
+@pytest.mark.parametrize("answer", ["42", ""])
 async def test_collected_judge_failure_can_be_reverified_without_inference(
-    runner_config, monkeypatch, route_failures, append
+    runner_config, monkeypatch, route_failures, append, answer
 ):
+    from nemo_gym.rollout_health import run_health_checks
+
     runner_config.route_failures_to_sidecar = route_failures
-    generated_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}]}
+    generated_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": answer}]}]}
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -445,6 +448,21 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
                     "failure_reason": "Judge unavailable",
                     "reward": 0.0,
                     "response": generated_response,
+                    "ng_trajectory": {
+                        "task_id": "1",
+                        "rollout_id": "1-0",
+                        "turns": [
+                            {
+                                "invocation_id": "agent",
+                                "task_id": "1",
+                                "rollout_id": "1-0",
+                                "turn_no": 1,
+                                "timestamp": 1.0,
+                                "step_count": 1,
+                                "answer": answer,
+                            }
+                        ],
+                    },
                 },
             )
         if row["task"] == 2:
@@ -504,6 +522,72 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
         with pytest.warns(UserWarning, match="without a saved response"):
             assert await reverification.RolloutReverificationHelper().run_from_config(config) == returned
         assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/verify") == 1
+
+    # Successful judging must not erase the generation evidence used by health.
+    health_before = run_health_checks(
+        collection.failures_path_for(output), workers=1, output_dir=output.parent / "before"
+    ).summary["run"]
+    health_after = run_health_checks(
+        Path(config.output_jsonl_fpath), workers=1, output_dir=output.parent / "after"
+    ).summary["run"]
+    assert health_before["artifacts"]["coverage"]["agent_turn_hollow"]["evaluated"] == 1
+    assert health_before["issues"]["agent_turn_hollow"] == int(not answer)
+    assert health_after["issues"]["agent_turn_hollow"] == health_before["issues"]["agent_turn_hollow"]
+    assert health_after["artifacts"]["coverage"]["agent_turn_hollow"]["evaluated"] == 1
+    assert by_task[1]["ng_trajectory"] == failures[1]["ng_trajectory"]
+
+
+@pytest.mark.parametrize("retry_failure", [False, True])
+async def test_resume_preserves_health_and_isolates_failed_attempt(runner_config, monkeypatch, retry_failure):
+    from nemo_gym.rollout_health import run_health_checks
+    from tests.unit_tests.test_rollout_health import _record
+
+    runner_config.disable_aggregation = runner_config.disable_health_check = False
+    runner_config.health_check_workers = 1
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", list)
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        first = row.get("_ng_attempt_index", 0) == 0
+        result = _record(row["_ng_task_index"], 0, answer="" if row["task"] == 1 and first else "ok", refs=[])
+        result["reward"] = 1.0
+        if retry_failure and row["task"] == 1 and first:
+            result["_ng_failure_class"] = "agent_run_error"
+        return FakeResponse(200, result)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    helper = RolloutCollectionHelper()
+    await helper.run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    before = output.read_bytes()
+    original_report = json.loads((output.parent / "quality_summary.json").read_bytes())["run"]
+    runner_config.resume_from_cache = True
+    await helper.run_from_config(runner_config)
+    assert client.post.await_count == 3 + int(retry_failure)
+    assert output.read_bytes().startswith(before)
+    if not retry_failure:
+        assert output.read_bytes() == before
+    expected = json.loads((output.parent / "quality_summary.json").read_bytes())["run"]
+    assert expected["artifacts"]["records"] == 3
+    assert expected["issues"]["rollout_duplicate_identity"] == 0
+    assert expected["issues"]["agent_turn_hollow"] == int(not retry_failure)
+    if not retry_failure:
+        assert expected == original_report
+    else:
+        failed = run_health_checks(
+            collection.failures_path_for(output), workers=1, output_dir=output.parent / "failed"
+        )
+        assert failed.summary["run"]["issues"]["agent_turn_hollow"] == 1
+    for merge in (False, True):
+        target = output.parent / f"aggregate-{merge}" / "rollouts.jsonl"
+        await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(
+                input_glob=str(output), output_jsonl_fpath=str(target), merge_shards=merge, health_check_workers=1
+            )
+        )
+        assert json.loads((target.parent / "quality_summary.json").read_bytes())["run"] == expected
+    assert run_health_checks(output, workers=1, output_dir=output.parent / "standalone").summary["run"] == expected
 
 
 async def test_runner_accepts_nested_hydra_overrides_and_unused_unresolved_server(runner_config, monkeypatch):
