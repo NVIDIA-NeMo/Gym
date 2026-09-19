@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      enabled_toolsets: [terminal]
+      terminal_backend: local

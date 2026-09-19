@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/hermes_agent/configs/borrowed_sandbox.yaml
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      # Standard OpenAI-compatible endpoints may reject provider-specific chat-template kwargs.
+      chat_template_kwargs_enabled: false
