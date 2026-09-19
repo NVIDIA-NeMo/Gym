@@ -198,7 +198,11 @@ class _DockerContainer:
 
 
 class _DockerProcessSession:
-    """One pipe-mode ``docker exec -i`` process session."""
+    """One pipe-mode ``docker exec -i`` process session.
+
+    Stream EOF only means the local Docker exec pipes are drained; callers must
+    inspect ``wait_exit()`` to distinguish successful and nonzero exits.
+    """
 
     mode: str | None = "pipe"
 
