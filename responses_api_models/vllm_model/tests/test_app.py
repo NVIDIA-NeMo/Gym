@@ -163,6 +163,7 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
                     staging_keys=("prefix-1",),
                     prefix_token_count=5,
                     prefix_digest="a" * 64,
+                    effective_output_limit=128,
                 )
                 for prefix in worker_inventory.active_prefixes
             ),
@@ -269,6 +270,7 @@ async def test_generation_cut_contacts_owning_workers_concurrently(
                     staging_keys=(f"prefix-{prefix.ticket_id}",),
                     prefix_token_count=5,
                     prefix_digest="a" * 64,
+                    effective_output_limit=128,
                 )
                 for prefix in worker_inventory.active_prefixes
             ),
@@ -469,6 +471,7 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
                 ),
                 prefix_token_count=2,
                 prefix_digest="a" * 64,
+                effective_output_limit=128,
             ),
         ),
     )
@@ -498,9 +501,12 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
                 "__generation_cut__/checkpoint-0/rollout-1/old-call",
                 "__generation_cut__/checkpoint-1/rollout-1/old-call",
             ],
-            "generation_token_count": 2,
-            "digest": "a" * 64,
-        }
+                "generation_token_count": 2,
+                "digest": "a" * 64,
+                "effective_output_limit": 128,
+                "terminal_finish_reason": None,
+                "terminal_stop_reason": None,
+            }
         context.attempt_index = 2
         assert model._generation_cut_for_context() == receipt.prefixes[0]
         context.attempt_index = 1
