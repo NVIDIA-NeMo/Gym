@@ -31,6 +31,12 @@ The custom policy imports `read_text` from `nemo_gym.verifiers.files`, then adds
 
 Use an environment-level verifier only when the tasks are genuinely uniform.
 
+## Why task directories?
+
+The tasks use directories because each one owns different instructions and verifier policy. A directory can also hold task-specific fixtures, repositories, tests, or other assets while remaining reviewable as one self-contained task.
+
+Use JSONL instead when many tasks share the same structure and differ only in data values. [Hello Taskset](../hello_taskset/README.md) demonstrates that data-authored form.
+
 ## Related examples
 
 - [Hello World](../hello_world/README.md) — Create the smallest single-task environment.
