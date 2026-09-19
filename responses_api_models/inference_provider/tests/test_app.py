@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
@@ -104,6 +107,39 @@ class TestSanity:
 
 
 class TestInferenceProvider:
+    @pytest.mark.parametrize("requested_tier", [None, "priority"])
+    async def test_doubleword_flex_config_through_responses(self, requested_tier: str | None) -> None:
+        config_path = Path(__file__).parents[1] / "configs" / "doubleword.yaml"
+        config = OmegaConf.load(config_path)
+        config.policy_api_key = "test-key"  # pragma: allowlist secret
+        config.policy_model_name = "test-model"
+        provider_config = OmegaConf.to_container(
+            config.policy_model.responses_api_models.inference_provider, resolve=True
+        )
+        server = _make_server(**provider_config)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            return_value=_mock_chat_response(content="<think>Six times seven.</think>42")
+        )
+
+        body = {"input": "What is six times seven?", "max_output_tokens": 128}
+        if requested_tier is not None:
+            body["service_tier"] = requested_tier
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/v1/responses", json=body)
+
+        assert response.status_code == 200
+        sent = server._client.create_chat_completion.call_args.kwargs
+        assert sent["service_tier"] == (requested_tier or "flex")
+        assert sent["model"] == "test-model"
+        assert sent["max_tokens"] == 128
+        assert sent["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": "What is six times seven?"}]}
+        ]
+        output = response.json()["output"]
+        assert output[0]["type"] == "reasoning"
+        assert output[1]["content"][0]["text"] == "42"
+
     async def test_basic_chat_completion(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
