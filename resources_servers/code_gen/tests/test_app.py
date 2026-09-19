@@ -34,6 +34,10 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 
+def test_checkpoint_recovery_mode_is_stateless() -> None:
+    assert CompCodingResourcesServerConfig.CHECKPOINT_RECOVERY_MODE == "stateless"
+
+
 class TestApp:
     @pytest.fixture(scope="module")
     def code_gen_resources_server_client(self) -> Generator[TestClient, None, None]:
