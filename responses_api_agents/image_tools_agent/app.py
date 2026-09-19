@@ -390,7 +390,11 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         aux_reward = float(rollout_info["image_tools_aux_reward"])
         verify_response_json["base_reward"] = base_reward
         verify_response_json["image_tools_aux_reward"] = aux_reward
-        verify_response_json["reward"] = base_reward + aux_reward
+        # Total reward is capped at 1.0 so a rollout can never score above a
+        # correct answer by spending tool calls: using tools and not using tools
+        # share the same 1.0 ceiling. aux_reward therefore only differentiates
+        # rollouts whose answer was wrong (base_reward = 0).
+        verify_response_json["reward"] = min(1.0, base_reward + aux_reward)
         verify_response_json["image_tools_base_agent_ref"] = body.image_tools_base_agent_ref
         verify_response_json.update(rollout_info)
         verify_response_json["response"] = model_response.model_dump()
