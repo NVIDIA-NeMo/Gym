@@ -598,8 +598,8 @@ class TestPrepareBenchmark:
 
 
 class TestBenchmarkAgentResolution:
-    """Pins how a benchmark finds its agent (dataset-decoupling): explicit `agent:` pin >
-    declaring agent block > unique agent referencing the declaring resources server."""
+    """Pins how a benchmark finds its agent (dataset-decoupling): the declaring agent block, else
+    the unique agent referencing the declaring resources server. There is no per-dataset override."""
 
     def _benchmark_dataset(self, **extra):
         return {
@@ -624,34 +624,10 @@ class TestBenchmarkAgentResolution:
             path=Path("bench/config.yaml"), initial_config_dict=OmegaConf.create(top_level), strict=False
         )
 
-    def test_declaring_agent_block_still_wins_without_pin(self) -> None:
+    def test_declaring_agent_block_wins(self) -> None:
         cfg = self._config(
             my_agent={
                 "responses_api_agents": {"impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset()]}}
-            }
-        )
-        assert cfg.agent_name == "my_agent"
-
-    def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
-        """Dispatch routes rows to the declaring agent, so a pin elsewhere would silently not apply."""
-        from nemo_gym.config_types import ConfigError
-
-        with pytest.raises(ConfigError, match="the pin would silently not apply"):
-            self._config(
-                my_agent={
-                    "responses_api_agents": {
-                        "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="other_agent")]}
-                    }
-                },
-                other_agent={"responses_api_agents": {"impl": {"entrypoint": "app.py"}}},
-            )
-
-    def test_redundant_agent_pin_naming_the_declarer_is_allowed(self) -> None:
-        cfg = self._config(
-            my_agent={
-                "responses_api_agents": {
-                    "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="my_agent")]}
-                }
             }
         )
         assert cfg.agent_name == "my_agent"
@@ -667,10 +643,12 @@ class TestBenchmarkAgentResolution:
         )
         assert cfg.agent_name == "my_agent"
 
-    def test_rs_declared_dataset_with_two_agents_requires_pin(self) -> None:
+    def test_rs_declared_dataset_with_two_agents_is_an_error(self) -> None:
+        """Two harnesses on one verifier: the config must choose (agent_map / fan_out / declare on the
+        agent). Nothing on the dataset entry can pick one."""
         from nemo_gym.config_types import ConfigError
 
-        with pytest.raises(ConfigError, match="Pin the harness with an `agent:` key"):
+        with pytest.raises(ConfigError, match=r"2 agents reference this resources server.*no single harness"):
             self._config(
                 my_rs={
                     "resources_servers": {
@@ -681,65 +659,12 @@ class TestBenchmarkAgentResolution:
                 agent_b=self._agent("my_rs"),
             )
 
-    def test_rs_declared_dataset_with_pin_needs_no_inversion(self) -> None:
-        cfg = self._config(
-            my_rs={
-                "resources_servers": {
-                    "impl": {
-                        "entrypoint": "app.py",
-                        "domain": "other",
-                        "datasets": [self._benchmark_dataset(agent="agent_b")],
-                    }
-                }
-            },
-            agent_a=self._agent("my_rs"),
-            agent_b=self._agent("my_rs"),
-        )
-        assert cfg.agent_name == "agent_b"
 
-    def test_rs_declared_pin_must_reference_the_declaring_rs(self) -> None:
-        """A pin naming an agent wired to a different RS would list one agent and run another."""
-        from nemo_gym.config_types import ConfigError
+class TestDiscoveryCollateRolloutAgree:
+    """The agent discovery resolves for a benchmark is the agent rollout dispatch routes its
+    collated rows to — one resolver, so the listing and the run can never disagree."""
 
-        with pytest.raises(ConfigError, match="no agent of that name references resources server 'my_rs'"):
-            self._config(
-                my_rs={
-                    "resources_servers": {
-                        "impl": {
-                            "entrypoint": "app.py",
-                            "domain": "other",
-                            "datasets": [self._benchmark_dataset(agent="agent_b")],
-                        }
-                    }
-                },
-                some_other_rs={"resources_servers": {"impl": {"entrypoint": "app.py", "domain": "other"}}},
-                agent_a=self._agent("my_rs"),
-                agent_b=self._agent("some_other_rs"),
-            )
-
-    def test_rs_declared_pin_naming_unknown_agent_errors(self) -> None:
-        from nemo_gym.config_types import ConfigError
-
-        with pytest.raises(ConfigError, match="pins agent 'ghost'"):
-            self._config(
-                my_rs={
-                    "resources_servers": {
-                        "impl": {
-                            "entrypoint": "app.py",
-                            "domain": "other",
-                            "datasets": [self._benchmark_dataset(agent="ghost")],
-                        }
-                    }
-                },
-                agent_a=self._agent("my_rs"),
-            )
-
-
-class TestAgentPinDiscoveryCollateRollout:
-    """The agent discovery resolves for a pinned benchmark is the agent rollout dispatch routes
-    its collated rows to (previously the pin was honored at discovery only)."""
-
-    def test_pin_survives_discovery_collate_and_rollout(self, tmp_path: Path, monkeypatch) -> None:
+    def test_resolution_survives_discovery_collate_and_rollout(self, tmp_path: Path, monkeypatch) -> None:
         import json
 
         from nemo_gym.benchmarks import BenchmarkConfig
@@ -750,7 +675,7 @@ class TestAgentPinDiscoveryCollateRollout:
         data_fpath = tmp_path / "bench.jsonl"
         data_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
         config = {
-            "shared_rs": {
+            "my_rs": {
                 "resources_servers": {
                     "impl": {
                         "entrypoint": "app.py",
@@ -761,48 +686,104 @@ class TestAgentPinDiscoveryCollateRollout:
                                 "type": "benchmark",
                                 "jsonl_fpath": str(data_fpath),
                                 "prepare_script": "prepare.py",
-                                "agent": "agent_b",
                             }
                         ],
                     }
                 }
             },
-            "agent_a": {
+            "my_agent": {
                 "responses_api_agents": {
                     "impl": {
                         "entrypoint": "app.py",
-                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
-                    }
-                }
-            },
-            "agent_b": {
-                "responses_api_agents": {
-                    "impl": {
-                        "entrypoint": "app.py",
-                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
+                        "resources_server": {"type": "resources_servers", "name": "my_rs"},
                     }
                 }
             },
         }
         config_dict = OmegaConf.create(config)
 
-        # 1. Discovery: two agents reference shared_rs; the pin picks agent_b.
+        # 1. Discovery: the unique agent referencing my_rs.
         bc = BenchmarkConfig.from_initial_config_dict(
             path=Path("bench/config.yaml"), initial_config_dict=config_dict, strict=False
         )
-        assert bc.agent_name == "agent_b"
+        assert bc.agent_name == "my_agent"
 
-        # 2. Collate (real stamping): rows carry only task_source, never the pin or an agent_ref.
-        rs_instance, err = maybe_get_server_instance_config("shared_rs", config_dict["shared_rs"])
+        # 2. Collate (real stamping): rows carry only task_source, never an agent name.
+        rs_instance, err = maybe_get_server_instance_config("my_rs", config_dict["my_rs"])
         assert err is None, err
         monkeypatch.chdir(tmp_path)
         paths = TrainDataProcessor()._collate_samples_single_type(
             type="benchmark", server_instance_configs=[rs_instance]
         )
         rows = [json.loads(line) for line in open(paths[0])]
-        assert rows[0]["task_source"] == "shared_rs"
+        assert rows[0]["task_source"] == "my_rs"
         assert "agent_ref" not in rows[0]
 
-        # 3. Rollout dispatch: resolution reads the pin back off the declaring instance.
+        # 3. Rollout dispatch resolves the same agent from the declaring instance.
         RolloutCollectionHelper.resolve_task_sources(rows, config_dict)
         assert rows[0]["agent_ref"] == {"name": bc.agent_name}
+
+
+class TestDatasetEntriesTakeNoAgentKey:
+    """The dataset-level `agent:` key was removed (review on #2724): a leftover one fails config load
+    with a pointer to the supported ways of choosing a harness, instead of being silently ignored."""
+
+    def test_benchmark_dataset_rejects_agent_key(self) -> None:
+        from pydantic import ValidationError
+
+        from nemo_gym.config_types import BenchmarkDatasetConfig
+
+        with pytest.raises(ValidationError, match=r"do not take an `agent:` key.*fan_out.*agent_map"):
+            BenchmarkDatasetConfig(
+                name="bench", type="benchmark", jsonl_fpath="d.jsonl", prepare_script="p.py", agent="agent_b"
+            )
+
+    def test_dataset_rejects_agent_key(self) -> None:
+        from pydantic import ValidationError
+
+        from nemo_gym.config_types import DatasetConfig
+
+        with pytest.raises(ValidationError, match=r"do not take an `agent:` key"):
+            DatasetConfig(name="example", type="example", jsonl_fpath="d.jsonl", agent="agent_b")
+
+    def test_agent_key_fails_benchmark_discovery(self, capsys) -> None:
+        """Through the real path: the config loader flags the declaring server as malformed and stops,
+        with the reason on stderr, so `gym eval` never starts with a key it would not honor."""
+        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.config_types import AlmostServerError
+
+        with pytest.raises(AlmostServerError):
+            BenchmarkConfig.from_initial_config_dict(
+                path=Path("bench/config.yaml"),
+                initial_config_dict=OmegaConf.create(
+                    {
+                        "my_rs": {
+                            "resources_servers": {
+                                "impl": {
+                                    "entrypoint": "app.py",
+                                    "domain": "other",
+                                    "datasets": [
+                                        {
+                                            "name": "bench",
+                                            "type": "benchmark",
+                                            "jsonl_fpath": "d.jsonl",
+                                            "prepare_script": "p.py",
+                                            "agent": "my_agent",
+                                        }
+                                    ],
+                                }
+                            }
+                        },
+                        "my_agent": {
+                            "responses_api_agents": {
+                                "impl": {
+                                    "entrypoint": "app.py",
+                                    "resources_server": {"type": "resources_servers", "name": "my_rs"},
+                                }
+                            }
+                        },
+                    }
+                ),
+                strict=False,
+            )
+        assert "do not take an `agent:` key" in capsys.readouterr().err
