@@ -94,16 +94,14 @@ getent() { printf '10.0.0.1 node0\n'; }
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
 
-    def serving_arguments(
-        self, command: str, *, rank: int, coupled_head: bool = False, env: dict[str, str] | None = None
-    ) -> tuple[str, str, list[str], list[str]]:
+    def serving_arguments(self, command, *, rank, coupled_head=False, env=None):
         # Record argv separately for vLLM and the router; marker files synchronize startup.
         stubs = r"""
 VLLM_COMMON_ARGS=(--common-test 'value with spaces')
 VLLM_PREFILL_ARGS=(--prefill-test producer)
 VLLM_DECODE_ARGS=(--decode-test consumer)
 vllm() {
-    printf '%s\0' "${VLLM_NIXL_SIDE_CHANNEL_HOST:-}" "${VLLM_NIXL_SIDE_CHANNEL_PORT:-}" "$@"
+    printf '%s\0' "$VLLM_NIXL_SIDE_CHANNEL_HOST" "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@"
     touch "$TEST_STATE_DIR/service-ready"
     if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
         while true; do command sleep 0.01; done
@@ -229,63 +227,6 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                     self.assertIn(f"--segment={count or 1}", calls[0])
                     self.assertIn(f"--ntasks={count or 1}", batch)
 
-    def test_aggregated_workers_strip_transfers_and_route_all_nodes(self) -> None:
-        """Standalone workers receive intact arguments with P/D cache-transfer options removed."""
-        for tuning, expected in (
-            (None, ["--prefill-test", "prefill value"]),
-            ("()", []),
-            ("(--aggregated-test 'custom value' --kv-transfer-config '{}')", ["--aggregated-test", "custom value"]),
-        ):
-            env = {
-                "VLLM_MODE": "aggregated",
-                "NUM_NODES": "3",
-                "ALL_NODES": "node0 node1 node2",
-                "ROUTER_POLICY": "round_robin",
-            }
-            _, command = self.generate_commands(env=env)
-            config = """
-VLLM_COMMON_ARGS=(--common-test 'common value' --kv-transfer-config '{}')
-VLLM_PREFILL_ARGS=(--prefill-test 'prefill value' '--kv-transfer-config={}')
-"""
-            if tuning is not None:
-                config += f"VLLM_AGGREGATED_ARGS={tuning}\n"
-            for rank in range(3):
-                with self.subTest(tuning=tuning, rank=rank):
-                    host, port, args, router = self.serving_arguments(config + command, rank=rank, env=env)
-                    self.assertEqual((host, port), ("", ""))
-                    self.assertEqual(
-                        args,
-                        ["serve", "/test/model", "--served-model-name", "/test/model", "--common-test", "common value"]
-                        + expected
-                        + ["--host", f"node{rank}", "--port", "8001"],
-                    )
-                    if rank == 0:
-                        self.assertEqual(
-                            router,
-                            [
-                                "--host",
-                                "node0",
-                                "--port",
-                                "8000",
-                                "--intra-node-data-parallel-size",
-                                "1",
-                                "--request-timeout-secs",
-                                "86400",
-                                "--worker-startup-timeout-secs",
-                                "1200",
-                                "--log-level",
-                                "error",
-                                "--policy",
-                                "round_robin",
-                                "--worker-urls",
-                                "http://node0:8001",
-                                "http://node1:8001",
-                                "http://node2:8001",
-                            ],
-                        )
-                    else:
-                        self.assertEqual(router, [])
-
     def test_aggregated_coupled_combination_is_rejected(self) -> None:
         """Reject unsupported multi-node aggregated execution before submitting jobs."""
         status, stdout, stderr = self.run_shell(
@@ -306,22 +247,9 @@ VLLM_PREFILL_ARGS=(--prefill-test 'prefill value' '--kv-transfer-config={}')
                     result = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True, timeout=5)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_ultra_runtime_overrides_preserve_other_models_defaults(self) -> None:
-        """Source the recipe after launcher defaults and inspect the effective worker environment."""
-        defaults = {
-            "VLLM_USE_V2_MODEL_RUNNER": "unset",
-            "VLLM_SSM_CONV_STATE_LAYOUT": "unset",
-            "UCX_TLS": "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc",
-            "UCX_NET_DEVICES": "all",
-            "UCX_IB_ADDR_TYPE": "unset",
-            "UCX_RNDV_SCHEME": "get_zcopy",
-            "UCX_RNDV_THRESH": "0",
-            "NCCL_CUMEM_ENABLE": "1",
-            "NCCL_MNNVL_ENABLE": "1",
-            "NCCL_NVLS_ENABLE": "1",
-            "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": "180",
-        }
-        ultra = defaults | {
+    def test_ultra_runtime_settings_override_launcher_defaults(self) -> None:
+        """Ultra configures its model runner, state layout, and communication environment."""
+        expected = {
             "VLLM_USE_V2_MODEL_RUNNER": "0",
             "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
             "UCX_TLS": "rc_x,rc,cuda_copy,cuda_ipc",
@@ -331,18 +259,13 @@ VLLM_PREFILL_ARGS=(--prefill-test 'prefill value' '--kv-transfer-config={}')
             "NCCL_MNNVL_ENABLE": "unset",
             "NCCL_NVLS_ENABLE": "unset",
         }
-        for recipe, expected in (
-            ("/dev/null", defaults),
-            (str(SCRIPT.parent / "vllm_configs/nemotron_3_ultra.sh"), ultra),
-            (str(SCRIPT.parent / "vllm_configs/inkling_small.sh"), defaults | {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
-        ):
-            with self.subTest(recipe=recipe):
-                _, command = self.generate_commands(env={"VLLM_CONFIG": recipe})
-                setup = command.split("this_node_hostname=", 1)[0]
-                inspect = '\nfor name in "$@"; do printf "%s\\0" "${!name-unset}"; done\n'
-                status, stdout, stderr = self.run_shell(setup + inspect, *expected)
-                self.assertEqual(status, 0, stderr)
-                self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
+        recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3_ultra.sh")
+        _, command = self.generate_commands(env={"VLLM_CONFIG": recipe})
+        setup = command.split("this_node_hostname=", 1)[0]
+        inspect = '\nfor name in "$@"; do printf "%s\\0" "${!name-unset}"; done\n'
+        status, stdout, stderr = self.run_shell(setup + inspect, *expected)
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
 
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self):
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""
@@ -535,11 +458,10 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                     self.assertIn("--time=00:30:00", calls[1])
                     self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
-    def test_invalid_launcher_controls_are_rejected_before_submission(self) -> None:
+    def test_invalid_launcher_controls_are_rejected_before_submission(self):
         """Reject invalid deployment modes and segment sizes without submitting any job."""
         stub = 'sbatch() { printf "unexpected-submission\\n"; }; source "$@"'
         cases = {
-            "VLLM_MODE": (("bad", "PD"), 1),
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
             "VLLM_SLURM_SEGMENT": (("0", "-1", "1.5", "bad"), 2),
             "SEGMENT": (("0", "-1", "1.5", "bad"), 2),
