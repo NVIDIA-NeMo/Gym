@@ -13,7 +13,8 @@ episode_protocol: nemo_gym.single_agent.v1
 
 task_model: task.py:TaskData
 tasksets:
-  example: tasksets/example.jsonl
+  - name: example
+    path: tasksets/example.jsonl
 
 runtime:
   dockerfile: runtime/Dockerfile

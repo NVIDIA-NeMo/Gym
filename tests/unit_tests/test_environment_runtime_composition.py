@@ -24,6 +24,7 @@ from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
 
 HELLO_WORLD = WORKING_DIR / "environments/hello_world/environment.yaml"
 HELLO_TASKSET = WORKING_DIR / "environments/hello_taskset/environment.yaml"
+HELLO_VERIFIER_REUSE = WORKING_DIR / "environments/hello_verifier_reuse/environment.yaml"
 HELLO_MCP_TOOL = WORKING_DIR / "environments/hello_mcp_tool/environment.yaml"
 
 
@@ -109,6 +110,40 @@ def test_compose_environment_run_materializes_internal_input_without_dataset_con
         Path("/episode.yaml"),
         artifacts.config_path,
     )
+
+
+def test_compose_environment_run_selects_default_taskset(monkeypatch, tmp_path: Path) -> None:
+    loaded = load_environment(HELLO_VERIFIER_REUSE)
+    selected_tasksets: list[str | None] = []
+
+    def capture_taskset(_loaded, *, taskset=None):
+        selected_tasksets.append(taskset)
+        raise RuntimeError("stop after selection")
+
+    monkeypatch.setattr(runtime_composition, "materialize_tasks", capture_taskset)
+    sandbox = SandboxRuntime(
+        config_paths=(),
+        runtime_image="nemo-gym-test:123",
+        sandbox_provider_ref="sandbox",
+        sandbox_config={},
+    )
+    episode_protocol = EpisodeProtocolRuntime(
+        config_paths=(),
+        environment_server_name="test_environment_server",
+        environment_server_config={},
+        agent_roles={},
+    )
+
+    with pytest.raises(RuntimeError, match="stop after selection"):
+        compose_environment_run(
+            loaded,
+            tmp_path,
+            sandbox=sandbox,
+            episode_protocol=episode_protocol,
+            adapter_config_path=Path("/adapter.yaml"),
+        )
+
+    assert selected_tasksets == ["default"]
 
 
 def test_compose_environment_run_rejects_unimplemented_mcp_servers(tmp_path: Path) -> None:

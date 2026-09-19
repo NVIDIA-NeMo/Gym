@@ -54,6 +54,9 @@ def test_load_environment_local_verifier() -> None:
 def test_materialize_file_taskset() -> None:
     loaded = load_environment(HELLO_TASKSET)
 
+    assert [(taskset.name, taskset.path) for taskset in loaded.definition.tasksets] == [
+        ("example", "tasksets/example.jsonl")
+    ]
     tasks = materialize_tasks(loaded, taskset="example")
 
     assert [task.materialized.task_id.task_id for task in tasks] == [
@@ -74,18 +77,58 @@ def test_materialize_file_taskset() -> None:
 def test_materialize_directory_tasks_with_selected_verifiers() -> None:
     loaded = load_environment(HELLO_VERIFIER_REUSE)
 
-    tasks = materialize_tasks(loaded, taskset="default")
+    assert [(taskset.name, taskset.path) for taskset in loaded.definition.tasksets] == [("default", "tasks/")]
+    tasks = materialize_tasks(loaded)
 
     assert [task.materialized.task_id.task_id for task in tasks] == [
-        "shared-verifier",
-        "custom-verifier",
+        "exact-greeting",
+        "uppercase-greeting",
     ]
-    shared, custom = tasks
-    assert "/workspace/hello-gym.txt" in shared.materialized.task_input.responses_create_params.input[0].content
-    assert shared.verifier.implementation == "nemo_gym.verifiers.files:text_file_equals"
-    assert shared.verifier.verifier_input["path"] == "/workspace/hello-gym.txt"
-    assert "/workspace/shout.txt" in custom.materialized.task_input.responses_create_params.input[0].content
-    assert custom.verifier.implementation == "tasks/custom_verifier/verifier.py:verify"
+    exact, uppercase = tasks
+    assert exact.materialized.task_id.taskset == "default"
+    assert "/workspace/hello-gym.txt" in exact.materialized.task_input.responses_create_params.input[0].content
+    assert exact.verifier.implementation == "nemo_gym.verifiers.files:text_file_equals"
+    assert exact.verifier.verifier_input["path"] == "/workspace/hello-gym.txt"
+    assert "/workspace/shout.txt" in uppercase.materialized.task_input.responses_create_params.input[0].content
+    assert uppercase.verifier.implementation == "tasks/uppercase-greeting/verifier.py:verify"
+
+
+def test_directory_taskset_requires_at_least_one_task_manifest(tmp_path: Path) -> None:
+    environment_root = tmp_path / "hello_verifier_reuse"
+    copytree(HELLO_VERIFIER_REUSE, environment_root)
+    (environment_root / "tasks/exact-greeting/task.yaml").unlink()
+    (environment_root / "tasks/uppercase-greeting/task.yaml").unlink()
+
+    with pytest.raises(EnvironmentDefinitionError, match="contains no task.yaml files"):
+        load_environment(environment_root)
+
+
+def test_directory_task_rejects_reference_outside_environment(tmp_path: Path) -> None:
+    environment_root = tmp_path / "hello_verifier_reuse"
+    copytree(HELLO_VERIFIER_REUSE, environment_root)
+    task_definition_path = environment_root / "tasks/uppercase-greeting/task.yaml"
+    task_definition_path.write_text(
+        task_definition_path.read_text().replace("verifier.py:verify", "../../../outside.py:verify")
+    )
+
+    with pytest.raises(EnvironmentDefinitionError, match="escapes the environment root"):
+        load_environment(environment_root)
+
+
+def test_taskset_names_must_be_unique(tmp_path: Path) -> None:
+    environment_root = tmp_path / "hello_taskset"
+    copytree(HELLO_TASKSET, environment_root)
+    definition_path = environment_root / "environment.yaml"
+    definition_path.write_text(
+        definition_path.read_text().replace(
+            "  - name: example\n    path: tasksets/example.jsonl\n",
+            "  - name: example\n    path: tasksets/example.jsonl\n"
+            "  - name: example\n    path: tasksets/example.jsonl\n",
+        )
+    )
+
+    with pytest.raises(EnvironmentDefinitionError, match="taskset names must be unique"):
+        load_environment(environment_root)
 
 
 def test_file_taskset_validates_task_data_model(tmp_path: Path) -> None:

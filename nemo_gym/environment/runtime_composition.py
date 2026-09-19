@@ -72,7 +72,10 @@ def compose_environment_run(
     output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
-    tasks = materialize_tasks(loaded, taskset=taskset)
+    selected_taskset = taskset
+    if selected_taskset is None and any(declaration.name == "default" for declaration in loaded.definition.tasksets):
+        selected_taskset = "default"
+    tasks = materialize_tasks(loaded, taskset=selected_taskset)
     input_jsonl_path = output_path / "tasks.jsonl"
     input_jsonl_path.write_text(tasks_to_jsonl(tasks), encoding="utf-8")
     config_path = output_path / "run.yaml"

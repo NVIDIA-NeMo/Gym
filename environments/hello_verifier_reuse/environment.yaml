@@ -11,20 +11,8 @@ license: Apache-2.0
 episode_protocol: nemo_gym.single_agent.v1
 
 tasksets:
-  default:
-    tasks:
-      shared-verifier:
-        instruction: tasks/shared_verifier/instruction.md
-        verifier:
-          implementation: nemo_gym.verifiers.files:text_file_equals
-          verifier_input:
-            path: /workspace/hello-gym.txt
-            content: Hello from NeMo Gym!
-
-      custom-verifier:
-        instruction: tasks/custom_verifier/instruction.md
-        verifier:
-          implementation: tasks/custom_verifier/verifier.py:verify
+  - name: default
+    path: tasks/
 
 runtime:
   dockerfile: runtime/Dockerfile

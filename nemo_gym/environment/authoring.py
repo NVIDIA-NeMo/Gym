@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
@@ -30,6 +30,7 @@ from nemo_gym.single_agent_episode_types import (
 
 LOGGER = logging.getLogger(__name__)
 ENVIRONMENT_DEFINITION_FILENAME = "environment.yaml"
+TASK_DEFINITION_FILENAME = "task.yaml"
 
 
 class EnvironmentDefinitionError(ConfigError):
@@ -53,7 +54,8 @@ class TaskDefinition(_DefinitionModel):
 
 
 class TasksetDefinition(_DefinitionModel):
-    tasks: dict[str, TaskDefinition] = Field(min_length=1)
+    name: str = Field(min_length=1)
+    path: str = Field(min_length=1)
 
 
 class _TasksetRow(_DefinitionModel):
@@ -89,7 +91,7 @@ class EnvironmentDefinition(_DefinitionModel):
     task: TaskDefinition | None = None
     instruction: str | None = Field(default=None, min_length=1)
     task_model: str | None = Field(default=None, min_length=1)
-    tasksets: dict[str, str | TasksetDefinition] = Field(default_factory=dict)
+    tasksets: list[TasksetDefinition] = Field(default_factory=list)
     verifier: VerifierDefinition | None = None
     runtime: RuntimeDefinition
 
@@ -97,11 +99,9 @@ class EnvironmentDefinition(_DefinitionModel):
     def validate_task_sources(self) -> "EnvironmentDefinition":
         if (self.task is None) == (not self.tasksets):
             raise ValueError("declare exactly one of task or tasksets")
-        file_tasksets = [name for name, declaration in self.tasksets.items() if isinstance(declaration, str)]
-        if file_tasksets and (self.instruction is None or self.task_model is None or self.verifier is None):
-            raise ValueError(
-                "file-backed tasksets require top-level instruction, task_model, and verifier declarations"
-            )
+        taskset_names = [taskset.name for taskset in self.tasksets]
+        if len(taskset_names) != len(set(taskset_names)):
+            raise ValueError("taskset names must be unique")
         return self
 
 
@@ -112,16 +112,29 @@ class LoadedEnvironment:
     root: Path
     definition_path: Path
     definition: EnvironmentDefinition
+    _directory_tasksets: dict[str, tuple[_DirectoryTask, ...]] = field(default_factory=dict)
 
-    def resolve_file(self, reference: str, *, description: str) -> Path:
+    def resolve_path(self, reference: str, *, description: str) -> Path:
         candidate = Path(reference)
         if candidate.is_absolute():
             raise EnvironmentDefinitionError(f"{description} must be relative to the environment root: {reference}")
         resolved = (self.root / candidate).resolve()
         if not resolved.is_relative_to(self.root):
             raise EnvironmentDefinitionError(f"{description} escapes the environment root: {reference}")
-        if not resolved.is_file():
+        if not resolved.exists():
             raise EnvironmentDefinitionError(f"{description} was not found: {resolved}")
+        return resolved
+
+    def resolve_file(self, reference: str, *, description: str) -> Path:
+        resolved = self.resolve_path(reference, description=description)
+        if not resolved.is_file():
+            raise EnvironmentDefinitionError(f"{description} is not a file: {resolved}")
+        return resolved
+
+    def resolve_directory(self, reference: str, *, description: str) -> Path:
+        resolved = self.resolve_path(reference, description=description)
+        if not resolved.is_dir():
+            raise EnvironmentDefinitionError(f"{description} is not a directory: {resolved}")
         return resolved
 
 
@@ -131,6 +144,14 @@ class MaterializedEnvironmentTask:
 
     materialized: MaterializedTask[BaseModel]
     verifier: VerifierDefinition
+
+
+@dataclass(frozen=True)
+class _DirectoryTask:
+    task_id: str
+    instruction_path: Path
+    verifier: VerifierDefinition
+    task_data: dict[str, JsonValue]
 
 
 def find_environment_definition(reference: str | Path) -> Path | None:
@@ -209,32 +230,28 @@ def load_environment(path: str | Path) -> LoadedEnvironment:
         definition_path=definition_path,
         definition=environment,
     )
+    directory_tasksets: dict[str, tuple[_DirectoryTask, ...]] = {}
     loaded.resolve_file(environment.runtime.dockerfile, description="runtime.dockerfile")
     if environment.task is not None:
         loaded.resolve_file(environment.task.instruction, description="task.instruction")
         _validate_local_object_reference(loaded, environment.task.verifier.implementation, "task verifier")
     else:
-        if environment.task_model is not None:
-            _validate_local_object_reference(loaded, environment.task_model, "task model")
-        if environment.instruction is not None:
-            loaded.resolve_file(environment.instruction, description="taskset instruction")
-        if environment.verifier is not None:
-            _validate_local_object_reference(loaded, environment.verifier.implementation, "taskset verifier")
-        for taskset_name, taskset in environment.tasksets.items():
-            if isinstance(taskset, str):
-                loaded.resolve_file(taskset, description=f"tasksets.{taskset_name}")
+        has_file_taskset = False
+        for taskset in environment.tasksets:
+            taskset_path = loaded.resolve_path(taskset.path, description=f"taskset {taskset.name!r} path")
+            if taskset_path.is_dir():
+                directory_tasksets[taskset.name] = _load_directory_taskset(loaded, taskset)
                 continue
-            for task_name, task in taskset.tasks.items():
-                loaded.resolve_file(
-                    task.instruction,
-                    description=f"tasksets.{taskset_name}.tasks.{task_name}.instruction",
+            has_file_taskset = True
+        if has_file_taskset:
+            if environment.instruction is None or environment.task_model is None or environment.verifier is None:
+                raise EnvironmentDefinitionError(
+                    "File-backed tasksets require top-level instruction, task_model, and verifier"
                 )
-                _validate_local_object_reference(
-                    loaded,
-                    task.verifier.implementation,
-                    f"tasksets.{taskset_name}.tasks.{task_name}.verifier",
-                )
-    return loaded
+            _validate_local_object_reference(loaded, environment.task_model, "task model")
+            loaded.resolve_file(environment.instruction, description="taskset instruction")
+            _validate_local_object_reference(loaded, environment.verifier.implementation, "taskset verifier")
+    return replace(loaded, _directory_tasksets=directory_tasksets)
 
 
 def materialize_tasks(
@@ -263,23 +280,30 @@ def _materialize_single_agent_tasks(
             )
         return (_materialize_declared_task(loaded, environment.name, environment.task.id, environment.task),)
 
-    selected = environment.tasksets
+    tasksets_by_name = {declaration.name: declaration for declaration in environment.tasksets}
     if taskset is not None:
         try:
-            selected = {taskset: environment.tasksets[taskset]}
+            selected = (tasksets_by_name[taskset],)
         except KeyError as error:
             raise EnvironmentDefinitionError(f"Unknown taskset {taskset!r}") from error
+    else:
+        selected = tuple(environment.tasksets)
 
     tasks: list[MaterializedEnvironmentTask] = []
     task_ids: set[TaskId] = set()
-    for taskset_name, declaration in selected.items():
-        if isinstance(declaration, str):
-            taskset_tasks = _materialize_file_taskset(loaded, taskset_name, declaration)
-        else:
-            taskset_tasks = tuple(
-                _materialize_declared_task(loaded, taskset_name, task.id or task_name, task)
-                for task_name, task in declaration.tasks.items()
+    for declaration in selected:
+        taskset_path = loaded.resolve_path(
+            declaration.path,
+            description=f"taskset {declaration.name!r} path",
+        )
+        if taskset_path.is_dir():
+            taskset_tasks = _materialize_directory_taskset(
+                loaded,
+                declaration,
+                loaded._directory_tasksets[declaration.name],
             )
+        else:
+            taskset_tasks = _materialize_file_taskset(loaded, declaration.name, declaration.path)
         for environment_task in taskset_tasks:
             task_id = environment_task.materialized.task_id
             if task_id in task_ids:
@@ -330,6 +354,140 @@ def _materialize_declared_task(
         materialized=_materialized_task(loaded, taskset_name, task_id, instruction, task.task_data),
         verifier=verifier,
     )
+
+
+def _load_directory_taskset(
+    loaded: LoadedEnvironment,
+    taskset: TasksetDefinition,
+) -> tuple[_DirectoryTask, ...]:
+    taskset_path = loaded.resolve_directory(taskset.path, description=f"taskset {taskset.name!r} path")
+    task_directories = sorted(
+        (
+            candidate
+            for candidate in taskset_path.iterdir()
+            if candidate.is_dir() and (candidate / TASK_DEFINITION_FILENAME).is_file()
+        ),
+        key=lambda candidate: candidate.name,
+    )
+    if not task_directories:
+        raise EnvironmentDefinitionError(
+            f"Directory taskset {taskset.name!r} contains no {TASK_DEFINITION_FILENAME} files"
+        )
+
+    tasks: list[_DirectoryTask] = []
+    for candidate in task_directories:
+        task_root = candidate.resolve()
+        if not task_root.is_relative_to(loaded.root):
+            raise EnvironmentDefinitionError(
+                f"Task directory {candidate} in taskset {taskset.name!r} escapes the environment root"
+            )
+        definition_path = task_root / TASK_DEFINITION_FILENAME
+        try:
+            raw = yaml.safe_load(definition_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as error:
+            raise EnvironmentDefinitionError(f"Could not read task definition {definition_path}: {error}") from error
+        if not isinstance(raw, Mapping):
+            raise EnvironmentDefinitionError(f"Task definition must contain a YAML mapping: {definition_path}")
+        try:
+            definition = TaskDefinition.model_validate(raw)
+        except ValidationError as error:
+            issues = "; ".join(
+                f"{'.'.join(str(part) for part in item['loc']) or 'task'}: {item['msg']}"
+                for item in error.errors(include_url=False, include_context=False, include_input=False)
+            )
+            raise EnvironmentDefinitionError(f"Invalid task definition {definition_path}: {issues}") from error
+        if definition.id is not None:
+            raise EnvironmentDefinitionError(
+                f"Directory task {candidate.name!r} must omit id; its directory name is the task ID"
+            )
+        instruction_path = _resolve_task_file(
+            loaded,
+            task_root,
+            definition.instruction,
+            description=f"task {candidate.name!r} instruction",
+        )
+        verifier = VerifierDefinition(
+            implementation=_normalize_task_object_reference(
+                loaded,
+                task_root,
+                definition.verifier.implementation,
+                description=f"task {candidate.name!r} verifier",
+            ),
+            verifier_input=definition.verifier.verifier_input,
+        )
+        tasks.append(
+            _DirectoryTask(
+                task_id=candidate.name,
+                instruction_path=instruction_path,
+                verifier=verifier,
+                task_data=definition.task_data,
+            )
+        )
+    return tuple(tasks)
+
+
+def _materialize_directory_taskset(
+    loaded: LoadedEnvironment,
+    taskset: TasksetDefinition,
+    directory_tasks: tuple[_DirectoryTask, ...],
+) -> tuple[MaterializedEnvironmentTask, ...]:
+    tasks: list[MaterializedEnvironmentTask] = []
+    for directory_task in directory_tasks:
+        instruction = directory_task.instruction_path.read_text(encoding="utf-8")
+        verifier = VerifierDefinition(
+            implementation=directory_task.verifier.implementation,
+            verifier_input=_resolve_task_data_references(
+                directory_task.verifier.verifier_input,
+                directory_task.task_data,
+            ),
+        )
+        tasks.append(
+            MaterializedEnvironmentTask(
+                materialized=_materialized_task(
+                    loaded,
+                    taskset.name,
+                    directory_task.task_id,
+                    instruction,
+                    directory_task.task_data,
+                ),
+                verifier=verifier,
+            )
+        )
+    return tuple(tasks)
+
+
+def _resolve_task_file(
+    loaded: LoadedEnvironment,
+    task_root: Path,
+    reference: str,
+    *,
+    description: str,
+) -> Path:
+    candidate = Path(reference)
+    if candidate.is_absolute():
+        raise EnvironmentDefinitionError(f"{description} must be relative to its task directory: {reference}")
+    resolved = (task_root / candidate).resolve()
+    if not resolved.is_relative_to(loaded.root):
+        raise EnvironmentDefinitionError(f"{description} escapes the environment root: {reference}")
+    if not resolved.is_file():
+        raise EnvironmentDefinitionError(f"{description} was not found: {resolved}")
+    return resolved
+
+
+def _normalize_task_object_reference(
+    loaded: LoadedEnvironment,
+    task_root: Path,
+    reference: str,
+    *,
+    description: str,
+) -> str:
+    module_reference, separator, object_name = reference.partition(":")
+    if not separator or not module_reference or not object_name:
+        raise EnvironmentDefinitionError(f"{description} must have the form module-or-file:object")
+    if not (module_reference.endswith(".py") or "/" in module_reference):
+        return reference
+    path = _resolve_task_file(loaded, task_root, module_reference, description=description)
+    return f"{path.relative_to(loaded.root).as_posix()}:{object_name}"
 
 
 def _materialize_file_taskset(
