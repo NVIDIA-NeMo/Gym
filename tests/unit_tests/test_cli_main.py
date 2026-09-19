@@ -21,11 +21,12 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from pytest import MonkeyPatch
+from pytest import LogCaptureFixture, MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
@@ -668,8 +669,10 @@ class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
+            (["--input-format", "atif"], "+input_format=atif"),
             (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -1241,6 +1244,50 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
 
+    @pytest.mark.parametrize(("legacy", "canonical"), LEGACY_ENVIRONMENT_ALIASES.items())
+    def test_legacy_environment_selector_resolves_to_canonical_config(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", legacy])
+
+        assert overrides == [f"+config_paths=[{WORKING_DIR / f'environments/{canonical}/config.yaml'}]"]
+        assert f"`--environment {legacy}` is deprecated" in caplog.text
+
+    def test_user_environment_with_legacy_name_takes_precedence(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
+    ) -> None:
+        legacy = next(iter(LEGACY_ENVIRONMENT_ALIASES))
+        config = tmp_path / "environments" / legacy / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}\n")
+        monkeypatch.chdir(tmp_path)
+
+        with caplog.at_level(logging.WARNING):
+            resolved = cli_main._asset_config_path("environment", legacy)
+
+        assert resolved == str(config)
+        assert "deprecated" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("legacy", "canonical"),
+        [
+            ("stirrup_agent/stirrup_gdpval", "stirrup_agent/stirrup_agent"),
+            ("tau2/tau2_agent", "tau2/tau2"),
+            ("verifiers_agent/acereason-math", "verifiers_agent/verifiers_agent"),
+        ],
+    )
+    def test_legacy_agent_type_flavor_resolves_to_canonical_config(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            resolved = cli_main._asset_config_path("agent-type", legacy)
+
+        server, flavor = canonical.split("/")
+        expected = WORKING_DIR / "responses_api_agents" / server / "configs" / f"{flavor}.yaml"
+        assert resolved == str(expected)
+        assert "deprecated" in caplog.text
+
     def test_nested_manifest_wins_over_legacy_flavor_with_the_same_name(
         self, monkeypatch: MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1622,7 +1669,8 @@ class TestListEnvironmentsRouting:
         assert error.value.code == 1
         assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
 
-    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("status", ["experimental", "no-manifest"])
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch, status: str) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
             [
@@ -1637,7 +1685,7 @@ class TestListEnvironmentsRouting:
                 "--licensing",
                 "Apache-2.0",
                 "--status",
-                "experimental",
+                status,
                 "--lifecycle",
                 "active",
             ],
@@ -1648,7 +1696,7 @@ class TestListEnvironmentsRouting:
             "+catalog_kind=benchmark",
             '+modality="text"',
             '+licensing="Apache-2.0"',
-            "+status=experimental",
+            f"+status={status}",
             "+lifecycle=active",
         }
 

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from collections.abc import Mapping
 from time import perf_counter, time
 from typing import Any, List
@@ -52,6 +53,8 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
+
+LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
@@ -168,7 +171,32 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
-            if not all_fn_calls and all_output_messages:
+            if not all_fn_calls:
+                if not all_output_messages:
+                    invocation_status = "incomplete"
+                    termination_message = (
+                        "Ending trajectory: model returned no assistant message or tool calls "
+                        "(reasoning-only or empty output) without reported truncation. "
+                        "This is the stop-token case (finish_reason='stop'), not length truncation "
+                        "(finish_reason='length', handled separately via incomplete_details). "
+                        "This indicates either a badly trained model requiring training-level fixes "
+                        "or a bug in the inference engine."
+                    )
+                    termination_reason = "incomplete_reasoning" if output else "empty_output"
+                    model_response.status = "incomplete"
+                    model_response.metadata = {
+                        **(model_response.metadata or {}),
+                        "ng_termination_reason": termination_reason,
+                        "ng_termination_message": termination_message,
+                    }
+                    LOG.warning(
+                        "%s model_server=%s response_id=%s rollout_id=%s step=%s",
+                        termination_message,
+                        self.config.model_server.name,
+                        model_response.id,
+                        rollout_id,
+                        step,
+                    )
                 break
 
             for output_function_call in all_fn_calls:

@@ -183,7 +183,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             provider_options=provider_options,
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
-        await eval_sandbox.start(eval_sandbox_spec)
+
+        async def _run_setup(sandbox: AsyncSandbox) -> None:
+            result = await sandbox.exec("apt-get update", timeout_s=self.config.evaluation_timeout)
+            if result.return_code != 0:
+                print(f"Failed to apt-get update: {result}")
+
+        # start_with_setup stops the container if _run_setup raises, instead of
+        # leaving it running until its TTL.
+        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
 
         return eval_sandbox
 

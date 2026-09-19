@@ -113,6 +113,7 @@ class StopReason(str, Enum):
     MAX_TURNS = "max_turns"
     MAX_TIME = "max_time"
     MAX_OUTPUT_TOKENS = "max_output_tokens"
+    TEXT_ONLY = "text_only"
     ERROR = "error"
 
 
@@ -160,6 +161,13 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         description="When True, drop the oldest exchange on context-overflow "
         "errors and retry. Intended for eval only — during training the full "
         "trajectory must be preserved so reward assignment is accurate.",
+    )
+    continue_if_not_tool_call: bool = Field(
+        default=True,
+        description="When True (Gym eval default), a turn with assistant text and "
+        "no tool call injects no_tool_call_nudge and the loop continues. When False "
+        "(GRPO overlay), that turn ends the episode so a synthetic user message "
+        "cannot break NeMo-RL monotonic trajectories.",
     )
 
 
@@ -350,8 +358,17 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             ]
 
             if not all_fn_calls and all_output_messages:
-                # Prose between tool calls does not end the run; the nudge keeps
-                # the model going until it calls a done tool or a limit is hit.
+                if not self.config.continue_if_not_tool_call:
+                    logger.info(
+                        "Text-only turn on step %d with continue_if_not_tool_call=false — terminating agent loop",
+                        step,
+                    )
+                    stop_reason = StopReason.TEXT_ONLY
+                    break
+                logger.info(
+                    "Text-only turn on step %d — injecting no-tool-call nudge",
+                    step,
+                )
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=self.config.no_tool_call_nudge))
                 continue
 

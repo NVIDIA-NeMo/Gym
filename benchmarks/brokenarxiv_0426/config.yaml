@@ -1,0 +1,22 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/false_statement_judge/configs/false_statement_judge.yaml
+  - resources_servers/false_statement_judge/configs/judge_nemotron3ultra.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config
+# above to ensure this benchmark config is isolated.
+brokenarxiv_0426_false_statement_judge_resources_server:
+  _inherit_from: false_statement_judge
+
+brokenarxiv_0426_false_statement_judge_simple_agent:
+  _inherit_from: false_statement_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: brokenarxiv_0426_false_statement_judge_resources_server
+      datasets:
+      - name: brokenarxiv_0426
+        type: benchmark
+        jsonl_fpath: benchmarks/brokenarxiv_0426/data/brokenarxiv_0426_benchmark.jsonl
+        prompt_config: benchmarks/brokenarxiv_0426/prompts/default.yaml
+        prepare_script: benchmarks/brokenarxiv_0426/prepare.py

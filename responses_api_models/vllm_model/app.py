@@ -24,7 +24,7 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -50,10 +50,18 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
-from nemo_gym.token_id_capture import current_capture_context
+from nemo_gym.token_id_capture import (
+    current_capture_context,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.external_capture import (
+    ExternalCaptureHandler,
+    make_external_capture_handler,
+)
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -156,6 +164,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -179,6 +188,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     is_responses_native: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    # When True, if the last input message is an assistant message, forward it to vLLM as a
+    # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
+    # starting a fresh assistant turn. Off by default so default model-server behavior is
+    # unchanged; benchmarks that seed an assistant "answer prefix" (e.g. RULER) opt in via config.
+    continue_final_assistant_message: bool = False
 
     # Sampling params this server puts on every request it sends to the engine, replacing what the caller sent.
     # On-policy training requires generation to use the sampling distribution the policy is optimized under,
@@ -272,6 +287,23 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
+    _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
+
+    def setup_exception_middleware(self, app) -> None:
+        @app.middleware("http")
+        async def context_error_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except ClientResponseError as error:
+                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
+                    return Response(
+                        content=error.response_content,
+                        status_code=error.status,
+                        media_type="application/json",
+                    )
+                raise
+
+        super().setup_exception_middleware(app)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -314,6 +346,26 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
+
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        capture_config = token_id_capture_config(global_config) if global_config is not None else None
+        self._external_capture_handler = None
+        if capture_config is not None and capture_config.token_id_capture.external_staging:
+            overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
+            if overrides.get("stream"):
+                raise ValueError("external staging requires non-streaming backend requests")
+            if self.config.use_completions_api:
+                raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
+            if self.config.is_responses_native:
+                raise ValueError("token_id_capture.external_staging requires the chat-backed Responses API path")
+            if self.config.return_token_id_information:
+                raise ValueError(
+                    "token_id_capture.external_staging requires return_token_id_information=false; "
+                    "worker custody replaces the token echo"
+                )
+            self._external_capture_handler = make_external_capture_handler(
+                capture_config.token_id_capture.external_staging_backend
+            )
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -373,7 +425,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         return self._converter.chat_completion_to_response(
-            responses_create_params=body, chat_completion=chat_completion_response
+            responses_create_params=body,
+            chat_completion=chat_completion_response,
+            # Keep the backend envelope id only for captured requests. Terminal
+            # attribution matches it to the ledger row.
+            preserve_envelope_id=self._preserve_envelope_id(),
         )
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -528,6 +584,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         metadata_extra_body_str = metadata.get("extra_body") or "{}"
         extra_body.update(json.loads(metadata_extra_body_str))
 
+        if (
+            self.config.continue_final_assistant_message
+            and body_dict.get("messages")
+            and body_dict["messages"][-1].get("role") == "assistant"
+        ):
+            body_dict["continue_final_message"] = True
+            body_dict["add_generation_prompt"] = False
+
         if self.config.return_token_id_information:
             body_dict |= dict(
                 logprobs=True,
@@ -657,9 +721,17 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
-        body_dict = self._apply_prefix_supply(body_dict)
+        if self._external_capture_handler is not None:
+            body_dict = self._external_capture_handler.prepare_request(body_dict)
+        else:
+            body_dict = self._apply_prefix_supply(body_dict)
 
         return body_dict
+
+    def _preserve_envelope_id(self) -> bool:
+        """Keep the backend envelope id only for requests with an active external-capture context."""
+        context = current_capture_context()
+        return context is not None and context.external_staging
 
     # Protect the ``[supplied, eligible, total]`` diagnostic counts.
     # Eligible calls have a resolved parent.
@@ -693,6 +765,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             # An uncorrelated rollout call has no verified parent.
             return body_dict
         if not parent_tokens:
+            return body_dict
+        if context.external_staging:
+            # External path: worker fetches prefix from TQ via staging_chain in ng_capture.
+            # Do not put the large token array in the request body.
             return body_dict
         body_dict["required_prefix_token_ids"] = parent_tokens
         # This records intent only.
@@ -833,6 +909,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -883,15 +962,23 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # See the TODO wrt reasoning_content above
                 choice_dict["message"].pop("reasoning", None)
 
-                # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
-                    [reasoning_content]
-                ) + (choice_dict["message"].get("content") or "")
+                if body_dict.get("continue_final_message", False):
+                    # by default, the response of continue_final_message will split into reasoning.
+                    choice_dict["message"]["content"] = reasoning_content + (choice_dict["message"]["content"] or "")
+                else:
+                    # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
+                    choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                        [reasoning_content]
+                    ) + (choice_dict["message"].get("content") or "")
+
         else:
             # See the TODO wrt reasoning_content above
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
+
+        if self._external_capture_handler is not None:
+            self._external_capture_handler.prepare_response(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -958,6 +1045,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Publish lineage using the final Chat, Responses, or Messages representation."""
+        if self._external_capture_handler is not None:
+            await self._external_capture_handler.finalize_response(_jsonable(response))
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
@@ -1073,10 +1165,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
-        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
-            raise ValueError(
-                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
-            )
+        context = current_capture_context()
+        external_capture = context is not None and context.external_staging
+        if (self.config.return_token_id_information or external_capture) and body_dict.get("n") not in (None, 1):
+            raise ValueError(f"NeMo Gym server `{self.config.name}` requires n=1 for token capture.")
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -1146,6 +1238,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res

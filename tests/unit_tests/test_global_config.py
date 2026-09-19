@@ -25,6 +25,7 @@ from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
@@ -38,6 +39,7 @@ from nemo_gym.config_types import (
     UnsupportedAgentPairingError,
     UnsupportedModelPairingError,
     WANDBConfig,
+    is_almost_server,
 )
 from nemo_gym.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -1408,6 +1410,18 @@ contested: second_inner
         # Diagnostics must stay off stdout, which carries the `--json` payload.
         assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
+    def test_environment_server_is_recognized_as_an_almost_server(self) -> None:
+        config = DictConfig(
+            {
+                "environment_servers": {
+                    "first": {"entrypoint": "first.py"},
+                    "second": {"entrypoint": "second.py"},
+                }
+            }
+        )
+
+        assert is_almost_server(config) is True
+
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
         Test that error_on_almost_servers=false does not raise ValueError.
@@ -1872,6 +1886,67 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert str(missing) in message
         assert message.count("  - ") == 1
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_CONFIG_PATH_ALIASES.items())
+    def test_load_extra_config_paths_resolves_legacy_alias(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        parser = GlobalConfigDictParser()
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
+    def test_existing_legacy_config_path_takes_precedence(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
+    ) -> None:
+        legacy = next(iter(LEGACY_CONFIG_PATH_ALIASES))
+        local_config = tmp_path / legacy
+        local_config.parent.mkdir(parents=True)
+        local_config.write_text("local: true\n")
+        monkeypatch.chdir(tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [legacy]
+        assert configs[0].local is True
+        assert "deprecated" not in caplog.text
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_AGENT_ALIASES.items())
+    def test_legacy_agent_names_route_to_canonical_instance(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        config = OmegaConf.create(
+            {
+                canonical: {},
+                "agent_name": legacy,
+                "agent_map": {"source": legacy},
+                "fan_out": {"source": [legacy]},
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_name == canonical
+        assert config.agent_map.source == canonical
+        assert config.agent_map[legacy] == canonical
+        assert config.fan_out.source == [canonical]
+        assert f"`{legacy}` -> `{canonical}`" in caplog.text
+
+    def test_legacy_agent_alias_follows_composed_agent_route(self) -> None:
+        legacy, canonical = next(iter(LEGACY_AGENT_ALIASES.items()))
+        composed = "reasoning_gym_custom_agent"
+        config = OmegaConf.create({composed: {}, "agent_map": {canonical: composed}})
+
+        GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_map[legacy] == composed
 
     def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
@@ -2633,6 +2708,36 @@ class TestComposeUnboundAgent:
 
         assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
 
+    def test_config_resolution_restores_held_agent_override_after_inheritance(self, monkeypatch: MonkeyPatch) -> None:
+        instance = "terminal_bench_2_1_terminus_2_sandboxed_agent"
+        agent_type = "terminus_2_sandboxed_agent"
+        config = DictConfig(
+            {
+                agent_type: {
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "app.py",
+                            "sandbox_timeout": 10800,
+                        }
+                    }
+                },
+                instance: {
+                    "_inherit_from": agent_type,
+                    "responses_api_agents": {agent_type: {}},
+                },
+            }
+        )
+        cli = self._cli_dict(
+            {
+                instance: {"responses_api_agents": {agent_type: {"sandbox_timeout": 21600}}},
+            }
+        )
+
+        resolved = self._parse_with_cli(config, cli, monkeypatch)
+
+        assert agent_type not in resolved
+        assert resolved[instance]["responses_api_agents"][agent_type]["sandbox_timeout"] == 21600
+
     def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
         # The override must carry only the fields the user set, leaving the environment's bindings intact.
         config = self._config(
@@ -2681,3 +2786,35 @@ class TestComposeUnboundAgent:
 
         with raises(ConfigKeyError):
             self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)
+
+
+def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
+    """Pinning only the port must not suppress the host default.
+
+    A caller that constrains the head server to an allocated port range cannot
+    also supply the host: it is the address of whichever node the job lands on,
+    which only `use_absolute_ip` resolves, and only here.
+    """
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import (
+        HEAD_SERVER_KEY_NAME,
+        USE_ABSOLUTE_IP,
+        GlobalConfigDictParser,
+        GlobalConfigDictParserConfig,
+    )
+
+    monkeypatch.setattr("nemo_gym.global_config.gethostname", lambda: "node-17")
+    monkeypatch.setattr("nemo_gym.global_config.gethostbyname", lambda _h: "10.1.2.3")
+
+    initial = OmegaConf.create(
+        {
+            **GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            USE_ABSOLUTE_IP: True,
+            HEAD_SERVER_KEY_NAME: {"port": 63000},
+        }
+    )
+    parsed = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+
+    assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
+    assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"

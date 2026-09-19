@@ -60,9 +60,10 @@ from nemo_gym.token_id_capture.lineage import (
     stamp_continuation,
 )
 from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
     LineageMatch,
     LineageResolution,
-    LineageStore,
+    LineageResolver,
     TokenCaptureSnapshot,
     TokenSink,
     TokenSource,
@@ -77,6 +78,8 @@ from nemo_gym.token_id_capture.records import (
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
     compute_digest,
@@ -85,15 +88,22 @@ from nemo_gym.token_id_capture.records import (
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
     CaptureContext,
     capture_health_snapshot,
     capture_tokens,
     commit_entry,
     current_capture_context,
+    mark_external_staging_committed,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
+)
+from nemo_gym.token_id_capture.staging.records import (
+    CallRecord,
+    CaptureLedgerCommit,
 )
 from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
 
@@ -115,9 +125,12 @@ __all__ = [
     "make_token_store",
     "TokenSink",
     "TokenSource",
+    "CaptureLedger",
+    "CaptureLedgerCommit",
+    "CallRecord",
     "LineageMatch",
     "LineageResolution",
-    "LineageStore",
+    "LineageResolver",
     "install_lineage_store",
     "installed_lineage_store",
     "TokenCaptureSnapshot",
@@ -126,6 +139,10 @@ __all__ = [
     "installed_token_sink",
     "installed_token_source",
     "CaptureContext",
+    "NG_CAPTURE_FIELD",
+    "NG_COMMIT_COORDS_FIELD",
+    "UNCOMMITTED_CALL_REASON",
+    "UNRESOLVED_PARENT_REASON",
     "set_token_sink",
     "capture_health_snapshot",
     "register_call_intent",
@@ -134,6 +151,7 @@ __all__ = [
     "capture_tokens",
     "commit_entry",
     "current_capture_context",
+    "mark_external_staging_committed",
     "FileLineageStore",
     "IncrementalLineageStore",
     "InMemoryLineageStore",
