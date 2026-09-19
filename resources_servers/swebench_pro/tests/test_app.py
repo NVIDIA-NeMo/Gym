@@ -351,6 +351,131 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
     assert server._session_id_to_identity["session"] == identity
 
 
+@pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
+def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
+    monkeypatch: MonkeyPatch, verdict: str
+) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
+    events: list[str] = []
+
+    async def task_exec(command: str, **kwargs: object) -> SimpleNamespace:
+        if "--no-pager diff" in command:
+            events.append("extract-patch")
+            return SimpleNamespace(return_code=0, stdout="agent patch", stderr="")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def stop_task() -> None:
+        events.append("stop-task")
+
+    async def stop_verifier() -> None:
+        events.append("stop-verifier")
+
+    task_sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=task_exec),
+        serialize=AsyncMock(return_value={"sandbox_id": "task-sandbox"}),
+        stop=AsyncMock(side_effect=stop_task),
+        pty=SimpleNamespace(create=AsyncMock()),
+    )
+    verifier_sandbox = SimpleNamespace(stop=AsyncMock(side_effect=stop_verifier))
+
+    async def create_sandbox(body: SWEBenchProInstanceRequest, files: dict | None = None) -> SimpleNamespace:
+        if files is None:
+            events.append("create-task")
+            return task_sandbox
+        events.append("create-verifier")
+        assert body.patch == "gold patch"
+        assert body.run_script == request_body()["run_script"]
+        return verifier_sandbox
+
+    completed = verdict != "infrastructure_failure"
+    resolved = verdict == "resolved"
+    test_results = {
+        "tests": [
+            {"name": "new_test", "status": "PASSED" if resolved else "FAILED"},
+            {"name": "old_test", "status": "PASSED"},
+        ]
+    }
+
+    async def verify(**kwargs: object) -> VerificationResult:
+        events.append("verify")
+        assert kwargs["sandbox"] is verifier_sandbox
+        assert kwargs["inputs"].patch == "agent patch"
+        return VerificationResult(
+            completed=completed,
+            resolved=resolved,
+            patch_applied=completed,
+            test_results=test_results if completed else None,
+            test_output="verifier output",
+            error=None if completed else "sandbox unavailable",
+        )
+
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+    task_data = request_body()
+    responses_create_params = task_data.pop("responses_create_params")
+    agent_response = task_data.pop("response")
+    episode_id = {"rollout_id": "rollout", "attempt": 1}
+    task_id = {"taskset": "swebench_pro", "task_id": "instance_example"}
+
+    with TestClient(server.setup_webserver()) as client:
+        seed = client.post(
+            "/seed_session", json={"episode_id": episode_id, "task_id": task_id, "task_data": task_data}
+        )
+        assert seed.status_code == 200
+        session_id = seed.json()["resources_session_id"]
+        assert client.cookies
+        assert seed.json()["sandbox_access"] == {
+            "connection": {
+                "kind": "direct",
+                "provider_config_ref": "test",
+                "descriptor": {"sandbox_id": "task-sandbox"},
+            },
+            "workdir": "/app",
+        }
+        assert "gold patch" not in seed.text
+        assert "run_script" not in seed.json()
+        task_sandbox.pty.create.assert_not_awaited()
+        task_sandbox.stop.assert_not_awaited()
+
+        # Verification receives only identity and the agent response; private assets stay in the resources session.
+        response = client.post(
+            "/verify",
+            json={
+                "episode_id": episode_id,
+                "task_id": task_id,
+                "verification_input": {"responses_create_params": responses_create_params, "response": agent_response},
+            },
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert result["reward"] == float(resolved)
+        # The shared response now includes a default mask, but SWE Pro still
+        # reports verification completion separately rather than deriving it.
+        assert result["mask_sample"] is False
+        assert result["evaluation_completed"] is completed
+        assert result["resolved"] is resolved
+        assert result["model_patch"] == "agent patch"
+        assert result["test_results"] == (test_results if completed else None)
+        assert result["test_output"] == "verifier output"
+        assert result["error"] == (None if completed else "sandbox unavailable")
+        assert result["response"] == NeMoGymResponse.model_validate(agent_response).model_dump(mode="json")
+
+        close_body = {"resources_session_id": session_id, "episode_id": episode_id}
+        close = client.post("/close_session", json=close_body)
+        assert close.status_code == 200
+        # Upstream rejects unknown sessions after successful close removes identity.
+        # A repeated request must not stop an already released sandbox again.
+        with pytest.raises(ValueError, match="Unknown resources session"):
+            client.post("/close_session", json=close_body)
+        assert session_id not in server._session_id_to_task
+        assert session_id not in server._session_id_to_identity
+        assert session_id not in server._session_id_to_sandbox
+
+    assert events == ["create-task", "extract-patch", "stop-task", "create-verifier", "verify", "stop-verifier"]
+    task_sandbox.stop.assert_awaited_once()
+    verifier_sandbox.stop.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_extract_model_patch_includes_commits_and_untracked_files() -> None:
     server = make_server(golden=False)
