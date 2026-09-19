@@ -1,0 +1,6 @@
+[
+  {"tool": "orders.get", "arguments": {"order_id": "ORD-7"}},
+  {"tool": "orders.update_status", "arguments": {"order_id": "ORD-7", "status": "shipped"}},
+  {"tool": "benchmark.submit_answer", "arguments": {"task_id": "mini-001", "order_total": 42.0}},
+  {"tool": "orders.get", "arguments": {"order_id": "ORD-7"}}
+]

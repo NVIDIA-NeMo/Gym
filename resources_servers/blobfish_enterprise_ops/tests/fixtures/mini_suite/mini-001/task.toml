@@ -1,0 +1,24 @@
+schema_version = "1.4"
+
+[task]
+name = "blobfishai/mini-001"
+version = "1.0.0"
+description = "Ship order ORD-7 and report its total. A tiny synthetic world for adapter tests."
+authors = [{ name = "Blobfish AI" }]
+
+[agent]
+user = "agent"
+timeout_sec = 60.0
+
+[verifier]
+user = "root"
+timeout_sec = 30.0
+
+[metadata]
+benchmark = "MiniBench"
+world_id = "mini-world-v1"
+task_id = "mini-001"
+category = "fulfilment"
+difficulty = "L1"
+metric = "MiniScore"
+synthetic = true
