@@ -270,6 +270,25 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    opencode_max_compactions: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum number of automatic compactions per opencode SESSION (the root "
+            "session and each subagent count separately). None (default) = unlimited, "
+            "i.e. upstream opencode behaviour. Once a session has compacted N times, its "
+            "next context overflow ends the run with agent_error_kind='max_compaction' "
+            "instead of summarising again. NOTE: opencode_compaction_enabled=false only "
+            "disables PROACTIVE compaction — a vLLM context-overflow error still triggers "
+            "a reactive summarize-and-continue (session/processor.ts halt()); set this to "
+            "0 to make overflow end the session instead. The rollout is NOT masked: the "
+            "patch on disk is evaluated and the (usually 0) reward trains normally, so "
+            "exceeding the budget costs the policy something. "
+            "Exported to the harness as OPENCODE_MAX_COMPACTIONS -> bench --max-compactions "
+            "-> opencode config compaction.max_compactions."
+        ),
+    )
+
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
@@ -2262,6 +2281,11 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             if self.config.opencode_context_limit_tokens is not None
             else ""
         )
+        max_compactions_export_cmd = (
+            f"export OPENCODE_MAX_COMPACTIONS={self.config.opencode_max_compactions} && "
+            if self.config.opencode_max_compactions is not None
+            else ""
+        )
 
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
@@ -2276,6 +2300,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
             f"export ENABLE_COMPACTION={'1' if self.config.opencode_compaction_enabled else '0'} && "
             f"{context_limit_export_cmd}"
+            f"{max_compactions_export_cmd}"
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2361,6 +2386,11 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
         return "max_iteration"
     if "ContextWindow" in s or "context window" in s.lower():
         return "context_window"
+    if "maximum compactions" in s:
+        # Deliberate stop (compaction.max_compactions budget exhausted, see the
+        # opencode_max_compactions field): NOT masked — the patch on disk is
+        # evaluated and the reward trains normally.
+        return "max_compaction"
     if "stuck in a loop" in s.lower():
         return "stuck_in_loop"
     return "other"
