@@ -1,0 +1,5 @@
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl
+*.jsonl.*
+*.tmp

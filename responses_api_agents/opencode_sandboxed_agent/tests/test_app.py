@@ -82,6 +82,20 @@ class TestOpenCodeSandboxedAgent:
             token_id_capture=True,
         )
 
+    @mark.parametrize("descriptor", [None, {"sandbox_id": "seed", "workdir": "/project"}])
+    async def test_start_sandbox_preserves_seed_descriptor(self, monkeypatch: MonkeyPatch, descriptor) -> None:
+        provider = MagicMock()
+        sandbox = MagicMock()
+        connect = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: provider)
+        monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        assert await server._start_sandbox("seed", descriptor) is sandbox
+        connect.assert_awaited_once_with(descriptor or {"sandbox_id": "seed"}, provider=provider)
+
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
         sandbox.start = AsyncMock()
@@ -518,7 +532,12 @@ class TestOpenCodeSandboxedAgent:
 
         async def post(server_name, url_path, json=None, cookies=None):
             if url_path == "/seed_session":
-                return Response({"sandbox_handle": "seed-sandbox"})
+                return Response(
+                    {
+                        "sandbox_handle": "seed-sandbox",
+                        "sandbox_descriptor": {"sandbox_id": "seed-sandbox", "workdir": "/project"},
+                    }
+                )
             assert url_path == "/verify"
             return Response(
                 json
@@ -543,6 +562,9 @@ class TestOpenCodeSandboxedAgent:
         finally:
             connection.close()
 
+        server._start_sandbox.assert_awaited_once_with(
+            sandbox_id="seed-sandbox", sandbox_descriptor={"sandbox_id": "seed-sandbox", "workdir": "/project"}
+        )
         assert result.ng_agent_observations is not None
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
