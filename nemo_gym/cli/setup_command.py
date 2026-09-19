@@ -20,7 +20,7 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
-from typing import IO, Any
+from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
 
@@ -214,12 +214,15 @@ def run_command(
     global_config_dict: DictConfig | None = None,
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> Popen:
     if global_config_dict is None:
         global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
+    if extra_env is not None:
+        custom_env.update(extra_env)
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
     # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
     # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
