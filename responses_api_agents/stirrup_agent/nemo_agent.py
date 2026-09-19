@@ -36,6 +36,7 @@ user turn.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from itertools import takewhile
@@ -47,6 +48,7 @@ from stirrup.core.agent import SessionAgent
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, ChatMessage, SummaryMessage, ToolCall, ToolMessage, UserMessage
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
+from stirrup.utils.logging import AgentLogger
 
 
 LOGGER = logging.getLogger(__name__)
@@ -129,6 +131,21 @@ class NeMoUserMessage(UserMessage):
 NeMoUserMessage.model_rebuild()
 
 
+class _NeMoAgentLogger(AgentLogger):
+    """Keep malformed model arguments from aborting response logging."""
+
+    def assistant_message(self, turn: int, max_turns: int, assistant_message: AssistantMessage) -> None:
+        try:
+            super().assistant_message(turn, max_turns, assistant_message)
+        except json.JSONDecodeError:
+            # Stirrup's display formatter parses arguments before tool execution.
+            # Leave the original message intact so the tool can report its error.
+            LOGGER.warning("Cannot format tool arguments as JSON on turn %s/%s", turn, max_turns)
+            LOGGER.warning("Assistant content: %s", str(assistant_message.content)[:500])
+            for tool_call in assistant_message.tool_calls or []:
+                LOGGER.warning("Tool %s raw arguments: %r", tool_call.name, tool_call.arguments[:1000])
+
+
 class NeMoAgent(Agent):
     """``Agent`` with tool-response-as-user conversion and system-prompt control."""
 
@@ -142,6 +159,8 @@ class NeMoAgent(Agent):
     ) -> None:
         if min_compaction_summary_words < 1:
             raise ValueError("min_compaction_summary_words must be at least 1")
+        if kwargs.get("logger") is None:
+            kwargs["logger"] = _NeMoAgentLogger()
         super().__init__(**kwargs)
         self._tool_response_as_user = tool_response_as_user
         self._skip_input_file_listing = skip_input_file_listing
