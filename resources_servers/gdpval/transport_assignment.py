@@ -408,6 +408,9 @@ def make_assignment_repair(
     max_wire_bytes = int(config.get("max_wire_bytes", MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE))
     max_section_raw_bytes = int(config.get("max_section_raw_bytes", MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE))
     framing_reserve_bytes = int(config.get("framing_reserve_bytes", 4 * 1024 * 1024))
+    reference_availability_only = config.get("reference_availability_only", False)
+    if not isinstance(reference_availability_only, bool):
+        raise ValueError("reference_availability_only must be a boolean")
     footprint_cache: dict[tuple[str, str, bool, bool], list[Footprint]] = {}
 
     def footprints(
@@ -444,7 +447,7 @@ def make_assignment_repair(
         unrepairable_tasks: list[str] = []
         for task_id in sorted(original):
             try:
-                candidates = footprints(candidate_root, task_id)
+                candidates = [] if reference_availability_only else footprints(candidate_root, task_id)
             except ValueError:
                 # No candidate deliverable yet (fresh run: repair fires at
                 # stage planning, before any rollout exists). The repair cannot
@@ -474,6 +477,17 @@ def make_assignment_repair(
                         raw_bytes=0,
                         max_file_bytes=0,
                         reasons=("reference_incomplete",),
+                    )
+                    continue
+                if reference_availability_only:
+                    # Repair missing reference completions; dispatch still
+                    # enforces the judge's transport and attachment limits.
+                    costs[(task_id, reference_id)] = PairCost(
+                        compatible=True,
+                        wire_bytes=0,
+                        raw_bytes=0,
+                        max_file_bytes=0,
+                        reasons=(),
                     )
                     continue
                 combinations = [
@@ -531,7 +545,11 @@ def make_assignment_repair(
         receipt = {
             "schema": "gdpval.transport-assignment-repair.v1",
             "stage_index": stage_index,
-            "policy": "minimum changed tasks; exact selected-reference counts; provider-free",
+            "policy": (
+                "minimum changed tasks; exact selected-reference counts; "
+                + ("completed-reference availability only" if reference_availability_only else "provider-free")
+            ),
+            "reference_availability_only": reference_availability_only,
             "limits": {
                 "max_file_bytes": max_file_bytes,
                 "max_raw_bytes": max_raw_bytes,
