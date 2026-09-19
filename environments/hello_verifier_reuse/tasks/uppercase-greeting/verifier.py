@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Task-owned policy composed from a shared file helper."""
+"""Task-owned verifier composed from a shared file helper."""
 
 from nemo_gym.verifiers.files import read_text
 
 
 async def verify(attempt, _verifier_input) -> float:
-    """Require the requested greeting with task-specific uppercase policy."""
+    """Require the requested greeting in uppercase."""
     actual = await read_text(attempt, "/workspace/shout.txt")
     if actual is None:
         return 0.0

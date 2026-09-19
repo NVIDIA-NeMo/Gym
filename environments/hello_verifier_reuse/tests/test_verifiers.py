@@ -9,7 +9,7 @@ from runpy import run_path
 from nemo_gym.verifiers.files import text_file_equals
 
 
-custom_verify = run_path(Path(__file__).parents[1] / "tasks/custom_policy/verifier.py")["verify"]
+uppercase_greeting_verify = run_path(Path(__file__).parents[1] / "tasks/uppercase-greeting/verifier.py")["verify"]
 
 
 @dataclass
@@ -32,7 +32,7 @@ class VerifierInput:
     content: str
 
 
-def test_shared_verifier_passes(tmp_path: Path) -> None:
+def test_reused_verifier_passes_exact_greeting(tmp_path: Path) -> None:
     (tmp_path / "hello-gym.txt").write_text("Hello from NeMo Gym!\n", encoding="utf-8")
     attempt = Attempt(workspace=Workspace(root=tmp_path))
     verifier_input = VerifierInput(
@@ -43,7 +43,7 @@ def test_shared_verifier_passes(tmp_path: Path) -> None:
     assert asyncio.run(text_file_equals(attempt, verifier_input)) == 1.0
 
 
-def test_shared_verifier_fails_when_file_is_missing(tmp_path: Path) -> None:
+def test_reused_verifier_fails_when_exact_greeting_file_is_missing(tmp_path: Path) -> None:
     attempt = Attempt(workspace=Workspace(root=tmp_path))
     verifier_input = VerifierInput(
         path="/workspace/hello-gym.txt",
@@ -53,15 +53,15 @@ def test_shared_verifier_fails_when_file_is_missing(tmp_path: Path) -> None:
     assert asyncio.run(text_file_equals(attempt, verifier_input)) == 0.0
 
 
-def test_composed_task_policy_passes(tmp_path: Path) -> None:
+def test_task_local_verifier_passes_uppercase_greeting(tmp_path: Path) -> None:
     (tmp_path / "shout.txt").write_text("HELLO FROM NEMO GYM!", encoding="utf-8")
     attempt = Attempt(workspace=Workspace(root=tmp_path))
 
-    assert asyncio.run(custom_verify(attempt, None)) == 1.0
+    assert asyncio.run(uppercase_greeting_verify(attempt, None)) == 1.0
 
 
-def test_composed_task_policy_rejects_lowercase(tmp_path: Path) -> None:
+def test_task_local_verifier_rejects_lowercase_greeting(tmp_path: Path) -> None:
     (tmp_path / "shout.txt").write_text("Hello from NeMo Gym!", encoding="utf-8")
     attempt = Attempt(workspace=Workspace(root=tmp_path))
 
-    assert asyncio.run(custom_verify(attempt, None)) == 0.0
+    assert asyncio.run(uppercase_greeting_verify(attempt, None)) == 0.0
