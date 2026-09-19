@@ -1,0 +1,110 @@
+---
+title: "Tavily Search Access and Setup"
+description: "Obtain the required search policy, service credentials, and datasets before starting Tavily search."
+position: 5
+---
+
+# Tavily Search Access and Setup
+
+The [Tavily resources server](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search)
+requires a Tavily key and a local domain-exclusion policy. Judge-enabled configs
+also need model access; the dataset recipe below needs separate GitLab access.
+
+## Access requirements
+
+NVIDIA users can start with **@rgala**, the existing access contact, to identify
+the owners and obtain:
+
+- A Tavily key, permitted usage, and quota.
+- The approved exclusion-policy artifact, version, checksum, and refresh requirements.
+- The GitLab MLflow-compatible registry URI, read token, dataset version, and artifact names.
+- Policy-model and judge-model endpoints and credentials.
+
+The server host needs network access to each service. Keep their credentials separate
+and out of source control and logs.
+
+<Note>
+External users can [contact the maintainers](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose)
+to discuss access options for the policy and internal datasets before running this recipe.
+These require separate authorization from Tavily service access. Use private
+channels for credentials and policy contents.
+</Note>
+
+## Exclusion policy
+
+Obtain the approved JSON from its owner and place it at an absolute path readable
+by the resources-server process, including inside its container if applicable.
+Set `TAVILY_EXCLUDE_DOMAINS_FILE` to that path and compare its SHA-256 with the
+owner-provided checksum. Record the version and follow the owner's instructions
+for downloading and refreshing this file.
+
+The [parser](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/app.py)
+reads a `notices` list containing `properties` entries with `type: "domain"`
+and `value`. Use the complete, unmodified approved policy. If the file is missing
+or fails to load, request a compatible approved artifact from its owner.
+
+## Configure services
+
+Add these references to the repo-root, gitignored `env.yaml`, matching the
+[shipped vLLM-judge config](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/configs/tavily_search_judge_vllm_model.yaml):
+
+```yaml
+tavily_api_key: ${oc.env:TAVILY_API_KEY}
+exclude_domains_file_path: ${oc.env:TAVILY_EXCLUDE_DOMAINS_FILE}
+search_judge_model_base_url: ${oc.env:SEARCH_JUDGE_MODEL_BASE_URL}
+search_judge_model_api_key: ${oc.env:SEARCH_JUDGE_MODEL_API_KEY}
+search_judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
+```
+
+Supply the environment variables through your credential workflow. The endpoint
+must serve the named judge model; leave its key empty only if the operator confirms
+unauthenticated access. Configure the policy model separately using the
+[vLLM guide](/main/model-server/vllm).
+
+## GitLab datasets
+
+Add the registry endpoint and token references to `env.yaml`:
+
+```yaml
+mlflow_tracking_uri: ${oc.env:GYM_GITLAB_REGISTRY_URI}
+mlflow_tracking_token: ${oc.env:GYM_GITLAB_REGISTRY_TOKEN}
+```
+
+Use the MLflow-compatible project registry URI supplied by its owner.
+See the [configuration reference](/main/reference/configuration#mlflow) and
+[dataset CLI](/main/reference/cli-commands#gym-dataset-download).
+
+These names and paths match the shipped config. Confirm access to version
+`0.0.1` and both artifacts before running from the repository root:
+
+```bash
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact train.jsonl \
+    --output resources_servers/tavily_search/sft_samples/train.jsonl
+
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact validation.jsonl \
+    --output resources_servers/tavily_search/sft_samples/validation.jsonl
+```
+
+For access errors, check the token and project permissions with the owner.
+For missing artifacts, confirm the version/name mapping and align the local config.
+Use these splits for training and validation; the committed example is for small
+setup checks.
+
+## Run
+
+With Gym installed and the prerequisites configured:
+
+```bash
+gym env start \
+    --resources-server tavily_search/tavily_search_judge_vllm_model \
+    --model-type vllm_model
+```
+
+Before scaling up, run a small [evaluation](/main/evaluation/benchmarks) and inspect
+the search response, policy exclusions, and judge result to validate the workflow.

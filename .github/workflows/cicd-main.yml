@@ -19,6 +19,8 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "0 */4 * * *"
   workflow_dispatch:
@@ -395,6 +397,7 @@ jobs:
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`
+            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
             • Pre-flight: ${{ needs.pre-flight.result }}
             • Classify changes: ${{ needs.classify_changes.result }}
             • Unit tests: ${{ needs.unit_tests.result }}
@@ -402,3 +405,27 @@ jobs:
             • GPU E2E tests: ${{ needs.gpu_e2e_tests.result }}
             • Provider E2E tests: ${{ needs.provider_e2e_tests.result }}
             • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
+
+  merge-queue-notification:
+    name: Merge queue notification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group'
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment on PR with merge queue run URL
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Extract the PR number from the merge group head ref
+          # (format: refs/heads/gh-readonly-queue/main/pr-<number>-<sha>)
+          PR_NUMBER=$(echo "$HEAD_REF" | sed -n 's/.*\/pr-\([0-9]*\)-.*/\1/p')
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "Could not extract a PR number from merge group head ref: $HEAD_REF" >&2
+            exit 1
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="🔄 Merge queue validation started! You can track the progress here: $RUN_URL"

@@ -846,7 +846,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
-            server_config["model_server_url"] = apply_rollout_prefix(server_config["model_server_url"], rollout_id)
+            server_config["model_server_url"] = apply_rollout_prefix(
+                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+            )
 
         params = AnyTerminalInstanceConfig(
             **{**self.config.model_dump(), **config_overrides},

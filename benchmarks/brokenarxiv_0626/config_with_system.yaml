@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/false_statement_judge/configs/false_statement_judge.yaml
+  - benchmarks/judge_luna.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config
+# above to ensure this benchmark config is isolated.
+brokenarxiv_0626_false_statement_judge_resources_server:
+  _inherit_from: false_statement_judge
+  resources_servers:
+    false_statement_judge:
+      judge_responses_create_params:
+        # Clear the inherited Ultra request settings for Luna medium.
+        max_output_tokens: null
+        temperature: null
+        top_p: null
+
+brokenarxiv_0626_false_statement_judge_simple_agent:
+  _inherit_from: false_statement_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: brokenarxiv_0626_false_statement_judge_resources_server
+      datasets:
+      - name: brokenarxiv_0626
+        type: benchmark
+        jsonl_fpath: benchmarks/brokenarxiv_0626/data/brokenarxiv_0626_benchmark.jsonl
+        prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml
+        prepare_script: benchmarks/brokenarxiv_0626/prepare.py

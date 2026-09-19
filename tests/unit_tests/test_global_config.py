@@ -39,6 +39,7 @@ from nemo_gym.config_types import (
     UnsupportedAgentPairingError,
     UnsupportedModelPairingError,
     WANDBConfig,
+    is_almost_server,
 )
 from nemo_gym.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -1409,6 +1410,18 @@ contested: second_inner
         # Diagnostics must stay off stdout, which carries the `--json` payload.
         assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
+    def test_environment_server_is_recognized_as_an_almost_server(self) -> None:
+        config = DictConfig(
+            {
+                "environment_servers": {
+                    "first": {"entrypoint": "first.py"},
+                    "second": {"entrypoint": "second.py"},
+                }
+            }
+        )
+
+        assert is_almost_server(config) is True
+
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
         Test that error_on_almost_servers=false does not raise ValueError.
@@ -2773,3 +2786,35 @@ class TestComposeUnboundAgent:
 
         with raises(ConfigKeyError):
             self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)
+
+
+def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
+    """Pinning only the port must not suppress the host default.
+
+    A caller that constrains the head server to an allocated port range cannot
+    also supply the host: it is the address of whichever node the job lands on,
+    which only `use_absolute_ip` resolves, and only here.
+    """
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import (
+        HEAD_SERVER_KEY_NAME,
+        USE_ABSOLUTE_IP,
+        GlobalConfigDictParser,
+        GlobalConfigDictParserConfig,
+    )
+
+    monkeypatch.setattr("nemo_gym.global_config.gethostname", lambda: "node-17")
+    monkeypatch.setattr("nemo_gym.global_config.gethostbyname", lambda _h: "10.1.2.3")
+
+    initial = OmegaConf.create(
+        {
+            **GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            USE_ABSOLUTE_IP: True,
+            HEAD_SERVER_KEY_NAME: {"port": 63000},
+        }
+    )
+    parsed = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+
+    assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
+    assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
