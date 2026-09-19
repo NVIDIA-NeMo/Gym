@@ -39,6 +39,12 @@ For each JSONL row, Gym:
 
 This data-authored form is useful when tasks are structurally uniform. When individual tasks need different policies, use task-local verifiers.
 
+## Why JSONL?
+
+JSONL keeps large collections of uniform tasks compact, streamable, and easy to generate, shard, filter, or publish as datasets. Each row contains only the values that vary; the instruction, runtime, data model, and verifier remain shared.
+
+Use task directories instead when individual tasks need their own instructions, verifier policies, fixtures, repositories, or other assets. [Hello Verifier Reuse](../hello_verifier_reuse/README.md) demonstrates that directory-authored form.
+
 ## Related examples
 
 - [Hello World](../hello_world/README.md) — Create the smallest single-task environment.

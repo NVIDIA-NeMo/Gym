@@ -14,7 +14,7 @@ gym eval run \
 ```
 
 > [!NOTE]
-> This is the target interface. Environment loading and execution are not implemented yet.
+> This is the target one-command interface. The dependent runtime prototype can already run this task with Hermes in local Docker. The checked-in `config.yaml` is temporary internal integration wiring, and `prepare.py` temporarily converts `environment.yaml` into the JSONL expected by the existing rollout pipeline. Environment authors should not need either file once `--environment` generates the server composition and materialized task internally.
 
 ## How it works
 
@@ -24,6 +24,8 @@ gym eval run \
 - `environment.yaml` connects those pieces.
 
 Hello World contains one task, so Gym runs it automatically. A taskset is a named collection of similar tasks that uses a `tasksets/` folder and the `--taskset` option.
+
+The singleton task stays at the environment root to keep the first example small. When tasks need different instructions, verifier policies, or assets, they can move into task directories as shown by Hello Verifier Reuse. When many tasks share those definitions and differ only in data, use JSONL as shown by Hello Taskset.
 
 ## Related examples
 
