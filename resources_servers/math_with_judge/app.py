@@ -17,7 +17,7 @@ import contextlib
 import logging
 import multiprocessing as mp
 from io import StringIO
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -44,6 +44,8 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
+
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True

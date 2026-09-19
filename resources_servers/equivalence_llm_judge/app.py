@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
@@ -55,6 +55,8 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
         {question}, {expected_answer}, {generated_answer}
     - judge_equal_label / judge_not_equal_label: labels the judge must output.
     """
+
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
 
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"
