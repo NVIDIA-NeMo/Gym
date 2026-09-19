@@ -237,7 +237,7 @@ def test_orchestrator_is_the_only_writer_of_the_active_servers_gauge():
     package_dir = pkg_file.rsplit("/", 1)[0]
     hits = (
         subprocess.run(
-            ["grep", "-rn", "record_active_servers", package_dir],
+            ["grep", "-rn", "--include=*.py", "record_active_servers", package_dir],
             capture_output=True,
             text=True,
         )
