@@ -35,6 +35,7 @@ from nemo_gym.sandbox.providers import (
     SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
@@ -467,9 +468,24 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        """Run a command, optionally preserving services needed by later commands.
+
+        ``preserve_background_services`` selects a provider's service-preserving
+        execution when available; other providers use ordinary exec. Services
+        must redirect stdout and stderr. This mode does not accept per-command
+        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
-            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            return await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
 
         # The command itself is deliberately not recorded. In a code-execution environment
         # it is model output or task content, which must not land in a trace backend
@@ -481,7 +497,14 @@ class AsyncSandbox:
             "gym.sandbox.exec",
             **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
         ) as span:
-            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            result = await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
             if span is not None:
                 safe_set_span_attributes(
                     span,
@@ -500,7 +523,17 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
+            if env is not None or user is not None:
+                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
+            return await self._provider.exec_with_background_services(
+                self._require_handle(),
+                command,
+                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                timeout_s=timeout_s,
+            )
         return await self._provider.exec(
             self._require_handle(),
             command,
@@ -722,6 +755,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         return self._runner.run(
             "exec",
@@ -731,6 +765,7 @@ class Sandbox:
                 env=env,
                 timeout_s=timeout_s,
                 user=user,
+                preserve_background_services=preserve_background_services,
             ),
         )
 

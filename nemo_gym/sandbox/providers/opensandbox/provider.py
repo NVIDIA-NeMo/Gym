@@ -1780,6 +1780,79 @@ class OpenSandboxProvider:
             retries=self._command_retry_count(),
         )
 
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult:
+        """Preserve background services that redirect their stdout and stderr."""
+        if timeout_s is not None and timeout_s < 0:
+            raise ValueError("timeout_s must be nonnegative")
+        commands = handle.raw.commands
+        session_id = await self._await_sdk_call(
+            commands.create_session(working_directory=cwd),
+            operation="create bash session",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._connection.request_timeout_s,
+        )
+        # A nested shell keeps exit/exec in the command from replacing the SDK's
+        # session wrapper. The client owns the deadline: the native timeout can
+        # kill only the shell and then hang waiting for a child's output pipe.
+        task = asyncio.create_task(
+            commands.run_in_session(session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0))
+        )
+
+        async def release_session() -> None:
+            try:
+                # Delete while the request is still active: execd then knows the
+                # process group to kill. After normal completion it only drops
+                # session state; background services live until sandbox teardown.
+                await self._await_sdk_call(
+                    commands.delete_session(session_id),
+                    operation="delete bash session",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=10,
+                )
+                if not task.done():
+                    await asyncio.wait({task}, timeout=10)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout_s)
+            timed_out = not done
+        finally:
+            cleanup = asyncio.create_task(release_session())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+
+        if timed_out and (task.cancelled() or task.exception() is not None):
+            return SandboxExecResult(
+                None, f"Command timed out after {timeout_s:g}s; native session was deleted", 124, error_type="timeout"
+            )
+        execution = task.result()
+        stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
+        stderr_parts = [msg.text for msg in execution.logs.stderr]
+        if timed_out:
+            stderr_parts.append(f"Command timed out after {timeout_s:g}s; native session was deleted")
+            return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
+        if execution.error is not None:
+            stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+        return_code = execution.exit_code
+        error_type = None
+        if return_code is None:
+            return_code = 125 if execution.error is not None else 0
+            error_type = "sandbox" if execution.error is not None else None
+        return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
+
     def _pty_http_client(self) -> Any:
         """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp

@@ -14,6 +14,8 @@
 
 import asyncio
 import importlib.util
+import os
+import shlex
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -48,6 +50,69 @@ from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESan
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.mark.integration
+# Ordinary exec is the negative control: its server starts, but does not survive command cleanup.
+@pytest.mark.parametrize("survives", [False, True])
+@pytest.mark.skipif(
+    os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
+)
+async def test_server_survival_after_command_finishes(survives: bool) -> None:
+    """Provider session execution preserves the server across OpenSandbox commands."""
+    from omegaconf import OmegaConf
+
+    config_path = Path(__file__).parents[2] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)["sandbox"]
+    config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
+    config["opensandbox"]["operations"].update(retries=0, background_poll_interval_s=1)
+    sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
+    try:
+        async with asyncio.timeout(300):
+            await sandbox.start(
+                SandboxSpec(
+                    image="python:3.11-slim",
+                    ttl_s=300,
+                    ready_timeout_s=120,
+                    env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
+                )
+            )
+            probe = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status)"
+            check = f"python3 -c {shlex.quote(probe)}"
+            start = (
+                "python3 -m http.server 5000 --bind 127.0.0.1 > /tmp/http.log 2>&1 < /dev/null & "
+                # Poll readiness before exiting to distinguish startup delay from process cleanup.
+                f"for attempt in {{1..100}}; do {check} 2>/dev/null && exit 0; sleep 0.1; done; exit 1"
+            )
+            # The first command exits after its child server accepts connections.
+            started = await sandbox.exec(
+                f"bash -c {shlex.quote(start)}", timeout_s=30, preserve_background_services=survives
+            )
+            assert started.return_code == 0, started
+            assert started.stdout.strip() == "200"
+            response = await sandbox.exec(check, timeout_s=15)
+            if survives:
+                assert response.return_code == 0, response
+                assert response.stdout.strip() == "200"
+                # A timed-out solution must stop its service while keeping the
+                # sandbox available for the verifier to inspect partial work.
+                timed_start = start.replace("5000", "5001")
+                timed_out = await sandbox.exec(
+                    f"bash -c {shlex.quote(timed_start)}; sleep 60", timeout_s=5, preserve_background_services=True
+                )
+                assert timed_out.return_code == 124, timed_out
+                assert timed_out.error_type == "timeout", timed_out
+                assert timed_out.stdout.strip() == "200", timed_out
+                stopped = await sandbox.exec(check.replace("5000", "5001"), timeout_s=15)
+                assert stopped.return_code == 1, stopped
+                assert "ConnectionRefusedError" in (stopped.stdout or "") + (stopped.stderr or "")
+                # Deleting the timed-out session must leave the earlier service alone.
+                assert (await sandbox.exec(check, timeout_s=15)).return_code == 0
+            else:
+                assert response.return_code == 1, response
+                assert "ConnectionRefusedError" in (response.stdout or "") + (response.stderr or "")
+    finally:
+        await sandbox.stop()
 
 
 def _has_module(module_name: str) -> bool:
@@ -350,6 +415,58 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
     await started.stop()
     with pytest.raises(RuntimeError, match="has been stopped"):
         await started.start(SandboxSpec(image="image:tag"))
+
+
+@pytest.mark.parametrize("timeout", [30, None])
+async def test_background_services_uses_ordinary_exec_without_provider_override(timeout: int | None) -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+    await sandbox.exec(
+        "bash solve.sh", env={"KEY": "value"}, user="root", timeout_s=timeout, preserve_background_services=True
+    )
+    [call] = provider.exec_calls
+    assert call["command"] == "bash solve.sh"
+    assert call["cwd"] == "/work"
+    assert call["timeout_s"] == timeout
+    assert call["env"] == {"KEY": "value"}
+    assert call["user"] == "root"
+
+
+class ServicePreservingSandboxProvider(FakeSandboxProvider):
+    async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
+        await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+        return SandboxExecResult(stdout="service-preserving execution", stderr=None, return_code=0)
+
+
+@pytest.mark.parametrize("telemetry", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+async def test_exec_selects_service_preserving_execution_only_when_requested(monkeypatch, telemetry, preserve):
+    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_enabled", lambda _: telemetry)
+    provider = ServicePreservingSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        result = await sandbox.exec("bash solve.sh", timeout_s=None, preserve_background_services=preserve)
+    assert result.stdout == ("service-preserving execution" if preserve else "ok")
+    assert provider.exec_calls[0]["cwd"] == "/work"
+    assert provider.exec_calls[0]["timeout_s"] is None
+
+
+@pytest.mark.parametrize("overrides", [{"env": {"KEY": "value"}}, {"user": "root"}])
+async def test_service_preserving_exec_rejects_unsupported_overrides(overrides):
+    provider = ServicePreservingSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag"))
+        with pytest.raises(ValueError, match="does not support per-command env or user"):
+            await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
+    assert provider.exec_calls == []
+
+
+def test_sync_exec_can_preserve_background_services():
+    with Sandbox(ServicePreservingSandboxProvider()) as sandbox:
+        sandbox.start(SandboxSpec(image="image:tag"))
+        result = sandbox.exec("bash solve.sh", preserve_background_services=True)
+    assert result.stdout == "service-preserving execution"
 
 
 async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:

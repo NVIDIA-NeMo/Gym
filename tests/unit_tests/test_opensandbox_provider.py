@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import gc
 import logging
 import sys
 from dataclasses import dataclass
@@ -39,6 +40,71 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize(
+    "outcome", ["success", "exit-124", "timeout", "cancel", "timeout-stream-error", "cancel-stream-error"]
+)
+async def test_session_execution_releases_session_before_cancelling(outcome: str, monkeypatch) -> None:
+    unhandled_errors = []
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_exception_handler", unhandled_errors.append)
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    calls = []
+
+    class Commands:
+        async def create_session(self, **kwargs):
+            calls.append("create")
+            assert kwargs == {"working_directory": "/work"}
+            return "session-1"
+
+        async def run_in_session(self, session_id, command, **kwargs):
+            assert session_id == "session-1"
+            assert "solve.sh" in command
+            started.set()
+            if outcome.startswith(("timeout", "cancel")):
+                try:
+                    await stopped.wait()
+                except asyncio.CancelledError:
+                    assert stopped.is_set(), "cancelled the client before stopping the remote process group"
+                    raise
+                if outcome.endswith("stream-error"):
+                    raise RuntimeError("output stream closed")
+            calls.append("finished")
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[SimpleNamespace(text="solution output")], stderr=[]),
+                exit_code=124 if outcome == "exit-124" else 0,
+                error=None,
+            )
+
+        async def delete_session(self, session_id):
+            assert session_id == "session-1"
+            calls.append("delete")
+            stopped.set()
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 1})
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", SimpleNamespace(commands=Commands()))
+    task = asyncio.create_task(
+        provider.exec_with_background_services(handle, "bash solve.sh", cwd="/work", timeout_s=0.05)
+    )
+    if outcome.startswith("cancel"):
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await task
+        assert result.stdout == (None if outcome.endswith("stream-error") else "solution output")
+        assert result.return_code == (124 if outcome.startswith("timeout") or outcome == "exit-124" else 0)
+        assert result.error_type == ("timeout" if outcome.startswith("timeout") else None)
+    assert calls.count("delete") == 1
+    if outcome in ("timeout", "cancel"):
+        assert calls.index("delete") < calls.index("finished")
+    del task
+    # Let completed-task callbacks release their references before checking unhandled errors.
+    await asyncio.sleep(0)
+    gc.collect()
+    assert unhandled_errors == []
 
 
 @pytest.mark.parametrize("recovers", [True, False])
