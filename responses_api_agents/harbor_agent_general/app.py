@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 
 
@@ -129,6 +130,23 @@ class HarborAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         ## Harbor owns the full run() lifecycle.
         raise NotImplementedError
+
+    @staticmethod
+    def _score_fn(rollout: dict) -> dict[str, float]:
+        reward = rollout.get("reward")
+        ## A row without one is not a zero: it is a rollout nobody scored.
+        return {} if reward is None else {"accuracy": reward}
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        """pass@k over whatever the task's verifier returned.
+
+        A benchmark scoring 0/1 gets the combinatorial estimator, a continuous one gets
+        max-of-k; `compute_pass_majority_metrics` decides per task. `answer_key` is left unset
+        because Harbor reports a score, not an extracted answer, so majority@k has nothing to
+        take a majority of.
+        """
+        metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
+        return metrics
 
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
