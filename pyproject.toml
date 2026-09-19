@@ -288,9 +288,8 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.15",
 
-    # httpx-aiohttp: aiohttp-backed httpx transport used by the OpenSandbox
-    # provider's `connection.transport_backend: aiohttp`; without it the
-    # provider silently falls back to the httpx transport with only a warning.
+    # httpx-aiohttp: response streaming and exception mapping for OpenSandbox's
+    # adapter to Gym's global aiohttp client, plus the E2B SDK transport.
     # Pulls in aiohttp (aiohttp<4,>=3.10).
     # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
     # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
