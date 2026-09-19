@@ -321,6 +321,49 @@ async def test_new_model_boundary_replaces_restored_lineage_coordinate() -> None
 
 
 @pytest.mark.asyncio
+async def test_restored_continuation_is_a_live_boundary_for_repeated_checkpoint(
+    tmp_path,
+) -> None:
+    participant = AgentCheckpointParticipant()
+    original = _boundary(attempt_index=0, boundary_index=4)
+    participant.install_restored([original])
+    await participant.resume()
+
+    replacement = await participant.begin("rollout-a", 1, task=asyncio.current_task())
+    assert participant.continuation(replacement) == original
+    assert replacement.boundary == original.model_copy(update={"attempt_index": 1})
+    assert replacement.boundary is not original
+
+    await participant.begin_external_wait(replacement)
+    report = await participant.prepare(time.time() + 2)
+
+    assert report["ready_to_commit"] is True
+    assert report["executions"][0]["state"] == "external_wait_frozen"
+    checkpoint_dir = tmp_path / "repeated-checkpoint"
+    checkpoint_dir.mkdir()
+    commit_agent_state(participant, checkpoint_dir, checkpoint_id="checkpoint-2")
+
+    restored = AgentCheckpointParticipant()
+    restore_agent_state(restored, checkpoint_dir)
+    await restored.resume()
+    second_replacement = await restored.begin("rollout-a", 2, task=None)
+    second_continuation = restored.continuation(second_replacement)
+
+    assert second_continuation is not None
+    assert second_continuation.attempt_index == 1
+    assert second_replacement.boundary is not None
+    assert second_replacement.boundary.attempt_index == 2
+    assert second_replacement.boundary.boundary_index == 4
+    assert second_replacement.boundary.last_committed_model_capture_key == "rollout-a"
+    assert second_replacement.boundary.last_committed_model_call_id == "call-1"
+
+    await participant.resume()
+    await participant.end_external_wait(replacement)
+    await participant.finish(replacement, outcome="failed")
+    await restored.finish(second_replacement, outcome="failed")
+
+
+@pytest.mark.asyncio
 async def test_retire_tombstones_attempt_without_execution() -> None:
     participant = AgentCheckpointParticipant()
 
