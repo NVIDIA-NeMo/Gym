@@ -121,6 +121,20 @@ Send a POST request to the `/compare` endpoint:
 }
 ```
 
+### 4. File collector
+
+The shipped configuration needs exactly 16 repeats per task and enough concurrency to admit all 16.
+After starting the configured Gym servers, use a fresh one-task input and output:
+
+```bash
+gym eval run --no-serve --agent genrm_simple_agent \
+    --input one-task.jsonl --output fresh-results.jsonl \
+    --num-repeats 16 --concurrency 16
+```
+
+See [GenRM Comparison Groups](https://docs.nvidia.com/nemo/gym/main/evaluation/genrm-cohorts)
+for the input format, explicit group IDs, and recovery limits.
+
 ## Configuration Options
 
 | Parameter | Type | Default | Description |
@@ -221,7 +235,8 @@ genrm_compare/
 
 ### POST `/compare`
 
-Compare multiple candidate responses.
+Compare multiple candidate responses. Judge transport failures or exhausted retries without a completed
+answer return HTTP 503 instead of ordinary rewards. Empty input returns an empty reward list.
 
 **Request Body** (`GenRMCompareRequest`):
 - `conversation_history`: List of `{"role": str, "content": str}` messages
@@ -235,18 +250,18 @@ Compare multiple candidate responses.
 
 ### POST `/verify`
 
-Cohort-based verification endpoint used during rollout collection.
+Cohort verification uses local member indices and finite deadlines. Caller-owned group IDs provide retry isolation
+and completed reward replay; legacy task/prompt grouping remains available for sequential runs.
+Comparisons start after every member arrives; rewards are published only for a complete group. Missing
+members end the group with HTTP 503 and no reward. Judge failures use Gym's `judge_failed` response,
+preserving each answer with a failure reason and `instance_config.mask_sample: true`; the failsafe's zero
+is a placeholder excluded from collector metrics. A disconnect detaches its waiter; the same answer can
+reattach. Explicit-ID groups can replay cached rewards after completion. Both successful and failed
+legacy groups are removed so the next complete sequential run can start.
+The caller coordinates complete replacement attempts; collector scheduling and resume are unchanged.
 
-- When `num_rollouts_per_prompt <= 1`, returns `default_score`
-- When `num_rollouts_per_prompt > 1`, buffers rollouts by task/prompt identity plus principle, waits for a full cohort, then assigns relative rewards to that cohort
-
-## Error Handling
-
-The server handles failures gracefully:
-
-- **Parse failures**: Retries up to `genrm_parse_retries` times with sleep between attempts
-- **Connection errors**: Falls back to default scores
-- **Single response**: Returns default score (no comparison possible)
+See [GenRM Comparison Groups](https://docs.nvidia.com/nemo/gym/main/evaluation/genrm-cohorts) for
+coordinates, the supported collector example, cancellation behavior, and bounded retention limits.
 
 ## Development
 
@@ -274,15 +289,9 @@ The `comparison_strategies.py` module provides the infrastructure for integratin
 - **`GenRMStrategyConfig`**: Configuration for strategy behavior
 - **Utility functions**: For cohort grouping, text extraction, response generation
 
-**Integration with Rollout Collection:**
-
-When configured in `rollout_collection.py`, the strategy:
-1. Generates N responses per prompt using the policy model
-2. Buffers responses by task/prompt identity plus principle
-3. Calls this Resources Server's `/compare` endpoint
-4. Attaches rewards and metrics to results
-
-See `examples/genrm_grpo_example.yaml` for complete configuration.
+The file collector calls the simple agent's `/run` endpoint, which calls `/verify` once per generated
+answer. It does not use `GenRMStrategy` or the batch `/compare` endpoint. `GenRMStrategy` is an optional
+client for callers that already hold all answers for a batch comparison.
 
 ## Related Components
 
@@ -290,8 +299,7 @@ See `examples/genrm_grpo_example.yaml` for complete configuration.
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
 - **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
 - **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
-- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Integrates comparison strategies
-- **Design Doc**: `docs/design_notes/genrm_reward_model_refactoring.md`
+- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Collects per-rollout agent results
 
 ## License
 
