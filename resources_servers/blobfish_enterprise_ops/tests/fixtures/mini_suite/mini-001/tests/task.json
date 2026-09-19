@@ -1,0 +1,1 @@
+{"task_id": "mini-001", "expected": {"order_id": "ORD-7", "status": "shipped", "order_total": 42.0}, "untouched": ["ORD-8"]}

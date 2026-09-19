@@ -1,0 +1,16 @@
+{
+  "task_id": "mini-001",
+  "role": "fulfilment_lead",
+  "company": "Mini Widgets Ltd",
+  "seed": {
+    "orders": [
+      {"order_id": "ORD-7", "customer": "Acme", "status": "packed"},
+      {"order_id": "ORD-8", "customer": "Globex", "status": "packed"}
+    ],
+    "lines": [
+      {"order_id": "ORD-7", "sku": "W-1", "qty": 2, "unit_price": 10.0},
+      {"order_id": "ORD-7", "sku": "W-2", "qty": 1, "unit_price": 22.0},
+      {"order_id": "ORD-8", "sku": "W-1", "qty": 5, "unit_price": 10.0}
+    ]
+  }
+}
