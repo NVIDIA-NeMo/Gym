@@ -1,0 +1,24 @@
+# Chain to the EnterpriseOps-Gym resources server + agent config
+config_paths:
+  - resources_servers/enterpriseops_gym/configs/enterpriseops_gym.yaml
+
+# `_inherit_from` keeps this benchmark config isolated from the generic config above.
+enterpriseops_benchmark_resources_server:
+  _inherit_from: enterpriseops_gym
+
+enterpriseops_benchmark_simple_agent:
+  _inherit_from: enterpriseops_gym_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: enterpriseops_benchmark_resources_server
+      datasets:
+      - name: enterpriseops
+        type: benchmark
+        jsonl_fpath: benchmarks/enterpriseops/data/enterpriseops_oracle_benchmark.jsonl
+        prepare_script: benchmarks/enterpriseops/prepare.py
+        # Rows are fully materialized by the converter (system+user input, tools baked in),
+        # so no prompt templating applies.
+        prompt_config: null
+        # EOG leaderboard reports single-run task success; raise for mean@k.
+        num_repeats: 1
