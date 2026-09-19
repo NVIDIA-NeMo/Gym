@@ -2326,6 +2326,57 @@ class TestComposeUnboundAgent:
 
         assert OmegaConf.to_container(config, resolve=False, throw_on_missing=False) == before
 
+    def test_protocol_agent_binding_creates_real_selected_agent(self) -> None:
+        config = DictConfig(
+            {
+                self.HARNESS_INSTANCE: self._harness(),
+                "resources": {"resources_servers": {"example": {"entrypoint": "app.py"}}},
+                "agent_bindings": {
+                    "agent": {
+                        "resources_server": {
+                            "type": "resources_servers",
+                            "name": "resources",
+                        }
+                    }
+                },
+                "environment": {
+                    "environment_servers": {
+                        "single_agent": {
+                            "agent_server": {
+                                "type": "responses_api_agents",
+                                "name": "agent",
+                            }
+                        }
+                    }
+                },
+            }
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "agent_bindings" not in config
+        assert "hermes_agent" in config
+        hermes = config["hermes_agent"]["responses_api_agents"]["hermes_agent"]
+        assert hermes["resources_server"]["name"] == "resources"
+        assert config["environment"]["environment_servers"]["single_agent"]["agent_server"]["name"] == "hermes_agent"
+
+    def test_protocol_agent_binding_requires_selected_agent(self) -> None:
+        config = DictConfig(
+            {
+                "agent_bindings": {
+                    "agent": {
+                        "resources_server": {
+                            "type": "resources_servers",
+                            "name": "resources",
+                        }
+                    }
+                }
+            }
+        )
+
+        with raises(AgentCompositionError, match="no standalone agent config was selected"):
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
     def test_absent_resources_server_is_not_a_source(self) -> None:
         # Self-contained agents omit `resources_server` entirely, which is not the same as leaving it unset.
         self_contained = {

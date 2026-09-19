@@ -5,16 +5,22 @@ Hello World is the smallest NeMo Gym environment and shows how to create and run
 ## Run it
 
 ```bash
-export ANTHROPIC_API_KEY="your-api-key"
+export MODEL_API_KEY="<api-key>"
 
 gym eval run \
   --environment hello-world \
-  --agent claude_code_agent \
-  --model claude-sonnet-4-6
+  --agent-type hermes_agent/borrowed_sandbox_openai_compatible \
+  --model-type openai_model \
+  --model <model-name> \
+  --model-url <openai-compatible-url> \
+  --model-api-key "$MODEL_API_KEY"
 ```
 
+The `borrowed_sandbox_openai_compatible` profile enables Hermes's terminal tool while omitting
+provider-specific chat-template arguments that standard OpenAI-compatible endpoints may reject.
+
 > [!NOTE]
-> This is the target one-command interface. The dependent runtime prototype can already run this task with Hermes in local Docker. The checked-in `config.yaml` is temporary internal integration wiring, and `prepare.py` temporarily converts `environment.yaml` into the JSONL expected by the existing rollout pipeline. Environment authors should not need either file once `--environment` generates the server composition and materialized task internally.
+> `--environment` now loads `environment.yaml`, materializes its task internally, builds the local Docker runtime, and generates the temporary server composition. The environment does not need a `config.yaml`, prepared JSONL file, or `prepare.py`.
 
 ## How it works
 

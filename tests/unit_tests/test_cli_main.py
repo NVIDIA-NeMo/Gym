@@ -1274,6 +1274,82 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
 
+    def test_eval_run_environment_definition_generates_internal_composition(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from nemo_gym.environment.runtime_composition import EnvironmentRunArtifacts
+
+        generated_config = tmp_path / "run.yaml"
+        generated_data = tmp_path / "tasks.jsonl"
+        monkeypatch.setattr(
+            "nemo_gym.environment.local_docker_image.build_local_docker_image",
+            lambda loaded: "nemo-gym-test:123",
+        )
+        monkeypatch.setattr(
+            "nemo_gym.environment.episode_protocols.create_episode_protocol_runtime", lambda loaded: object()
+        )
+        monkeypatch.setattr(
+            "nemo_gym.environment.runtime_composition.compose_environment_run",
+            lambda *args, **kwargs: EnvironmentRunArtifacts(
+                config_path=generated_config,
+                input_jsonl_path=generated_data,
+                config_paths=(Path("/supporting.yaml"), generated_config),
+            ),
+        )
+
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "run",
+                "--environment",
+                str(WORKING_DIR / "environments/hello_world"),
+                "--agent-type",
+                "hermes_agent/borrowed_sandbox_openai_compatible",
+                "--model-type",
+                "openai_model",
+                "--model",
+                "test-model",
+            ],
+        )
+
+        config_paths, other_overrides = _split_overrides(overrides)
+        assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
+        assert config_paths == {
+            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
+            str(WORKING_DIR / "responses_api_agents/hermes_agent/configs/borrowed_sandbox_openai_compatible.yaml"),
+            "/supporting.yaml",
+            str(generated_config),
+        }
+        assert other_overrides == {
+            "+policy_model_name=test-model",
+            '+output_jsonl_fpath="results/hello-world/rollouts.jsonl"',
+        }
+
+    def test_eval_run_rejects_taskset_without_environment_definition(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "run", "--taskset", "example"])
+
+        assert "--taskset requires an environment.yaml definition" in capsys.readouterr().out
+
+    def test_eval_run_rejects_dataset_split_for_environment_definition(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        with pytest.raises(SystemExit):
+            _dispatch_for(
+                monkeypatch,
+                [
+                    "eval",
+                    "run",
+                    "--environment",
+                    "hello-world",
+                    "--agent-type",
+                    "hermes_agent/borrowed_sandbox_openai_compatible",
+                    "--split",
+                    "validation",
+                ],
+            )
+
+        assert "--split selects a prepared dataset split" in capsys.readouterr().out
+
     @pytest.mark.parametrize(("legacy", "canonical"), LEGACY_ENVIRONMENT_ALIASES.items())
     def test_legacy_environment_selector_resolves_to_canonical_config(
         self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, legacy: str, canonical: str

@@ -14,17 +14,20 @@ Their JSONL rows contain only the path and expected content that differ.
 ## Run it
 
 ```bash
-export ANTHROPIC_API_KEY="your-api-key"
+export MODEL_API_KEY="<api-key>"
 
 gym eval run \
   --environment hello-taskset \
   --taskset example \
-  --agent claude_code_agent \
-  --model claude-sonnet-4-6
+  --agent-type hermes_agent/borrowed_sandbox_openai_compatible \
+  --model-type openai_model \
+  --model <model-name> \
+  --model-url <openai-compatible-url> \
+  --model-api-key "$MODEL_API_KEY"
 ```
 
 > [!NOTE]
-> This is the target one-command interface. The environment adapter now loads, validates, renders, and verifies this taskset; connecting that internal runtime directly to `--environment` remains future work.
+> `--environment` materializes the selected taskset and generates the temporary runtime composition internally. The environment adapter loads, validates, renders, and verifies each task.
 
 ## How it works
 

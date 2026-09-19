@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -343,6 +344,7 @@ _ASSETS = {
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
     "agent-type": ("responses_api_agents", "configs", None),
+    "sandbox-provider": ("nemo_gym/sandbox/providers", "configs", None),
 }
 
 
@@ -486,6 +488,37 @@ BENCHMARK = _asset_selector("benchmark", repeatable=True)
 ENVIRONMENT = _asset_selector("environment", repeatable=True)
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
+
+
+def _translate_eval_environment(args: argparse.Namespace) -> list[str]:
+    selected = args.environment or []
+    if not selected:
+        return []
+    from nemo_gym.environment.authoring import find_environment_definition
+
+    config_paths = [
+        _asset_config_path("environment", name) for name in selected if find_environment_definition(name) is None
+    ]
+    return [f"+config_paths=[{','.join(config_paths)}]"] if config_paths else []
+
+
+EVAL_ENVIRONMENT = Flag(
+    register=lambda p: p.add_argument(
+        "--environment",
+        action="append",
+        metavar="NAME_OR_PATH",
+        help="Run an environment.yaml definition or load a legacy named environment config.",
+    ),
+    translate_to_hydra=_translate_eval_environment,
+)
+
+TASKSET = Flag(
+    register=lambda p: p.add_argument(
+        "--taskset",
+        metavar="NAME",
+        help="Run only the named taskset from an environment.yaml definition.",
+    )
+)
 
 # Override for verifier-side agent/model compatibility guards. Offered wherever runtime configs compose.
 ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
@@ -644,9 +677,71 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+@exit_cleanly_on_config_error
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
-    dispatch(target, overrides)
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.environment.authoring import find_environment_definition, load_environment
+    from nemo_gym.environment.episode_protocols import create_episode_protocol_runtime
+    from nemo_gym.environment.local_docker_image import build_local_docker_image
+    from nemo_gym.environment.runtime_composition import SandboxRuntime, compose_environment_run
+
+    selected_environments = args.environment or []
+    authored_environments = [
+        (name, definition_path)
+        for name in selected_environments
+        if (definition_path := find_environment_definition(name)) is not None
+    ]
+    if not authored_environments:
+        if args.taskset is not None:
+            raise ConfigError("--taskset requires an environment.yaml definition selected with --environment.")
+        dispatch(target, overrides)
+        return
+    if len(selected_environments) != 1:
+        raise ConfigError("An environment.yaml run currently supports exactly one --environment value.")
+    if args.no_serve:
+        raise ConfigError("An environment.yaml run starts its generated server composition and cannot use --no-serve.")
+    if args.split is not None or _has_override(overrides, "split"):
+        raise ConfigError(
+            "--split selects a prepared dataset split and cannot be used with materialized environment.yaml tasks."
+        )
+    if args.agent_type is None:
+        raise ConfigError("An environment.yaml run requires --agent-type so the agent harness is selected explicitly.")
+    if args.agent is not None:
+        raise ConfigError(
+            "--agent names an already-running agent instance; use --agent-type to select the harness "
+            "for an environment.yaml run."
+        )
+
+    _, definition_path = authored_environments[0]
+    with tempfile.TemporaryDirectory(prefix="nemo-gym-environment-run-") as directory:
+        loaded = load_environment(definition_path)
+        runtime_image = build_local_docker_image(loaded)
+        sandbox = SandboxRuntime(
+            config_paths=(Path(_asset_config_path("sandbox-provider", "docker")),),
+            runtime_image=runtime_image,
+            sandbox_provider_ref="sandbox",
+            sandbox_config={
+                "ttl_s": 1800,
+                "ready_timeout_s": 300,
+            },
+        )
+        episode_protocol = create_episode_protocol_runtime(loaded)
+        artifacts = compose_environment_run(
+            loaded,
+            directory,
+            sandbox=sandbox,
+            episode_protocol=episode_protocol,
+            adapter_config_path=Path(_asset_config_path("resources-server", "environment_adapter")),
+            taskset=args.taskset,
+        )
+        generated_configs = f"+config_paths=[{','.join(str(path) for path in artifacts.config_paths)}]"
+        generated_overrides = _merge_config_paths([*overrides, generated_configs])
+        if args.output is None and not _has_override(generated_overrides, "output_jsonl_fpath"):
+            slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", loaded.definition.name).strip("-.") or "environment"
+            output_path = Path("results") / slug / "rollouts.jsonl"
+            generated_overrides.append(f"+output_jsonl_fpath={json.dumps(str(output_path))}")
+        dispatch(target, generated_overrides)
 
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1005,7 +1100,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             BENCHMARK,
-            ENVIRONMENT,
+            EVAL_ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,
@@ -1027,6 +1122,7 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
+            TASKSET,
             MODEL,
             MODEL_URL,
             MODEL_API_KEY,

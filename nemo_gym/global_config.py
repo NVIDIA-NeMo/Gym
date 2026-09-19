@@ -122,6 +122,8 @@ ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
 TASKSETS_KEY_NAME = "tasksets"
+ROLLOUT_INPUT_KEY_NAME = "rollout_input"
+AGENT_BINDINGS_KEY_NAME = "agent_bindings"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -163,6 +165,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
     TASKSETS_KEY_NAME,
+    ROLLOUT_INPUT_KEY_NAME,
+    AGENT_BINDINGS_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
@@ -648,6 +652,29 @@ Duplicate config paths:
             instances.append(_AgentInstance(name=str(name), agent_type=agent_type, server_config=server_config))
         return instances
 
+    def _agent_binding_targets(self, global_config_dict: DictConfig) -> List[_AgentInstance]:
+        """Return protocol-declared agent roles as composition targets."""
+
+        bindings = global_config_dict.get(AGENT_BINDINGS_KEY_NAME)
+        if bindings is None:
+            return []
+        if not isinstance(bindings, DictConfig):
+            raise ConfigError(f"`{AGENT_BINDINGS_KEY_NAME}` must be a mapping of role names to agent bindings.")
+
+        targets: List[_AgentInstance] = []
+        for name, binding in bindings.items_ex(resolve=False):
+            if not isinstance(binding, DictConfig):
+                raise ConfigError(f"`{AGENT_BINDINGS_KEY_NAME}.{name}` must be a mapping.")
+            unsupported = sorted(set(binding) - set(_COMPOSED_AGENT_CARRY_OVER_KEYS))
+            if unsupported:
+                raise ConfigError(
+                    f"`{AGENT_BINDINGS_KEY_NAME}.{name}` contains unsupported fields: {', '.join(unsupported)}."
+                )
+            if self._resources_server_reference(binding) is None:
+                raise ConfigError(f"`{AGENT_BINDINGS_KEY_NAME}.{name}` must declare `resources_server`.")
+            targets.append(_AgentInstance(name=str(name), agent_type="agent", server_config=binding))
+        return targets
+
     @staticmethod
     def _resources_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
         """The agent's `resources_server` block, or None when it declares none.
@@ -742,13 +769,18 @@ Duplicate config paths:
     def compose_unbound_agent(
         self, global_config_dict: DictConfig, held_agent_overrides: Optional[DictConfig] = None
     ) -> None:
-        """Rehost every other agent instance on the config's unbound agent, then drop that agent.
+        """Bind the selected standalone agent to declared roles and legacy agent targets.
 
         `held_agent_overrides` are command line overrides keyed by the name each instance is renamed to.
         """
         instances = self._agent_instances(global_config_dict)
+        binding_targets = self._agent_binding_targets(global_config_dict)
         sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
         if not sources:
+            if binding_targets:
+                raise AgentCompositionError(
+                    f"`{AGENT_BINDINGS_KEY_NAME}` declares agent roles, but no standalone agent config was selected."
+                )
             return
 
         if len(sources) > 1:
@@ -764,6 +796,15 @@ Duplicate config paths:
             for instance in instances
             if instance.name != source.name and self._runs_against_a_resources_server(instance.server_config)
         ]
+        concrete_target_names = {target.name for target in targets}
+        duplicate_binding_names = sorted(
+            target.name for target in binding_targets if target.name in concrete_target_names
+        )
+        if duplicate_binding_names:
+            raise AgentCompositionError(
+                f"Agent role names collide with configured agent instances: {', '.join(duplicate_binding_names)}."
+            )
+        targets.extend(binding_targets)
         if not targets:
             raise AgentCompositionError(
                 f"Agent instance '{source.name}' leaves its 'resources_server' unset, but the merged config "
@@ -775,11 +816,13 @@ Duplicate config paths:
 
         renames = {target.name: self._composed_instance_name(target, source.agent_type) for target in targets}
         self._raise_on_name_collision(global_config_dict, renames, source.name)
+        binding_names = {target.name for target in binding_targets}
 
         # Struct mode would reject the key removals below - we need open_dict to allow it.
         with open_dict(global_config_dict):
             # delete the source instance before any renames to avoid corner cases
             global_config_dict.pop(source.name)
+            global_config_dict.pop(AGENT_BINDINGS_KEY_NAME, None)
             for target in targets:
                 composed = deepcopy(source.server_config)
                 self._carry_over_agent_bindings(target.server_config, composed)
@@ -787,11 +830,15 @@ Duplicate config paths:
                     held_agent_overrides, renames[target.name], source.agent_type, composed
                 )
 
-                # extract the target instance, remove the old agent config, add the new agent
-                # and add the whole thing back to the config under the new name
-                instance = global_config_dict.pop(target.name)
-                agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
-                agents.pop(target.agent_type)
+                # Binding roles create a real agent instance directly. Legacy targets replace
+                # the environment's default agent while preserving its outer instance config.
+                if target.name in binding_names:
+                    instance = OmegaConf.create({AGENT_SERVER_TYPE_KEY_NAME: {}})
+                    agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
+                else:
+                    instance = global_config_dict.pop(target.name)
+                    agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
+                    agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
@@ -980,11 +1027,13 @@ the check."""
         sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
         if len(sources) != 1:
             return set()
-        return {
-            self._composed_instance_name(target, sources[0].agent_type)
-            for target in instances
-            if target.name != sources[0].name
-        }
+        targets = [
+            instance
+            for instance in instances
+            if instance.name != sources[0].name and self._runs_against_a_resources_server(instance.server_config)
+        ]
+        targets.extend(self._agent_binding_targets(config_dict))
+        return {self._composed_instance_name(target, sources[0].agent_type) for target in targets}
 
     def _hold_back_composed_agent_overrides(
         self, cli_global_config_dict: DictConfig, config_dict: DictConfig

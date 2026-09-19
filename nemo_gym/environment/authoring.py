@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import logging
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -18,12 +19,17 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 
+from nemo_gym import component_search_roots
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import MaterializedTask, TaskId
 from nemo_gym.single_agent_episode_types import (
     SINGLE_AGENT_TASK_INPUT_CONTRACT,
     SingleAgentTaskInput,
 )
+
+
+LOGGER = logging.getLogger(__name__)
+ENVIRONMENT_DEFINITION_FILENAME = "environment.yaml"
 
 
 class EnvironmentDefinitionError(ConfigError):
@@ -127,11 +133,57 @@ class MaterializedEnvironmentTask:
     verifier: VerifierDefinition
 
 
+def find_environment_definition(reference: str | Path) -> Path | None:
+    """Resolve a local path or installed environment name to ``environment.yaml``."""
+
+    requested = Path(reference).expanduser()
+    explicit_candidates = [requested]
+    if not requested.is_absolute():
+        explicit_candidates.append(Path.cwd() / requested)
+    for candidate in explicit_candidates:
+        definition_path = candidate / ENVIRONMENT_DEFINITION_FILENAME if candidate.is_dir() else candidate
+        if definition_path.is_file() and definition_path.name == ENVIRONMENT_DEFINITION_FILENAME:
+            return definition_path.resolve()
+
+    reference_text = str(reference)
+    matches: list[Path] = []
+    for root in component_search_roots():
+        environments_dir = root / "environments"
+        if not environments_dir.is_dir():
+            continue
+        directory_candidates = {
+            environments_dir / reference_text,
+            environments_dir / reference_text.replace("-", "_"),
+        }
+        for directory in directory_candidates:
+            definition_path = directory / ENVIRONMENT_DEFINITION_FILENAME
+            if definition_path.is_file() and definition_path.resolve() not in matches:
+                matches.append(definition_path.resolve())
+        for definition_path in environments_dir.glob(f"*/{ENVIRONMENT_DEFINITION_FILENAME}"):
+            try:
+                raw = yaml.safe_load(definition_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, yaml.YAMLError):
+                continue
+            if isinstance(raw, dict) and raw.get("name") == reference_text:
+                resolved = definition_path.resolve()
+                if resolved not in matches:
+                    matches.append(resolved)
+
+    if len(matches) > 1:
+        LOGGER.warning(
+            "Environment %r matches multiple definitions; using %s and ignoring %s",
+            reference_text,
+            matches[0],
+            ", ".join(str(path) for path in matches[1:]),
+        )
+    return matches[0] if matches else None
+
+
 def load_environment(path: str | Path) -> LoadedEnvironment:
     """Load an environment root or an explicit ``environment.yaml`` path."""
 
     requested = Path(path).expanduser()
-    definition_path = requested / "environment.yaml" if requested.is_dir() else requested
+    definition_path = requested / ENVIRONMENT_DEFINITION_FILENAME if requested.is_dir() else requested
     definition_path = definition_path.resolve()
     try:
         raw = yaml.safe_load(definition_path.read_text(encoding="utf-8"))
@@ -248,10 +300,16 @@ def materialize_single_task(loaded: LoadedEnvironment) -> MaterializedTask[BaseM
 def materialize_tasks_jsonl(loaded: LoadedEnvironment, *, taskset: str | None = None) -> str:
     """Serialize selected materialized tasks as JSONL rows."""
 
+    return tasks_to_jsonl(materialize_tasks(loaded, taskset=taskset))
+
+
+def tasks_to_jsonl(tasks: tuple[MaterializedEnvironmentTask, ...]) -> str:
+    """Encode materialized environment tasks as JSONL rows."""
+
     return "".join(
         json.dumps(environment_task.materialized.model_dump(mode="json", exclude_none=True), separators=(",", ":"))
         + "\n"
-        for environment_task in materialize_tasks(loaded, taskset=taskset)
+        for environment_task in tasks
     )
 
 
@@ -465,10 +523,12 @@ __all__ = [
     "EnvironmentDefinitionError",
     "LoadedEnvironment",
     "MaterializedEnvironmentTask",
+    "find_environment_definition",
     "load_environment",
     "load_environment_callable",
     "load_environment_object",
     "materialize_single_task",
     "materialize_tasks",
     "materialize_tasks_jsonl",
+    "tasks_to_jsonl",
 ]
