@@ -16,6 +16,9 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
@@ -28,12 +31,98 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import ModelCallRef
+from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+class InvalidPolicyOutputError(ValueError):
+    """A successful model request whose output does not satisfy the method contract."""
+
+
+@dataclass(slots=True)
+class GymModelCall:
+    model_ref: ModelServerRef
+    request: NeMoGymResponseCreateParamsNonStreaming
+    response: NeMoGymResponse | None = None
+    invocation_id: str | None = None
+
+
+@dataclass(slots=True)
+class RolloutLLMState:
+    """Gym-owned budget and exact model evidence shared by this rollout's clients."""
+
+    max_steps: int
+    used: int = 0
+    calls: list[GymModelCall] = field(default_factory=list)
+    gaps: list[ObservationGap] = field(default_factory=list)
+
+    def charge(self) -> None:
+        # No await between check and increment: atomic for the async rollout task tree.
+        if self.used >= self.max_steps:
+            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_steps} calls")
+        self.used += 1
+
+    @property
+    def model_calls(self) -> list[ModelCallRef]:
+        return [
+            ModelCallRef(model_ref=call.model_ref, response_id=call.response.id)
+            for call in self.calls
+            if call.response is not None
+        ]
+
+    def restore_prior_outputs(self, items: list[dict[str, Any]]) -> None:
+        """Restore only identifiable outputs; never guess between independent histories."""
+        prior = [
+            item.model_dump(mode="json", exclude_none=True)
+            for call in self.calls
+            if call.response is not None
+            for item in call.response.output
+        ]
+        text_counts = Counter(_assistant_text(item) for item in items if _assistant_text(item) is not None)
+        ambiguous = False
+        for index, item in enumerate(items):
+            identity = item.get("call_id") or item.get("id")
+            if identity is not None:
+                candidates = [
+                    raw
+                    for raw in prior
+                    if (raw.get("call_id") or raw.get("id")) == identity and raw.get("type") == item.get("type")
+                ]
+            elif (text := _assistant_text(item)) is not None:
+                candidates = [raw for raw in prior if _assistant_text(raw) == text]
+                if candidates and text_counts[text] != 1:
+                    ambiguous = True
+                    continue
+            else:
+                continue
+            if len(candidates) == 1:
+                items[index] = candidates[0]
+            elif len(candidates) > 1 and item not in candidates:
+                ambiguous = True
+        if ambiguous:
+            self.gaps.append(
+                ObservationGap(
+                    code="prior_output_metadata_ambiguous",
+                    detail="History does not uniquely identify a prior model output; training metadata was not guessed.",
+                )
+            )
+
+
+def _assistant_text(item: dict[str, Any]) -> str | None:
+    if item.get("role") != "assistant":
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(
+        isinstance(part, dict) and part.get("type") in {"text", "output_text"} for part in content
+    ):
+        return "\n".join(part.get("text", "") for part in content)
+    return None
 
 
 def _dump(value: Any) -> Any:
@@ -123,17 +212,19 @@ class GymResponsesLLM(UnifiedLLM):
         server_client: ServerClient,
         model_server_name: str,
         model_url_path: str,
-        max_steps: int,
-        model_call_collector: list[ModelCallRef],
+        state: RolloutLLMState,
         cookies: dict[str, str],
         model: str = "gym-policy",
+        on_call: Callable[[GymModelCall], None] | None = None,
+        sampling_overrides: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
-        self._max_steps = max_steps
-        self._model_call_collector = model_call_collector
+        self._state = state
+        self._on_call = on_call
+        self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
 
@@ -157,11 +248,11 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        if self._calls >= self._max_steps:
-            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_steps} calls")
+        self._state.charge()
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
+        self._state.restore_prior_outputs(input_items)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,
@@ -180,13 +271,22 @@ class GymResponsesLLM(UnifiedLLM):
             }
 
         aliases = {"max_tokens": "max_output_tokens"}
-        supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields)
+        supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
         for name, value in kwargs.items():
             destination = aliases.get(name, name)
             if destination in supported and value is not None:
                 request[destination] = value
 
+        # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
+        request.update(self._sampling_overrides)
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
+        call = GymModelCall(
+            model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
+            request=body.model_copy(deep=True),
+        )
+        self._state.calls.append(call)
+        if self._on_call is not None:
+            self._on_call(call)
         http_response = await self._server_client.post(
             server_name=self._model_server_name,
             url_path=self._model_url_path,
@@ -196,13 +296,8 @@ class GymResponsesLLM(UnifiedLLM):
         await raise_for_status(http_response)
         raw = await get_response_json(http_response)
         response = NeMoGymResponse.model_validate(raw)
+        call.response = response
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
-        self._model_call_collector.append(
-            ModelCallRef(
-                model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
-                response_id=response.id,
-            )
-        )
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
@@ -224,7 +319,7 @@ class GymResponsesLLM(UnifiedLLM):
             try:
                 content = output_model.model_validate(json.loads(content))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
-                raise ValueError(f"Gym model returned invalid {output_model.__name__} JSON") from error
+                raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
         reasoning = [
             item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"

@@ -63,6 +63,16 @@ class InputItem(BaseModel):
     content: str
 
 
+class PositionalOnlyAgent(Agent):
+    async def analyze(self, text: str, /) -> str:
+        return text
+
+
+class OptionalPositionalOnlyAgent(Agent):
+    async def analyze(self, text: str = "default", /) -> str:
+        return text
+
+
 def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     values = {
         "agent_class": f"{__name__}:ExampleAgent",
@@ -77,6 +87,36 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     }
     values.update(overrides)
     return NOOAInvocationConfig.model_validate(values)
+
+
+@pytest.mark.parametrize("field,value", [("agent_class", "missing-colon"), ("entrypoint", "_private")])
+def test_malformed_entrypoint_contract(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        invocation_config(**{field: value})
+
+
+@pytest.mark.parametrize("path", ["nooa_missing_package:Agent", "nooa:MissingAgent"])
+def test_missing_agent_import_is_a_configuration_error(path: str) -> None:
+    with pytest.raises(ValueError, match="could not import|has no attribute"):
+        load_agent_class(path)
+
+
+def test_missing_entrypoint_is_a_configuration_error() -> None:
+    with pytest.raises(ValueError, match="no callable entrypoint"):
+        validate_invocation(invocation_config(entrypoint="missing_method"))
+
+
+@pytest.mark.parametrize(
+    "row,path,message",
+    [
+        ({"agent_inputs": InputItem(role="user", content="text")}, "agent_inputs.missing", "does not exist"),
+        ({"agent_inputs": {"items": []}}, "agent_inputs.items.0", "no index"),
+        ({"agent_inputs": 3}, "agent_inputs.value", "cannot traverse"),
+    ],
+)
+def test_mapping_reports_invalid_traversal(row: object, path: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        resolve_source(row, path)
 
 
 def test_materialize_arguments_from_complete_run_row() -> None:
@@ -179,6 +219,21 @@ def test_validate_invocation_returns_agent_and_entrypoint() -> None:
 
     assert agent_class is ExampleAgent
     assert entrypoint is ExampleAgent.analyze
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_rejects_required_positional_only_entrypoint_even_when_unmapped(mapped: bool) -> None:
+    config = invocation_config(
+        agent_class=f"{__name__}:PositionalOnlyAgent",
+        arguments={"text": {"source": "agent_inputs.text"}} if mapped else {},
+    )
+    with pytest.raises(ValueError, match="must accept keyword arguments.*text"):
+        validate_invocation(config)
+
+
+def test_allows_unmapped_optional_positional_only_entrypoint() -> None:
+    config = invocation_config(agent_class=f"{__name__}:OptionalPositionalOnlyAgent", arguments={})
+    assert validate_invocation(config)[0] is OptionalPositionalOnlyAgent
 
 
 def test_validate_invocation_rejects_missing_required_mapping() -> None:
