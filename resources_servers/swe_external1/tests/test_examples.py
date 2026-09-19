@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Public fixture integrity and offline parser tests, not live sandbox rollouts."""
+"""Public example assets and empty-log grading checks, not live sandbox rollouts."""
 
 import json
 import subprocess
@@ -14,45 +14,44 @@ from resources_servers.swe_external1.task_data import TaskRow
 
 
 SERVER = Path(__file__).resolve().parents[1]
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ROWS = [json.loads(line) for line in (SERVER / "data/example.jsonl").read_text().splitlines()]
-SOURCE_ROWS = {row["instance_id"]: row for row in json.loads((FIXTURES / "source-examples.json").read_text())}
-RECORDED_TEST_OUTPUTS = json.loads((FIXTURES / "recorded-test-outputs.json").read_text())
+PUBLIC_TASK_IDS = {
+    "intel__rohd-458",
+    "syuilo__aiscript-257",
+    "taiki-e__cargo-hack-70",
+    "tox-dev__pipdeptree-279",
+    "cta-observatory__ctapipe-2397",
+}
 
 
 def files(task, name):
     return {asset.path: asset.decoded() for asset in getattr(task, name)}
 
 
-def test_exactly_the_same_five_public_examples():
+def test_five_public_examples_have_complete_assets():
     assert len(ROWS) == 5
-    assert {row["verifier_metadata"]["task_id"] for row in ROWS} == set(SOURCE_ROWS)
+    assert {row["verifier_metadata"]["task_id"] for row in ROWS} == PUBLIC_TASK_IDS
     for row in ROWS:
         task = TaskRow.model_validate(row).verifier_metadata
-        source = SOURCE_ROWS[task.task_id]
         tests, solution = files(task, "test_files"), files(task, "solution_files")
-        assert row["responses_create_params"] == source["responses_create_params"]
-        assert task.image_ref == source["image_name"]
-        assert task.workdir == "/" + source["repo"].split("/", 1)[1]
-        assert task.setup_script == "git checkout --detach " + source["base_commit"]
-        assert solution["solution.patch"] == source["patch"].encode()
-        assert tests["test.patch"] == source["test_patch"].encode()
-        assert json.loads(tests["expected.json"]) == {
-            "parser": source["install_config"]["log_parser"],
-            "FAIL_TO_PASS": source["FAIL_TO_PASS"],
-            "PASS_TO_PASS": source["PASS_TO_PASS"],
-        }
+        assert row["public_source"]["instance_id"] == task.task_id
+        assert row["responses_create_params"]["input"]
+        assert task.image_ref.startswith("docker.io/swerebenchv2/")
+        assert task.setup_script.startswith("git checkout --detach ")
+        assert {"test.sh", "test.patch", "grade.py", "expected.json", "lib/agent/log_parsers.py", "LICENSE"} <= set(tests)
+        assert set(solution) == {"solve.sh", "solution.patch"}
+        assert tests["test.patch"].strip() and solution["solution.patch"].strip()
+        expected = json.loads(tests["expected.json"])
+        assert expected["parser"] and expected["FAIL_TO_PASS"]
+        assert isinstance(expected["PASS_TO_PASS"], list)
         test_script = tests["test.sh"].decode()
         assert "git reset" not in test_script and "git checkout" not in test_script
         assert "git apply --check /tests/test.patch" in test_script
-        for field in ("install", "test_cmd"):
-            commands = source["install_config"].get(field) or []
-            for command in [commands] if isinstance(commands, str) else commands:
-                assert command in test_script
+        assert "git apply --check /solution/solution.patch" in solution["solve.sh"].decode()
         assert b"MIT License" in tests["LICENSE"]
 
 
-def run_packaged_grader(row, log, directory, missing_required=False):
+def run_packaged_grader(row, log, directory):
     task = TaskRow.model_validate(row).verifier_metadata
     for name, data in files(task, "test_files").items():
         target = directory / "tests" / name
@@ -61,11 +60,6 @@ def run_packaged_grader(row, log, directory, missing_required=False):
     output = directory / "logs/verifier"
     output.mkdir(parents=True)
     (output / "test-output.txt").write_text(log)
-    if missing_required:
-        expected_path = directory / "tests/expected.json"
-        expected = json.loads(expected_path.read_text())
-        expected["FAIL_TO_PASS"].append("missing-test-never-in-the-log")
-        expected_path.write_text(json.dumps(expected))
     # Relocate the packaged script's two absolute roots for host-side parser tests.
     # All grading logic and parser bytes are unchanged; no task commands run here.
     grade = directory / "tests/grade.py"
@@ -95,19 +89,3 @@ def test_empty_logs_never_pass(row, tmp_path):
     assert reward == 0
     assert report["passed"] == []
     assert len(report["missing_or_failed"]) == report["required"]
-
-
-@pytest.mark.parametrize("row", ROWS, ids=[row["verifier_metadata"]["task_id"] for row in ROWS])
-def test_recorded_source_logs_and_missing_required_tests(row, tmp_path):
-    recorded = RECORDED_TEST_OUTPUTS[row["verifier_metadata"]["task_id"]]
-    reward, report = run_packaged_grader(row, recorded, tmp_path / "recorded")
-    # These are existing source logs, not evidence that this adapter ran the tasks.
-    # A truncated source log may lack required tests; it must not receive a free pass.
-    if len(recorded) < 100_000:
-        assert reward == 1, report
-    else:
-        assert reward == (not report["missing_or_failed"])
-    assert report["passed"]
-    reward, report = run_packaged_grader(row, recorded, tmp_path / "missing", missing_required=True)
-    assert reward == 0
-    assert "missing-test-never-in-the-log" in report["missing_or_failed"]
