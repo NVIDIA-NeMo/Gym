@@ -265,8 +265,17 @@ class AgentExecution:
         self.outer_task = task
         self.parked_task: Optional[asyncio.Task] = None
         self.state = AgentExecutionState.RUNNING
-        self.boundary: Optional[AgentBoundaryRecord] = None
         self.continuation = continuation
+        self.boundary: Optional[AgentBoundaryRecord] = (
+            continuation.model_copy(
+                update={
+                    "rollout_id": rollout_id,
+                    "attempt_index": attempt_index,
+                }
+            )
+            if continuation is not None
+            else None
+        )
         self.terminal_result: Any = None
         self.result_identity: Optional[str] = None
         self.result_digest: Optional[str] = None
