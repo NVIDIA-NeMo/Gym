@@ -25,7 +25,7 @@ import shlex
 import shutil
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -59,6 +61,11 @@ DOCKER_RUNTIME_ERROR_MARKERS = (
     "error response from daemon",
 )
 DOCKER_MISSING_CONTAINER_MARKERS = ("no such container", "no such object")
+DOCKER_SESSION_SIGNALS = frozenset({"SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGHUP"})
+# Session startup normally completes in one or two probes. Backoff avoids making
+# Docker CLI startup latency an operator-facing tuning parameter.
+DOCKER_SESSION_INITIAL_POLL_SECONDS = 0.05
+DOCKER_SESSION_MAX_POLL_SECONDS = 0.5
 
 
 class DockerCreateError(SandboxCreateError):
@@ -143,6 +150,8 @@ class DockerExecConfig:
     default_timeout_s: float | None = 180
     extra_exec_args: list[str] = field(default_factory=list)
     concurrency: int = 32
+    session_concurrency: int = 32
+    session_start_timeout_s: float = 10.0
     # `<shell> -c <cmd>`. None auto-detects bash (needed for conda `source`), else falls back to sh.
     exec_shell: str | None = None
 
@@ -151,6 +160,10 @@ class DockerExecConfig:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
+        if self.session_concurrency < 1:
+            raise ValueError("exec.session_concurrency must be >= 1")
+        if self.session_start_timeout_s <= 0:
+            raise ValueError("exec.session_start_timeout_s must be > 0")
         if self.exec_shell is not None and not self.exec_shell:
             raise ValueError("exec.exec_shell must be null (auto) or a non-empty shell name/path")
 
@@ -182,6 +195,142 @@ class _DockerContainer:
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
     published_ports: tuple[int, ...] = ()
+
+
+class _DockerProcessSession:
+    """One pipe-mode ``docker exec -i`` process session."""
+
+    mode: str | None = "pipe"
+
+    def __init__(
+        self,
+        *,
+        process: asyncio.subprocess.Process,
+        session_id: str,
+        signal_process: Callable[[str], Awaitable[None]],
+        cleanup_control: Callable[[], Awaitable[None]],
+        release_session: Callable[[], None],
+    ) -> None:
+        self._process = process
+        self._signal_process = signal_process
+        self._cleanup_control = cleanup_control
+        self._release_session = release_session
+        self.session_id = session_id
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_error: Exception | None = None
+        self._exit_cleanup_task = asyncio.create_task(self._cleanup_after_exit())
+
+    @property
+    def closed(self) -> bool:
+        return self._closed or self._process.returncode is not None
+
+    @staticmethod
+    async def _read_stream(
+        stream: asyncio.StreamReader | None,
+        *,
+        timeout_s: float | None,
+    ) -> bytes:
+        if stream is None:
+            return b""
+        return await asyncio.wait_for(stream.read(65536), timeout=timeout_s)
+
+    async def read(self, *, timeout_s: float | None = None) -> bytes:
+        return await self._read_stream(self._process.stdout, timeout_s=timeout_s)
+
+    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+        return await self._read_stream(self._process.stderr, timeout_s=timeout_s)
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            while chunk := await self.read():
+                yield chunk
+
+        return _iterate()
+
+    async def write(self, data: bytes) -> None:
+        if self._closed or self._process.returncode is not None or self._process.stdin is None:
+            raise SandboxPtyError("Docker process session is closed")
+        self._process.stdin.write(data)
+        try:
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            raise SandboxPtyError("Docker process session stdin is closed") from error
+
+    async def resize(self, rows: int, cols: int) -> None:
+        return None
+
+    async def send_signal(self, signal_name: str) -> None:
+        if signal_name not in DOCKER_SESSION_SIGNALS:
+            raise ValueError(f"Docker process sessions support only {sorted(DOCKER_SESSION_SIGNALS)}")
+        if self._closed or self._process.returncode is not None:
+            raise SandboxPtyError("Docker process session is closed")
+        await self._signal_process(signal_name)
+
+    async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+        return_code = await asyncio.wait_for(asyncio.shield(self._process.wait()), timeout=timeout_s)
+        await self._wait_for_cleanup()
+        return return_code
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        raise NotImplementedError("Docker process sessions do not support detached execution")
+
+    async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _cleanup(self) -> None:
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._cleanup_control())
+        await asyncio.shield(self._cleanup_task)
+
+    async def _cleanup_after_exit(self) -> None:
+        try:
+            await self._process.wait()
+            await self._cleanup()
+        except Exception as error:
+            self._cleanup_error = error
+        finally:
+            self._release_session()
+
+    async def _wait_for_cleanup(self) -> None:
+        await asyncio.shield(self._exit_cleanup_task)
+        if self._cleanup_error is not None:
+            raise SandboxPtyError(
+                f"Could not clean up Docker process session {self.session_id}"
+            ) from self._cleanup_error
+
+    async def _close(self) -> None:
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+        cleanup_error: Exception | None = None
+        try:
+            if self._process.returncode is None:
+                try:
+                    await self._signal_process("SIGKILL")
+                except Exception as error:
+                    cleanup_error = error
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        self._process.kill()
+                    await self._process.wait()
+            await self._wait_for_cleanup()
+        finally:
+            self._closed = True
+        if cleanup_error is not None:
+            raise SandboxPtyError(
+                f"Could not terminate Docker process session {self.session_id} inside the container"
+            ) from cleanup_error
+
+    async def __aenter__(self) -> "_DockerProcessSession":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
 
 
 def _normalize_image(image: str) -> str:
@@ -267,6 +416,7 @@ class DockerProvider:
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._session_semaphore = asyncio.Semaphore(self._exec_config.session_concurrency)
 
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
@@ -511,6 +661,133 @@ class DockerProvider:
                 stdout=out, stderr=err, return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
             )
         return SandboxExecResult(stdout=out, stderr=err, return_code=code, error_type=None)
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DockerProcessSession:
+        """Start a persistent pipe-mode process through ``docker exec -i``."""
+
+        if spec.pty:
+            raise NotImplementedError("Docker process sessions currently support only pty=False")
+        await self._session_semaphore.acquire()
+        try:
+            return await self._create_pipe_session(handle, spec)
+        except BaseException:
+            self._session_semaphore.release()
+            raise
+
+    async def _create_pipe_session(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DockerProcessSession:
+        inst = handle.raw
+        session_id = f"docker-{uuid.uuid4().hex}"
+        control_dir = f"/tmp/nemo-gym-{session_id}"
+        pid_path = f"{control_dir}/pgid"
+        ready_path = f"{control_dir}/ready"
+        flags = ["-i"]
+        if spec.cwd is not None:
+            flags += ["-w", spec.cwd]
+        merged_env = dict(getattr(inst, "env", {}))
+        if spec.env:
+            merged_env.update(spec.env)
+        for key, value in merged_env.items():
+            flags += ["--env", f"{key}={value}"]
+        if spec.user is not None:
+            flags += ["--user", "0" if spec.user == "root" or spec.user == 0 else str(spec.user)]
+        flags += list(self._exec_config.extra_exec_args)
+
+        command = spec.command or f"exec {shlex.quote(inst.shell)}"
+        session_script = (
+            "umask 077\n"
+            f"printf '%s\\n' \"$$\" > {shlex.quote(pid_path)}.tmp || exit 70\n"
+            f"mv {shlex.quote(pid_path)}.tmp {shlex.quote(pid_path)} || exit 70\n"
+            f": > {shlex.quote(ready_path)} || exit 70\n"
+            f"{shlex.quote(inst.shell)} -c {shlex.quote(command)}\n"
+            "status=$?\n"
+            'exit "$status"'
+        )
+        wrapper = (
+            "command -v setsid >/dev/null 2>&1 || "
+            "{ printf '%s\\n' 'Docker pipe sessions require setsid' >&2; exit 127; }; "
+            f"rm -rf {shlex.quote(control_dir)} && "
+            f"mkdir -m 700 {shlex.quote(control_dir)} && "
+            f"exec setsid --wait {shlex.quote(inst.shell)} -c {shlex.quote(session_script)}"
+        )
+        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", wrapper]
+        async with self._semaphore:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+
+        async def cleanup_control() -> None:
+            await self._run(
+                [self._binary, "exec", inst.name, inst.shell, "-c", f"rm -rf {shlex.quote(control_dir)}"],
+                timeout_s=self._exec_config.default_timeout_s,
+            )
+
+        deadline = asyncio.get_running_loop().time() + self._exec_config.session_start_timeout_s
+        poll_interval_s = DOCKER_SESSION_INITIAL_POLL_SECONDS
+        pgid: int | None = None
+        startup_error = ""
+        while asyncio.get_running_loop().time() < deadline:
+            remaining_s = deadline - asyncio.get_running_loop().time()
+            probe_script = (
+                f"test -s {shlex.quote(pid_path)} && test -e {shlex.quote(ready_path)} && cat {shlex.quote(pid_path)}"
+            )
+            try:
+                code, out, err = await self._run(
+                    [self._binary, "exec", inst.name, inst.shell, "-c", probe_script],
+                    timeout_s=remaining_s,
+                )
+            except TimeoutError as error:
+                startup_error = str(error)
+                break
+            startup_error = err.strip()
+            if code == 0 and out.strip().isdigit() and int(out.strip()) > 1:
+                pgid = int(out.strip())
+                break
+            if process.returncode is not None:
+                stderr = await _DockerProcessSession._read_stream(process.stderr, timeout_s=1.0)
+                detail = stderr.decode(errors="replace").strip() or startup_error or "session process exited"
+                await cleanup_control()
+                raise SandboxPtyError(f"Could not start Docker process session {session_id}: {detail}")
+            await asyncio.sleep(poll_interval_s)
+            poll_interval_s = min(poll_interval_s * 2, DOCKER_SESSION_MAX_POLL_SECONDS)
+        if pgid is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            await cleanup_control()
+            raise SandboxPtyError(
+                f"Timed out starting Docker process session {session_id}"
+                + (f": {startup_error}" if startup_error else "")
+            )
+
+        async def signal_process(signal_name: str) -> None:
+            shell_signal = signal_name.removeprefix("SIG")
+            script = f"kill -s {shlex.quote(shell_signal)} {shlex.quote(f'-{pgid}')}"
+            error_detail = ""
+            for attempt in range(3):
+                code, _out, err = await self._run(
+                    [self._binary, "exec", inst.name, inst.shell, "-c", script],
+                    timeout_s=self._exec_config.default_timeout_s,
+                )
+                if code == 0 or process.returncode is not None:
+                    return
+                error_detail = err.strip()
+                if attempt < 2:
+                    await asyncio.sleep(0.1)
+            raise SandboxPtyError(
+                f"Could not send {signal_name} to Docker process session {session_id}: {error_detail}"
+            )
+
+        return _DockerProcessSession(
+            process=process,
+            session_id=session_id,
+            signal_process=signal_process,
+            cleanup_control=cleanup_control,
+            release_session=self._session_semaphore.release,
+        )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one host file (creates the parent dir; the file lands owned by root)."""
