@@ -67,6 +67,7 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
+ROUTER_METRICS_PORT=29000
 WORKER_SERVER_PORT=8001
 
 PREFILL_DP_RPC_PORT=13345
@@ -96,6 +97,30 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
 rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
+
+# Scrape each API server directly; the router only exposes its own metrics.
+gym_config_args=(
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml
+)
+inference_metrics_config="results/\$experiment_name/inference-metrics.yaml"
+mkdir -p "\$(dirname "\$inference_metrics_config")"
+read -r -a nodes <<< "\$ALL_NODES"
+{
+    printf 'inference_metrics:\n  enabled: true\n  endpoints:\n'
+    for node_index in "\${!nodes[@]}"; do
+        # Coupled tiers expose one API server each; other ranks are headless.
+        if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        printf '    node%s: "http://%s:$WORKER_SERVER_PORT/metrics"\n' \
+            "\$node_index" "\${nodes[node_index]}"
+    done
+    printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
+} > "\$inference_metrics_config"
+gym_config_args+=(--config "\$inference_metrics_config")
+
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -105,8 +130,7 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
     $@ \
-    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
-    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+    "\${gym_config_args[@]}" \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
@@ -177,6 +201,8 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+
 if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
@@ -246,7 +272,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --log-level error &
+            "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
 
@@ -322,7 +348,7 @@ else
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
             --worker-startup-timeout-secs 1200 \
-            --log-level error
+            "\${router_common_args[@]}"
         )
 
         if [[ "$VLLM_MODE" == pd ]]; then
@@ -445,6 +471,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     ROUTER_NODE="\${nodes[0]}" \
+    ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
