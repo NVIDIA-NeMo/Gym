@@ -11,7 +11,7 @@ local, one-question environment. It does not require a Prime Hub account, a Hub
 package, or a sandbox. Dependency installation can require network access; the
 fixture tests themselves make no model calls.
 
-This is the **legacy Verifiers v0** path, pinned to `v0.1.14`. It is not a Verifiers
+This is the **legacy Verifiers v0** path, pinned to `v0.3.1`. It is not a Verifiers
 v1 migration or a claim that current Hub environments work with the adapter.
 Check each additional environment's Python, Verifiers and runtime requirements
 before trying it with this pinned adapter.
@@ -34,7 +34,7 @@ uv venv --python 3.13.14 responses_api_agents/verifiers_agent/.venv
 uv pip install --python responses_api_agents/verifiers_agent/.venv/bin/python \
   --constraint "$GYM_ONBOARDING_CONSTRAINTS" \
   -e '.[dev]' \
-  'verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14' \
+  'verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.3.1' \
   -e responses_api_agents/verifiers_agent/examples/onboarding
 ```
 
@@ -59,7 +59,7 @@ print("answer:", environment.get_dataset()[0]["answer"])
 PY
 ```
 
-Expect Verifiers `0.1.14`, `SingleTurnEnv`, one task and the answer `42`. The task
+Expect Verifiers `0.3.1`, `SingleTurnEnv`, one task and the answer `42`. The task
 asks `What is 6 * 7? Reply with only the integer.` It uses an exact final-assistant
 answer rubric: whitespace around `42` and one balanced leading reasoning block
 in `<think>...</think>` tags are accepted. A wrong final answer, extra answer

@@ -7,7 +7,7 @@ version = "0.1.0"
 description = "Local one-task onboarding control for NeMo Gym's legacy Verifiers adapter"
 requires-python = ">=3.13.14,<3.14"
 license = "Apache-2.0"
-dependencies = ["verifiers==0.1.14"]
+dependencies = ["verifiers==0.3.1"]
 
 [build-system]
 requires = ["hatchling"]

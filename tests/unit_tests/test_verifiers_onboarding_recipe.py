@@ -5,6 +5,7 @@ import importlib
 import json
 import re
 import shlex
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,19 @@ MODULE_NAME = ENVIRONMENT_ID.replace("-", "_")
 
 def test_local_environment_is_shipped():
     assert (EXAMPLE / MODULE_NAME / "__init__.py").is_file(), "Missing local onboarding environment"
+
+
+def test_recipe_uses_the_adapter_verifiers_pin():
+    requirements = (ROOT / "responses_api_agents/verifiers_agent/requirements.txt").read_text()
+    match = re.search(r"^verifiers @ .+@v(\d+\.\d+\.\d+)$", requirements, re.MULTILINE)
+    assert match is not None, "The adapter must use an exact Verifiers release tag"
+    version = match.group(1)
+    project = tomllib.loads((EXAMPLE / "pyproject.toml").read_text())
+    assert project["project"]["dependencies"] == [f"verifiers=={version}"]
+    assert (
+        f"pinned to `v{version}`"
+        in (ROOT / "fern/versions/latest/pages/get-started/verifiers-onboarding.mdx").read_text()
+    )
 
 
 def test_documented_model_run_is_valid_for_automatic_serving():
