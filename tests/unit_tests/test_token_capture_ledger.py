@@ -204,11 +204,30 @@ async def test_failure_rows_poison_and_never_resolve(store):
     match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
     assert match is not None and match.model_call_id == "c1"
     assert await store.has_rows("r1")
+    assert await store.has_committed_rows("r1")
+
+
+@pytest.mark.asyncio
+async def test_failure_only_rows_do_not_prevent_retrying_the_logical_root(store):
+    await store.record_failure("r1", "refused-call", "request_finished_without_staged_coordinates")
+
+    assert await store.has_rows("r1")
+    assert not await store.has_committed_rows("r1")
+    context = await _admit(
+        store,
+        [USER_1, ASSISTANT_SEEDED, USER_2],
+        model_call_id="retried-root",
+    )
+
+    assert context.capture_admission is not None
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.parent_call_id is None
 
 
 @pytest.mark.asyncio
 async def test_has_rows_is_false_for_untouched_rollout(store):
     assert not await store.has_rows("r-none")
+    assert not await store.has_committed_rows("r-none")
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
@@ -427,8 +446,8 @@ async def test_custom_store_without_explicit_lookup_fails_closed():
         async def has_rows(self, rollout_id):
             return await self.inner.has_rows(rollout_id)
 
-        async def manifest(self, rollout_id):
-            return await self.inner.manifest(rollout_id)
+        async def has_committed_rows(self, rollout_id):
+            return await self.inner.has_committed_rows(rollout_id)
 
         async def record_failure(self, rollout_id, model_call_id, reason):
             await self.inner.record_failure(rollout_id, model_call_id, reason)

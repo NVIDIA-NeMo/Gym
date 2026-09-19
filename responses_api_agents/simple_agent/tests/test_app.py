@@ -47,12 +47,12 @@ from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import (
+    _INTERNAL_RESOURCE_REVISIONS_KEY,
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
-    _INTERNAL_RESOURCE_REVISIONS_KEY,
     _cookie_values,
 )
 
@@ -997,6 +997,52 @@ class TestApp:
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
 
+    async def test_run_no_generation_skips_verification_and_masks_sample(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple_agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.checkpoint_participant()
+        client = TestClient(server.setup_webserver())
+        seed_response = AsyncMock(ok=True, cookies={"session": "seeded"}, headers={})
+        model_response_payload = {
+            "id": "synthetic-response",
+            "created_at": 1,
+            "model": "model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "_ng_model_capture_outcome": "no_generation",
+        }
+        model_response = AsyncMock(ok=True, cookies={"session": "model"})
+        model_response.read.return_value = json.dumps(model_response_payload).encode()
+        server.server_client.post.side_effect = [seed_response, model_response]
+
+        response = client.post(
+            "/run",
+            json={
+                "responses_create_params": {"input": [{"role": "user", "content": "hello"}]},
+                TASK_INDEX_KEY_NAME: 4,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                ATTEMPT_INDEX_KEY_NAME: 0,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["reward"] == 0.0
+        assert response.json()["mask_sample"] is True
+        assert response.json()["failure_kind"] == "agent_no_generation"
+        assert server.server_client.post.call_count == 2
+
     async def test_terminal_verify_freezes_at_last_boundary_until_checkpoint_resumes(self) -> None:
         server, server_client = _make_agent(observability_enabled=False)
         server.config.checkpoint_replayable_verify = True
@@ -1114,17 +1160,13 @@ class TestApp:
             response = await server.responses(
                 request,
                 Response(),
-                NeMoGymResponseCreateParamsNonStreaming(
-                    input=[{"role": "user", "content": "hello"}]
-                ),
+                NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
             )
         finally:
             participant.unbind(token)
 
         assert execution.boundary is None
-        assert response.model_extra[_INTERNAL_RESOURCE_REVISIONS_KEY] == {
-            "resources": 7
-        }
+        assert response.model_extra[_INTERNAL_RESOURCE_REVISIONS_KEY] == {"resources": 7}
         client.post.assert_not_awaited()
 
     async def test_multiturn_boundaries_track_current_model_call_and_merge_cookies(
@@ -1196,7 +1238,10 @@ class TestApp:
             if server_name == "model":
                 response = _mock_response(model_payloads.pop(0))
                 response.cookies = model_cookies.pop(0)
-                response.headers = {"x-nemo-gym-model-call-id": model_call_ids.pop(0)}
+                response.headers = {
+                    "x-nemo-gym-model-call-id": model_call_ids.pop(0),
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
                 return response
             response = _mock_response(content="tool-result")
             response.cookies = {"resource-rotated": "two"}
@@ -1249,6 +1294,160 @@ class TestApp:
         assert response.usage.total_tokens == 6
         await participant.finish(execution, outcome="completed", result=response)
 
+    async def test_no_generation_response_keeps_the_last_captured_boundary(self, monkeypatch: MonkeyPatch) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        boundaries = []
+        original_commit = type(participant).commit_boundary
+
+        async def capture_boundary(self, current_execution, record):
+            boundaries.append(record.model_copy(deep=True))
+            await original_commit(self, current_execution, record)
+
+        monkeypatch.setattr(type(participant), "commit_boundary", capture_boundary)
+        responses = [
+            (
+                {
+                    "id": "response-reasoning",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "reasoning-1",
+                            "summary": [{"text": "thinking", "type": "summary_text"}],
+                            "status": "completed",
+                            "type": "reasoning",
+                        }
+                    ],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+                {
+                    "x-nemo-gym-model-call-id": "captured-call-1",
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                },
+            ),
+            (
+                {
+                    "id": "synthetic-response",
+                    "created_at": 2.0,
+                    "model": "model",
+                    "object": "response",
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"},
+                },
+                {"x-nemo-gym-model-call-capture-outcome": "no_generation"},
+            ),
+        ]
+
+        async def post(server_name, url_path, **_kwargs):
+            assert server_name == "model"
+            assert url_path == "/v1/responses"
+            payload, headers = responses.pop(0)
+            response = _mock_response(payload)
+            response.headers = headers
+            return response
+
+        client.post = AsyncMock(side_effect=post)
+        token = participant.bind(execution)
+        try:
+            with rollout_context("4-1", attempt_index=0, logical_rollout_id="4-1"):
+                response, _trajectory, _model_cookies, _resource_cookies = await server._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+                    model_url_path="/v1/responses",
+                )
+        finally:
+            participant.unbind(token)
+
+        assert response.status == "incomplete"
+        assert responses == []
+        assert [boundary.boundary_kind for boundary in boundaries] == [
+            AgentBoundaryKind.PENDING_MODEL,
+            AgentBoundaryKind.TURN_COMPLETE,
+            AgentBoundaryKind.TURN_COMPLETE,
+        ]
+        assert [boundary.last_committed_model_call_id for boundary in boundaries] == [
+            "captured-call-1",
+            "captured-call-1",
+            "captured-call-1",
+        ]
+        assert boundaries[0].pending_model.model_call_id == "captured-call-1"
+        assert boundaries[1].pending_model is None
+
+    async def test_capture_failure_does_not_create_a_checkpoint_boundary(self) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        response = _mock_response(
+            {
+                "id": "uncaptured-response",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        response.headers = {"x-nemo-gym-model-call-capture-outcome": "capture_failed"}
+        client.post = AsyncMock(return_value=response)
+        token = participant.bind(execution)
+        try:
+            with rollout_context("4-1", attempt_index=0, logical_rollout_id="4-1"):
+                with pytest.raises(RuntimeError, match="without durable token capture"):
+                    await server._create_episode(
+                        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+                        model_url_path="/v1/responses",
+                    )
+        finally:
+            participant.unbind(token)
+
+        assert execution.boundary is None
+
+    async def test_no_generation_without_a_prior_call_creates_no_lineage_boundary(self) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        response = _mock_response(
+            {
+                "id": "synthetic-response",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }
+        )
+        response.headers = {"x-nemo-gym-model-call-capture-outcome": "no_generation"}
+        client.post = AsyncMock(return_value=response)
+        token = participant.bind(execution)
+        try:
+            with rollout_context("4-1", attempt_index=0, logical_rollout_id="4-1"):
+                result, _trajectory, _model_cookies, _resource_cookies = await server._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+                    model_url_path="/v1/responses",
+                )
+        finally:
+            participant.unbind(token)
+
+        assert result.status == "incomplete"
+        assert execution.boundary is not None
+        assert execution.boundary.boundary_kind == AgentBoundaryKind.TURN_COMPLETE
+        assert execution.boundary.last_committed_model_call_id is None
+        assert execution.boundary.pending_model is None
+
     async def test_pending_action_restore_does_not_repeat_model_output_or_usage(self) -> None:
         server, client = _make_agent(observability_enabled=False)
         tool_call = {
@@ -1292,6 +1491,8 @@ class TestApp:
             ),
             output_items=[tool_call],
             usage=pending_response["usage"],
+            last_committed_model_capture_key="4-1",
+            last_committed_model_call_id="model-call-1",
             resource_state_revisions={"resources": 1},
             agent_state={"resources_server_cookies": {"resource": "saved"}},
         )
@@ -1396,6 +1597,7 @@ class TestApp:
                 "tools": [],
             },
         ]
+        model_call_ids = ["capture-tool", "capture-final"]
         tool_payloads = [
             _mock_response(
                 {"error": {"code": "checkpoint_parked", "detail": "paused"}},
@@ -1407,7 +1609,12 @@ class TestApp:
         async def post(server_name, url_path, **kwargs):
             calls.append((server_name, url_path, kwargs))
             if server_name == "model":
-                return _mock_response(model_payloads.pop(0))
+                response = _mock_response(model_payloads.pop(0))
+                response.headers = {
+                    "x-nemo-gym-model-call-id": model_call_ids.pop(0),
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
+                return response
             response = tool_payloads.pop(0)
             if response.status == 409:
                 refused.set()
@@ -1497,7 +1704,12 @@ class TestApp:
             if server_name == "model":
                 model_started.set()
                 await release_model.wait()
-                return _mock_response(tool_call_payload)
+                response = _mock_response(tool_call_payload)
+                response.headers = {
+                    "x-nemo-gym-model-call-id": "capture-tool",
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
+                return response
             if server_name == "resources" and url_path == "/my_tool":
                 return _mock_response(content="tool-result")
             raise AssertionError(f"unexpected call: {server_name} {url_path}")

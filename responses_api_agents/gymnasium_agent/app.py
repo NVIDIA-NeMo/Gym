@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_NO_GENERATION
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -47,7 +48,7 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.rollout_correlation import (
-    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
     current_attempt_index,
     current_logical_rollout_id,
     current_rollout_id,
@@ -87,6 +88,8 @@ class GymnasiumAgentRunRequest(BaseRunRequest):
 
 class GymnasiumRunResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    mask_sample: bool = False
+    failure_kind: Optional[str] = None
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
@@ -268,6 +271,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         pending_cursor = 0
         resource_request_id: Optional[str] = None
         pending_response_usage: Optional[dict[str, Any]] = None
+        no_generation = False
         if continuation is not None:
             model_capture_key = continuation.last_committed_model_capture_key
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
@@ -364,11 +368,9 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                         cookies=model_server_cookies,
                     )
                 )
-                model_call_id = None
                 headers = getattr(model_resp, "headers", None)
-                if self._checkpoint_participant is not None and isinstance(headers, Mapping):
-                    model_call_id = headers.get(MODEL_CALL_ID_HEADER)
                 await raise_for_status(model_resp)
+                capture_result = self.model_call_capture_result(headers if isinstance(headers, Mapping) else None)
                 model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
                 model_server_cookies = _merge_cookies(model_server_cookies, model_resp.cookies)
                 full_model_response = model_response.model_dump(mode="json")
@@ -379,9 +381,22 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 model_response.usage = None
                 last_model_response = model_response
                 new_outputs.extend(model_response.output)
-                model_call_id = model_call_id or model_response.id or f"turn-{turn_index}"
-                model_capture_key = current_rollout_id()
                 pending_cursor = 0
+                if capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.CAPTURE_FAILED:
+                    raise RuntimeError("model generation completed without durable token capture")
+                no_generation = (
+                    capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.NO_GENERATION
+                )
+                if no_generation:
+                    if model_response.incomplete_details is None:
+                        raise RuntimeError("no-generation model response must terminate as incomplete")
+                    resource_request_id = None
+                    boundary_index += 1
+                    await commit_boundary(AgentBoundaryKind.TURN_COMPLETE)
+                    break
+                response_model_call_id = capture_result.model_call_id if capture_result is not None else None
+                model_call_id = response_model_call_id or model_response.id or f"turn-{turn_index}"
+                model_capture_key = current_rollout_id()
                 resource_request_id = uuid.uuid4().hex
                 boundary_index += 1
                 pending_model = None
@@ -498,6 +513,9 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            mask_sample=no_generation,
+            failure_kind=AGENT_NO_GENERATION if no_generation else None,
+            failure_reason=("model request completed without a trainable generation" if no_generation else None),
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:

@@ -280,6 +280,10 @@ class TokenIdCaptureConfig(BaseModel):
                 f"token_id_capture.{kind} {target!r} does not satisfy {protocol.__name__}: "
                 f"{', '.join(missing) or 'attribute check failed'}"
             )
+        if kind == "sink" and callable(getattr(endpoint, "begin_call", None)) != callable(
+            getattr(endpoint, "cancel_call", None)
+        ):
+            raise ValueError(f"token_id_capture.sink {target!r} must implement begin_call and cancel_call together")
         return endpoint
 
 

@@ -399,7 +399,10 @@ class TestApp:
                     return response
                 response.ok = True
                 response.status = 200
-                response.headers = {MODEL_CALL_ID_HEADER: "model-call-1"}
+                response.headers = {
+                    MODEL_CALL_ID_HEADER: "model-call-1",
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
                 response.read.return_value = json_dumps(model_response).encode()
                 return response
             assert server_name == agent_config.resources_server.name
@@ -765,7 +768,6 @@ class TestApp:
             "response": full_tool_call_response,
             "reward": 1,
             "mask_sample": False,
-            "failure_kind": None,
             "failure_reason": None,
         }
         assert _drop_nulls(expected_valid_verify_response_json) == _drop_nulls(valid_verify_response.json())
@@ -857,7 +859,10 @@ class TestApp:
 
         model_http_response = AsyncMock()
         model_http_response.ok = True
-        model_http_response.headers = {MODEL_CALL_ID_HEADER: model_call_id}
+        model_http_response.headers = {
+            MODEL_CALL_ID_HEADER: model_call_id,
+            "x-nemo-gym-model-call-capture-outcome": "captured",
+        }
         model_http_response.json.return_value = model_response
         model_http_response.read.return_value = json.dumps(model_response).encode()
         verify_http_response = AsyncMock()
@@ -898,6 +903,88 @@ class TestApp:
         assert model_call.kwargs["headers"][AGENT_EXECUTION_GENERATION_HEADER] == "1"
         verify_call = server_client_mock.post.await_args_list[1]
         assert verify_call.kwargs["headers"][RESOURCE_REQUEST_ID_HEADER]
+
+    async def test_run_no_generation_skips_verify_and_masks_sample(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        model_response = {
+            "id": "synthetic-response",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+        }
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "no_generation"}
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(return_value=model_http_response)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        test_client = TestClient(agent_server.setup_webserver())
+
+        response = test_client.post(
+            "/run",
+            json={
+                "_ng_rollout_id": "tool-simulation-rollout",
+                "_ng_attempt_index": 0,
+                "responses_create_params": {"input": []},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["mask_sample"] is True
+        assert response.json()["failure_kind"] == "agent_no_generation"
+        assert server_client_mock.post.await_count == 1
+        receipt = participant.completion_receipt("tool-simulation-rollout", 0)
+        assert receipt.terminal_model_call_id is None
+
+    async def test_run_capture_failure_stops_without_verify_or_boundary(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        model_response = {
+            "id": "uncaptured-response",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "capture_failed"}
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(return_value=model_http_response)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+
+        test_client = TestClient(agent_server.setup_webserver())
+        with raises(RuntimeError, match="without durable token capture"):
+            test_client.post(
+                "/run",
+                json={
+                    "_ng_rollout_id": "tool-simulation-rollout",
+                    "_ng_attempt_index": 0,
+                    "responses_create_params": {"input": []},
+                },
+            )
+
+        assert server_client_mock.post.await_count == 1
+        execution = participant.resolve("tool-simulation-rollout", 0)
+        assert execution is None or execution.boundary is None
 
     async def test_run_restores_pending_model_without_regenerating(
         self,
@@ -998,7 +1085,10 @@ class TestApp:
 
         model_http_response = AsyncMock()
         model_http_response.ok = True
-        model_http_response.headers = {MODEL_CALL_ID_HEADER: "model-call-1"}
+        model_http_response.headers = {
+            MODEL_CALL_ID_HEADER: "model-call-1",
+            "x-nemo-gym-model-call-capture-outcome": "captured",
+        }
         model_http_response.json.return_value = model_response
         model_http_response.read.return_value = json.dumps(model_response).encode()
         verify_http_response = AsyncMock()

@@ -22,6 +22,11 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -102,3 +107,39 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+    def test_capture_result_is_gated_by_token_capture_not_checkpoint_participation(self) -> None:
+        agent = self._agent(
+            {"token_id_capture": {"enabled": True}},
+            token_id_capture=True,
+        )
+        result = agent.model_call_capture_result(
+            {
+                MODEL_CALL_CAPTURE_OUTCOME_HEADER: "captured",
+                MODEL_CALL_ID_HEADER: "call-1",
+            }
+        )
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.CAPTURED
+        assert result.model_call_id == "call-1"
+
+    def test_capture_result_is_absent_when_token_capture_and_header_are_absent(self) -> None:
+        assert self._agent({}).model_call_capture_result(None) is None
+
+    def test_explicit_capture_outcome_is_honored_when_config_is_unavailable(self) -> None:
+        result = self._agent({}).model_call_capture_result({MODEL_CALL_CAPTURE_OUTCOME_HEADER: "no_generation"})
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.NO_GENERATION
+        assert result.model_call_id is None
+
+    def test_checkpoint_participant_preserves_legacy_model_call_id(self) -> None:
+        agent = self._agent({"observability_enabled": True})
+        agent._checkpoint_participant = MagicMock()
+
+        result = agent.model_call_capture_result({MODEL_CALL_ID_HEADER: "call-1"})
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.CAPTURED
+        assert result.model_call_id == "call-1"

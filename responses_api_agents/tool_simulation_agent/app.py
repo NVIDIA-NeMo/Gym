@@ -28,9 +28,12 @@ from nemo_gym._checkpoint import (
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_NO_GENERATION
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
     MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
     current_attempt_index,
     current_logical_rollout_id,
     current_rollout_id,
@@ -53,6 +56,8 @@ class ToolSimulationAgentVerifyRequest(BaseVerifyRequest):
 
 class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    mask_sample: bool = False
+    failure_kind: str | None = None
 
 
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
@@ -80,8 +85,10 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         model_response_json = await get_response_json(model_response)
 
         headers = getattr(model_response, "headers", None)
-        if isinstance(headers, Mapping) and headers.get(MODEL_CALL_ID_HEADER) is not None:
-            response.headers[MODEL_CALL_ID_HEADER] = headers[MODEL_CALL_ID_HEADER]
+        if isinstance(headers, Mapping):
+            for header in (MODEL_CALL_ID_HEADER, MODEL_CALL_CAPTURE_OUTCOME_HEADER):
+                if headers.get(header) is not None:
+                    response.headers[header] = headers[header]
 
         try:
             return NeMoGymResponse.model_validate(model_response_json)
@@ -137,13 +144,30 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             await raise_for_status(model_response)
             response_json = await get_response_json(model_response)
 
+            headers = getattr(model_response, "headers", None)
+            capture_result = self.model_call_capture_result(headers if isinstance(headers, Mapping) else None)
+            if capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.CAPTURE_FAILED:
+                raise RuntimeError("model generation completed without durable token capture")
+            if capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.NO_GENERATION:
+                response = NeMoGymResponse.model_validate(response_json)
+                if response.incomplete_details is None:
+                    raise RuntimeError("no-generation model response must terminate as incomplete")
+                return ToolSimulationAgentVerifyResponse.model_validate(
+                    body.model_dump()
+                    | {
+                        "response": response_json,
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": AGENT_NO_GENERATION,
+                        "failure_reason": "model request completed without a trainable generation",
+                    }
+                )
+
             if execution is not None:
                 capture_key = current_rollout_id()
                 if logical_rollout_id is None or attempt_index is None or capture_key is None:
                     raise RuntimeError("checkpointed tool-simulation model call is missing its rollout identity")
-                headers = getattr(model_response, "headers", None)
-                model_call_id = headers.get(MODEL_CALL_ID_HEADER) if isinstance(headers, Mapping) else None
-                model_call_id = model_call_id or response_json.get("id")
+                model_call_id = capture_result.model_call_id if capture_result is not None else response_json.get("id")
                 if not isinstance(model_call_id, str) or not model_call_id:
                     raise RuntimeError("checkpointed tool-simulation model response is missing its model-call ID")
                 verify_request_id = uuid.uuid4().hex
