@@ -24,7 +24,7 @@ gym eval run \
 ```
 
 > [!NOTE]
-> This is the target interface. Environment loading and execution are not implemented yet.
+> This is the target one-command interface. The dependent runtime prototype now loads, validates, renders, and verifies this taskset; connecting that runtime directly to `--environment` remains future work.
 
 ## How it works
 
@@ -38,6 +38,12 @@ For each JSONL row, Gym:
 6. Returns reward `1.0` for success or `0.0` otherwise.
 
 This data-authored form is useful when tasks are structurally uniform. When individual tasks need different policies, use task-local verifiers.
+
+## Why JSONL?
+
+JSONL keeps large collections of uniform tasks compact, streamable, and easy to generate, shard, filter, or publish as datasets. Each row contains only the values that vary; the instruction, runtime, data model, and verifier remain shared.
+
+Use task directories instead when individual tasks need their own instructions, verifier policies, fixtures, repositories, tests, or other assets. [Hello Verifier Reuse](../hello_verifier_reuse/README.md) demonstrates that directory-based form.
 
 ## Related examples
 

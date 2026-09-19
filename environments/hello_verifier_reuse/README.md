@@ -21,7 +21,7 @@ gym eval run \
 ```
 
 > [!NOTE]
-> This is the target interface. Environment loading and execution are not implemented yet.
+> This is the target one-command interface. The dependent runtime prototype now loads these directory-based tasks and dispatches each selected verifier; connecting that runtime directly to `--environment` remains future work.
 
 ## How it works
 
@@ -30,6 +30,12 @@ Reusable libraries are a good home for difficult evidence extraction: trajectory
 The custom policy imports `read_text` from `nemo_gym.verifiers.files`, then adds its own requirement that the output be uppercase. A real evaluation can use the same pattern with helpers from an environment-local module or an installed Python package.
 
 Use an environment-level verifier only when the tasks are genuinely uniform.
+
+## Why task directories?
+
+The tasks use directories because each one owns different instructions and verifier policy. A directory can also hold task-specific fixtures, repositories, tests, or other assets while remaining reviewable as one self-contained task.
+
+Use JSONL instead when many tasks share the same structure and differ only in data values. [Hello Taskset](../hello_taskset/README.md) demonstrates that data-driven form.
 
 ## Related examples
 

@@ -14,7 +14,7 @@ gym eval run \
 ```
 
 > [!NOTE]
-> This is the target interface. Environment loading and execution are not implemented yet.
+> This is the target one-command interface. The dependent runtime prototype can already run this task with Hermes in local Docker, but connecting that runtime directly to `--environment` remains future work.
 
 ## How it works
 
@@ -23,7 +23,11 @@ gym eval run \
 - `runtime/Dockerfile` defines the workspace where the agent works.
 - `environment.yaml` connects those pieces.
 
+The `episode_protocol` field tells Gym what kind of interaction to run for each task. This example uses the built-in single-agent protocol.
+
 Hello World contains one task, so Gym runs it automatically. A taskset is a named collection of similar tasks that uses a `tasksets/` folder and the `--taskset` option.
+
+The singleton task stays at the environment root to keep the first example small. When tasks need different instructions, verifier policies, or assets, they can move into task directories as shown by Hello Verifier Reuse. When many tasks share those definitions and differ only in data, use JSONL as shown by Hello Taskset.
 
 ## Related examples
 
