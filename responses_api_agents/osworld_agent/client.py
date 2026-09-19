@@ -486,6 +486,34 @@ def _patch_pdf_image_evaluator_cleanup() -> None:
     metrics_package.compare_pdf_images = wrapped
 
 
+def _configure_wallpaper_evaluator(env: Any, task_config: Mapping[str, Any]) -> None:
+    """Preserve wallpaper retrieval and cache failures as evaluator errors."""
+    evaluator = task_config.get("evaluator", {})
+    result = evaluator.get("result", {})
+    if (
+        evaluator.get("func") != "compare_images"
+        or not isinstance(result, dict)
+        or result.get("type") != "vm_wallpaper"
+    ):
+        return
+
+    def get_wallpaper(environment: Any, config: Dict[str, Any]) -> str:
+        try:
+            content = environment.controller.get_vm_wallpaper()
+            # The pinned controller returns bytes on HTTP 200 and None after failed retries.
+            if not isinstance(content, bytes):
+                raise RuntimeError("Failed to retrieve VM wallpaper: controller returned no image bytes")
+            path = os.path.join(environment.cache_dir, config["dest"])
+            with open(path, "wb") as file:
+                file.write(content)
+        except FileNotFoundError as exc:
+            # DesktopEnv.evaluate otherwise catches this exception and returns zero.
+            raise RuntimeError("VM wallpaper retrieval or caching failed") from exc
+        return path
+
+    env.result_getter = get_wallpaper
+
+
 def _normalize_prompt_agent_computer_13_action(action: Any) -> Any:
     """Normalize native PromptAgent computer_13 actions for DesktopEnv.
 
@@ -1740,6 +1768,7 @@ def run_osworld_task(
             )
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
+        _configure_wallpaper_evaluator(env, task_config)
         rollout_phase = "rollout"
         native_agent = None
         pointer_agent = None
