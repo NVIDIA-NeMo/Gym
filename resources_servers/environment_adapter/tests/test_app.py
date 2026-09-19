@@ -12,7 +12,11 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
-from nemo_gym.environment.authoring import load_environment, materialize_single_task
+from nemo_gym.environment.authoring import (
+    load_environment,
+    materialize_single_task,
+    materialize_tasks,
+)
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
@@ -26,15 +30,21 @@ from resources_servers.environment_adapter.app import (
 
 ROOT = Path(__file__).parents[3]
 HELLO_WORLD = ROOT / "environments" / "hello_world"
+HELLO_TASKSET = ROOT / "environments" / "hello_taskset"
+HELLO_VERIFIER_REUSE = ROOT / "environments" / "hello_verifier_reuse"
 
 
-def make_server(*, trusted: bool = True) -> EnvironmentAdapterResourcesServer:
+def make_server(
+    *,
+    environment_root: Path = HELLO_WORLD,
+    trusted: bool = True,
+) -> EnvironmentAdapterResourcesServer:
     config = EnvironmentAdapterResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="app.py",
         name="hello_world_resources_server",
-        environment_root=str(HELLO_WORLD),
+        environment_root=str(environment_root),
         runtime_image="ubuntu:24.04",
         sandbox_provider="sandbox",
         trusted_environment_code=trusted,
@@ -117,6 +127,100 @@ async def test_seed_verify_and_close_hello_world(monkeypatch: MonkeyPatch) -> No
 
     assert closed.resources_session_id == "session"
     sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_seed_and_verify_taskset_row(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(environment_root=HELLO_TASKSET)
+    task = materialize_tasks(load_environment(HELLO_TASKSET), taskset="example")[1].materialized
+    episode_id = EpisodeId(rollout_id="taskset-rollout")
+
+    async def download(remote_path: str, local_path: Path) -> None:
+        assert remote_path == "/workspace/goodbye-gym.txt"
+        local_path.write_text("Goodbye from NeMo Gym!\n")
+
+    sandbox = SimpleNamespace(
+        serialize=AsyncMock(return_value={"sandbox_id": "sandbox"}),
+        download=AsyncMock(side_effect=download),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: "taskset-session"})
+
+    await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            episode_id=episode_id,
+            task_id=task.task_id,
+            task_data=task.task_input.task_data,
+        ),
+    )
+    verification = await server.verify(
+        request,
+        ResponsesResourcesVerifyRequest(
+            episode_id=episode_id,
+            task_id=task.task_id,
+            verification_input=ResponsesVerificationInput(
+                responses_create_params=task.task_input.responses_create_params,
+                response=response(),
+            ),
+        ),
+    )
+
+    assert verification.reward == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_index", "expected_path", "file_content"),
+    [
+        (0, "/workspace/hello-gym.txt", "Hello from NeMo Gym!\n"),
+        (1, "/workspace/shout.txt", "HELLO FROM NEMO GYM!"),
+    ],
+)
+async def test_selects_directory_task_verifier(
+    monkeypatch: MonkeyPatch,
+    task_index: int,
+    expected_path: str,
+    file_content: str,
+) -> None:
+    server = make_server(environment_root=HELLO_VERIFIER_REUSE)
+    task = materialize_tasks(load_environment(HELLO_VERIFIER_REUSE), taskset="default")[task_index].materialized
+    episode_id = EpisodeId(rollout_id=f"verifier-rollout-{task_index}")
+
+    async def download(remote_path: str, local_path: Path) -> None:
+        assert remote_path == expected_path
+        local_path.write_text(file_content)
+
+    sandbox = SimpleNamespace(
+        serialize=AsyncMock(return_value={"sandbox_id": "sandbox"}),
+        download=AsyncMock(side_effect=download),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: f"verifier-session-{task_index}"})
+
+    await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            episode_id=episode_id,
+            task_id=task.task_id,
+            task_data=task.task_input.task_data,
+        ),
+    )
+    verification = await server.verify(
+        request,
+        ResponsesResourcesVerifyRequest(
+            episode_id=episode_id,
+            task_id=task.task_id,
+            verification_input=ResponsesVerificationInput(
+                responses_create_params=task.task_input.responses_create_params,
+                response=response(),
+            ),
+        ),
+    )
+
+    assert verification.reward == 1.0
 
 
 @pytest.mark.asyncio

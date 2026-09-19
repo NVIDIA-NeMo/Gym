@@ -8,7 +8,7 @@ internally, so environment authors will not need a preparation script.
 
 from pathlib import Path
 
-from nemo_gym.environment.authoring import load_environment, materialize_single_task_jsonl
+from nemo_gym.environment.authoring import load_environment, materialize_tasks_jsonl
 
 
 ENVIRONMENT_ROOT = Path(__file__).parent
@@ -18,7 +18,7 @@ OUTPUT_PATH = ENVIRONMENT_ROOT / "data" / "materialized.jsonl"
 def prepare() -> Path:
     environment = load_environment(ENVIRONMENT_ROOT)
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(materialize_single_task_jsonl(environment), encoding="utf-8")
+    OUTPUT_PATH.write_text(materialize_tasks_jsonl(environment), encoding="utf-8")
     return OUTPUT_PATH
 
 
