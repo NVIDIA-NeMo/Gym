@@ -89,6 +89,24 @@ class FakeProcess:
         self.returncode = -9
 
 
+class BlockingFakeProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self._exit = asyncio.Event()
+
+    async def wait(self) -> int:
+        await self._exit.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+    def finish(self, return_code: int = 0) -> None:
+        self.returncode = return_code
+        self._exit.set()
+
+    def kill(self) -> None:
+        self.finish(-9)
+
+
 def _contains_seq(haystack: list[str], needle: list[str]) -> bool:
     return any(haystack[i : i + len(needle)] == needle for i in range(len(haystack) - len(needle) + 1))
 
@@ -163,6 +181,10 @@ def test_config_validation() -> None:
         docker_provider.DockerExecConfig(default_timeout_s=-1)
     with pytest.raises(ValueError, match="concurrency"):
         docker_provider.DockerExecConfig(concurrency=0)
+    with pytest.raises(ValueError, match="session_concurrency"):
+        docker_provider.DockerExecConfig(session_concurrency=0)
+    with pytest.raises(ValueError, match="session_start_timeout_s"):
+        docker_provider.DockerExecConfig(session_start_timeout_s=0)
     with pytest.raises(ValueError, match="exec_shell"):
         docker_provider.DockerExecConfig(exec_shell="")
     with pytest.raises(ValueError, match="timeout_s"):
@@ -625,11 +647,17 @@ async def test_exec_command_failure_is_not_runtime_error(fake_binary: str, monke
 # --------------------------------------------------------------------------- #
 # process sessions
 # --------------------------------------------------------------------------- #
+def _session_responder(argv: list[str]) -> tuple[int, str, str]:
+    if "test -s" in argv[-1]:
+        return 0, "123\n", ""
+    return 0, "", ""
+
+
 async def test_create_pipe_session_builds_interactive_docker_exec(
     fake_binary: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    provider, rec = _make_provider(monkeypatch, _session_responder)
     process = FakeProcess(stdout=b"out", stderr=b"err")
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
@@ -658,6 +686,7 @@ async def test_create_pipe_session_builds_interactive_docker_exec(
     assert _contains_seq(list(argv), ["--user", "0"])
     assert argv[-4:-1] == ("nemo-gym-x", "bash", "-c")
     assert "python runner.py" in argv[-1]
+    assert "exec setsid --wait" in argv[-1]
     assert kwargs["start_new_session"] is True
     assert session.mode == "pipe"
 
@@ -668,13 +697,14 @@ async def test_create_pipe_session_builds_interactive_docker_exec(
     assert await session.wait_exit() == 0
     await session.close()
     assert process.stdin.closed is True
+    assert any("rm -rf /tmp/nemo-gym-" in call["argv"][-1] for call in rec.calls)
 
 
 async def test_create_pipe_session_sends_signal_inside_container(
     fake_binary: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    provider, rec = _make_provider(monkeypatch, _session_responder)
     process = FakeProcess()
 
     async def create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
@@ -687,9 +717,60 @@ async def test_create_pipe_session_sends_signal_inside_container(
 
     signal_argv = rec.calls[-1]["argv"]
     assert signal_argv[:3] == [FAKE_BINARY, "exec", "nemo-gym-x"]
-    assert "kill -s TERM" in signal_argv[-1]
+    assert "kill -s TERM -123" in signal_argv[-1]
     process.returncode = 0
     await session.close()
+
+
+async def test_create_pipe_session_reports_startup_failure(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "not ready"))
+    process = FakeProcess(stderr=b"setsid: not found", return_code=127)
+    process.returncode = 127
+
+    async def create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    with pytest.raises(docker_provider.SandboxPtyError, match="setsid: not found"):
+        await provider.create_pty(_make_handle(), SandboxPtySpec(command="true", pty=False))
+
+
+async def test_pipe_sessions_respect_dedicated_concurrency_limit(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _rec = _make_provider(
+        monkeypatch,
+        _session_responder,
+        exec={"exec_shell": "sh", "session_concurrency": 1},
+    )
+    processes = [BlockingFakeProcess(), BlockingFakeProcess()]
+
+    async def create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return processes.pop(0)
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", create_subprocess_exec)
+    first = await provider.create_pty(_make_handle(), SandboxPtySpec(command="sleep 10", pty=False))
+    second_task = asyncio.create_task(
+        provider.create_pty(_make_handle(), SandboxPtySpec(command="sleep 10", pty=False))
+    )
+    await asyncio.sleep(0)
+    assert not second_task.done()
+
+    first_process = first._process
+    assert isinstance(first_process, BlockingFakeProcess)
+    first_process.finish()
+    assert await first.wait_exit() == 0
+
+    second = await asyncio.wait_for(second_task, timeout=1)
+    second_process = second._process
+    assert isinstance(second_process, BlockingFakeProcess)
+    second_process.finish()
+    assert await second.wait_exit() == 0
 
 
 async def test_create_pipe_session_rejects_tty_mode(
