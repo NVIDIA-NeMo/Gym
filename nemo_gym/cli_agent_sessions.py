@@ -14,12 +14,12 @@ from typing import ClassVar
 from fastapi import Body, HTTPException, Request
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.episode import (
+from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    SimpleResponsesAPIAgent,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
