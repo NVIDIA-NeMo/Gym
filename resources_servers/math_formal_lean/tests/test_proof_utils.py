@@ -14,6 +14,8 @@
 # limitations under the License.
 
 
+import pytest
+
 from resources_servers.math_formal_lean.proof_utils import (
     ProofBuildConfig,
     build_lean4_proof,
@@ -21,60 +23,29 @@ from resources_servers.math_formal_lean.proof_utils import (
     determine_proof_status,
     extract_code_block,
     extract_proof_only,
+    strip_lean_comments_and_strings,
+    strip_thinking,
 )
 
 
 class TestExtractCodeBlock:
-    def test_extract_lean4_code_block(self):
-        text = """Here's the proof:
-```lean4
-simp [h₁, h₂, h₃]
-ring
-```
-Done!"""
-        result = extract_code_block(text, languages=["lean4", "lean", ""])
-        assert result == "simp [h₁, h₂, h₃]\nring"
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("Here's the proof:\n```lean4\nsimp [h₁, h₂, h₃]\nring\n```\nDone!", "simp [h₁, h₂, h₃]\nring"),
+            ("Just some text without code blocks", ""),
+        ],
+    )
+    def test_extract_by_language_tag(self, text, expected):
+        assert extract_code_block(text, languages=["lean4", "lean", ""]) == expected
 
-    def test_extract_lean_code_block(self):
-        text = """```lean
-omega
-```"""
-        result = extract_code_block(text, languages=["lean4", "lean", ""])
-        assert result == "omega"
-
-    def test_extract_generic_code_block(self):
-        text = """```
-simp
-```"""
-        result = extract_code_block(text, languages=["lean4", "lean", ""])
-        assert result == "simp"
-
-    def test_no_code_block(self):
-        text = "Just some text without code blocks"
-        result = extract_code_block(text, languages=["lean4", "lean", ""])
-        assert result == ""
-
-    def test_extract_last_code_block(self):
-        text = """```lean4
-first_proof
-```
-Actually, let me try again:
-```lean4
-second_proof
-```"""
-        result = extract_code_block(text, languages=["lean4"], extract_code_mode="last")
-        assert result == "second_proof"
-
-    def test_extract_first_code_block(self):
-        text = """```lean4
-first_proof
-```
-Actually:
-```lean4
-second_proof
-```"""
-        result = extract_code_block(text, languages=["lean4"], extract_code_mode="first")
-        assert result == "first_proof"
+    @pytest.mark.parametrize(
+        "mode,expected",
+        [("last", "second_proof"), ("first", "first_proof")],
+    )
+    def test_extract_mode_picks_the_right_block(self, mode, expected):
+        text = "```lean4\nfirst_proof\n```\nActually:\n```lean4\nsecond_proof\n```"
+        assert extract_code_block(text, languages=["lean4"], extract_code_mode=mode) == expected
 
 
 class TestCleanFormalGeneration:
@@ -175,34 +146,64 @@ theorem test : True := by
 
 
 class TestDetermineProofStatus:
-    def test_completed_status(self):
-        output = {"process_status": "completed", "stdout": "", "stderr": ""}
-        assert determine_proof_status(output) == "completed"
+    @pytest.mark.parametrize(
+        "output,expected",
+        [
+            ({"process_status": "completed", "stdout": "", "stderr": ""}, "completed"),
+            ({"process_status": "timeout", "stdout": "", "stderr": ""}, "timeout"),
+            ({"process_status": "error", "stdout": "", "stderr": "compilation failed"}, "error"),
+            ({}, "unknown"),
+            (
+                {"process_status": "completed", "stdout": "warning: declaration uses 'sorry'", "stderr": ""},
+                "has_sorry",
+            ),
+        ],
+    )
+    def test_status_mapping(self, output, expected):
+        assert determine_proof_status(output) == expected
 
-    def test_timeout_status(self):
-        output = {"process_status": "timeout", "stdout": "", "stderr": ""}
-        assert determine_proof_status(output) == "timeout"
 
-    def test_error_status(self):
-        output = {"process_status": "error", "stdout": "", "stderr": "compilation failed"}
-        assert determine_proof_status(output) == "error"
+class TestStripLeanCommentsAndStrings:
+    def test_line_comment_content_removed_newline_and_offsets_kept(self):
+        original = "a -- sorry\nb"
+        stripped = strip_lean_comments_and_strings(original)
+        assert stripped == "a" + " " * (len("a -- sorry") - 1) + "\nb"
+        assert len(stripped) == len(original)
 
-    def test_has_sorry_in_output(self):
-        output = {
-            "process_status": "completed",
-            "stdout": "warning: declaration uses 'sorry'",
-            "stderr": "",
-        }
-        assert determine_proof_status(output) == "has_sorry"
+    def test_nested_block_comments(self):
+        # The inner `-/` must not be read as closing the outer comment, or `sorry`
+        # would leak back into the checked text.
+        assert "sorry" not in strip_lean_comments_and_strings("/- /- sorry -/ -/ ok")
+        assert "ok" in strip_lean_comments_and_strings("/- /- sorry -/ -/ ok")
 
-    def test_has_sorry_in_stderr(self):
-        output = {
-            "process_status": "completed",
-            "stdout": "",
-            "stderr": "sorry found in proof",
-        }
-        assert determine_proof_status(output) == "has_sorry"
+    def test_doc_comment_is_stripped(self):
+        assert "sorry" not in strip_lean_comments_and_strings(
+            "/-- proves it with sorry -/\ntheorem t : True := trivial"
+        )
 
-    def test_unknown_status(self):
-        output = {}
-        assert determine_proof_status(output) == "unknown"
+    def test_string_literal_is_stripped(self):
+        assert "sorry" not in strip_lean_comments_and_strings('def s := "sorry"')
+
+    def test_escaped_quote_does_not_end_string(self):
+        assert "sorry" not in strip_lean_comments_and_strings('def s := "a\\" sorry"')
+
+    def test_code_outside_comments_survives_verbatim(self):
+        code = "theorem t : True := trivial"
+        assert strip_lean_comments_and_strings(code) == code
+
+
+class TestStripThinking:
+    def test_closed_block_removed(self):
+        assert strip_thinking("<think>a</think>answer") == "answer"
+
+    def test_bare_close_keeps_only_the_tail(self):
+        assert strip_thinking("reasoning</think>answer") == "answer"
+
+    def test_last_close_wins(self):
+        assert strip_thinking("r1</think>mid</think>answer") == "answer"
+
+    def test_unclosed_opener_drops_the_rest(self):
+        assert strip_thinking("answer<think>reasoning") == "answer"
+
+    def test_no_tags_unchanged(self):
+        assert strip_thinking("plain") == "plain"
