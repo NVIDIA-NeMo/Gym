@@ -27,13 +27,9 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
-SBATCH_TIME="${SBATCH_TIME:-${SBATCH_TIMELIMIT:-04:00:00}}"
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
-# Empty falls back to main's SEGMENT or the calculated node count below.
-# Coupled deployments can override this with their tier size.
-VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
@@ -71,9 +67,8 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
+ROUTER_METRICS_PORT=29000
 WORKER_SERVER_PORT=8001
-PREFILL_SERVER_PORT=8001
-DECODE_SERVER_PORT=8002
 
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
@@ -93,7 +88,6 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
-GYM_MODEL_PARAMS=()
 source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
@@ -103,6 +97,30 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
 rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
+
+# Scrape each API server directly; the router only exposes its own metrics.
+gym_config_args=(
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml
+)
+inference_metrics_config="results/\$experiment_name/inference-metrics.yaml"
+mkdir -p "\$(dirname "\$inference_metrics_config")"
+read -r -a nodes <<< "\$ALL_NODES"
+{
+    printf 'inference_metrics:\n  enabled: true\n  endpoints:\n'
+    for node_index in "\${!nodes[@]}"; do
+        # Coupled tiers expose one API server each; other ranks are headless.
+        if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        printf '    node%s: "http://%s:$WORKER_SERVER_PORT/metrics"\n' \
+            "\$node_index" "\${nodes[node_index]}"
+    done
+    printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
+} > "\$inference_metrics_config"
+gym_config_args+=(--config "\$inference_metrics_config")
+
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -112,8 +130,7 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
     $@ \
-    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
-    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+    "\${gym_config_args[@]}" \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
@@ -184,6 +201,8 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+
 if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
@@ -218,7 +237,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
-            --port $PREFILL_SERVER_PORT \
+            --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-address \$PREFILL_HEAD \
             --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
@@ -238,22 +257,22 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
+        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$WORKER_SERVER_PORT/health" "\$prefill_pid"
         # Monitor the local prefill process while the remote decode API
         # starts. The enclosing srun handles failures on the decode ranks.
-        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid" "prefill"
+        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$WORKER_SERVER_PORT/health" "\$prefill_pid" "prefill"
 
         vllm-router \
             --prefill-policy $ROUTER_PREFILL_POLICY \
             --decode-policy $ROUTER_DECODE_POLICY \
             --vllm-pd-disaggregation \
-            --prefill "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT" \
-            --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
+            --prefill "http://\$PREFILL_HEAD:$WORKER_SERVER_PORT" \
+            --decode "http://\$DECODE_HEAD:$WORKER_SERVER_PORT" \
             --host \$PREFILL_HEAD \
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --log-level error &
+            "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
 
@@ -290,7 +309,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
             --host \$this_node_hostname \
-            --port $DECODE_SERVER_PORT \
+            --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-address \$DECODE_HEAD \
             --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
@@ -329,7 +348,7 @@ else
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
             --worker-startup-timeout-secs 1200 \
-            --log-level error
+            "\${router_common_args[@]}"
         )
 
         if [[ "$VLLM_MODE" == pd ]]; then
@@ -408,12 +427,6 @@ fi
 EOF
 )
 
-VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-${SEGMENT:-$NUM_NODES}}"
-if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: VLLM_SLURM_SEGMENT must be a positive integer." >&2
-    exit 2
-fi
-
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -458,6 +471,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     ROUTER_NODE="\${nodes[0]}" \
+    ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
@@ -492,8 +506,9 @@ wait "\$server_step"
 EOF
 )
 
-# This cluster needs --segment > 0 to avoid distributed engine hangs.
-# Coupled tiers benefit from caller-configurable segments matching their node count.
+# --segment > 0 otherwise the engine will hang on the second or third engine step.
+SEGMENT=${SEGMENT:-$NUM_NODES}
+
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -510,13 +525,13 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time="$SBATCH_TIME" \
-        --segment="$VLLM_SLURM_SEGMENT" \
+        --time="${SBATCH_TIMELIMIT:-04:00:00}" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
+        --segment=$SEGMENT \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}

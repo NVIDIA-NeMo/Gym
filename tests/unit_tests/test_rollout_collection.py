@@ -1764,9 +1764,17 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
+    @pytest.mark.parametrize("inference_metrics_enabled", [False, True])
     async def test_run_from_config_sanity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        inference_metrics_enabled: bool,
     ) -> None:
+        publish = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", publish)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
         clear_captures = MagicMock()
         merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
@@ -1784,6 +1792,10 @@ class TestRolloutCollection:
             output_jsonl_fpath=str(output_jsonl_fpath),
             limit=3,
             num_repeats=2,
+            inference_metrics={
+                "enabled": inference_metrics_enabled,
+                "endpoints": {"replica0": "http://localhost:8000/metrics"},
+            },
         )
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
@@ -1819,6 +1831,15 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        progress_calls = [c for c in publish.call_args_list if "progress/total/rollouts_per_min" in c.args[0]]
+        assert progress_calls
+        for call in progress_calls:
+            if inference_metrics_enabled:
+                assert "step" not in call.kwargs
+                assert 0 < call.args[0]["progress/completion_pct"] <= 100
+            else:
+                assert 0 < call.kwargs["step"] <= 100
+                assert "progress/completion_pct" not in call.args[0]
         empty_global_config.assert_called_once_with()
         clear_captures.assert_not_called()
         merge_capture.assert_not_called()
