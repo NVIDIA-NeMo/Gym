@@ -402,13 +402,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
             if uv_path is None:
                 raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
             prepare = await sandbox.exec(
-                f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
+                (
+                    f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}; "
+                    "if command -v uv >/dev/null 2>&1; then "
+                    f'cp "$(command -v uv)" {quote(_SANDBOX_UV)}; '
+                    "printf nemo-gym-sandbox-uv; "
+                    "fi"
+                ),
                 cwd=body.sandbox_access.workdir,
                 timeout_s=30,
             )
             if prepare.return_code != 0:
                 raise RuntimeError(prepare.stderr or prepare.stdout or "Failed to prepare Hermes sandbox paths")
-            await sandbox.upload(uv_path, _SANDBOX_UV)
+            if "nemo-gym-sandbox-uv" not in (prepare.stdout or ""):
+                await sandbox.upload(uv_path, _SANDBOX_UV)
             install = await sandbox.exec(
                 (
                     f"chmod 755 {quote(_SANDBOX_UV)}; "
