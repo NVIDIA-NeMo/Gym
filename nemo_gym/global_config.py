@@ -104,6 +104,8 @@ DELETE_KEY_KEY_NAME = "_delete_key"
 # real config value (e.g. a literal "???" or a DictConfig) for "missing".
 _MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+# Requires nemo_gym_log_dir; keep selected servers in log files without echoing them to the console.
+NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME = "nemo_gym_log_suppress_stdout_server_names"
 VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
@@ -147,6 +149,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME,
     VERBOSE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
