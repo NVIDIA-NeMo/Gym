@@ -21,7 +21,7 @@ gym eval run \
 ```
 
 > [!NOTE]
-> This is the target interface. Environment loading and execution are not implemented yet.
+> This is the target one-command interface. The environment adapter now loads these directory-based tasks and dispatches each selected verifier; connecting that internal runtime directly to `--environment` remains future work.
 
 ## How it works
 

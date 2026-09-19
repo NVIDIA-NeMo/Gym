@@ -28,9 +28,10 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.environment.authoring import (
-    LoadedEnvironment,
+    MaterializedEnvironmentTask,
     load_environment,
     load_environment_callable,
+    materialize_tasks,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
@@ -102,21 +103,24 @@ class EnvironmentAdapterResourcesServer(SimpleResourcesServer):
             )
         environment_root = _resolve_under_cwd_or_install(self.config.environment_root, validator=Path.is_dir)
         self._loaded_environment = load_environment(environment_root)
-        task = self._require_single_task(self._loaded_environment)
-        self._verifier = load_environment_callable(
-            self._loaded_environment,
-            task.verifier.implementation,
-            description="task verifier",
-        )
+        tasks = materialize_tasks(self._loaded_environment)
+        self._tasks_by_id = {task.materialized.task_id: task for task in tasks}
+        self._verifiers_by_implementation = {
+            task.verifier.implementation: load_environment_callable(
+                self._loaded_environment,
+                task.verifier.implementation,
+                description=f"verifier for {task.materialized.task_id.task_id}",
+            )
+            for task in tasks
+        }
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
 
-    @staticmethod
-    def _require_single_task(loaded: LoadedEnvironment):
-        task = loaded.definition.task
-        if task is None or task.id is None:
-            raise ValueError("The environment adapter currently requires one task with task.id")
-        return task
+    def _task_for(self, task_id: TaskId) -> MaterializedEnvironmentTask:
+        try:
+            return self._tasks_by_id[task_id]
+        except KeyError as error:
+            raise ValueError(f"TaskId does not belong to the configured environment: {task_id}") from error
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -162,15 +166,8 @@ class EnvironmentAdapterResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest,
     ) -> ResourcesSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        task = self._require_single_task(self._loaded_environment)
-        expected = TaskId(
-            taskset=self._loaded_environment.definition.name,
-            task_id=task.id,
-            revision=self._loaded_environment.definition.version,
-        )
-        if body.task_id != expected:
-            raise ValueError(f"TaskId does not match the configured environment task: expected {expected}")
-        if body.task_data != task.task_data:
+        task = self._task_for(body.task_id)
+        if body.task_data != task.materialized.task_input.task_data:
             raise ValueError("Task data does not match the trusted environment declaration")
 
         previous = self._session_id_to_sandbox.pop(session_id, None)
@@ -210,13 +207,14 @@ class EnvironmentAdapterResourcesServer(SimpleResourcesServer):
         if identity != (body.episode_id, body.task_id):
             raise ValueError("Verification identity does not match the seeded resources session")
 
-        task = self._require_single_task(self._loaded_environment)
+        task = self._task_for(body.task_id)
         attempt = EnvironmentAttempt(
             workspace=SandboxWorkspace(sandbox, self._loaded_environment.definition.runtime.workdir),
             response=body.verification_input.response,
         )
         verifier_input = SimpleNamespace(**task.verifier.verifier_input)
-        result = self._verifier(attempt, verifier_input)
+        verifier = self._verifiers_by_implementation[task.verifier.implementation]
+        result = verifier(attempt, verifier_input)
         reward = await result if inspect.isawaitable(result) else result
         if isinstance(reward, bool) or not isinstance(reward, (int, float)):
             raise TypeError("Environment verifier must return a numeric reward")
