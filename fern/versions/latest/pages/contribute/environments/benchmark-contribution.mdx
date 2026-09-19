@@ -1,0 +1,219 @@
+---
+title: "Contribute a Benchmark"
+description: "Prepare, test, and submit a benchmark contribution."
+position: 1
+---
+
+# Contribute a Benchmark
+
+Follow these steps to prepare a benchmark and submit it for review.
+
+## 1. Choose the Destination Before Adding Data
+
+| Contribution | Guide | Target branch |
+| --- | --- | --- |
+| Code and examples approved for public release | [GitHub PR](/main/contribute/environments/benchmark-public-contribution) | `NVIDIA-NeMo/Gym:main` |
+| Private code, data, or benchmark details | [GitLab MR](/main/contribute/environments/benchmark-private-contribution) | Internal Gym project, `nv-internal-main` |
+
+Create a checkout using the selected guide, then return here. Confirm release
+and redistribution permissions with the data owner before sharing content publicly.
+
+## 2. Set Up and Scaffold in That Checkout
+
+Complete [Onboarding Setup](/main/get-started/onboarding-setup) in your checkout,
+skipping its clone command. Use its Python requirements, frozen lockfile, and
+exported child-dependency constraints.
+
+### Create and Complete the Manifest
+
+Replace `safety_example` throughout this guide with an unused lowercase Python identifier.
+
+```bash title="contribution-scaffold"
+gym env init --benchmark safety_example --profile custom-gym-verifier
+```
+
+This creates `benchmarks/safety_example/manifest.yaml` and its companion files.
+The manifest records the benchmark's identity, metadata, and composition for
+catalog discovery and validation. Complete it alongside `config.yaml` and include
+both files in your PR or MR.
+
+The scaffold contains a one-question arithmetic example. Replace its data and
+scoring logic with your benchmark. For a worked example, see
+[Native Benchmark Onboarding](/main/get-started/native-onboarding).
+
+### Request Gym Team Maintenance
+
+<Note>
+The `experimental` field requires [PR #3147](https://github.com/NVIDIA-NeMo/Gym/pull/3147).
+On checkouts without that change, omit the field; unknown manifest keys fail validation.
+</Note>
+
+On supported checkouts, new manifests default to `experimental: true`:
+
+```yaml title="manifest.yaml (maintenance field)"
+experimental: true
+```
+
+If you need the Gym team to maintain the benchmark and handle PR reviews and
+approvals, ping a Gym maintainer in your PR or MR to request `experimental: false`.
+Keep it `true` until the team accepts maintenance ownership; only the Gym team
+should set it to `false`, which marks the benchmark as `maintained`.
+The flag does not assign reviewers or change repository approval rules.
+
+## 3. Replace the Control With Your Benchmark
+
+| Files | Required changes |
+| --- | --- |
+| `benchmarks/safety_example/manifest.yaml` | Replace placeholders with authors, description, domain, version, license, canonical split, reward range, and determinism. |
+| `benchmarks/safety_example/config.yaml` | Configure the dataset, agent, and scorer; keep the manifest's composition mirror synchronized. |
+| `benchmarks/safety_example/data/source.jsonl`, `data/example.jsonl`, `prepare.py` | Prepare a small approved fixture and document the real dataset's pinned source/version. |
+| `benchmarks/safety_example/prompt.yaml` | Define the canonical prompt; exclude expected answers and grading-only metadata from model input. |
+| `resources_servers/safety_example/app.py`, `configs/safety_example.yaml`, `requirements.txt` | Implement the scorer and declare dependencies. Keep `verified: false` until baselining and review. |
+| `resources_servers/safety_example/tests/test_app.py`, `tests/verifier_cases.jsonl`, `example.jsonl` | Cover full reward, zero reward, malformed input, and benchmark-specific edge cases. Test determinism when declared. |
+| Both `README.md` files | Describe the task, data provenance, licensing, synthetic-data attribution, rubric, limitations, commands, and maintainer. |
+
+Document deviations from an existing benchmark's protocol. See
+[New Environment](/main/contribute/environments/new-environment) for manifest
+and verifier contracts, and [Single Step Environment](/main/environment-tutorials/single-step-environment)
+for implementation guidance.
+
+## 4. Run Local Checks and Record Their Limits
+
+Configure `prepare.py` to read the small fixture and write the configured JSONL
+path. The scaffold uses `data/source.jsonl` and `data/example.jsonl`.
+
+<Warning>
+Review preparation code before running it: preparation has no generic sample
+limit and may otherwise download or process the full dataset.
+</Warning>
+
+```bash title="contribution-prepare"
+gym eval prepare --benchmark safety_example +use_cached_prepared_benchmarks=false
+```
+
+Check the regenerated row count, content, schema, and rendered prompt. Disabling
+the cache prevents stale data from masking preparation errors. Neither static
+validation nor `gym eval run` reruns `prepare.py`.
+
+```bash title="contribution-checks"
+gym env validate safety_example --json
+gym env test safety_example --json
+gym env test --resources-server safety_example
+gym env publish safety_example --json
+```
+
+Validation, verifier cases, and server unit tests should pass. The scaffold's
+checks are model-free; custom tests must document external-service requirements.
+The first run may install dependencies.
+
+<Note>
+`gym env publish` checks local readiness and reports the catalog status
+(`experimental` for new contributions).
+It does not upload data, create a PR/MR, or certify benchmark fidelity.
+</Note>
+
+After changing composition, run `gym env validate --sync safety_example` and
+review the diff. Change expected fixture rewards only when the scoring contract
+intentionally changes.
+
+### Optional, Separately Approved One-Sample Smoke
+
+Environment and agent changes require inspected rollout evidence under the
+repository's quality guidance. If access or budget is unavailable, record it
+as pending in a draft. Follow the [model setup and budget guidance](/main/get-started/onboarding-setup)
+and use an endpoint approved for your data.
+
+```bash title="contribution-smoke"
+gym env validate --benchmark safety_example --model-type vllm_model \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" --strict
+export GYM_CONTRIBUTION_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gym-contribution-run.XXXXXX")"
+gym eval run --benchmark safety_example --model-type vllm_model \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" \
+  --split benchmark --limit 1 --num-repeats 1 --concurrency 1 \
+  --max-output-tokens 128 --output "$GYM_CONTRIBUTION_RUN_DIR/rollouts.jsonl"
+gym eval health-check "$GYM_CONTRIBUTION_RUN_DIR" --workers 1
+```
+
+Use the [result inspection steps](/main/get-started/native-onboarding#inspect-the-result-before-calling-it-validated),
+substituting `GYM_CONTRIBUTION_RUN_DIR` for the run-directory variable. Inspect
+inputs, responses, rewards, metrics, and failures; distinguish valid zero scores
+from execution errors.
+
+<Warning>
+The sample and token limits do not cap transport retries or custom tool/judge
+calls. Use endpoint quotas and obtain a separate budget for those calls.
+Report truncation without automatically increasing limits. Do not run a full
+benchmark for onboarding.
+</Warning>
+
+Agree any [baselining work](/main/contribute/environments/adding-a-benchmark)
+and compute budget separately with reviewers; one sample does not establish
+benchmark fidelity.
+
+## 5. Prepare a Narrow, Reviewed Commit
+
+Run `pre-commit run --all-files`. Review hook changes and rerun checks.
+Stage relevant fixes without discarding unrelated work.
+
+The list below covers the scaffold; add other implementation files individually.
+Check that all example data is approved for the destination. Exclude raw datasets,
+credentials, logs, and rollout artifacts.
+
+```bash title="contribution-stage"
+git add -- \
+  benchmarks/safety_example/__init__.py \
+  benchmarks/safety_example/manifest.yaml \
+  benchmarks/safety_example/config.yaml \
+  benchmarks/safety_example/README.md \
+  benchmarks/safety_example/prepare.py \
+  benchmarks/safety_example/prompt.yaml \
+  benchmarks/safety_example/data/source.jsonl \
+  benchmarks/safety_example/data/example.jsonl \
+  resources_servers/safety_example/__init__.py \
+  resources_servers/safety_example/README.md \
+  resources_servers/safety_example/app.py \
+  resources_servers/safety_example/configs/safety_example.yaml \
+  resources_servers/safety_example/requirements.txt \
+  resources_servers/safety_example/example.jsonl \
+  resources_servers/safety_example/tests/__init__.py \
+  resources_servers/safety_example/tests/test_app.py \
+  resources_servers/safety_example/tests/verifier_cases.jsonl
+git diff --cached --check
+git diff --cached --stat
+git diff --cached
+```
+
+Review the staged diff, including any README-table update from the hooks.
+Resolve secrets, unapproved data, or unrelated changes before committing with DCO sign-off:
+
+```bash title="contribution-commit"
+git commit -s -m "feat(benchmark): add safety_example"
+```
+
+Continue with the [GitHub PR](/main/contribute/environments/benchmark-public-contribution#3-push-and-open-a-draft-pr)
+or [GitLab MR](/main/contribute/environments/benchmark-private-contribution#3-push-and-open-a-draft-mr) submission steps.
+
+## Review Description: Copy Into Your PR or MR
+
+```markdown
+## Benchmark
+- Task, motivation, maintainer, and requested reviewer:
+- Gym-team maintenance requested, if applicable:
+- Dataset source/version, split, license, access, and release restrictions:
+- Synthetic-data attribution, if applicable:
+
+## Implementation
+- Preparation, prompt, agent, scorer, and reward range:
+- Protocol changes and known limitations:
+
+## Validation
+- Gym commit, Python version, and dependency lock revision:
+- Static validation, verifier, server-test, and pre-commit results:
+- Live smoke: completed / pending / N/A, with reason:
+- If run: model, sample/repeat/concurrency/token limits, and inspected results:
+- Failures, missing evidence, and redacted or restricted artifact links:
+- Outstanding baselining work, owner, and agreed budget:
+```
+
+Request a reviewer explicitly. `gym env publish` does not assign reviewers or
+update CODEOWNERS. If no owner is listed, ask a Gym maintainer to nominate one.
