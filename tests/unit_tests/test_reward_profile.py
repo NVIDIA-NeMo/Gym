@@ -14,9 +14,11 @@
 # limitations under the License.
 
 
+import sys
 from pathlib import Path
 
 import orjson
+import pandas as pd
 import pytest
 
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -648,6 +650,26 @@ class TestRewardProfile:
         assert summary["complete_input_rows"] == 1
         assert summary["missing_input_rows"] == 1
         assert summary["partial_input_rows"] == 0
+
+
+class TestHistogram:
+    def test_returns_a_wandb_histogram_when_wandb_is_installed(self) -> None:
+        from wandb import Histogram
+
+        result = RewardProfiler().histogram(pd.Series([1, 2, 3]))
+
+        assert isinstance(result, Histogram)
+
+    def test_falls_back_to_none_when_wandb_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # wandb is an optional extra (`nemo-gym[wandb]`); this stat is always dropped by
+        # prepare_for_serialization before it reaches any JSON output or exporter, so a plain
+        # Gym install must be able to skip it instead of failing.
+        monkeypatch.setitem(sys.modules, "wandb", None)
+
+        assert RewardProfiler().histogram(pd.Series([1, 2, 3])) is None
+
+    def test_empty_data_returns_none(self) -> None:
+        assert RewardProfiler().histogram(pd.Series([], dtype=float)) is None
 
 
 class TestWriteToDisk:
