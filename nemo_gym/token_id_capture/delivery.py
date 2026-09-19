@@ -84,12 +84,21 @@ def _unusable(result: dict, error: str, message: str) -> dict:
     return {"rebuilt_response": None, MASK_SAMPLE_KEY: True, "error": error, "metrics": metrics}
 
 
-async def finalize_rollout_token_capture(result: dict, source: TokenSource | None) -> dict | None:
+async def finalize_rollout_token_capture(
+    result: dict,
+    source: TokenSource | None,
+    *,
+    builder: str = "prefix_merging",
+    delivery: str = "main_chain",
+) -> dict | None:
     """Rebuild one finished rollout record's ``response.output`` from its recorded token ids.
 
     Call this after the harness and verifier finish the record.
     The function mutates ``result`` in place.
-    It replaces only ``response.output``.
+    By default it replaces only ``response.output``.
+    With ``delivery="all_traces"`` it preserves the scored response, including
+    native inline tokens, and attaches a versioned ``training_traces`` envelope.
+    That mode requires a trainer which consumes the envelope explicitly.
     It preserves the reward and all other harness and verifier output.
 
     The function freezes capture records through ``source``.
@@ -121,7 +130,10 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             f"a rollout result carries a malformed id ({error}), so its recorded token ids could "
             "not be looked up and it will be token-less.",
         )
-    if rollout_carries_token_ids(result):
+    if delivery == "all_traces":
+        # Never accept stale or harness-supplied training rows as captured proof.
+        result.pop("training_traces", None)
+    if delivery == "main_chain" and rollout_carries_token_ids(result):
         # Re-finalization must return the frozen snapshot.
         # The caller must be able to retire on every path.
         if rollout_id is None:
@@ -159,6 +171,8 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         built = await trajectories_from_source(
             rollout_id,
             source,
+            builder=builder,
+            delivery=delivery,
             model=str(response.get("model") or ""),
             verified_response=response or None,
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
@@ -184,6 +198,8 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             "middleware correlated.",
         )
 
+    if "training_traces" in built:
+        result["training_traces"] = built["training_traces"]
     projected = built["rebuilt_response"]
     if projected is not None:
         if isinstance(result.get("response"), dict):
@@ -242,4 +258,8 @@ def capture_build_can_retire(built: dict | None) -> bool:
     """Whether a successful build consumed a frozen snapshot."""
     if built is None or built.get(MASK_SAMPLE_KEY):
         return False
-    return built.get("rebuilt_response") is not None or bool(built.get(_REDUNDANT_CAPTURE_KEY))
+    return (
+        built.get("rebuilt_response") is not None
+        or bool(built.get("training_traces"))
+        or bool(built.get(_REDUNDANT_CAPTURE_KEY))
+    )
