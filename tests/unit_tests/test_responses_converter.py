@@ -1639,6 +1639,15 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
         converter.responses_to_chat_completion_create_params(params)
 
 
+def test_downconverting_treats_empty_include_as_absent(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=[])
+
+    chat_params = converter.responses_to_chat_completion_create_params(params)
+
+    assert "include" not in chat_params.model_dump(exclude_unset=True)
+    assert chat_params.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
 def test_downconverting_null_responses_only_fields_treats_them_as_absent(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(
         input="hi",
