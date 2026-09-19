@@ -1,0 +1,3 @@
+-e nemo-gym[dev,sandbox] @ ../..
+# The upstream SWE-rebench log parsers are fetched at runtime (see log_parsers.py) and import
+# only the standard library, so nothing extra is pinned here.
