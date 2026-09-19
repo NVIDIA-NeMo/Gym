@@ -201,6 +201,11 @@ class UnsupportedAgentOverrideError(ConfigError, ValueError):
     """A command line override configures an agent that no instance ends up running."""
 
 
+class HeadServerUnreachableError(ConfigError, ValueError):
+    """Nothing answered at the configured head server address, so the merged config could not be fetched
+    from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################

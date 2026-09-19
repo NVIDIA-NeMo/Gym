@@ -64,6 +64,7 @@ from nemo_gym.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
+    HeadServerUnreachableError,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -617,8 +618,11 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
-            raise ValueError(
-                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
+            raise HeadServerUnreachableError(
+                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
+                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()
