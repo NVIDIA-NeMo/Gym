@@ -12,10 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym._checkpoint import AgentBoundaryRecord
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
@@ -71,7 +74,7 @@ class TestBaseResponsesAPIAgent:
 
     def _agent(self, global_config: dict, *, token_id_capture: bool = False) -> SimpleResponsesAPIAgent:
         config = BaseResponsesAPIAgentConfig(
-            host="", port=0, entrypoint="", name="", token_id_capture=token_id_capture
+            host="", port=0, entrypoint="", name="agent", token_id_capture=token_id_capture
         )
 
         class _Agent(SimpleResponsesAPIAgent):
@@ -102,3 +105,64 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+    async def test_checkpoint_refusal_after_resume_retries_without_parking(self) -> None:
+        agent = self._agent({})
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        response_ready = asyncio.Event()
+        return_refusal = asyncio.Event()
+        calls = 0
+
+        class _Response:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            async def read(self) -> bytes:
+                return self._body
+
+        async def operation() -> _Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                response_ready.set()
+                await return_refusal.wait()
+                return _Response(409, b'{"error":{"code":"checkpoint_parked"}}')
+            return _Response(200, b"{}")
+
+        token = participant.bind(execution)
+        try:
+            retried = asyncio.create_task(
+                agent.retry_checkpoint_refusal(
+                    operation,
+                    checkpointable_model_wait=True,
+                )
+            )
+            await response_ready.wait()
+            report = await participant.prepare(
+                time.time() + 2,
+                allow_model_wait_boundary=True,
+            )
+            assert report["ready_to_commit"] is True
+
+            return_refusal.set()
+            await asyncio.sleep(0)
+            assert not retried.done()
+
+            await participant.resume()
+            response = await asyncio.wait_for(retried, timeout=1)
+            assert response.status == 200
+            assert calls == 2
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")

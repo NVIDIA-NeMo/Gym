@@ -113,6 +113,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     checkpoint_continuation_supported = True
     checkpoint_resource_dependencies_supported = True
 
+    def _prepare_model_request_for_turn(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        turn_index: int,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Allow specialized agents to adjust a fully materialized turn request."""
+        del turn_index
+        return body
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -233,6 +243,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     break
                 turn_index += 1
                 new_body = body.model_copy(update={"input": body.input + new_outputs})
+                new_body = self._prepare_model_request_for_turn(
+                    new_body,
+                    turn_index=turn_index,
+                )
                 if collect_trajectory:
                     turn_timestamp = time()
 
@@ -244,6 +258,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         cookies=model_server_cookies,
                     ),
                     request=request,
+                    checkpointable_model_wait=True,
                 )
                 model_call_id = None
                 if self._checkpoint_participant is not None:
@@ -490,11 +505,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resource_revision,
                 )
             model_response = model_response.model_copy(
-                update={
-                    _INTERNAL_RESOURCE_REVISIONS_KEY: {
-                        self.config.resources_server.name: resource_revision
-                    }
-                }
+                update={_INTERNAL_RESOURCE_REVISIONS_KEY: {self.config.resources_server.name: resource_revision}}
             )
         return model_response
 

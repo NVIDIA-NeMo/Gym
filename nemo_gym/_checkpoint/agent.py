@@ -69,6 +69,7 @@ class AgentExecutionState(str, Enum):
     PARK_REQUESTED = "park_requested"
     PARKED = "parked"
     EXTERNAL_WAIT_FROZEN = "external_wait_frozen"
+    MODEL_WAIT_FROZEN = "model_wait_frozen"
     COMPLETED = "completed"
     RETIRED = "retired"
 
@@ -268,12 +269,13 @@ class AgentExecution:
         self.terminal_model_call_id: Optional[str] = None
         self.started_at = time.time()
         self.external_wait_depth = 0
+        self.model_wait_depth = 0
         self.resume_event = asyncio.Event()
         self.resume_event.set()
 
 
 class AgentPrepareRequest(CheckpointControlRequest):
-    pass
+    allow_model_wait_boundary: bool = False
 
 
 class AgentCommitRequest(CheckpointControlRequest):
@@ -423,6 +425,7 @@ class AgentCheckpointParticipant:
             in {
                 AgentExecutionState.PARKED,
                 AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+                AgentExecutionState.MODEL_WAIT_FROZEN,
             }
             and execution.boundary is not None
         ):
@@ -484,10 +487,38 @@ class AgentCheckpointParticipant:
         elif execution.state == AgentExecutionState.PARK_REQUESTED:
             await self.park(execution)
 
+    async def begin_model_wait(self, execution: AgentExecution) -> None:
+        """Mark an execution as blocked on a policy-model response."""
+        self._require_owner(execution)
+        if execution.state != AgentExecutionState.RUNNING:
+            raise AgentCheckpointError("an agent execution can enter a model wait only while running")
+        execution.model_wait_depth += 1
+        await self._notify()
+
+    async def end_model_wait(self, execution: AgentExecution) -> bool:
+        """Release a policy-model result only after checkpoint resume."""
+        self._require_owner(execution)
+        if execution.model_wait_depth <= 0:
+            raise AgentCheckpointError("agent model-wait depth underflow")
+        execution.model_wait_depth -= 1
+        await self._notify()
+        if execution.model_wait_depth > 0:
+            return False
+        if execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
+            await execution.resume_event.wait()
+            self._require_owner(execution)
+            if execution.state == AgentExecutionState.RETIRED:
+                raise AgentStaleAttemptError("agent execution was retired while its model result was frozen")
+            return True
+        return False
+
     async def commit_boundary(self, execution: AgentExecution, record: AgentBoundaryRecord) -> None:
         self._require_owner(execution)
-        if execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
-            raise AgentCheckpointError("an external-wait-frozen execution cannot advance its checkpoint boundary")
+        if execution.state in {
+            AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+            AgentExecutionState.MODEL_WAIT_FROZEN,
+        }:
+            raise AgentCheckpointError("a frozen agent execution cannot advance its checkpoint boundary")
         if (record.rollout_id, record.attempt_index) != (execution.rollout_id, execution.attempt_index):
             raise AgentCheckpointError("boundary identity does not match its agent execution")
         previous = execution.boundary
@@ -521,17 +552,27 @@ class AgentCheckpointParticipant:
         execution.state = AgentExecutionState.RUNNING
         await self._notify()
 
-    async def prepare(self, deadline_ts: float) -> dict[str, Any]:
+    async def prepare(
+        self,
+        deadline_ts: float,
+        *,
+        allow_model_wait_boundary: bool = False,
+    ) -> dict[str, Any]:
         """Park running work and expose every condition blocking publication."""
         self._accepting = False
         requested: list[AgentExecution] = []
         external_wait_frozen: list[AgentExecution] = []
+        model_wait_frozen: list[AgentExecution] = []
         for execution in self._executions.values():
             if execution.state == AgentExecutionState.RUNNING:
                 if execution.external_wait_depth > 0 and execution.boundary is not None:
                     execution.state = AgentExecutionState.EXTERNAL_WAIT_FROZEN
                     execution.resume_event.clear()
                     external_wait_frozen.append(execution)
+                elif allow_model_wait_boundary and execution.model_wait_depth > 0 and execution.boundary is not None:
+                    execution.state = AgentExecutionState.MODEL_WAIT_FROZEN
+                    execution.resume_event.clear()
+                    model_wait_frozen.append(execution)
                 else:
                     execution.state = AgentExecutionState.PARK_REQUESTED
                     requested.append(execution)
@@ -548,6 +589,10 @@ class AgentCheckpointParticipant:
                         execution.state = AgentExecutionState.RUNNING
                 for execution in external_wait_frozen:
                     if self._owns(execution) and execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
+                        execution.state = AgentExecutionState.RUNNING
+                        execution.resume_event.set()
+                for execution in model_wait_frozen:
+                    if self._owns(execution) and execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
                         execution.state = AgentExecutionState.RUNNING
                         execution.resume_event.set()
                 await self._notify()
@@ -573,6 +618,10 @@ class AgentCheckpointParticipant:
             if execution.state == AgentExecutionState.PARK_REQUESTED:
                 execution.state = AgentExecutionState.RUNNING
             elif execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
+                execution.state = AgentExecutionState.RUNNING
+                execution.resume_event.set()
+                released += 1
+            elif execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
                 execution.state = AgentExecutionState.RUNNING
                 execution.resume_event.set()
                 released += 1
@@ -714,6 +763,7 @@ class AgentCheckpointParticipant:
             in {
                 AgentExecutionState.PARKED,
                 AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+                AgentExecutionState.MODEL_WAIT_FROZEN,
             }
             and execution.boundary is not None
         ]
@@ -769,6 +819,7 @@ class AgentCheckpointParticipant:
             in {
                 AgentExecutionState.PARKED,
                 AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+                AgentExecutionState.MODEL_WAIT_FROZEN,
             }
             and execution.boundary is not None
         ]
@@ -799,11 +850,16 @@ class AgentCheckpointParticipant:
         if execution.state in {
             AgentExecutionState.PARKED,
             AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+            AgentExecutionState.MODEL_WAIT_FROZEN,
         }:
             parked_boundary_state = (
                 (
-                    "external_wait_frozen"
-                    if execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN
+                    execution.state.value
+                    if execution.state
+                    in {
+                        AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+                        AgentExecutionState.MODEL_WAIT_FROZEN,
+                    }
                     else "parked_with_boundary"
                 )
                 if execution.boundary is not None
@@ -1312,7 +1368,10 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
-            result = await participant.prepare(body.deadline_ts)
+            result = await participant.prepare(
+                body.deadline_ts,
+                allow_model_wait_boundary=body.allow_model_wait_boundary,
+            )
             if not result["ready_to_commit"]:
                 raise AgentPrepareIncompleteError(
                     "agent prepare is incomplete: "

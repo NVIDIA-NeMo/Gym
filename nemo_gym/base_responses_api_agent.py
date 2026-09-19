@@ -262,14 +262,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         operation: Callable[[], Awaitable[Any]],
         *,
         request: Optional[Request] = None,
+        checkpointable_model_wait: bool = False,
     ) -> Any:
         execution = self.checkpoint_execution(request)
         while True:
-            response = await operation()
+            checkpoint_resumed_during_model_wait = False
+            if checkpointable_model_wait and execution is not None and self._checkpoint_participant is not None:
+                await self._checkpoint_participant.begin_model_wait(execution)
+                try:
+                    response = await operation()
+                finally:
+                    checkpoint_resumed_during_model_wait = await self._checkpoint_participant.end_model_wait(execution)
+            else:
+                response = await operation()
             if await _checkpoint_refusal_code(response) is None:
                 return response
             if execution is None or self._checkpoint_participant is None:
                 return response
+            if checkpoint_resumed_during_model_wait:
+                continue
             await self._checkpoint_participant.park(execution)
 
     async def checkpointable_external_wait(

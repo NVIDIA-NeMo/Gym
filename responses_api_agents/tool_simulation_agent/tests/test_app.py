@@ -511,10 +511,9 @@ class TestApp:
             await asyncio.wait_for(wait_until_parked(), timeout=1)
 
             await participant.retire(rollout_id, 0)
-            with raises((asyncio.CancelledError, RuntimeError)) as cancelled:
-                await run_task
-            if isinstance(cancelled.value, RuntimeError):
-                assert str(cancelled.value) == "No response returned."
+            response = await asyncio.wait_for(run_task, timeout=1)
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "stale_attempt"
 
         await asyncio.sleep(0)
         assert model_calls == 1
@@ -1045,6 +1044,84 @@ class TestApp:
             assert not run_task.done()
 
             await participant.resume()
+            response = await asyncio.wait_for(run_task, timeout=1)
+
+        assert response.status_code == 200
+
+    async def test_prefix_checkpoint_prepare_freezes_inflight_model_call(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        model_started = asyncio.Event()
+        release_model = asyncio.Event()
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        verify_result = {
+            "responses_create_params": {"input": []},
+            "response": model_response,
+            "reward": 1.0,
+        }
+
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {MODEL_CALL_ID_HEADER: "model-call-1"}
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        verify_http_response = AsyncMock()
+        verify_http_response.ok = True
+        verify_http_response.headers = {}
+        verify_http_response.json.return_value = verify_result
+        verify_http_response.read.return_value = json.dumps(verify_result).encode()
+
+        async def post(*, server_name: str, **kwargs):
+            del kwargs
+            if server_name == "tool_agent":
+                model_started.set()
+                await release_model.wait()
+                return model_http_response
+            assert server_name == "tool_resources_server"
+            return verify_http_response
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(side_effect=post)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=agent_server.setup_webserver()),
+            base_url="http://agent.test",
+        ) as client:
+            run_task = asyncio.create_task(
+                client.post(
+                    "/run",
+                    json={
+                        "_ng_rollout_id": rollout_id,
+                        "_ng_attempt_index": 0,
+                        "responses_create_params": {"input": []},
+                    },
+                )
+            )
+            await asyncio.wait_for(model_started.wait(), timeout=1)
+
+            report = await participant.prepare(
+                time.time() + 1,
+                allow_model_wait_boundary=True,
+            )
+            assert report["ready_to_commit"] is True
+            assert report["executions"][0]["state"] == AgentExecutionState.MODEL_WAIT_FROZEN.value
+            assert report["selected_boundaries"][0]["boundary_kind"] == AgentBoundaryKind.TURN_COMPLETE.value
+
+            await participant.resume()
+            release_model.set()
             response = await asyncio.wait_for(run_task, timeout=1)
 
         assert response.status_code == 200

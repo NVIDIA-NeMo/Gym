@@ -27,6 +27,13 @@ from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint.model_control_contracts import (
+    GenerationCutBackend,
+    GenerationCutInventory,
+    GenerationCutPrefix,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -49,7 +56,16 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.rollout_correlation import capture_key_for
+from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
+from nemo_gym.server_utils import (
+    request as http_request,
+)
 from nemo_gym.token_id_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
@@ -72,11 +88,13 @@ from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
     CaptureLedgerCommit,
     CommitCoords,
+    GenerationCutContinuation,
 )
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+_GENERATION_CUT_RPC_MAX_CONCURRENCY = 32
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -303,6 +321,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_enabled: bool = PrivateAttr(default=False)
+    _generation_prefix_cuts_enabled: bool = PrivateAttr(default=False)
+    _generation_cut_control_token: str | None = PrivateAttr(default=None)
+    _generation_cut_clients: Dict[str, NeMoGymAsyncOpenAI] = PrivateAttr(default_factory=dict)
+    _restored_generation_cuts: Dict[str, GenerationCutPrefixAck] = PrivateAttr(default_factory=dict)
+    _generation_cut_restore_lock: Any = PrivateAttr(default_factory=Lock)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -367,6 +390,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_enabled = bool(
             capture_config is not None and capture_config.token_id_capture.external_staging
         )
+        self._generation_prefix_cuts_enabled = bool(
+            capture_config is not None and capture_config.token_id_capture.generation_prefix_cuts_enabled
+        )
+        if self._generation_prefix_cuts_enabled:
+            assert capture_config is not None
+            self._generation_cut_control_token = capture_config.token_id_capture.resolve_control_auth_token()
         if self._external_capture_enabled:
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
@@ -381,6 +410,147 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    def generation_cut_backend(self) -> GenerationCutBackend | None:
+        """Bridge Gym's frozen call inventory to the owning RL vLLM workers."""
+        return self if self._generation_prefix_cuts_enabled else None
+
+    def _remember_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
+        """Retain active call routing until the model request exits."""
+        existing = self._generation_cut_clients.get(model_call_id)
+        if existing is not None and existing is not client:
+            raise RuntimeError(f"model call {model_call_id!r} changed generation worker while active")
+        self._generation_cut_clients[model_call_id] = client
+
+    def _forget_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
+        """Retire one active route without removing a newer owner."""
+        if self._generation_cut_clients.get(model_call_id) is client:
+            self._generation_cut_clients.pop(model_call_id, None)
+
+    async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+        """Ask each owning RL worker to stage its current generated prefix."""
+        if not self._generation_prefix_cuts_enabled or self._generation_cut_control_token is None:
+            raise RuntimeError("generation-prefix cuts are not enabled for this model server")
+
+        by_client: dict[str, tuple[NeMoGymAsyncOpenAI, list[GenerationCutPrefix]]] = {}
+        acknowledgements: list[GenerationCutPrefixAck] = []
+        for prefix in inventory.active_prefixes:
+            client = self._generation_cut_clients.get(prefix.model_call_id)
+            if client is None:
+                # The request was admitted but had not reached backend dispatch
+                # when admission closed. No generated state exists to preserve.
+                acknowledgements.append(
+                    GenerationCutPrefixAck(
+                        **prefix.model_dump(mode="json"),
+                        disposition="durable_failure",
+                    )
+                )
+                continue
+            by_client.setdefault(client.base_url, (client, []))[1].append(prefix)
+
+        semaphore = asyncio.Semaphore(_GENERATION_CUT_RPC_MAX_CONCURRENCY)
+
+        async def checkpoint_client(
+            client: NeMoGymAsyncOpenAI,
+            prefixes: list[GenerationCutPrefix],
+        ) -> GenerationCutReceipt:
+            worker_inventory = GenerationCutInventory.build(
+                checkpoint_id=inventory.checkpoint_id,
+                server_name=inventory.server_name,
+                active_prefixes=prefixes,
+            )
+            async with semaphore:
+                response = await http_request(
+                    method="POST",
+                    url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
+                    headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
+                    json=worker_inventory.model_dump(mode="json"),
+                    _internal=True,
+                )
+                await raise_for_status(response)
+                receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
+            receipt.validate_for(worker_inventory)
+            return receipt
+
+        tasks: list[asyncio.Task[GenerationCutReceipt]] = []
+        async with asyncio.TaskGroup() as task_group:
+            for base_url in sorted(by_client):
+                client, prefixes = by_client[base_url]
+                tasks.append(task_group.create_task(checkpoint_client(client, prefixes)))
+        backend_receipts = [task.result() for task in tasks]
+        for receipt in backend_receipts:
+            acknowledgements.extend(receipt.prefixes)
+
+        evidence = {
+            "inventory_digest": inventory.inventory_digest,
+            "backend_receipts": [receipt.model_dump(mode="json") for receipt in backend_receipts],
+        }
+        aggregate_digest = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        receipt = GenerationCutReceipt(
+            checkpoint_id=inventory.checkpoint_id,
+            cut_id=f"gym-{aggregate_digest}",
+            inventory_digest=inventory.inventory_digest,
+            inventory=inventory,
+            backend_snapshot_id=f"tq-{aggregate_digest}",
+            prefixes=tuple(sorted(acknowledgements, key=lambda ack: ack.ticket_id)),
+        )
+        receipt.validate_for(inventory)
+        return receipt
+
+    async def restore_generation_cut(
+        self,
+        receipt: GenerationCutReceipt,
+        *,
+        excluded_replacements: frozenset[tuple[str, int]] = frozenset(),
+    ) -> GenerationCutReceipt:
+        """Install durable cuts for the replacement attempts that will consume them."""
+        if not self._generation_prefix_cuts_enabled:
+            raise RuntimeError("generation-prefix cuts are not enabled for this model server")
+        if (self.config.num_workers or 1) > 1:
+            raise RuntimeError(
+                "generation-prefix restore currently requires a single Gym model-server worker; "
+                "multi-worker restore needs a process-shared continuation registry"
+            )
+        if receipt.inventory.server_name != self.config.name:
+            raise ValueError(
+                "generation-cut receipt belongs to a different model server: "
+                f"expected={self.config.name!r}, actual={receipt.inventory.server_name!r}"
+            )
+        with self._generation_cut_restore_lock:
+            for prefix in receipt.prefixes:
+                if prefix.disposition != "durable_prefix" or prefix.cut_kind != "active_prefix":
+                    continue
+                replacement = (prefix.rollout_id, prefix.attempt_index + 1)
+                if replacement in excluded_replacements:
+                    continue
+                previous = self._restored_generation_cuts.get(prefix.rollout_id)
+                if previous is not None and previous != prefix:
+                    raise RuntimeError(
+                        "multiple durable generation cuts target the same replacement attempt: "
+                        f"rollout_id={prefix.rollout_id!r}, "
+                        f"attempt_index={prefix.attempt_index + 1}"
+                    )
+                self._restored_generation_cuts[prefix.rollout_id] = prefix
+        return receipt
+
+    def _generation_cut_for_context(self) -> GenerationCutPrefixAck | None:
+        context = current_capture_context()
+        if context is None or context.logical_rollout_id is None or context.attempt_index is None:
+            return None
+        with self._generation_cut_restore_lock:
+            prefix = self._restored_generation_cuts.get(context.logical_rollout_id)
+        if prefix is None or context.attempt_index < prefix.attempt_index + 1:
+            return None
+        return prefix
+
+    def _retire_generation_cut_for_context(self) -> None:
+        context = current_capture_context()
+        if context is None or context.generation_cut_key is None:
+            return
+        with self._generation_cut_restore_lock:
+            self._restored_generation_cuts.pop(context.generation_cut_key[0], None)
 
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
@@ -757,6 +927,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         admission = context.capture_admission
         if admission is None:
             return body_dict
+        restored_cut = self._generation_cut_for_context()
+        if restored_cut is not None:
+            if (
+                not restored_cut.staging_keys
+                or restored_cut.prefix_token_count is None
+                or restored_cut.prefix_digest is None
+            ):
+                raise RuntimeError("durable generation cut is missing recovery coordinates")
+            admission = admission.model_copy(
+                update={
+                    "generation_cut": GenerationCutContinuation(
+                        source_capture_key=capture_key_for(
+                            restored_cut.rollout_id,
+                            restored_cut.attempt_index,
+                        ),
+                        source_model_call_id=restored_cut.model_call_id,
+                        staging_keys=restored_cut.staging_keys,
+                        generation_token_count=restored_cut.prefix_token_count,
+                        digest=restored_cut.prefix_digest,
+                        effective_output_limit=restored_cut.effective_output_limit,
+                        terminal_finish_reason=restored_cut.terminal_finish_reason,
+                        terminal_stop_reason=restored_cut.terminal_stop_reason,
+                    )
+                }
+            )
+            context.capture_admission = admission
+            context.generation_cut_key = (
+                restored_cut.rollout_id,
+                restored_cut.attempt_index + 1,
+            )
         body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         body_dict.update(
             logprobs=True,
@@ -868,13 +1068,35 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        capture_context = current_capture_context()
+        generation_cut_client = None
+        if self._generation_prefix_cuts_enabled and capture_context is not None:
+            generation_cut_client = self._resolve_client(request)
+            self._remember_generation_cut_client(capture_context.model_call_id, generation_cut_client)
+        try:
+            return await self._chat_completions(
+                request,
+                body,
+                resolved_client=generation_cut_client,
+            )
+        finally:
+            if generation_cut_client is not None and capture_context is not None:
+                self._forget_generation_cut_client(capture_context.model_call_id, generation_cut_client)
+
+    async def _chat_completions(
+        self,
+        request: Request,
+        body: NeMoGymChatCompletionCreateParamsNonStreaming,
+        *,
+        resolved_client: NeMoGymAsyncOpenAI | None,
+    ) -> NeMoGymChatCompletion:
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
-        client = self._resolve_client(request)
+        client = resolved_client or self._resolve_client(request)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
@@ -948,6 +1170,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                self._retire_generation_cut_for_context()
                 return res
             else:
                 raise e
@@ -1247,6 +1470,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.model_call_id,
                 )
         finally:
+            self._retire_generation_cut_for_context()
             self._strip_capture_transport_fields(payload)
 
     @staticmethod
