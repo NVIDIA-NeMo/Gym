@@ -223,7 +223,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             {
                 "episode_id": request.episode_id,
                 "task_id": request.task.task_id,
-                "failure": failure,
+                "failure": failure.model_dump(),
             }
         )
 

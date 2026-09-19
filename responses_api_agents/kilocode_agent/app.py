@@ -34,8 +34,8 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -272,7 +272,7 @@ class KiloCodeAgentVerifyResponse(BaseVerifyResponse):
     finished_naturally: bool = False
 
 
-class KiloCodeAgent(SimpleResponsesAPIAgent):
+class KiloCodeAgent(CLIResponsesAPIAgent):
     """Runs the Kilo Code CLI (``kilo run --auto --format json``).
 
     Kilo runs its own tools internally; we parse its JSON event stream into Gym format and use the
@@ -281,10 +281,12 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     """
 
     config: KiloCodeAgentConfig
+    observation_source = "kilocode"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_kilo(self.config.kilo_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
@@ -454,6 +456,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 await proc.communicate()
                 LOG.warning("kilo timed out after %ds", self.config.timeout)
                 return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+            except asyncio.CancelledError:
+                self._kill_process_group(proc)
+                await proc.communicate()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("kilo exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -463,7 +469,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

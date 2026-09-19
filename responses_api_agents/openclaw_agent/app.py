@@ -37,8 +37,8 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -381,10 +381,11 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class OpenClawAgent(SimpleResponsesAPIAgent):
+class OpenClawAgent(CLIResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
     config: OpenClawAgentConfig
+    observation_source = "openclaw"
     sem: Semaphore = None
     sigterm_events: set = Field(default_factory=set)
     sigterm_handler_installed: bool = False
@@ -394,6 +395,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     _HEADLESS_TOOL_DENY: ClassVar[tuple[str, ...]] = ("message",)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_openclaw(self.config.openclaw_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
@@ -637,6 +639,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             except TimeoutError:
                 LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
             finally:
+                # Outer episode cancellation does not cancel asyncio.wait's
+                # child tasks. Join them before deleting the CLI workspace.
+                term_task.cancel()
+                if not run_task.done():
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await run_task
+                with contextlib.suppress(asyncio.CancelledError):
+                    await term_task
                 self.sigterm_events.discard(sigterm_hit)
 
             if code:
@@ -742,7 +753,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
