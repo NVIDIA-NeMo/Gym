@@ -96,6 +96,7 @@ class _FakeHttpResp:
     def __init__(self, payload: dict, *, status: int = 200):
         self._payload = payload
         self.cookies = {}
+        self.headers = {}
         self.status = status
         self.ok = status < 400
 
@@ -117,6 +118,15 @@ class _FakeHttpResp:
         return None
 
 
+def _captured_http_response(payload: dict, model_call_id: str) -> _FakeHttpResp:
+    response = _FakeHttpResp(payload)
+    response.headers = {
+        "x-nemo-gym-model-call-id": model_call_id,
+        "x-nemo-gym-model-call-capture-outcome": "captured",
+    }
+    return response
+
+
 class _FailedHttpResp(_FakeHttpResp):
     def __init__(self, payload: dict, *, message: str):
         super().__init__(payload)
@@ -135,7 +145,13 @@ def _wire_mock_client(agent, responses_per_url):
     async def _post(server_name, url_path, json=None, cookies=None, **kw):
         call_log.append((server_name, url_path, json))
         payload = responses_per_url[url_path].pop(0)
-        return _FakeHttpResp(payload)
+        response = _FakeHttpResp(payload)
+        if url_path.endswith("/v1/responses"):
+            response.headers = {
+                "x-nemo-gym-model-call-id": f"capture-{payload['id']}",
+                "x-nemo-gym-model-call-capture-outcome": "captured",
+            }
+        return response
 
     agent.server_client.post = AsyncMock(side_effect=_post)
     return call_log
@@ -166,6 +182,68 @@ class TestConfig:
 
 
 class TestRun:
+    @pytest.mark.asyncio
+    async def test_no_generation_stops_before_environment_step_and_masks_sample(self):
+        agent = _make_agent(max_steps=2)
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("2-0", 0, task=asyncio.current_task())
+        model_response = _model_response("synthetic", input_toks=0, output_toks=0)
+        model_response.update(
+            {
+                "output": [],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+            }
+        )
+        http_response = _FakeHttpResp(model_response)
+        http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "no_generation"}
+        agent.server_client.post = AsyncMock(return_value=http_response)
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        token = participant.bind(execution)
+        try:
+            with rollout_context("2-0", attempt_index=0, logical_rollout_id="2-0"):
+                result = await agent._run_open_episode(
+                    body,
+                    "/v1/responses",
+                    EnvResetResponse(observation="start", info={}),
+                    {},
+                )
+        finally:
+            participant.unbind(token)
+
+        assert result.mask_sample is True
+        assert result.failure_kind == "agent_no_generation"
+        assert result.reward == 0.0
+        assert agent.server_client.post.await_count == 1
+        assert execution.boundary is not None
+        assert execution.boundary.boundary_kind == AgentBoundaryKind.TURN_COMPLETE
+        assert execution.boundary.last_committed_model_call_id is None
+
+    @pytest.mark.asyncio
+    async def test_capture_failure_stops_without_environment_step_or_boundary(self):
+        agent = _make_agent(max_steps=2)
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("2-0", 0, task=asyncio.current_task())
+        http_response = _FakeHttpResp(_model_response("uncaptured"))
+        http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "capture_failed"}
+        agent.server_client.post = AsyncMock(return_value=http_response)
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        token = participant.bind(execution)
+        try:
+            with rollout_context("2-0", attempt_index=0, logical_rollout_id="2-0"):
+                with pytest.raises(RuntimeError, match="without durable token capture"):
+                    await agent._run_open_episode(
+                        body,
+                        "/v1/responses",
+                        EnvResetResponse(observation="start", info={}),
+                        {},
+                    )
+        finally:
+            participant.unbind(token)
+
+        assert agent.server_client.post.await_count == 1
+        assert execution.boundary is None
+
     @pytest.mark.asyncio
     async def test_restored_attempt_skips_reset_and_preserves_reward_usage_and_history(self):
         agent = _make_agent(max_steps=3)
@@ -304,6 +382,8 @@ class TestRun:
             ),
             output_items=pending_response["output"],
             usage=pending_response["usage"],
+            last_committed_model_capture_key="2-0",
+            last_committed_model_call_id="model-call-1",
             resource_state_revisions={"my_env": 1},
             agent_state={
                 "reset_data": {"observation": "start", "info": {"supports_step_idempotency": True}},
@@ -392,7 +472,10 @@ class TestRun:
             if server_name == "policy_model":
                 response = _FakeHttpResp(model_payloads.pop(0))
                 response.cookies = model_cookies.pop(0)
-                response.headers = {"x-nemo-gym-model-call-id": model_call_ids.pop(0)}
+                response.headers = {
+                    "x-nemo-gym-model-call-id": model_call_ids.pop(0),
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
                 return response
             response = _FakeHttpResp(step_payloads.pop(0))
             response.headers = {"x-nemo-gym-resource-state-revision": revisions.pop(0)}
@@ -462,7 +545,7 @@ class TestRun:
 
         responses = {
             "/reset": [_FakeHttpResp({"observation": "start", "info": {}})],
-            "/ng-rollout/2-0/v1/responses": [_FakeHttpResp(_model_response("act"))],
+            "/ng-rollout/2-0/v1/responses": [_captured_http_response(_model_response("act"), "capture-act")],
             "/step": [
                 DelayedStepResponse(
                     {
@@ -515,7 +598,7 @@ class TestRun:
         calls: list[tuple[str, object]] = []
         responses = {
             "/reset": [_FakeHttpResp({"observation": "start", "info": {}})],
-            "/ng-rollout/2-0/v1/responses": [_FakeHttpResp(_model_response("act"))],
+            "/ng-rollout/2-0/v1/responses": [_captured_http_response(_model_response("act"), "capture-act")],
             "/step": [
                 _FakeHttpResp(
                     {"error": {"code": "checkpoint_parked", "detail": "paused"}},
@@ -577,7 +660,10 @@ class TestRun:
 
         async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
             seen.append((url_path, headers))
-            return _FakeHttpResp(payloads[url_path].pop(0))
+            payload = payloads[url_path].pop(0)
+            if url_path == model_path:
+                return _captured_http_response(payload, "capture-move-a")
+            return _FakeHttpResp(payload)
 
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()

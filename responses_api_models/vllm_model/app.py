@@ -25,6 +25,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
+from openai.types.responses.response import IncompleteDetails
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -56,6 +57,7 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     mark_external_staging_committed,
     mark_external_staging_failed,
+    mark_no_generation,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
@@ -435,13 +437,29 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
-        return self._converter.chat_completion_to_response(
+        response = self._converter.chat_completion_to_response(
             responses_create_params=body,
             chat_completion=chat_completion_response,
             # Keep the backend envelope id only for captured requests. Terminal
             # attribution matches it to the ledger row.
             preserve_envelope_id=self._preserve_envelope_id(),
         )
+        if (
+            not self.config.sequential_reasoning_allowed
+            and response.output
+            and all(item.type == "reasoning" for item in response.output)
+            and response.incomplete_details is None
+        ):
+            # The real call is durably captured, but this model is not allowed
+            # another reasoning-only turn. End the episode on this call rather
+            # than waiting for a second request and synthesizing a phantom call.
+            response = response.model_copy(
+                update={
+                    "status": "incomplete",
+                    "incomplete_details": IncompleteDetails(reason="content_filter"),
+                }
+            )
+        return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
@@ -878,6 +896,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
+                await mark_no_generation()
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "content_filter"
                 return res
@@ -946,6 +965,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
+                await mark_no_generation()
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -1454,6 +1474,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
+                await mark_no_generation()
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res

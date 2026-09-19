@@ -2786,6 +2786,45 @@ class TestApp:
         expected_dict = expected_response.model_dump()
         assert data == expected_dict
 
+    def test_reasoning_only_generation_is_terminal_when_sequential_reasoning_is_disabled(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+        server.config.sequential_reasoning_allowed = False
+        server._converter.uses_reasoning_parser = True
+        chat_completions = AsyncMock(
+            return_value=NeMoGymChatCompletion(
+                id="chat-reasoning-only",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(
+                            role="assistant",
+                            content="<think>private reasoning</think>",
+                        ),
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(type(server), "chat_completions", chat_completions)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/responses",
+            json={"input": [{"role": "user", "content": "question"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "incomplete"
+        assert response.json()["incomplete_details"] == {"reason": "content_filter"}
+        assert [item["type"] for item in response.json()["output"]] == ["reasoning"]
+        chat_completions.assert_awaited_once()
+
 
 class TestVLLMConverter:
     def setup_method(self, _):

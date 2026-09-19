@@ -17,6 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -54,8 +55,47 @@ _CHECKPOINT_PARENT: ContextVar[Optional[_CheckpointParentState]] = ContextVar(
 ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
 ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
 MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
+MODEL_CALL_CAPTURE_OUTCOME_HEADER = "x-nemo-gym-model-call-capture-outcome"
 SOURCE_CAPTURE_KEY_HEADER = "x-nemo-gym-source-capture-key"
 PARENT_MODEL_CALL_ID_HEADER = "x-nemo-gym-parent-model-call-id"
+
+
+class ModelCallCaptureOutcome(str, Enum):
+    """Durable capture disposition advertised by a model response."""
+
+    CAPTURED = "captured"
+    NO_GENERATION = "no_generation"
+    CAPTURE_FAILED = "capture_failed"
+
+
+@dataclass(frozen=True)
+class ModelCallCaptureResult:
+    """Validated model-call capture evidence for a checkpoint-aware agent."""
+
+    outcome: ModelCallCaptureOutcome
+    model_call_id: Optional[str]
+
+
+def checkpoint_model_call_capture(headers: Mapping[str, Any] | None) -> ModelCallCaptureResult:
+    """Validate capture headers returned to a checkpoint-aware agent.
+
+    A model-call ID is proof of durable capture only when the model server also
+    reports ``captured``. Intentional no-generation and capture-failure
+    responses must not expose an ID that an agent could persist as lineage.
+    """
+    raw_outcome = headers.get(MODEL_CALL_CAPTURE_OUTCOME_HEADER) if headers is not None else None
+    model_call_id = headers.get(MODEL_CALL_ID_HEADER) if headers is not None else None
+    try:
+        outcome = ModelCallCaptureOutcome(raw_outcome)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("checkpointed model response is missing a valid capture outcome") from error
+    if outcome == ModelCallCaptureOutcome.CAPTURED:
+        if not isinstance(model_call_id, str) or not model_call_id:
+            raise RuntimeError("captured model response is missing its model-call ID")
+    elif model_call_id is not None:
+        raise RuntimeError(f"{outcome.value} model response unexpectedly carried a model-call ID")
+    return ModelCallCaptureResult(outcome=outcome, model_call_id=model_call_id)
+
 
 # The transport id appends ``-a{n}`` for re-dispatch attempts. The suffix is a
 # capture and routing key, never the logical identity. This pattern recovers

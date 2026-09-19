@@ -24,6 +24,7 @@ import time
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 import nemo_gym._checkpoint.agent as agent_checkpoint
 from nemo_gym._checkpoint import (
@@ -31,6 +32,7 @@ from nemo_gym._checkpoint import (
     AGENT_MANIFEST_NAME,
     AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
+    AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
@@ -44,6 +46,7 @@ from nemo_gym._checkpoint import (
     ControlFence,
     DuplicateExecutionError,
     MultiProcessCapability,
+    PendingModelPayload,
     commit_agent_state,
     install_agent_checkpoint,
     install_control_plane,
@@ -65,6 +68,78 @@ def _boundary(*, attempt_index: int = 0, boundary_index: int = 1) -> AgentBounda
         last_committed_model_call_id="call-1",
         resource_state_revisions={"resources": 3},
     )
+
+
+def _pending_boundary(call_id: str, *, boundary_index: int) -> AgentBoundaryRecord:
+    return AgentBoundaryRecord(
+        rollout_id="rollout-a",
+        attempt_index=0,
+        boundary_index=boundary_index,
+        boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+        pending_model=PendingModelPayload(
+            model_call_id=call_id,
+            response={},
+            pending_action_cursor=0,
+            resource_request_id=f"resource-{boundary_index}",
+        ),
+        output_items=[],
+        last_committed_model_capture_key="rollout-a",
+        last_committed_model_call_id=call_id,
+    )
+
+
+def test_pending_boundary_requires_its_committed_model_call() -> None:
+    with pytest.raises(ValidationError, match="pending model id must equal"):
+        AgentBoundaryRecord(
+            rollout_id="rollout-a",
+            attempt_index=0,
+            boundary_index=1,
+            boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+            pending_model=PendingModelPayload(
+                model_call_id="call-2",
+                response={},
+                pending_action_cursor=0,
+                resource_request_id="resource-1",
+            ),
+            output_items=[],
+            last_committed_model_capture_key="rollout-a",
+            last_committed_model_call_id="call-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_boundary_transition_cannot_clear_or_silently_change_model_coordinate() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _pending_boundary("call-1", boundary_index=1))
+
+    with pytest.raises(AgentCheckpointError, match="cannot clear"):
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=2,
+                output_items=[],
+            ),
+        )
+
+    with pytest.raises(AgentCheckpointError, match="pending-model boundary"):
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=2,
+                output_items=[],
+                last_committed_model_capture_key="rollout-a",
+                last_committed_model_call_id="call-2",
+            ),
+        )
+
+    await participant.commit_boundary(execution, _pending_boundary("call-2", boundary_index=2))
+    assert execution.boundary is not None
+    assert execution.boundary.last_committed_model_call_id == "call-2"
 
 
 def _completion_receipt(

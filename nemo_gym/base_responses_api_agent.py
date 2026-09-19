@@ -56,7 +56,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
+    ModelCallCaptureResult,
     RolloutContextMiddleware,
+    checkpoint_model_call_capture,
     checkpoint_parent_context,
     current_attempt_index,
     current_logical_rollout_id,
@@ -316,6 +321,28 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(block.get("all_agents", False)) or bool(
             getattr(getattr(self, "config", None), "token_id_capture", False)
+        )
+
+    def model_call_capture_result(self, headers: Mapping[str, Any] | None) -> ModelCallCaptureResult | None:
+        """Validate model-call capture evidence when the response carries it.
+
+        Training-token capture and turn-level checkpoint participation are
+        independent capabilities. Typed capture outcomes are authoritative
+        whenever present and mandatory for training-token capture. Turn-level
+        checkpointing without token capture retains the legacy model-call ID
+        header contract used by the model ledger.
+        """
+        capture_header_present = headers is not None and MODEL_CALL_CAPTURE_OUTCOME_HEADER in headers
+        if capture_header_present or self._token_id_capture_enabled():
+            return checkpoint_model_call_capture(headers)
+        if self._checkpoint_participant is None or headers is None:
+            return None
+        model_call_id = headers.get(MODEL_CALL_ID_HEADER)
+        if not isinstance(model_call_id, str) or not model_call_id:
+            return None
+        return ModelCallCaptureResult(
+            outcome=ModelCallCaptureOutcome.CAPTURED,
+            model_call_id=model_call_id,
         )
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:

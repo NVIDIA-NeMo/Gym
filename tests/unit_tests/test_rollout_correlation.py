@@ -39,6 +39,10 @@ from nemo_gym.base_responses_api_model import (
 )
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
+    checkpoint_model_call_capture,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
@@ -247,3 +251,35 @@ def test_explicit_rollout_alias_stays_request_scoped() -> None:
     )
     assert maybe_rollout_id_from_run_body(body) == "rollout-explicit"
     assert "_ng_rollout_id" not in body.model_dump(by_alias=True)
+
+
+def test_checkpoint_model_call_capture_requires_matching_evidence() -> None:
+    captured = checkpoint_model_call_capture(
+        {
+            MODEL_CALL_CAPTURE_OUTCOME_HEADER: "captured",
+            MODEL_CALL_ID_HEADER: "call-1",
+        }
+    )
+    assert captured.outcome == ModelCallCaptureOutcome.CAPTURED
+    assert captured.model_call_id == "call-1"
+
+    no_generation = checkpoint_model_call_capture({MODEL_CALL_CAPTURE_OUTCOME_HEADER: "no_generation"})
+    assert no_generation.outcome == ModelCallCaptureOutcome.NO_GENERATION
+    assert no_generation.model_call_id is None
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {MODEL_CALL_ID_HEADER: "call-1"},
+        {MODEL_CALL_CAPTURE_OUTCOME_HEADER: "captured"},
+        {
+            MODEL_CALL_CAPTURE_OUTCOME_HEADER: "capture_failed",
+            MODEL_CALL_ID_HEADER: "call-1",
+        },
+    ],
+)
+def test_checkpoint_model_call_capture_rejects_ambiguous_headers(headers) -> None:
+    with pytest.raises(RuntimeError):
+        checkpoint_model_call_capture(headers)

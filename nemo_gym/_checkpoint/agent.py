@@ -239,6 +239,12 @@ class AgentBoundaryRecord(BaseModel):
             self.last_committed_model_capture_key = capture_key_for(self.rollout_id, self.attempt_index)
         if (self.last_committed_model_capture_key is None) != (self.last_committed_model_call_id is None):
             raise ValueError("last committed model capture key and call id must be supplied together")
+        if (
+            self.boundary_kind == AgentBoundaryKind.PENDING_MODEL
+            and self.pending_model is not None
+            and self.pending_model.model_call_id != self.last_committed_model_call_id
+        ):
+            raise ValueError("pending model id must equal the last committed model call id")
         return self
 
 
@@ -497,6 +503,19 @@ class AgentCheckpointParticipant:
             raise AgentCheckpointError(
                 f"boundary indices must increase for rollout {record.rollout_id!r} attempt {record.attempt_index}"
             )
+        if previous is not None and previous.last_committed_model_call_id is not None:
+            previous_coordinate = (
+                previous.last_committed_model_capture_key,
+                previous.last_committed_model_call_id,
+            )
+            record_coordinate = (
+                record.last_committed_model_capture_key,
+                record.last_committed_model_call_id,
+            )
+            if record.last_committed_model_call_id is None:
+                raise AgentCheckpointError("a later boundary cannot clear its committed model coordinate")
+            if record_coordinate != previous_coordinate and record.boundary_kind != AgentBoundaryKind.PENDING_MODEL:
+                raise AgentCheckpointError("a committed model coordinate may change only at a pending-model boundary")
         execution.boundary = record
         if execution.state == AgentExecutionState.PARK_REQUESTED:
             await self.park(execution)

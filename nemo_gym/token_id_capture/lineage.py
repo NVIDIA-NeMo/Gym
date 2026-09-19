@@ -586,6 +586,12 @@ class InMemoryLineageStore:
             return True
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
+    async def has_committed_rows(self, rollout_id: str) -> bool:
+        rows = self._ledgers.get(rollout_id) or ()
+        if any(row.get("failure_reason") is None for row in rows):
+            return True
+        return bool(self.index.for_rollout(rollout_id).by_call_id)
+
     async def close(self) -> None:
         self.index.clear()
         self._ledgers.clear()
@@ -1141,3 +1147,10 @@ class FileLineageStore(IncrementalLineageStore):
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
             return bool(self._read(rollout_id))
+
+    async def has_committed_rows(self, rollout_id: str) -> bool:
+        return await asyncio.to_thread(self._has_committed_rows, rollout_id)
+
+    def _has_committed_rows(self, rollout_id: str) -> bool:
+        with self._locked(rollout_id):
+            return any(row.get("failure_reason") is None for row in self._read(rollout_id))

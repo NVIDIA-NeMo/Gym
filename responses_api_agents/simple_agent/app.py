@@ -42,6 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_NO_GENERATION
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -54,7 +55,7 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.rollout_correlation import (
-    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
     current_attempt_index,
     current_logical_rollout_id,
     current_rollout_id,
@@ -72,6 +73,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _INTERNAL_RESOURCE_REVISIONS_KEY = "_ng_resource_state_revisions"
+_INTERNAL_CAPTURE_OUTCOME_KEY = "_ng_model_capture_outcome"
 _INPUT_ITEMS_ADAPTER = TypeAdapter(List[NeMoGymResponseInputItem])
 
 
@@ -106,6 +108,8 @@ class SimpleAgentVerifyRequest(BaseVerifyRequest):
 
 class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    mask_sample: bool = False
+    failure_kind: Optional[str] = None
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
@@ -149,6 +153,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         pending_cursor = 0
         resource_request_id: Optional[str] = None
         pending_response_usage: Optional[dict[str, Any]] = None
+        no_generation = False
         if continuation is not None:
             model_capture_key = continuation.last_committed_model_capture_key
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
@@ -245,12 +250,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     ),
                     request=request,
                 )
-                model_call_id = None
-                if self._checkpoint_participant is not None:
-                    headers = getattr(model_http_response, "headers", None)
-                    if isinstance(headers, Mapping):
-                        model_call_id = headers.get(MODEL_CALL_ID_HEADER)
+                capture_result = None
+                headers = getattr(model_http_response, "headers", None)
                 await raise_for_status(model_http_response)
+                capture_result = self.model_call_capture_result(headers if isinstance(headers, Mapping) else None)
                 model_response_json = await get_response_json(model_http_response)
                 model_server_cookies = _merge_cookies(model_server_cookies, model_http_response.cookies)
                 try:
@@ -301,25 +304,36 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 usage = accumulate_response_usage(usage, model_response.usage)
                 model_response.usage = None
-                model_call_id = model_call_id or model_response.id or f"turn-{turn_index}"
-                model_capture_key = current_rollout_id()
                 pending_cursor = 0
-                resource_request_id = uuid.uuid4().hex
-                boundary_index += 1
-                pending_model = None
-                if self._checkpoint_participant is not None and self.checkpoint_execution(request) is not None:
-                    pending_model = PendingModelPayload(
-                        model_call_id=model_call_id,
-                        response=full_model_response,
-                        model_server_cookies=_cookie_values(model_server_cookies),
-                        usage=pending_response_usage,
-                        pending_action_cursor=pending_cursor,
-                        resource_request_id=resource_request_id,
-                    )
-                await commit_boundary(
-                    AgentBoundaryKind.PENDING_MODEL,
-                    pending_model=pending_model,
+                if capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.CAPTURE_FAILED:
+                    raise RuntimeError("model generation completed without durable token capture")
+                no_generation = (
+                    capture_result is not None and capture_result.outcome == ModelCallCaptureOutcome.NO_GENERATION
                 )
+                if no_generation:
+                    if model_response.incomplete_details is None:
+                        raise RuntimeError("no-generation model response must terminate as incomplete")
+                    resource_request_id = None
+                else:
+                    response_model_call_id = capture_result.model_call_id if capture_result is not None else None
+                    model_call_id = response_model_call_id or model_response.id or f"turn-{turn_index}"
+                    model_capture_key = current_rollout_id()
+                    resource_request_id = uuid.uuid4().hex
+                    boundary_index += 1
+                    pending_model = None
+                    if self._checkpoint_participant is not None and self.checkpoint_execution(request) is not None:
+                        pending_model = PendingModelPayload(
+                            model_call_id=model_call_id,
+                            response=full_model_response,
+                            model_server_cookies=_cookie_values(model_server_cookies),
+                            usage=pending_response_usage,
+                            pending_action_cursor=pending_cursor,
+                            resource_request_id=resource_request_id,
+                        )
+                    await commit_boundary(
+                        AgentBoundaryKind.PENDING_MODEL,
+                        pending_model=pending_model,
+                    )
 
             assert model_response is not None
             output = model_response.output
@@ -432,6 +446,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             raise RuntimeError("agent episode ended before producing or restoring a model response")
         model_response.output = new_outputs
         model_response.usage = usage
+        if no_generation:
+            model_response = model_response.model_copy(
+                update={_INTERNAL_CAPTURE_OUTCOME_KEY: ModelCallCaptureOutcome.NO_GENERATION.value}
+            )
         trajectory = None
         if collect_trajectory:
             invocation = AgentInvocation(
@@ -490,11 +508,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resource_revision,
                 )
             model_response = model_response.model_copy(
-                update={
-                    _INTERNAL_RESOURCE_REVISIONS_KEY: {
-                        self.config.resources_server.name: resource_revision
-                    }
-                }
+                update={_INTERNAL_RESOURCE_REVISIONS_KEY: {self.config.resources_server.name: resource_revision}}
             )
         return model_response
 
@@ -557,6 +571,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_response_json = await get_response_json(response)
         cookies = response.cookies
         resource_revisions = model_response_json.pop(_INTERNAL_RESOURCE_REVISIONS_KEY, {})
+        capture_outcome = model_response_json.pop(_INTERNAL_CAPTURE_OUTCOME_KEY, None)
         if isinstance(resource_revisions, Mapping):
             resource_revision = int(resource_revisions.get(self.config.resources_server.name, resource_revision))
 
@@ -588,7 +603,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 }
             )
 
-        if self.config.skip_verification:
+        if capture_outcome == ModelCallCaptureOutcome.NO_GENERATION.value:
+            result = body.model_dump() | {
+                "response": model_response_json,
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": AGENT_NO_GENERATION,
+                "failure_reason": "model request completed without a trainable generation",
+            }
+        elif self.config.skip_verification:
             result = body.model_dump() | {
                 "response": model_response_json,
                 "reward": float(self.config.skip_verification_reward),
