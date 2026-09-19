@@ -17,11 +17,15 @@
 
 Ported from NeMo-Skills:
 https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/nemo_skills/code_execution/proof_utils.py
+
+``strip_thinking`` and ``strip_lean_comments_and_strings`` are not from NeMo-Skills; they are
+shared with the whole-file Lean servers (``leancat``), whose extraction must skip a reasoning
+model's thinking and whose text checks must ignore comments and string literals.
 """
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -196,3 +200,93 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> str:
 
     # If process completed without errors, consider it successful
     return "completed"
+
+
+def strip_lean_comments_and_strings(code: str) -> str:
+    """Blank out comment and string-literal contents with spaces, preserving offsets and line structure.
+
+    Block comments nest in Lean, so the scanner tracks depth. Doc comments are block comments.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(code)
+    depth = 0  # block-comment nesting depth
+    in_line_comment = False
+    in_string = False
+
+    while i < n:
+        ch = code[i]
+        two = code[i : i + 2]
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+                out.append(ch)
+            else:
+                out.append(" ")
+            i += 1
+        elif depth > 0:
+            if two == "/-":
+                depth += 1
+                out.append("  ")
+                i += 2
+            elif two == "-/":
+                depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+        elif in_string:
+            if ch == "\\" and i + 1 < n:
+                # Consume the escape as a unit so a `\"` does not close the string.
+                out.append("  ")
+                i += 2
+            elif ch == '"':
+                in_string = False
+                out.append(" ")
+                i += 1
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+        else:
+            if two == "/-":
+                depth = 1
+                out.append("  ")
+                i += 2
+            elif two == "--":
+                in_line_comment = True
+                out.append("  ")
+                i += 2
+            elif ch == '"':
+                in_string = True
+                out.append(" ")
+                i += 1
+            else:
+                out.append(ch)
+                i += 1
+
+    return "".join(out)
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Drop a reasoning model's thinking so only its answer remains.
+
+    Handles the three shapes seen in practice: closed ``<think>...</think>`` blocks; a bare
+    ``</think>`` when the chat template put the opener in the prompt (everything before the
+    last close is thinking); and an unclosed ``<think>`` when the model ran out of budget
+    (everything after it is thinking).
+    """
+    text = _THINK_BLOCK_RE.sub("", text)
+    closes = list(_THINK_CLOSE_RE.finditer(text))
+    if closes:
+        text = text[closes[-1].end() :]
+    opener = _THINK_OPEN_RE.search(text)
+    if opener:
+        text = text[: opener.start()]
+    return text

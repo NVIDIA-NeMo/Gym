@@ -40,6 +40,10 @@ Set sandbox location via environment variables or YAML config:
 ```yaml
 sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
 sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+# Optional. When set, the server compiles `import Mathlib` once before its first proof and logs an
+# error if the sandbox's Lean/Mathlib version differs. A wrong Mathlib does not fail loudly on its
+# own: tasks fail with ordinary-looking compile errors and the run reports a meaningless number.
+expected_lean_version: "4.12.0"
 ```
 
 ## License
