@@ -1020,7 +1020,12 @@ COMMANDS = {
             AGENT_TYPE,
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
-            _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
+            _value_flag(
+                "input",
+                "input_jsonl_fpath",
+                "Input tasks JSONL file; skips dataset preparation and takes precedence over --split.",
+                aliases=("-i",),
+            ),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),

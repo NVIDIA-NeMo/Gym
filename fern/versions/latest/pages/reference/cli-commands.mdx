@@ -684,6 +684,8 @@ gym eval prepare --benchmark aime24
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
+With server startup enabled, provide `--input` or a configured `--split`. An explicit input file uses the existing rollout input format: prepared Gym task rows (`responses_create_params` and any verifier metadata), or raw rows with `--prompt-config`. Supply either `agent_ref` routing in the rows or an agent selected through `--agent`. Gym still applies rollout options such as `--limit`, `--num-repeats`, and `--prompt-config`, but does not download or prepare datasets for `--input`.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
@@ -696,13 +698,13 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
-| `--input`, `-i` | Input tasks JSONL file. |
+| `--input`, `-i` | Input tasks JSONL file. Skips dataset preparation and takes precedence over `--split`, including a split supplied by config. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). Used when `--input` is omitted; a dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — select their JSONL file with `--input`. |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -720,6 +722,13 @@ gym eval run --benchmark aime24 \
     --model-type openai_model \
     --output results/aime24.jsonl \
     --split validation \
+    --concurrency 10
+
+# End-to-end with a prepared subset: skip split preparation and start servers
+gym eval run --benchmark aime24 \
+    --model-type openai_model \
+    --input data/aime24-subset.jsonl \
+    --output results/aime24-subset.jsonl \
     --concurrency 10
 
 # Against an already-running server, with a remote vLLM endpoint

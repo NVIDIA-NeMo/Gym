@@ -681,24 +681,19 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     ```
     """
 
-    split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
+    input_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Input tasks JSONL file. When provided, skips dataset preparation and takes precedence over split.",
+    )
+    split: Optional[Literal["train", "validation", "benchmark"]] = None
     reuse_existing_data_preparation: bool = False
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_input_jsonl_fpath(cls, data):
-        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
-        # e2e collection would overwrite it with the prepared split path — the user's file
-        # would be ignored without any indication. Match on Mapping, not dict: the CLI passes
-        # an OmegaConf DictConfig, which is a Mapping but not a dict.
-        if isinstance(data, Mapping) and "input_jsonl_fpath" in data:
-            raise ConfigError(
-                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
-                "always the prepared dataset for the requested split. Either add --no-serve to collect "
-                "rollouts from your own input file against already-running servers, or drop -i/--input "
-                "to use the prepared data."
-            )
-        return data
+    @model_validator(mode="after")
+    def _require_input_or_split(self):
+        if self.input_jsonl_fpath is None and self.split is None:
+            raise ConfigError("Provide --input <tasks.jsonl> or --split <train|validation|benchmark>.")
+        return self
 
     @model_validator(mode="before")
     @classmethod

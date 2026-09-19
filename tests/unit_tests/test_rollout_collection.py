@@ -3470,30 +3470,25 @@ class TestRolloutCarriesTokenIds:
         assert rollout_carries_token_ids({"response": response}) is False
 
 
-class TestE2EInputJsonlFpathRejected:
-    def test_e2e_config_rejects_input_jsonl_fpath(self) -> None:
-        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
-            E2ERolloutCollectionConfig.model_validate(
-                {
-                    "output_jsonl_fpath": "out.jsonl",
-                    "split": "train",
-                    "input_jsonl_fpath": "my_data.jsonl",
-                }
-            )
+class TestE2EInputJsonlFpath:
+    @pytest.mark.parametrize("wrap", [dict, DictConfig])
+    @pytest.mark.parametrize("split", [None, "train", "validation", "benchmark"])
+    def test_e2e_config_accepts_input_jsonl_fpath(self, wrap, split) -> None:
+        values = {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
+        if split is not None:
+            values["split"] = split
+        config = E2ERolloutCollectionConfig.model_validate(wrap(values))
+        assert config.input_jsonl_fpath == "my_data.jsonl"
+        assert config.split == split
 
-    def test_e2e_config_rejects_input_jsonl_fpath_from_dictconfig(self) -> None:
-        # The CLI passes an OmegaConf DictConfig (a Mapping, not a dict). An isinstance(dict)
-        # check silently let input_jsonl_fpath through on the real path — pin the Mapping match.
-        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
-            E2ERolloutCollectionConfig.model_validate(
-                DictConfig(
-                    {
-                        "output_jsonl_fpath": "out.jsonl",
-                        "split": "train",
-                        "input_jsonl_fpath": "my_data.jsonl",
-                    }
-                )
-            )
+    @pytest.mark.parametrize("wrap", [dict, DictConfig])
+    def test_e2e_config_requires_input_or_split(self, wrap) -> None:
+        with pytest.raises(ConfigError, match="Provide --input.*or --split"):
+            E2ERolloutCollectionConfig.model_validate(wrap({"output_jsonl_fpath": "out.jsonl"}))
+
+    def test_empty_input_path_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="input_jsonl_fpath"):
+            E2ERolloutCollectionConfig(output_jsonl_fpath="out.jsonl", input_jsonl_fpath="")
 
     def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
         config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
