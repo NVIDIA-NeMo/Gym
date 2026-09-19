@@ -10,11 +10,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
 from nemo_gym.server_utils import ServerClient, SimpleServer
 
@@ -146,6 +146,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         run_endpoint.__annotations__["body"] = self.request_model
         run_endpoint.__annotations__["return"] = self.response_model
         app.post("/run", response_model=self.response_model)(run_endpoint)
+
+        async def aggregate_metrics_endpoint(body: Any) -> Any:
+            return await self.aggregate_metrics(body)
+
+        aggregate_metrics_endpoint.__annotations__["body"] = AggregateMetricsRequest
+        aggregate_metrics_endpoint.__annotations__["return"] = AggregateMetrics
+        app.post("/aggregate_metrics", response_model=AggregateMetrics)(aggregate_metrics_endpoint)
         return app
 
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
@@ -233,3 +240,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             raise ValueError("response episode_id does not match request")
         if response.task_id != request.task.task_id:
             raise ValueError("response task_id does not match request")
+
+    @abstractmethod
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Aggregate per-rollout scores into task-level metrics."""

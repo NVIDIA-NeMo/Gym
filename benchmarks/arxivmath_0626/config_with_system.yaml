@@ -28,3 +28,10 @@ arxivmath_0626_math_with_judge_simple_agent:
         jsonl_fpath: benchmarks/arxivmath_0626/data/arxivmath_0626_benchmark.jsonl
         prompt_config: benchmarks/arxivmath_0626/prompts/with_system.yaml
         prepare_script: benchmarks/arxivmath_0626/prepare.py
+
+arxivmath_0626_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: arxivmath_0626_math_with_judge_simple_agent
