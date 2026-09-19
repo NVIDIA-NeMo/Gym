@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: hello-gym
+name: hello-taskset
 version: 1.0.0
-description: Create your first NeMo Gym environment
+description: Define uniform tasks with shared instructions and verification
 tags:
   - example
 license: Apache-2.0
 
 instruction: instruction.md
-episode_protocol: nemo_gym.episode_protocols.single_agent
+episode_protocol: nemo_gym.single_agent.v1
 
-task_schema: task.schema.json
+task_model: task.py:TaskData
 tasksets:
   example: tasksets/example.jsonl
 
-environment:
-  dockerfile: environment/Dockerfile
+runtime:
+  dockerfile: runtime/Dockerfile
   workdir: /workspace
 
   # MCP services exposed to compatible agents.

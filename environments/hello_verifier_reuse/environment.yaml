@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: hello-verifier-reuse
+version: 1.0.0
+description: Combine reusable verifier utilities with task-specific policy
+tags:
+  - example
+license: Apache-2.0
+
+episode_protocol: nemo_gym.single_agent.v1
+
+tasksets:
+  default:
+    tasks:
+      shared-verifier:
+        instruction: tasks/shared_verifier/instruction.md
+        verifier:
+          implementation: nemo_gym.verifiers.files:text_file_equals
+          verifier_input:
+            path: /workspace/hello-gym.txt
+            content: Hello from NeMo Gym!
+
+      custom-policy:
+        instruction: tasks/custom_policy/instruction.md
+        verifier:
+          implementation: tasks/custom_policy/verifier.py:verify
+
+runtime:
+  dockerfile: runtime/Dockerfile
+  workdir: /workspace
+  mcp_servers: []

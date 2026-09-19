@@ -24,38 +24,21 @@ class Attempt:
     workspace: Workspace
 
 
-@dataclass
-class VerifierInput:
-    path: str
-    content: str
-
-
-def score(workspace: Path, path: str, content: str) -> float:
-    return asyncio.run(
-        verify(
-            Attempt(workspace=Workspace(root=workspace)),
-            VerifierInput(path=path, content=content),
-        )
-    )
+def score(workspace: Path) -> float:
+    return asyncio.run(verify(Attempt(workspace=Workspace(root=workspace)), None))
 
 
 def test_matching_file_passes(tmp_path: Path) -> None:
     (tmp_path / "hello-gym.txt").write_text("Hello from NeMo Gym!", encoding="utf-8")
 
-    assert score(tmp_path, "/workspace/hello-gym.txt", "Hello from NeMo Gym!") == 1.0
-
-
-def test_one_trailing_newline_is_accepted(tmp_path: Path) -> None:
-    (tmp_path / "hello-gym.txt").write_text("Hello from NeMo Gym!\n", encoding="utf-8")
-
-    assert score(tmp_path, "/workspace/hello-gym.txt", "Hello from NeMo Gym!") == 1.0
+    assert score(tmp_path) == 1.0
 
 
 def test_missing_file_fails(tmp_path: Path) -> None:
-    assert score(tmp_path, "/workspace/hello-gym.txt", "Hello from NeMo Gym!") == 0.0
+    assert score(tmp_path) == 0.0
 
 
 def test_wrong_content_fails(tmp_path: Path) -> None:
     (tmp_path / "hello-gym.txt").write_text("Wrong", encoding="utf-8")
 
-    assert score(tmp_path, "/workspace/hello-gym.txt", "Hello from NeMo Gym!") == 0.0
+    assert score(tmp_path) == 0.0
