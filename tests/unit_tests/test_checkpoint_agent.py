@@ -99,10 +99,15 @@ def test_pending_model_boundary_round_trips_typed_generation_state() -> None:
     assert restored.pending_model.resource_request_id == "resource-request-2"
 
 
-def _pending_boundary(call_id: str, *, boundary_index: int) -> AgentBoundaryRecord:
+def _pending_boundary(
+    call_id: str,
+    *,
+    boundary_index: int,
+    attempt_index: int = 0,
+) -> AgentBoundaryRecord:
     return AgentBoundaryRecord(
         rollout_id="rollout-a",
-        attempt_index=0,
+        attempt_index=attempt_index,
         boundary_index=boundary_index,
         boundary_kind=AgentBoundaryKind.PENDING_MODEL,
         pending_model=PendingModelPayload(
@@ -306,7 +311,17 @@ async def test_new_model_boundary_replaces_restored_lineage_coordinate() -> None
     execution = await participant.begin("rollout-a", 1, task=None)
     await participant.commit_boundary(
         execution,
-        _boundary(attempt_index=1, boundary_index=2).model_copy(
+        _pending_boundary(
+            "call-2",
+            attempt_index=1,
+            boundary_index=2,
+        ).model_copy(
+            update={"last_committed_model_capture_key": "rollout-a-a1"}
+        ),
+    )
+    await participant.commit_boundary(
+        execution,
+        _boundary(attempt_index=1, boundary_index=3).model_copy(
             update={
                 "last_committed_model_capture_key": "rollout-a-a1",
                 "last_committed_model_call_id": "call-2",
