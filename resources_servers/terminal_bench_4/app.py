@@ -15,7 +15,7 @@ from typing import ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -24,9 +24,11 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, CANCELLED, VERIFIER_ERROR
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.sandbox.harness import HarnessContext
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -44,7 +46,8 @@ from resources_servers.terminal_bench_4.models import (
     SessionRequest,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
+from responses_api_agents.hermes_sandboxed_agent.harness import HermesConfig, HermesHarness
+from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig, MiniSWEHarness
 
 
 BENCHMARK = Path(__file__).resolve().parents[2] / "benchmarks" / "terminal_bench_4"
@@ -57,11 +60,18 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
     environment: EnvironmentConfig
     model_server: ModelServerRef
-    harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
+    harness: HermesConfig | MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     max_concurrent_sessions: int = Field(default=8, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     task_download_dir: Path | None = None
+
+    @field_validator("harness", mode="before")
+    @classmethod
+    def validate_harness(cls, value):
+        if isinstance(value, dict) and "name" in value:
+            return HermesConfig.model_validate(value)
+        return value
 
 
 class TerminalBench4RunRequest(BaseRunRequest):
@@ -268,7 +278,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
                     global_config = getattr(self.server_client, "global_config_dict", None)
-                    harness = MiniSWEHarness(
+                    harness_class = HermesHarness if isinstance(self.config.harness, HermesConfig) else MiniSWEHarness
+                    harness = harness_class(
                         sandbox=session.environment.main,
                         context=context,
                         config=self.config.harness,
@@ -335,9 +346,21 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
+        reason = session.termination.reason
+        failure_kind = None
+        if reason == "infrastructure_error":
+            failure_kind = AGENT_RUN_ERROR
+        elif reason == "cancelled":
+            failure_kind = CANCELLED
+        elif not completed:
+            failure_kind = VERIFIER_ERROR
+        elif reason == "timeout":
+            failure_kind = AGENT_TIMEOUT
         return SandboxedVerifyResponse(
             **(
-                session.verify_body.model_dump(exclude={"termination"})
+                session.verify_body.model_dump(
+                    exclude={"termination", "mask_sample", "failure_kind", "failure_reason"}
+                )
                 | extra
                 | {"task_id": session.request.task_name}
             ),
@@ -346,6 +369,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure,
+            mask_sample=bool(failure) or reason == "cancelled",
+            failure_kind=failure_kind,
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")

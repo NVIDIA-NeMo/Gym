@@ -261,6 +261,10 @@ async def test_failures_cleanup_and_do_not_grade_failed_setup(fixture, monkeypat
         f.grade.side_effect = RuntimeError(stage)
     result = await f.server.run(f.request, f.body)
     assert result.infrastructure_error
+    assert result.mask_sample is True
+    assert result.failure_kind == (
+        "agent_run_error" if stage in ("provision", "workdir", "setup", "execute") else "verifier_error"
+    )
     assert all(env.closed for env in f.envs)
     assert f.server._slots._value == f.server.config.max_concurrent_sessions
     assert f.grade.await_count == int(stage in ("execute", "grade"))
@@ -282,7 +286,27 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
     assert result.termination.reason == reason
     assert result.reward == 0.75 and result.evaluation_completed
     assert bool(result.infrastructure_error) == (reason == "infrastructure_error")
+    assert result.mask_sample == (reason in ("infrastructure_error", "cancelled"))
+    assert result.failure_kind == {
+        "infrastructure_error": "agent_run_error",
+        "cancelled": "cancelled",
+        "timeout": "agent_timeout",
+    }.get(reason)
     assert all(env.closed for env in f.envs)
+
+
+async def test_official_zero_remains_scoreable(fixture):
+    """An official zero is a valid measurement, including after serialization and replay."""
+    f = fixture
+    f.grade.side_effect = None
+    f.grade.return_value = {"rewards": {"reward": 0}}
+    result = await f.server.run(f.request, f.body)
+    assert result.reward == 0
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    f.server._sessions.clear()
+    f.server._by_identity.clear()
+    assert await f.server.run(f.request, f.body) == result
 
 
 @pytest.mark.parametrize("stage", ["setup", "execute", "grade"])

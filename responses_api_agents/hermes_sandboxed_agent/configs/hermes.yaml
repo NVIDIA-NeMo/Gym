@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      harness:
+        name: hermes
+        insert_reasoning: false
+        quiet_mode: true
+        tool_delay: 1
+        toolsets:
+          - terminal
+          - file
