@@ -69,7 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -648,6 +648,16 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         ),
     )
 
+    count_missing_rollouts_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Count a materialized rollout that produced no row at all as a zero in aggregate "
+            "metrics. Covers what the failure classes cannot: a rollout killed mid-flight leaves "
+            "nothing in either file, so without this it leaves the denominator too and the score "
+            "reads higher than the run earned. Scores the metrics only; no artifact is changed."
+        ),
+    )
+
     route_failures_to_sidecar: bool = Field(
         default=False,
         description=(
@@ -848,8 +858,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
-        output_fpath = Path(self.output_jsonl_fpath)
-        return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+        return materialized_path_for(Path(self.output_jsonl_fpath))
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -943,6 +952,43 @@ def _failure_rows_counted_as_zero(
         scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
         scored.setdefault("reward", 0.0)
         counted.append(scored)
+    return counted
+
+
+def _missing_rollout_rows_counted_as_zero(materialized_fpaths: List[Path], scored_keys: set) -> List[Dict[str, Any]]:
+    """Materialized rollouts that produced no row anywhere, counted as zeros.
+
+    The failure classes reach a rollout that failed and said so. This reaches the one that never
+    got that far -- killed mid-flight, or dispatched and lost -- which leaves nothing in the
+    rollouts jsonl and nothing in the sidecar. Without it such a rollout leaves the denominator as
+    well as the numerator, so the score reads higher the more of the run went missing.
+
+    Only the identity of the rollout is carried over. The score enters the metric input and
+    nothing else, the same way a counted failure row does.
+    """
+    counted = []
+    for materialized_fpath in materialized_fpaths:
+        if not materialized_fpath.exists():
+            continue
+        with open(materialized_fpath, "rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, materialized_fpath, line_no)
+                key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+                if key in scored_keys:
+                    continue
+                scored_keys.add(key)
+                counted.append(
+                    {
+                        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+                        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+                        AGENT_REF_KEY_NAME: row.get(AGENT_REF_KEY_NAME),
+                        "task_name": row.get("task_name"),
+                        "reward": 0.0,
+                    }
+                )
     return counted
 
 
@@ -1651,15 +1697,21 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
+            scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results}
             counted[:] = _failure_rows_counted_as_zero(
                 [failures_fpath],
                 config.count_failure_classes_as_zero,
-                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
+                scored_keys,
             )
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
+            if config.count_missing_rollouts_as_zero:
+                scored_keys |= {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in counted}
+                missing = _missing_rollout_rows_counted_as_zero([config.materialized_jsonl_fpath], scored_keys)
+                print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
+                counted.extend(missing)
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
                 persisted_results + counted, persisted_rows + counted, output_fpath
             )
@@ -2101,6 +2153,13 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
             "no reward is scored zero for the metrics only; no artifact is changed."
         ),
     )
+    count_missing_rollouts_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Count a materialized rollout that produced no row at all as a zero, reading each "
+            "shard's own materialized inputs. Same contract as the collection-time flag."
+        ),
+    )
     disable_health_check: bool = Field(
         default=False,
         description="Skip post-aggregation rollout quality verification and report writing.",
@@ -2184,6 +2243,13 @@ class RolloutAggregationHelper(BaseModel):
         )
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+        if config.count_missing_rollouts_as_zero:
+            missing = _missing_rollout_rows_counted_as_zero(
+                [materialized_path_for(Path(path)) for path in input_paths],
+                scored_keys | {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted},
+            )
+            print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
+            counted.extend(missing)
 
         # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
         helper = RolloutCollectionHelper()
