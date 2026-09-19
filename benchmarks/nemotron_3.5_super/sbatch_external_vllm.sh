@@ -3,14 +3,31 @@
 set -euo pipefail
 
 # Input arguments and validation
-NUM_PREFILL_NODES=$NUM_PREFILL_NODES
-NUM_DECODE_NODES=$NUM_DECODE_NODES
+# PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
+# Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
+VLLM_MODE="${VLLM_MODE:-pd}"
+case "$VLLM_MODE" in
+    pd)
+        NUM_PREFILL_NODES=${NUM_PREFILL_NODES:?Required in PD mode}
+        NUM_DECODE_NODES=${NUM_DECODE_NODES:?Required in PD mode}
+        NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+        ;;
+    aggregated)
+        NUM_NODES=${NUM_NODES:-1}
+        NUM_PREFILL_NODES=0
+        NUM_DECODE_NODES=0
+        ;;
+    *)
+        echo "VLLM_MODE must be pd or aggregated" >&2
+        exit 1
+        ;;
+esac
 MODEL=$MODEL
 MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
-SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
+SBATCH_TIME="${SBATCH_TIME:-${SBATCH_TIMELIMIT:-04:00:00}}"
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
@@ -30,6 +47,11 @@ case "$VLLM_PD_DEPLOYMENT_MODE" in
         exit 1
         ;;
 esac
+
+if [[ "$VLLM_MODE" == aggregated && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    echo "ERROR: VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled." >&2
+    exit 1
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -58,6 +80,7 @@ DECODE_DP_RPC_PORT=13346
 
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
+ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 
 eval_command=$(cat <<EOF
@@ -124,27 +147,32 @@ fi
 EOF
 )
 
-pd_command=$(cat <<EOF
+vllm_command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
 
-# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
-# Not used when the model has no Mamba layers.
-export VLLM_SSM_CONV_STATE_LAYOUT=DS
-
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
-export VLLM_USE_V2_MODEL_RUNNER=0
+
+# @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
+export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
+
+# TODO @bxyu-nvidia: Unfortunately there's an accuracy issue with the rust frontend in vLLM 0.29.0, around 1-2% delta on SWE Verified.
+# export VLLM_USE_RUST_FRONTEND=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
 # host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
-export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
-export UCX_NET_DEVICES=mlx5_0:1
-export UCX_IB_ADDR_TYPE=eth
+export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
+export UCX_NET_DEVICES=all
+
+# Helpful NCCL env vars to set on modern clusters.
+export NCCL_CUMEM_ENABLE=1
+export NCCL_MNNVL_ENABLE=1
+export NCCL_NVLS_ENABLE=1
 
 source "$VLLM_CONFIG"
 
@@ -156,7 +184,7 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
-if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
 
@@ -211,7 +239,7 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         trap 'exit 143' TERM
 
         wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
-        # Keep watching the local prefill process while the remote decode API
+        # Monitor the local prefill process while the remote decode API
         # starts. The enclosing srun handles failures on the decode ranks.
         wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid" "prefill"
 
@@ -229,7 +257,7 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         router_pid=\$!
         coupled_pids+=("\$router_pid")
 
-        # Keep monitoring after readiness. Polling also catches children that
+        # Monitor both services after readiness. Polling also catches children that
         # exited before monitoring started, which wait -n can otherwise miss.
         while kill -0 "\$prefill_pid" 2>/dev/null && kill -0 "\$router_pid" 2>/dev/null; do
             sleep 1
@@ -278,33 +306,55 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --data-parallel-rpc-port $DECODE_DP_RPC_PORT
     fi
 else
-    # Preserve main's independent topology for models that fit one complete
-    # tensor-parallel replica on each node.
+    router_pid=""
+
+    cleanup_vllm() {
+        if [[ -n "\$router_pid" ]]; then
+            kill "\$router_pid" 2>/dev/null || true
+            wait "\$router_pid" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_vllm EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
     if (( SLURM_PROCID == 0 )); then
+
         # Set a super long request timeout since some reasoning requests may take a long time to generate.
         # Don't manually wait as vllm-router will wait for the URLs to come up
+        # Set a longer worker startup timeout since some models e.g. DSv4 take > 10 mins to load.
         router_args=( \
-            --prefill-policy $ROUTER_PREFILL_POLICY \
-            --decode-policy $ROUTER_DECODE_POLICY \
-            --vllm-pd-disaggregation \
             --host \$this_node_hostname \
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
+            --worker-startup-timeout-secs 1200 \
             --log-level error
         )
 
-        for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-            router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
-        done
-        for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
-            node_idx=\$(( $NUM_PREFILL_NODES + i ))
-            router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
-        done
+        if [[ "$VLLM_MODE" == pd ]]; then
+            router_args+=( \
+                --prefill-policy $ROUTER_PREFILL_POLICY \
+                --decode-policy $ROUTER_DECODE_POLICY \
+                --vllm-pd-disaggregation
+            )
+            for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+                router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+            done
+            for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+                node_idx=\$(( $NUM_PREFILL_NODES + i ))
+                router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+            done
+        else
+            router_args+=(--policy $ROUTER_POLICY --worker-urls)
+            for node in "\${nodes[@]}"; do
+                router_args+=("http://\$node:$WORKER_SERVER_PORT")
+            done
+        fi
 
         vllm-router "\${router_args[@]}" &
+
         router_pid=\$!
-        trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
 
         sleep 5
         if ! kill -0 "\$router_pid" 2>/dev/null; then
@@ -313,13 +363,41 @@ else
         fi
     fi
 
-    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+    if [[ "$VLLM_MODE" == aggregated ]]; then
+        # Reuse prefill tuning by default. Configs can supply VLLM_AGGREGATED_ARGS
+        # instead (including an empty array) for independent tuning.
+        if declare -p VLLM_AGGREGATED_ARGS &>/dev/null; then
+            worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_AGGREGATED_ARGS[@]}")
+        else
+            worker_args=("\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}")
+        fi
+        # A complete replica must not wait for KV transfers from a prefill worker.
+        # Strip both CLI forms, including connectors set in VLLM_COMMON_ARGS.
+        aggregated_args=()
+        skip_value=0
+        for arg in "\${worker_args[@]}"; do
+            if (( skip_value )); then
+                skip_value=0
+                continue
+            fi
+            if [[ "\$arg" == --kv-transfer-config ]]; then
+                skip_value=1
+            elif [[ "\$arg" != --kv-transfer-config=* ]]; then
+                aggregated_args+=("\$arg")
+            fi
+        done
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
+            --host \$this_node_hostname \
+            --port $WORKER_SERVER_PORT
+    elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        # Prefill
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
     else
+        # Decode
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
@@ -330,7 +408,6 @@ fi
 EOF
 )
 
-NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
 VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-${SEGMENT:-$NUM_NODES}}"
 if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: VLLM_SLURM_SEGMENT must be a positive integer." >&2
@@ -371,7 +448,7 @@ trap 'exit 143' TERM
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
-    # @bxyu-nvidia: Put the Gym servers on a separate node than the PREFILL_HEAD which is also running the vllm-router
+    # @bxyu-nvidia: Put the Gym servers on a separate node from the one running vllm-router.
     # This helps relieve so much network traffic on one node.
     if [[ -v 'nodes[1]' ]]; then
         EVAL_NODE=\${nodes[1]}
@@ -415,8 +492,8 @@ wait "\$server_step"
 EOF
 )
 
-# This cluster needs --segment > 0 to avoid distributed engine hangs. Keep the
-# setting caller-configurable because coupled tiers benefit from tier-sized segments.
+# This cluster needs --segment > 0 to avoid distributed engine hangs.
+# Coupled tiers benefit from caller-configurable segments matching their node count.
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -427,7 +504,7 @@ fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
-    vllm_command="$pd_command" \
+    vllm_command="$vllm_command" \
     eval_command="$eval_command" \
     batch_command="$batch_command" \
     sbatch \

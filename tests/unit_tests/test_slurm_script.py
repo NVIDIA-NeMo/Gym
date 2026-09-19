@@ -30,6 +30,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
     _build_service_command,
     _build_vllm_command,
+    _build_vllm_multi_instance_multi_node_command,
     _build_vllm_ray_command,
     _build_vllm_ray_serve_command,
     _node_totals,
@@ -534,6 +535,36 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 
 
+def test_driver_policy_model_type_defaults_to_openai_model(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type openai_model" in script
+
+
+def test_driver_policy_model_type_is_configurable(submit_config, bench_dir):
+    # Every certified NEL run of these benchmarks serves the policy as
+    # vllm_model, and lmarena_v3 ships its own vllm_model policy that a second
+    # composed server would collide with.
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type vllm_model" in script
+    assert "--model-type openai_model" not in script
+
+
+def test_driver_policy_model_type_empty_composes_nothing(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = ""
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type" not in script
+
+
 def test_render_driver_entrypoint_no_install_no_prepare():
     out = render_driver_entrypoint(None, None, None)
     assert out == '"${GYM_CMD[@]}"'
@@ -542,7 +573,9 @@ def test_render_driver_entrypoint_no_install_no_prepare():
 def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
-    assert "git checkout main" in out
+    # `git -C "$GYM_SRC/gym" checkout`, not `git checkout`: the clone is
+    # out-of-tree. See test_gym_install_does_not_clone_into_the_job_directory.
+    assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
     assert "uv pip install -e ." in out
@@ -568,9 +601,79 @@ def test_render_driver_entrypoint_with_prepare():
 def test_render_driver_entrypoint_install_and_prepare():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare")
     assert "git clone" in out
-    assert "git checkout v1.0" in out
+    assert "checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
+
+
+def test_worker_command_drops_api_server_count():
+    """vLLM exits on `--api-server-count` in headless mode before loading anything:
+    "no API servers are started in headless mode". The flag is valid on the head
+    node and arrives via the service's own extra_args, so only the worker branch
+    is stripped. A real mmlu-prox run lost all five workers to this.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args="--api-server-count 1 --enable-prefix-caching",
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+    head, worker = block.split("else")
+
+    assert "--api-server-count 1" in head
+    assert "--headless" in worker
+    assert "--api-server-count" not in worker
+    # Stripping must not take the neighbouring flag with it.
+    assert "--enable-prefix-caching" in worker
+
+
+def test_multi_instance_multi_node_command_survives_the_shell():
+    """vLLM's JSON flags are single-quoted, and the DP branches are embedded in a
+    single-quoted `bash -lc '...'`. Unescaped they end the block early and the
+    whole invocation word-splits -- a real mmlu-prox submission died of this with
+    "/usr/bin/env: Argument list too long". Run the rendered block through bash
+    and check the JSON arrives as one argument.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args='--hf-overrides \'{"architectures":["Custom"],"norm_mean":[0.5,0.5]}\'',
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+
+    # Replace `vllm serve` with a printf that dumps one argument per line, so the
+    # test observes what the shell actually passed rather than the rendered text.
+    # Double quotes, because this substitution happens AFTER rendering and so is
+    # not itself escaped -- single quotes here would break the block the test is
+    # checking.
+    script = "SLURM_NODEID=0 HEAD_NODE_IP=1.2.3.4 " + block.replace("vllm serve", 'printf "%s\\n"', 2)
+    argv = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    assert '{"architectures":["Custom"],"norm_mean":[0.5,0.5]}' in argv
+
+
+def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():
+    """A prepare argument containing spaces must reach Hydra as ONE word.
+
+    The entrypoint body is embedded in a single-quoted `bash -c '...'`, so an
+    inner single quote ends the outer string instead of nesting. Without
+    escaping, gdpval's real prepare argument word-split and Hydra failed with
+    "no viable alternative at input '[{num_tasks:'". Asserting on the rendered
+    string would not catch that -- only running it through a shell does.
+    """
+    arg = "+multistage.stages=[{num_tasks: 45, waivable: [timeout, transient]}]"
+    out = render_driver_entrypoint(None, None, f"printf '%s\\n' {shlex.quote(arg)}")
+
+    script = out.replace('exec "$@"', ":").replace('"${GYM_CMD[@]}"', "''")
+    printed = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    assert printed == [arg]
 
 
 def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
@@ -702,7 +805,10 @@ def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "+output_jsonl_fpath=artifacts/rollouts.jsonl" in script
+    # Absolute: a relative output path lands wherever the container's cwd
+    # happens to be, and cwd cannot be moved without breaking a benchmark's
+    # cwd-relative prepare_script.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
 
 
 def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench_dir):
@@ -783,6 +889,18 @@ def test_resolve_env_value_with_newline_is_quoted():
     assert "KEY='line1\nline2'" in out
 
 
+def test_resolve_env_runtime_marker_emits_unquoted_shell_reference():
+    out = _resolve_env({"FOO": "runtime:NEL_INVOCATION_ID"})
+    assert "FOO=${NEL_INVOCATION_ID}" in out
+    assert "'" not in out
+
+
+def test_resolve_env_runtime_marker_alongside_literal():
+    out = _resolve_env({"LIT": "val", "RUN": "runtime:NEL_INVOCATION_ID"})
+    assert "LIT=val" in out
+    assert "RUN=${NEL_INVOCATION_ID}" in out
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script — env injection
 # ---------------------------------------------------------------------------
@@ -818,11 +936,11 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"SVC_KEY": "svc_val"},
+                    "env": {"SVC_KEY": "lit:svc_val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "drv_val"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "lit:drv_val"}},
             "job": {"output_path": "/remote/jobs"},
         }
     )
@@ -831,8 +949,8 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     svc_env_idx = script.index("SVC_KEY=svc_val")
     drv_env_idx = script.index("DRV_KEY=drv_val")
-    svc_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=vllm:latest")
-    drv_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=python:3.12")
+    svc_srun_idx = script.index("--container-image=vllm:latest")
+    drv_srun_idx = script.index("--container-image=python:3.12")
     # Service env prefix appears before service srun; driver env prefix appears before driver srun.
     assert svc_env_idx < svc_srun_idx
     assert drv_env_idx < drv_srun_idx
@@ -862,7 +980,7 @@ def test_build_sbatch_script_service_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"HF_TOKEN": "hf_test", "LIT": "val"},
+                    "env": {"HF_TOKEN": "lit:hf_test", "LIT": "lit:val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
@@ -885,7 +1003,7 @@ def test_build_sbatch_script_driver_env(bench_dir):
             "driver": {
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
-                "env": {"WANDB_API_KEY": "wb_secret"},  # pragma: allowlist secret
+                "env": {"WANDB_API_KEY": "lit:wb_secret"},  # pragma: allowlist secret
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -1014,11 +1132,18 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
     assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
 
 
-def test_build_sbatch_script_no_mounts_by_default(submit_config, bench_dir):
+def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
+    """Services get no mounts unless configured. The driver is the exception and
+    always mounts the job directory, because that is where its artifacts go --
+    see test_driver_can_write_its_artifacts_into_the_job_directory."""
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "--container-mounts" not in script
+
+    service_lines = [line for line in script.splitlines() if "srun" in line and "--output=logs/driver.log" not in line]
+    assert service_lines, "expected at least one service srun line"
+    for line in service_lines:
+        assert "--container-mounts" not in line
 
 
 # ---------------------------------------------------------------------------
@@ -1365,3 +1490,78 @@ def submit_config_with_policy():
             "job": {"output_path": "/remote/jobs"},
         }
     )
+
+
+def test_driver_can_write_its_artifacts_into_the_job_directory():
+    """A run that cannot reach the job directory completes cleanly and produces
+    nothing: `output_jsonl_fpath` is relative, `#SBATCH --chdir` only sets the
+    host-side cwd of the batch script, and a Pyxis container starts in whatever
+    directory its image declares. Both the mount and the workdir are required.
+    """
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "gym:latest",
+                "mounts": ["/host/cache:/cache"],
+                "benchmarks": {"gpqa": {}},
+            },
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"{bench_dir}:{bench_dir}" in driver_line
+    # the caller's own mounts must survive alongside the injected one
+    assert "/host/cache:/cache" in driver_line
+    # The output path is absolute rather than cwd-relative, and cwd is left
+    # alone: a benchmark's prepare_script is resolved against cwd, so moving it
+    # breaks `gym eval prepare` on a file that exists.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
+    assert "--container-workdir" not in script
+
+
+def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"gpqa": {}}},
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line
+
+
+def test_gym_install_does_not_clone_into_the_job_directory():
+    """The driver's cwd is the job directory. A clone there gives Gym a second
+    copy of every built-in asset, and named lookups (`--model-type
+    openai_model`) then abort as ambiguous against the installed copy."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    assert "mktemp -d /tmp/gym-install-" in entrypoint
+    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+
+
+def test_gym_install_runs_from_the_install_root():
+    """A benchmark's prepare_script is relative to cwd, and a runtime image bakes no
+    Gym, so the driver has to run from the clone or `gym eval prepare` cannot find
+    its own script. Safe because the clone is outside the job directory and the
+    driver's output path is absolute."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    # Assert the behaviour, not the line layout: the `cd` is chained onto the
+    # checkout with && rather than standing on its own line.
+    assert 'cd "$GYM_SRC/gym"' in entrypoint
+    assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
+    # The only `cd` is into the clone -- nothing else may move cwd.
+    assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')

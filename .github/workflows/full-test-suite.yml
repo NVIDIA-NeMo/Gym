@@ -67,7 +67,11 @@ jobs:
           curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv
           source .venv/bin/activate
-          uv sync --extra dev --extra sandbox --extra openshell
+          # The telemetry extra installs nemo-lens so the lens-gated tests under
+          # tests/unit_tests/telemetry actually run; without it they skip and the
+          # telemetry modules count as uncovered, failing the coverage gate below.
+          # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extra.
+          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry
 
       - name: Test
         run: |
@@ -305,4 +309,5 @@ jobs:
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`
+            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
             • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>

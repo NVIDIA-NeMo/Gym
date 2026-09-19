@@ -10,6 +10,18 @@
 # Both tiers use piecewise CUDA graphs with graph-owned inputs and MTP3.
 # Settings are fixed in this recipe; asynchronous scheduling is prefill-only.
 
+# Mamba state transfers require the dimension-sequence layout.
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+# The V1 model runner provides higher decode throughput for Ultra.
+export VLLM_USE_V2_MODEL_RUNNER=0
+
+# Ultra uses the GB200 InfiniBand interface and NCCL's default configuration.
+# Recipe settings override the shared launcher's communication defaults.
+export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_IB_ADDR_TYPE=eth
+unset NCCL_CUMEM_ENABLE NCCL_MNNVL_ENABLE NCCL_NVLS_ENABLE
+
 # Standard safetensors loading avoided the InstantTensor io_uring failures seen
 # against the Lustre-hosted checkpoint.
 export SAFETENSORS_FAST_GPU=1

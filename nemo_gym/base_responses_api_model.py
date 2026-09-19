@@ -37,11 +37,11 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -56,6 +56,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_streaming import (
+    NamespaceMap,
+    restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_sse,
@@ -93,16 +95,6 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
-
-
-def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
-    """Reject streaming before sanitization can hide it from worker capture."""
-    context = current_capture_context()
-    if context is not None and context.external_staging and body.get("stream") is True:
-        raise HTTPException(
-            status_code=422,
-            detail="worker-owned token capture does not support streaming requests",
-        )
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -194,6 +186,18 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture after conversion to the response returned to the client."""
+
+    async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
+        """Serialize buffered SSE before committing externally staged capture."""
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            # SSE generators serialize lazily. Finish that work before recording success.
+            events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
+            await self._finalize_served_response(response)
+        return StreamingResponse(iter(events), media_type="text/event-stream")
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -252,10 +256,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
-        _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return _orjson_dispatch_response(await self._invoke_responses(request, params))
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -263,9 +269,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         except ValidationError as exc:
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
+        return await self._stream_responses(request, params, ns_map)
+
+    async def _stream_responses(
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
@@ -274,10 +288,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
             )
-        return StreamingResponse(
-            synthesize_responses_sse(response_json, ns_map),
-            media_type="text/event-stream",
-        )
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -297,18 +307,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
-        _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            response = await self._invoke_chat_completions(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
         completion = await self._invoke_chat_completions(request, params)
         completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return StreamingResponse(
+        return await self._stream_served_response(
+            completion_json,
             synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
-            media_type="text/event-stream",
         )
 
     async def _invoke_chat_completions(
@@ -344,17 +356,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        _reject_external_capture_streaming(body)
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
         if body.get("stream"):
-            return StreamingResponse(
+            return await self._stream_served_response(
+                anthropic_response,
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
-                media_type="text/event-stream",
             )
-        return _orjson_dispatch_response(anthropic_response)
+        dispatched = _orjson_dispatch_response(anthropic_response)
+        await self._finalize_served_response(anthropic_response)
+        return dispatched
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
@@ -1055,6 +1068,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     """Rebuild a Chat Completions response from streamed chunks."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    refusal_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
@@ -1076,6 +1090,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             role = delta.get("role") or role
             if delta.get("content"):
                 content_parts.append(delta["content"])
+            if delta.get("refusal"):
+                refusal_parts.append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
                 reasoning_parts.append(reasoning)
@@ -1097,6 +1113,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     result: dict[str, Any] = {
@@ -1237,8 +1255,8 @@ class _CaptureMiddleware:
     downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
     the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
     after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
-    prefix and forwards only.
+    stream is held in memory until it completes. When ``store`` is None it avoids buffering evaluation
+    records, while still persisting external capture failures before terminal events are forwarded.
     """
 
     def __init__(
@@ -1344,10 +1362,26 @@ class _CaptureMiddleware:
             sink_token = set_token_sink(capture_context)
 
         # Training-only capture has no evaluation record.
-        # Forward without buffering while the sink is active.
+        # Persist capture failure before forwarding a terminal event or finishing a JSON response.
         if self._store is None:
+            streaming = False
+            sse_event_buffer = bytearray()
+
+            async def _send_training_only(message: dict[str, Any]) -> None:
+                nonlocal streaming
+                if message.get("type") == "http.response.start":
+                    streaming = _headers_content_type(message.get("headers") or []).startswith(b"text/event-stream")
+                elif message.get("type") == "http.response.body":
+                    terminal = None
+                    if streaming:
+                        sse_event_buffer.extend(message.get("body", b"") or b"")
+                        terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
+                    if terminal is not None or not message.get("more_body", False):
+                        await _fail_uncommitted_external_call(capture_context)
+                await send(message)
+
             try:
-                await self._app(scope, receive, send)
+                await self._app(scope, receive, _send_training_only)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1434,6 +1468,7 @@ class _CaptureMiddleware:
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
+                await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
         finally:

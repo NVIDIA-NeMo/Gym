@@ -23,6 +23,8 @@ Alongside the score the env reports `guardrails_violated`, `guardrails_total`,
 directly comparable to the AA leaderboard column.
 
 - Toolset: `api`, matching the AA harness
+- `api_fetch` uses JSON objects instead of JSON strings for `body` and
+  `params`, with `{}` for empty values.
 - Scoring code: `automationbench_env/` (imports upstream
   `automationbench`; vendors nothing)
 
@@ -45,9 +47,3 @@ python benchmarks/automationbench/prepare.py
 ```
 
 Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100).
-
-## Note on comparability
-
-AA evaluates 657 tasks with 22,822 objectives (~34.7 per task), this env uses
-the public 600-task set at roughly 9.5 objectives per rollout. The metric is the
-same, the split is not, so absolute numbers will not match the leaderboard.
