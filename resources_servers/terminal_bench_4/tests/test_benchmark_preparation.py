@@ -30,6 +30,7 @@ def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
     validator = task_validator()
     for index, row in enumerate(rows):
         validator.validate_row(index, row)
+        assert row["task_id"] == row["task_name"]
         assert row["task_ref"] == tasks[row["task_name"]]
         assert row["dataset_ref"] == manifest["ref"]
         assert "path" not in row

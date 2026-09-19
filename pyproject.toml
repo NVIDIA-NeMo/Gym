@@ -615,6 +615,8 @@ where = ["."]
 include = [
     "benchmarks",
     "benchmarks.*",
+    "environment_servers",
+    "environment_servers.*",
     "resources_servers",
     "resources_servers.*",
     "responses_api_agents",

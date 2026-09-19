@@ -146,8 +146,16 @@ def make_harness(tmp_path, monkeypatch):
         worker = _Worker()
         worker.reasoning = reasoning
         model._clients = [worker]
-        monkeypatch.setattr(model, "_finalize_external_capture", AsyncMock(wraps=model._finalize_external_capture))
-        return SimpleNamespace(model=model, worker=worker, app=model.setup_webserver(), ledger=FileLineageStore(root))
+        handler = model._external_capture_handler
+        finalize = AsyncMock(wraps=handler.finalize_response)
+        monkeypatch.setattr(handler, "finalize_response", finalize)
+        return SimpleNamespace(
+            model=model,
+            worker=worker,
+            app=model.setup_webserver(),
+            ledger=FileLineageStore(root),
+            finalize=finalize,
+        )
 
     return make
 
@@ -219,7 +227,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
         assert h.worker.context.committed
 
     messages = await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
-    assert h.model._finalize_external_capture.await_count == 1
+    assert h.finalize.await_count == 1
     assert messages[0]["status"] == 200
     raw = b"".join(message.get("body", b"") for message in messages).decode()
     assert "answer 1" in raw and "completion-1" in raw
@@ -341,7 +349,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
             call = next(item for item in first["output"] if item["type"] == "function_call")
             assert call["namespace"] == "functions"
             assert call["name"] == "weather"
-            assert h.model._finalize_external_capture.await_args.args[0]["output"] == first["output"]
+            assert h.finalize.await_args.args[0]["output"] == first["output"]
             manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
             # Neither a declaration nor an envelope ID may bypass content attribution.
             attribution = resolve_terminal(manifest.records, {**first, "id": ""})
@@ -376,7 +384,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
     assert admission["parent_call_id"] == parent.model_call_id
     assert admission["staging_chain"] == [parent.staging_key]
     assert child.response_id == second["id"]
-    assert h.model._finalize_external_capture.await_count == 2
+    assert h.finalize.await_count == 2
     receipt = RolloutReceipt(
         rollout_id="r1",
         manifest=manifest.records,
@@ -460,7 +468,7 @@ async def test_response_preparation_failure_does_not_commit(
         assert sent[0]["status"] == 500
 
     assert len(h.worker.records) == 1, "the failure must occur after worker staging succeeds"
-    h.model._finalize_external_capture.assert_not_awaited()
+    h.finalize.assert_not_awaited()
     manifest = await h.ledger.manifest("r1")
     assert not manifest["records"]
     assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
