@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import orjson
@@ -61,6 +62,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.rollout_store import RolloutStore
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -460,15 +462,47 @@ def run_health_checks(
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
 ) -> HealthCheckResult:
-    """Run the RFC's map/group/reduce pipeline and write both reports."""
-    ignored = frozenset(normalize_ignored_checks(ignored_checks))
+    """Check selected completed attempts, or raw records for loose legacy files.
+
+    Journal-backed JSONL files are append-only histories. Stage the store's
+    selected results for the existing file-based worker pipeline so health and
+    scoring agree, without rewriting history or sending large records over IPC.
+    Explicit failure-sidecar inputs remain available for diagnostic inspection.
+    """
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
-    for path in paths:
-        if not path.is_file():
-            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
+    with TemporaryDirectory(prefix="gym-health-") as scratch:
+        selected_paths = []
+        for index, path in enumerate(paths):
+            if not path.is_file():
+                raise FileNotFoundError(f"Rollout JSONL not found: {path}")
+            store = RolloutStore.read(path, import_legacy=False)
+            if store is None:
+                selected_paths.append(path)
+                continue
+            selected = Path(scratch) / f"selected-{index}.jsonl"
+            with selected.open("wb") as file:
+                for row in store.selected("success"):
+                    file.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+            selected_paths.append(selected)
+        return _run_health_checks(
+            selected_paths,
+            output_dir=output_dir or paths[0].parent,
+            workers=workers,
+            ignored_checks=ignored_checks,
+        )
 
+
+def _run_health_checks(
+    paths: Sequence[Path],
+    *,
+    output_dir: Path,
+    workers: int | None,
+    ignored_checks: Sequence[str],
+) -> HealthCheckResult:
+    """Run the RFC's map/group/reduce pipeline and write both reports."""
+    ignored = frozenset(normalize_ignored_checks(ignored_checks))
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
@@ -514,8 +548,7 @@ def run_health_checks(
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
-    report_dir = output_dir or paths[0].parent
-    summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
+    summary_path, verdicts_path = _write_reports(summary, digests, output_dir)
     return HealthCheckResult(
         summary=summary,
         rollouts=digests,
