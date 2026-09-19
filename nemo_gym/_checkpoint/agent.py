@@ -535,13 +535,22 @@ class AgentCheckpointParticipant:
         execution.model_wait_depth += 1
         await self._notify()
 
-    async def end_model_wait(self, execution: AgentExecution) -> None:
-        """Leave a policy-model wait after its response or refusal arrives."""
+    async def end_model_wait(self, execution: AgentExecution) -> bool:
+        """Release a policy-model result only after checkpoint resume."""
         self._require_owner(execution)
         if execution.model_wait_depth <= 0:
             raise AgentCheckpointError("agent model-wait depth underflow")
         execution.model_wait_depth -= 1
         await self._notify()
+        if execution.model_wait_depth > 0:
+            return False
+        if execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
+            await execution.resume_event.wait()
+            self._require_owner(execution)
+            if execution.state == AgentExecutionState.RETIRED:
+                raise AgentStaleAttemptError("agent execution was retired while its model result was frozen")
+            return True
+        return False
 
     async def commit_boundary(self, execution: AgentExecution, record: AgentBoundaryRecord) -> None:
         self._require_owner(execution)
@@ -617,6 +626,7 @@ class AgentCheckpointParticipant:
                     external_wait_frozen.append(execution)
                 elif allow_model_wait_boundary and execution.model_wait_depth > 0 and execution.boundary is not None:
                     execution.state = AgentExecutionState.MODEL_WAIT_FROZEN
+                    execution.resume_event.clear()
                     model_wait_frozen.append(execution)
                 else:
                     execution.state = AgentExecutionState.PARK_REQUESTED
@@ -670,6 +680,7 @@ class AgentCheckpointParticipant:
                 released += 1
             elif execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
                 execution.state = AgentExecutionState.RUNNING
+                execution.resume_event.set()
                 released += 1
             elif execution.state == AgentExecutionState.PARKED:
                 if execution.outer_task is None:

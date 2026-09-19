@@ -497,10 +497,14 @@ async def test_prepare_freezes_a_model_wait_at_its_last_boundary() -> None:
     assert report["parked_with_boundary"] == 1
     assert report["executions"][0]["state"] == "model_wait_frozen"
     assert participant.records_for_commit() == [boundary]
-    assert (await participant.resume())["released"] == 1
-    assert participant.status()["executions"][0]["state"] == "running"
 
-    await participant.end_model_wait(execution)
+    completed = asyncio.create_task(participant.end_model_wait(execution))
+    await asyncio.sleep(0)
+    assert not completed.done()
+
+    assert (await participant.resume())["released"] == 1
+    assert await completed is True
+    assert participant.status()["executions"][0]["state"] == "running"
     await participant.finish(execution, outcome="failed")
 
 
@@ -537,6 +541,30 @@ async def test_stale_resume_signal_cannot_cross_a_new_external_wait_checkpoint()
     await participant.end_external_wait(execution)
 
     await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
+async def test_failed_prepare_releases_a_frozen_model_result() -> None:
+    participant = AgentCheckpointParticipant()
+    frozen = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(frozen, _boundary())
+    await participant.begin_model_wait(frozen)
+    await participant.begin("rollout-b", 0, task=asyncio.current_task())
+
+    prepare = asyncio.create_task(
+        participant.prepare(
+            time.time() + 0.01,
+            allow_model_wait_boundary=True,
+        )
+    )
+    await asyncio.sleep(0)
+    completed = asyncio.create_task(participant.end_model_wait(frozen))
+    report = await prepare
+
+    assert report["ready_to_commit"] is False
+    await asyncio.wait_for(completed, timeout=1)
+    assert participant.status()["executions"][0]["state"] == "running"
+    await participant.finish(frozen, outcome="failed")
 
 
 @pytest.mark.asyncio
