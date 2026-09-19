@@ -25,7 +25,7 @@ import shlex
 import shutil
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -59,6 +61,7 @@ DOCKER_RUNTIME_ERROR_MARKERS = (
     "error response from daemon",
 )
 DOCKER_MISSING_CONTAINER_MARKERS = ("no such container", "no such object")
+DOCKER_SESSION_SIGNALS = frozenset({"SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGHUP"})
 
 
 class DockerCreateError(SandboxCreateError):
@@ -182,6 +185,101 @@ class _DockerContainer:
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
     published_ports: tuple[int, ...] = ()
+
+
+class _DockerProcessSession:
+    """One pipe-mode ``docker exec -i`` process session."""
+
+    mode: str | None = "pipe"
+
+    def __init__(
+        self,
+        *,
+        process: asyncio.subprocess.Process,
+        session_id: str,
+        signal_process: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self._process = process
+        self._signal_process = signal_process
+        self.session_id = session_id
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed or self._process.returncode is not None
+
+    @staticmethod
+    async def _read_stream(
+        stream: asyncio.StreamReader | None,
+        *,
+        timeout_s: float | None,
+    ) -> bytes:
+        if stream is None:
+            return b""
+        return await asyncio.wait_for(stream.read(65536), timeout=timeout_s)
+
+    async def read(self, *, timeout_s: float | None = None) -> bytes:
+        return await self._read_stream(self._process.stdout, timeout_s=timeout_s)
+
+    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+        return await self._read_stream(self._process.stderr, timeout_s=timeout_s)
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            while chunk := await self.read():
+                yield chunk
+
+        return _iterate()
+
+    async def write(self, data: bytes) -> None:
+        if self._closed or self._process.returncode is not None or self._process.stdin is None:
+            raise SandboxPtyError("Docker process session is closed")
+        self._process.stdin.write(data)
+        try:
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            raise SandboxPtyError("Docker process session stdin is closed") from error
+
+    async def resize(self, rows: int, cols: int) -> None:
+        return None
+
+    async def send_signal(self, signal_name: str) -> None:
+        if signal_name not in DOCKER_SESSION_SIGNALS:
+            raise ValueError(f"Docker process sessions support only {sorted(DOCKER_SESSION_SIGNALS)}")
+        if self._closed or self._process.returncode is not None:
+            raise SandboxPtyError("Docker process session is closed")
+        await self._signal_process(signal_name)
+
+    async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+        return await asyncio.wait_for(asyncio.shield(self._process.wait()), timeout=timeout_s)
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        raise NotImplementedError("Docker process sessions do not support detached execution")
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+        if self._process.returncode is None:
+            try:
+                await self._signal_process("SIGKILL")
+            except Exception:
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+                await self._process.wait()
+
+    async def __aenter__(self) -> "_DockerProcessSession":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
 
 
 def _normalize_image(image: str) -> str:
@@ -511,6 +609,61 @@ class DockerProvider:
                 stdout=out, stderr=err, return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
             )
         return SandboxExecResult(stdout=out, stderr=err, return_code=code, error_type=None)
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DockerProcessSession:
+        """Start a persistent pipe-mode process through ``docker exec -i``."""
+
+        if spec.pty:
+            raise NotImplementedError("Docker process sessions currently support only pty=False")
+        inst = handle.raw
+        session_id = f"docker-{uuid.uuid4().hex}"
+        pid_path = f"/tmp/nemo-gym-{session_id}.pid"
+        flags = ["-i"]
+        if spec.cwd is not None:
+            flags += ["-w", spec.cwd]
+        merged_env = dict(getattr(inst, "env", {}))
+        if spec.env:
+            merged_env.update(spec.env)
+        for key, value in merged_env.items():
+            flags += ["--env", f"{key}={value}"]
+        if spec.user is not None:
+            flags += ["--user", "0" if spec.user == "root" or spec.user == 0 else str(spec.user)]
+        flags += list(self._exec_config.extra_exec_args)
+
+        command = spec.command or f"exec {shlex.quote(inst.shell)}"
+        wrapper = (
+            f"printf '%s' \"$$\" > {shlex.quote(pid_path)}; exec {shlex.quote(inst.shell)} -c {shlex.quote(command)}"
+        )
+        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", wrapper]
+        async with self._semaphore:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+
+        async def signal_process(signal_name: str) -> None:
+            shell_signal = signal_name.removeprefix("SIG")
+            script = (
+                f"test -r {shlex.quote(pid_path)} && "
+                f'kill -s {shlex.quote(shell_signal)} "$(cat {shlex.quote(pid_path)})"'
+            )
+            code, _out, err = await self._run(
+                [self._binary, "exec", inst.name, inst.shell, "-c", script],
+                timeout_s=self._exec_config.default_timeout_s,
+            )
+            if code != 0 and process.returncode is None:
+                raise SandboxPtyError(
+                    f"Could not send {signal_name} to Docker process session {session_id}: {err.strip()}"
+                )
+
+        return _DockerProcessSession(
+            process=process,
+            session_id=session_id,
+            signal_process=signal_process,
+        )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one host file (creates the parent dir; the file lands owned by root)."""

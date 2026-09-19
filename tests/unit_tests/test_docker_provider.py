@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,7 @@ import pytest
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -50,6 +52,41 @@ class RunRecorder:
     ) -> tuple[int, str, str]:
         self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
         return self._responder(list(argv))
+
+
+class FakeStdin:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeProcess:
+    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", return_code: int = 0) -> None:
+        self.stdin = FakeStdin()
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+        self.returncode: int | None = None
+        self._return_code = return_code
+
+    async def wait(self) -> int:
+        self.returncode = self._return_code
+        return self._return_code
+
+    def kill(self) -> None:
+        self.returncode = -9
 
 
 def _contains_seq(haystack: list[str], needle: list[str]) -> bool:
@@ -583,6 +620,86 @@ async def test_exec_command_failure_is_not_runtime_error(fake_binary: str, monke
     result = await provider.exec(_make_handle(), "ls /nope")
     assert result.return_code == 2
     assert result.error_type is None
+
+
+# --------------------------------------------------------------------------- #
+# process sessions
+# --------------------------------------------------------------------------- #
+async def test_create_pipe_session_builds_interactive_docker_exec(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    process = FakeProcess(stdout=b"out", stderr=b"err")
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        calls.append((args, kwargs))
+        return process
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    session = await provider.create_pty(
+        _make_handle(shell="bash", env={"BASE": "value"}),
+        SandboxPtySpec(
+            command="python runner.py",
+            cwd="/workspace",
+            env={"EXTRA": "value"},
+            user="root",
+            pty=False,
+        ),
+    )
+
+    argv, kwargs = calls[0]
+    assert argv[:3] == (FAKE_BINARY, "exec", "-i")
+    assert _contains_seq(list(argv), ["-w", "/workspace"])
+    assert _contains_seq(list(argv), ["--env", "BASE=value"])
+    assert _contains_seq(list(argv), ["--env", "EXTRA=value"])
+    assert _contains_seq(list(argv), ["--user", "0"])
+    assert argv[-4:-1] == ("nemo-gym-x", "bash", "-c")
+    assert "python runner.py" in argv[-1]
+    assert kwargs["start_new_session"] is True
+    assert session.mode == "pipe"
+
+    await session.write(b"input")
+    assert process.stdin.writes == [b"input"]
+    assert await session.read() == b"out"
+    assert await session.read_stderr() == b"err"
+    assert await session.wait_exit() == 0
+    await session.close()
+    assert process.stdin.closed is True
+
+
+async def test_create_pipe_session_sends_signal_inside_container(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    process = FakeProcess()
+
+    async def create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", create_subprocess_exec)
+    session = await provider.create_pty(_make_handle(), SandboxPtySpec(command="sleep 10", pty=False))
+
+    await session.send_signal("SIGTERM")
+
+    signal_argv = rec.calls[-1]["argv"]
+    assert signal_argv[:3] == [FAKE_BINARY, "exec", "nemo-gym-x"]
+    assert "kill -s TERM" in signal_argv[-1]
+    process.returncode = 0
+    await session.close()
+
+
+async def test_create_pipe_session_rejects_tty_mode(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    with pytest.raises(NotImplementedError, match="pty=False"):
+        await provider.create_pty(_make_handle(), SandboxPtySpec(command="true", pty=True))
 
 
 # --------------------------------------------------------------------------- #
