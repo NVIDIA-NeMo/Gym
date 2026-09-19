@@ -1,0 +1,30 @@
+name: frontierscience_research
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: FrontierScience research rubric grading via single-pass LLM judge
+modality: text
+licensing: unknown
+authors:
+- Jiacheng Xu
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: frontierscience_judge
+agent_server: simple_agent
+datasets:
+- name: frontierscience_research
+  type: benchmark
+  jsonl_fpath: benchmarks/frontierscience_research/data/frontierscience_research_benchmark.jsonl
+  prepare_script: benchmarks/frontierscience_research/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active

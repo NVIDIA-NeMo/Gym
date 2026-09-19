@@ -1,0 +1,31 @@
+name: arxivmath_0426
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Math QA verified by a Skills-style autograder LLM judge with math-verify
+  symbolic fallback
+modality: text
+licensing: unknown
+authors:
+- Wei Du
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: math_with_autograder
+agent_server: simple_agent
+datasets:
+- name: arxivmath_0426
+  type: benchmark
+  jsonl_fpath: benchmarks/arxivmath_0426/data/arxivmath_0426_benchmark.jsonl
+  prepare_script: benchmarks/arxivmath_0426/prepare.py
+  prompt_config: benchmarks/arxivmath_0426/prompts/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/arxivmath_0426/prompts/default.yaml
+lifecycle: active

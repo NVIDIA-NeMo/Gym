@@ -1,0 +1,30 @@
+name: ioi26
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Execution of competitive programming competition questions
+modality: text
+licensing: unknown
+authors:
+- George Armstrong
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: competitive_coding_challenges
+agent_server: simple_agent
+datasets:
+- name: ioi26
+  type: benchmark
+  jsonl_fpath: benchmarks/ioi26/data/ioi26_benchmark.jsonl
+  prepare_script: benchmarks/ioi26/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 50
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active

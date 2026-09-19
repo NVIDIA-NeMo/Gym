@@ -1,0 +1,31 @@
+name: supergpqa
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Multi-choice question answering problems
+modality: text
+licensing: unknown
+authors:
+- Wei Du
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: mcqa
+agent_server: simple_agent
+datasets:
+- name: supergpqa
+  type: benchmark
+  jsonl_fpath: benchmarks/supergpqa/data/supergpqa_benchmark.jsonl
+  prepare_script: benchmarks/supergpqa/prepare.py
+  prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
+  num_repeats: 1
+model_server: policy_model
+grading_mode: lenient_answer_colon_md
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
+lifecycle: active

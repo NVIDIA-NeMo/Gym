@@ -16,9 +16,34 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     manifest_json_schema,
 )
+from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from nemo_gym.registry import discover_environment_catalog
 
 
 REPO_ROOT = Path(__file__).parents[2]
+
+
+def test_checked_in_benchmark_manifests_are_ready_for_experimental_catalog() -> None:
+    benchmarks = [
+        entry for entry in discover_environment_catalog() if entry.kind == "benchmark" and entry.manifest_path
+    ]
+    problems = []
+    for entry in benchmarks:
+        manifest = load_manifest(entry.manifest_path)
+        if manifest.standard_prompt_config == "TODO":
+            problems.append(f"{entry.name}: standard_prompt_config is TODO")
+            continue
+        try:
+            composition = _resolve_manifest_composition(entry.config_path)
+        except ConfigError as error:
+            problems.append(f"{entry.name}: {error}")
+            continue
+        differences = _mirror_differences(manifest, composition)
+        if differences:
+            problems.append(f"{entry.name}: {differences}")
+
+    assert len(benchmarks) == 88
+    assert not problems, "Benchmark manifests needing review:\n" + "\n".join(problems)
 
 
 def _manifest(*, profile: str = "custom-gym-verifier", kind: str = "environment") -> dict:

@@ -1,0 +1,31 @@
+name: human_eval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Function-completion code judged by EvalPlus base + plus tests (HumanEval+,
+  MBPP+)
+modality: text
+licensing: unknown
+authors:
+- George Armstrong
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: evalplus
+agent_server: simple_agent
+datasets:
+- name: human_eval
+  type: benchmark
+  jsonl_fpath: benchmarks/human_eval/data/human_eval_benchmark.jsonl
+  prepare_script: benchmarks/human_eval/prepare.py
+  prompt_config: benchmarks/prompts/generic/codegen.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/codegen.yaml
+lifecycle: active

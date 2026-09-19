@@ -1,0 +1,31 @@
+name: mmlu
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Multi-choice question answering problems
+modality: text
+licensing: unknown
+authors:
+- Wei Du
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: mcqa
+agent_server: simple_agent
+datasets:
+- name: mmlu
+  type: benchmark
+  jsonl_fpath: benchmarks/mmlu/data/mmlu_benchmark.jsonl
+  prepare_script: benchmarks/mmlu/prepare.py
+  prompt_config: benchmarks/prompts/eval/aai/mcq-4choices-boxed.yaml
+  num_repeats: 1
+model_server: policy_model
+grading_mode: strict_single_letter_boxed
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/aai/mcq-4choices-boxed.yaml
+lifecycle: active
