@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Package-local verifier for the Hello Gym tasks."""
+"""Environment-level verifier shared by the Hello Taskset tasks."""
 
 
 async def verify(attempt, verifier_input) -> float:

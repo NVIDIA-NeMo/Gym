@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: hello-mcp-tool
+version: 1.0.0
+description: Give an agent an additional tool over MCP
+tags:
+  - example
+license: Apache-2.0
+
+episode_protocol: nemo_gym.single_agent.v1
+
+task:
+  id: hello-mcp-tool-001
+  instruction: instruction.md
+  verifier:
+    implementation: verifier.py:verify
+
+runtime:
+  dockerfile: runtime/Dockerfile
+  workdir: /workspace
+  mcp_servers:
+    - name: hello-tools
+      command: python
+      args:
+        - tools/server.py
