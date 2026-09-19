@@ -285,6 +285,10 @@ class RolloutStore:
     def attempt_count(self, row: dict) -> int:
         return self._state.attempt_counts[logical_rollout_id(row)]
 
+    def disposition(self, row: dict) -> str:
+        """Return the latest dispatched attempt's disposition for this rollout."""
+        return self._state.disposition(logical_rollout_id(row))
+
     def selected(self, disposition: str) -> list[dict]:
         return self._state.selected(disposition)
 

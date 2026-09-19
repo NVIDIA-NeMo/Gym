@@ -931,6 +931,9 @@ def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
 
     assert "ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit" in dockerfile
-    assert "pre-commit install-hooks" in dockerfile
+    seed_cache_start = dockerfile.index("RUN git init --quiet")
+    install_hooks = dockerfile.index("pre-commit install-hooks", seed_cache_start)
+    remove_git_dir = dockerfile.index("rm -rf .git", install_hooks)
+    assert seed_cache_start < install_hooks < remove_git_dir
     assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
     assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile

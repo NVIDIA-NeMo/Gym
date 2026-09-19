@@ -135,6 +135,38 @@ from nemo_gym.token_id_capture.delivery import (
 
 logger = logging.getLogger(__name__)
 
+
+def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) -> Dict[str, float]:
+    """In-progress view of what a run is losing to its environment rather than its policy.
+
+    ``scored`` covers persisted rollouts only, split into the unmasked ones (``count``,
+    ``reward``) and the masked ones; ``dropped`` counts what never reached the main output
+    at all. ``reward_unmasked`` averages over the unmasked rollouts alone, so the gap
+    against the existing ``reward`` series is the score lost to infrastructure. Failed and
+    omitted attempts are reported as counts, never folded into a quality average.
+
+    Empty until something is actually masked or dropped, so a healthy run exports exactly
+    what it exported before. The final numbers come from ``/aggregate_metrics``; this is
+    the progress view while the run is still going.
+    """
+    masked, unmasked = int(scored["masked"]), int(scored["count"])
+    failed, omitted = int(dropped["failed"]), int(dropped["omitted"])
+    if not (masked or failed or omitted):
+        return {}
+
+    metrics: Dict[str, float] = {}
+    persisted = masked + unmasked
+    if masked and persisted:
+        metrics[f"progress/{agent_name}/masked_pct"] = round(100 * masked / persisted, 2)
+    if unmasked:
+        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * scored["reward"] / unmasked, 2)
+    if failed:
+        metrics[f"progress/{agent_name}/failed"] = failed
+    if omitted:
+        metrics[f"progress/{agent_name}/omitted"] = omitted
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
 #
@@ -1460,6 +1492,13 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
+        # unmasked ones, `masked` over the rest. Token capture already reports its own
+        # masking; this is the same accounting for what an environment declares on its
+        # verify response.
+        agent_name_to_scored = defaultdict(Counter)
+        # Rollouts that never reach the main output at all, kept apart from quality.
+        agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1636,6 +1675,16 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     agent_name_to_counts[agent_name] += 1
 
+                # Use the persisted classification so terminal skips count as omissions
+                # and kill-shaped failures count as failures, just as in final coverage.
+                disposition = store.disposition(row)
+                if disposition in {"failure", "omitted"}:
+                    agent_name_to_dropped[agent_name].update({"failed" if disposition == "failure" else "omitted": 1})
+                elif result.get(MASK_SAMPLE_KEY):
+                    agent_name_to_scored[agent_name].update({"masked": 1})
+                else:
+                    agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
+
                 current_pct = 100 * len(results) / len(input_rows)
                 if pcts_to_print and current_pct >= pcts_to_print[0]:
                     while pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1671,6 +1720,17 @@ class RolloutCollectionHelper(BaseModel):
                             step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
                                 100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]),
                                 2,
+                            )
+
+                        # Include agents with no successful outcomes so total failures
+                        # remain visible even when they have no reward series.
+                        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+                            step_metrics.update(
+                                _masking_step_metrics(
+                                    agent_name,
+                                    agent_name_to_scored.get(agent_name, Counter()),
+                                    agent_name_to_dropped.get(agent_name, Counter()),
+                                )
                             )
 
                         export_metrics(step_metrics, step=int(current_pct))

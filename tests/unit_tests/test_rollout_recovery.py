@@ -927,6 +927,11 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(
         "coverage/unknown": 0,
         "coverage/attempts_exhausted": 0,
     }
+    progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
+    assert progress["progress/my_agent/masked_pct"] == 100.0
+    assert progress["progress/my_agent/failed"] == 1
+    assert progress["progress/my_agent/omitted"] == 1
+    assert "progress/my_agent/reward_unmasked" not in progress
     assert not report["complete"] and report["reconciled"]
     failures = list(read_records(collection.failures_path_for(output)))
     assert len(failures) == 2
@@ -945,6 +950,54 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(
     assert exported[-1]["coverage/measured"] == 1 and exported[-1]["coverage/masked"] == 1
     assert exported[-1]["coverage/failed"] == 0
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
+
+
+@pytest.mark.parametrize("failure_type", ["typed", "legacy", "kill_shaped", "skipped", "suppressed"])
+async def test_progress_masking_matches_persisted_outcomes(runner_config, monkeypatch, failure_type):
+    source = Path(runner_config.input_jsonl_fpath)
+    rows = [json.loads(line) for line in source.read_text().splitlines()]
+    rows[2]["agent_ref"]["name"] = "dropped_agent"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    runner_config.upload_rollouts = False
+    exported = []
+    monkeypatch.setattr(collection, "get_exporters", lambda: True)
+    monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        if row["task"] < 2:
+            return FakeResponse(200, {"reward": 0.5, "response": {}, "mask_sample": row["task"] == 1})
+        if failure_type == "typed":
+            result = RolloutFailure(
+                rollout_id=logical_rollout_id(row),
+                failure_kind="agent_request_failed",
+                stage="agent",
+                failure_reason="Agent unavailable",
+            ).model_dump()
+        else:
+            result = {"reward": 0.0, "response": {}}
+            if failure_type == "legacy":
+                result["_ng_failure_class"] = "agent_request_failed"
+            elif failure_type == "suppressed":
+                result["_ng_no_persist"] = True
+            elif failure_type == "skipped":
+                result.update(_ng_failure_class="skipped", _ng_failure_terminal=True)
+            else:
+                result.update(_ng_failure_class="kill_shaped", _ng_no_persist=True)
+        return FakeResponse(200, result)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict["dropped_agent"] = {"responses_api_agents": {"impl": {}}}
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
+    assert progress["progress/my_agent/masked_pct"] == 50.0
+    assert progress["progress/my_agent/reward_unmasked"] == 50.0
+    omitted = failure_type in {"skipped", "suppressed"}
+    assert progress[f"progress/dropped_agent/{'omitted' if omitted else 'failed'}"] == 1
+    assert not any(key.startswith("progress/dropped_agent/reward") for key in progress)
+    assert exported[-1]["coverage/failed"] == int(not omitted)
+    assert exported[-1]["coverage/omitted"] == int(omitted)
+    assert (exported[-1]["coverage/measured"], exported[-1]["coverage/masked"]) == (1, 1)
 
 
 async def test_runner_cancellation_closes_requests_before_return(runner_config, monkeypatch):
