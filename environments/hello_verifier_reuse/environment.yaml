@@ -3,7 +3,7 @@
 
 name: hello-verifier-reuse
 version: 1.0.0
-description: Combine reusable verifier utilities with task-specific policy
+description: Combine reusable verifier utilities with task-specific verifier logic
 tags:
   - example
 license: Apache-2.0
@@ -21,10 +21,10 @@ tasksets:
             path: /workspace/hello-gym.txt
             content: Hello from NeMo Gym!
 
-      custom-policy:
-        instruction: tasks/custom_policy/instruction.md
+      custom-verifier:
+        instruction: tasks/custom_verifier/instruction.md
         verifier:
-          implementation: tasks/custom_policy/verifier.py:verify
+          implementation: tasks/custom_verifier/verifier.py:verify
 
 runtime:
   dockerfile: runtime/Dockerfile

@@ -40,16 +40,19 @@ For each JSONL row, Gym:
 5. Passes the selected verifier input to the shared `verifier.py`.
 6. Returns reward `1.0` for success or `0.0` otherwise.
 
-This data-authored form is useful when tasks are structurally uniform. When individual tasks need different policies, use task-local verifiers.
+This data-authored form is useful when tasks are structurally uniform. When individual tasks need different success
+criteria, use task-local verifiers.
 
 ## Why JSONL?
 
 JSONL keeps large collections of uniform tasks compact, streamable, and easy to generate, shard, filter, or publish as datasets. Each row contains only the values that vary; the instruction, runtime, data model, and verifier remain shared.
 
-Use task directories instead when individual tasks need their own instructions, verifier policies, fixtures, repositories, or other assets. [Hello Verifier Reuse](../hello_verifier_reuse/README.md) demonstrates that directory-authored form.
+Use task directories instead when individual tasks need their own instructions, verifier logic, fixtures, repositories,
+or other assets. [Hello Verifier Reuse](../hello_verifier_reuse/README.md) demonstrates that directory-authored form.
 
 ## Related examples
 
 - [Hello World](../hello_world/README.md) — Create the smallest single-task environment.
-- [Hello Verifier Reuse](../hello_verifier_reuse/README.md) — Reuse verification code while keeping task-specific policy.
+- [Hello Verifier Reuse](../hello_verifier_reuse/README.md) — Reuse verification code while keeping task-specific
+  verifier logic.
 - [Hello MCP Tool](../hello_mcp_tool/README.md) — Give an agent an additional tool over MCP.

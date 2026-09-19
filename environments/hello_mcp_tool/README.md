@@ -33,4 +33,5 @@ The other `hello-*` environments do not need `pyproject.toml` because they intro
 
 - [Hello World](../hello_world/README.md) — Create the smallest single-task environment.
 - [Hello Taskset](../hello_taskset/README.md) — Run a named collection of similar tasks.
-- [Hello Verifier Reuse](../hello_verifier_reuse/README.md) — Reuse verification code while keeping task-specific policy.
+- [Hello Verifier Reuse](../hello_verifier_reuse/README.md) — Reuse verification code while keeping task-specific
+  verifier logic.

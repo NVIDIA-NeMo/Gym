@@ -9,7 +9,7 @@ from runpy import run_path
 from nemo_gym.verifiers.files import text_file_equals
 
 
-custom_verify = run_path(Path(__file__).parents[1] / "tasks/custom_policy/verifier.py")["verify"]
+custom_verify = run_path(Path(__file__).parents[1] / "tasks/custom_verifier/verifier.py")["verify"]
 
 
 @dataclass
@@ -53,14 +53,14 @@ def test_shared_verifier_fails_when_file_is_missing(tmp_path: Path) -> None:
     assert asyncio.run(text_file_equals(attempt, verifier_input)) == 0.0
 
 
-def test_composed_task_policy_passes(tmp_path: Path) -> None:
+def test_custom_verifier_passes(tmp_path: Path) -> None:
     (tmp_path / "shout.txt").write_text("HELLO FROM NEMO GYM!", encoding="utf-8")
     attempt = Attempt(workspace=Workspace(root=tmp_path))
 
     assert asyncio.run(custom_verify(attempt, None)) == 1.0
 
 
-def test_composed_task_policy_rejects_lowercase(tmp_path: Path) -> None:
+def test_custom_verifier_rejects_lowercase(tmp_path: Path) -> None:
     (tmp_path / "shout.txt").write_text("Hello from NeMo Gym!", encoding="utf-8")
     attempt = Attempt(workspace=Workspace(root=tmp_path))
 

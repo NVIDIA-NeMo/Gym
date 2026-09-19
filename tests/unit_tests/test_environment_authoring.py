@@ -78,14 +78,14 @@ def test_materialize_directory_tasks_with_selected_verifiers() -> None:
 
     assert [task.materialized.task_id.task_id for task in tasks] == [
         "shared-verifier",
-        "custom-policy",
+        "custom-verifier",
     ]
     shared, custom = tasks
     assert "/workspace/hello-gym.txt" in shared.materialized.task_input.responses_create_params.input[0].content
     assert shared.verifier.implementation == "nemo_gym.verifiers.files:text_file_equals"
     assert shared.verifier.verifier_input["path"] == "/workspace/hello-gym.txt"
     assert "/workspace/shout.txt" in custom.materialized.task_input.responses_create_params.input[0].content
-    assert custom.verifier.implementation == "tasks/custom_policy/verifier.py:verify"
+    assert custom.verifier.implementation == "tasks/custom_verifier/verifier.py:verify"
 
 
 def test_file_taskset_validates_task_data_model(tmp_path: Path) -> None:
