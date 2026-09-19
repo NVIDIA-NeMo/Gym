@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ from nemo_gym.orchestration.jobs import (
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
+    installed_gym_commit,
     local_index_dir,
     new_gym_job_id,
 )
@@ -271,3 +274,73 @@ def test_submission_record_executor_is_not_closed_over_todays_executors():
     )
     assert record.executor == "kubernetes"
     assert SubmissionRecord.load(json.loads(record.dumps())) == record
+
+
+class _Distribution:
+    def __init__(self, direct_url: dict | None) -> None:
+        self.direct_url = direct_url
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return None if self.direct_url is None else json.dumps(self.direct_url)
+
+
+def _install(monkeypatch: MonkeyPatch, direct_url: dict | None) -> None:
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", lambda name: _Distribution(direct_url))
+
+
+def test_installed_gym_commit_reads_a_git_install(monkeypatch: MonkeyPatch):
+    """`pip install git+...@<sha>` records the sha in PEP 610 direct_url.json."""
+    _install(
+        monkeypatch,
+        {
+            "url": "https://github.com/NVIDIA-NeMo/gym.git",
+            "vcs_info": {"vcs": "git", "commit_id": "c" * 40, "requested_revision": "main"},
+        },
+    )
+    assert installed_gym_commit() == "c" * 40
+
+
+def test_installed_gym_commit_asks_an_editable_checkout(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """`pip install -e .` records only the checkout's path, so the checkout is asked."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "f").write_text("x")
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "-C", str(tmp_path), "add", "f"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "seed"], check=True, env={**os.environ, **env})
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+
+    assert installed_gym_commit() == head
+
+
+def test_installed_gym_commit_is_none_for_an_index_wheel(monkeypatch: MonkeyPatch):
+    """A wheel from an index has no direct_url.json; None, not a guess."""
+    _install(monkeypatch, None)
+    assert installed_gym_commit() is None
+
+
+def test_installed_gym_commit_is_none_for_an_editable_install_outside_git(tmp_path: Path, monkeypatch: MonkeyPatch):
+    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    assert installed_gym_commit() is None
+
+
+def test_installed_gym_commit_is_none_when_the_package_is_not_installed(monkeypatch: MonkeyPatch):
+    def missing(name: str):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", missing)
+    assert installed_gym_commit() is None
+
+
+def test_a_record_written_before_gym_commit_still_loads():
+    """Added with a default, as the module docstring requires of a same-version change."""
+    old = json.loads(_record().dumps())
+    del old["gym_commit"]
+
+    record = SubmissionRecord.load(old)
+
+    assert record.gym_commit is None
+    assert record.schema_version == SCHEMA_VERSION

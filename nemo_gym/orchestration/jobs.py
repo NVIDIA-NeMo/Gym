@@ -41,11 +41,15 @@ then be read as if it meant the new thing. Anything of that kind needs a
 `SCHEMA_VERSION` bump and an explicit migration, not a silent reinterpretation.
 """
 
+import json
 import os
 import secrets
+import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel
 
@@ -62,6 +66,35 @@ MANIFEST_NAME = "gym-job.json"
 # disk, which may have changed since, or the overrides, which are meaningless
 # without the file they were applied to.
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
+
+
+def installed_gym_commit() -> str | None:
+    """The git commit of the nemo-gym this process runs, or None when the install does not say.
+
+    A package version repeats across every commit between two bumps, so a reader
+    that must reinstall the exact Gym that wrote a record -- to recompose its
+    config and compare -- needs the commit, not the version. A git install
+    records it in the distribution's PEP 610 `direct_url.json`; an editable
+    install points at a checkout, which is asked directly. A wheel from an index
+    carries neither, and None says so rather than guessing.
+    """
+    try:
+        raw = distribution("nemo-gym").read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
+    if raw is None:
+        return None
+    direct_url = json.loads(raw)
+    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
+    if commit:
+        return str(commit)
+    url = direct_url.get("url", "")
+    if (direct_url.get("dir_info") or {}).get("editable") and url.startswith("file://"):
+        checkout = Path(unquote(urlparse(url).path))
+        result = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    return None
 
 
 class BenchmarkJob(BaseModel):
@@ -93,10 +126,16 @@ class SubmissionRecord(BaseModel):
     workload manager's client directly, rather than reaching it over SSH -- not
     that the host is unknown. Executors with no remote-submission concept at all
     leave it None.
+
+    `gym_commit` is the commit of the Gym that wrote the record, when its install
+    records one (see `installed_gym_commit`). `gym_version` alone repeats across
+    every commit between two version bumps, so a reader that reinstalls Gym to
+    recompose this submission's config cannot pin it from the version.
     """
 
     gym_job_id: str
     gym_version: str
+    gym_commit: str | None = None
     submitted_at: str
     run_dir: str
     cluster: str
