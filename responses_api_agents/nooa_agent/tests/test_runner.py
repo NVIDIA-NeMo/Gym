@@ -43,10 +43,16 @@ class FakeAgent:
         FakeAgent.instances += 1
         self.llm = llm
         self.label = label
+        self.event_manager = FakeEventManager()
 
     async def analyze(self, text: str, customer_id: str) -> str:
         weather = await self.get_weather(city=customer_id)
         return f"{text}: {weather['weather']}"
+
+
+class FakeEventManager:
+    def on(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
 
 
 class Row(BaseModel):
@@ -132,11 +138,10 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
         )
     )
 
+    assert result.episode.response.output == []
     assert result.return_value == "Check delivery: cold"
-    assert result.agent.label == "configured"
-    assert result.agent.llm.model == "gym-policy"
-    assert "get_weather" in vars(type(result.agent))
-    assert "gym_tools" not in vars(result.agent)
+    assert result.episode.observations.source == "nooa"
+    assert result.episode.observations.gaps == []
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
 
@@ -163,5 +168,5 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     )
 
     assert FakeAgent.instances == 2
-    assert first.agent is not second.agent
+    assert first.episode is not second.episode
     assert first.resource_cookies is not second.resource_cookies
