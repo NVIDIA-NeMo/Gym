@@ -15,7 +15,7 @@ from typing import ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -44,6 +44,7 @@ from resources_servers.terminal_bench_4.models import (
     SessionRequest,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
+from responses_api_agents.hermes_sandboxed_agent.harness import HermesConfig, HermesHarness
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
 
 
@@ -57,11 +58,23 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
     environment: EnvironmentConfig
     model_server: ModelServerRef
-    harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
+    harness: MiniSWEConfig | HermesConfig = Field(default_factory=MiniSWEConfig)
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     max_concurrent_sessions: int = Field(default=8, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     task_download_dir: Path | None = None
+
+    @field_validator("harness", mode="before")
+    @classmethod
+    def _dispatch_harness(cls, value):
+        # Dispatch strictly on `name`: absent selects mini-SWE (preserving current
+        # configs unchanged), "hermes" selects Hermes, anything else is rejected
+        # rather than silently defaulting to Hermes for every named harness.
+        if not isinstance(value, Mapping) or "name" not in value:
+            return value
+        if value["name"] == "hermes":
+            return HermesConfig.model_validate(value)
+        raise ValueError(f"Unknown harness name: {value['name']!r}. Supported harnesses: 'hermes'.")
 
 
 class TerminalBench4RunRequest(BaseRunRequest):
@@ -268,7 +281,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
                     global_config = getattr(self.server_client, "global_config_dict", None)
-                    harness = MiniSWEHarness(
+                    harness_class = HermesHarness if isinstance(self.config.harness, HermesConfig) else MiniSWEHarness
+                    harness = harness_class(
                         sandbox=session.environment.main,
                         context=context,
                         config=self.config.harness,
