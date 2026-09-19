@@ -1,0 +1,23 @@
+# NOTE: duplicates the agent block in resources_servers/gdp_pdf/configs/gdp_pdf.yaml.
+# Inheriting instead breaks benchmarks/gdp_pdf, which chains _inherit_from off that instance.
+gdp_pdf_agent:
+  responses_api_agents:
+    gdp_pdf_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      documents_base_dir: resources_servers/gdp_pdf/data
+      dpi: 150
+      min_dpi: 72
+      max_images: null  # compositing only kicks in reactively, on an actual server-reported image-count limit
+      max_pages: null
+      include_text: true
+      include_images: true
+      image_format: png  # lossless; set jpeg to cut the base64 payload ~28% at the cost of artifacts
+      jpeg_quality: 90
+      strip_images_from_output: true

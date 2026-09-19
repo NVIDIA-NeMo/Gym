@@ -14,9 +14,7 @@
 # limitations under the License.
 """RAGTruth resources server — case-level hallucination detection.
 
-Ported from the nemo-evaluator BYOB benchmarks ``ragtruth_qa`` /
-``ragtruth_summary`` / ``ragtruth_data2txt``. Each task gives the model a
-``(reference context, candidate_response)`` pair (already formatted into the
+Each task gives the model a ``(reference context, candidate_response)`` pair (already formatted into the
 prompt by ``prepare_ragtruth.py``) and asks it to emit a
 ``{"hallucination list": [...]}`` JSON object. The per-sample reward is ``1.0``
 when the model's binary "any hallucination?" verdict matches the gold label
@@ -27,14 +25,13 @@ prompt template applied at prep time; the scoring logic here is identical
 across them. ``task_type`` rides on each row so ``compute_metrics`` can break
 results down per slice.
 
-``compute_metrics`` reports both the BYOB headline metric (mean per-sample
+``compute_metrics`` reports both the headline metric (mean per-sample
 accuracy, also the reward) and the corpus-level precision / recall / F1 that
 the original RAGTruth paper reports — reconstructed from the per-row
 ``is_halu`` (gold) and ``pred_halu`` (predicted) flags.
 
 Build the dataset with ``prepare_ragtruth.py`` (fetches the public
-ParticleMedia/RAGTruth GitHub dataset). Upstream:
-``benchmarks/ragtruth/ragtruth/baseline/{dataset,prepare_dataset,predict_and_evaluate}.py``.
+ParticleMedia/RAGTruth GitHub dataset).
 """
 
 from __future__ import annotations
@@ -70,7 +67,7 @@ _FENCE_INNER_RE = re.compile(
 )
 
 
-# ── Response parsing (adapted from byob_ragtruth.py) ──────────────────────
+# ── Response parsing ──────────────────────────────────────────────────────
 
 
 def _make_think_res(tag: str) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
@@ -173,7 +170,7 @@ class RagtruthRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # Gold "does this case contain a hallucination?" label, precomputed at prep
-    # time as ``bool(labels)`` from the upstream RAGTruth annotations.
+    # time as ``bool(labels)`` from the RAGTruth span annotations.
     is_halu: bool = False
     task_type: str = ""
 

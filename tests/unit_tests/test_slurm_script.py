@@ -13,16 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+)
 from nemo_gym.orchestration.executors.slurm_script import (
+    _RAY_SERVE_GATEWAY_SOURCE_PATH,
+    _build_service_command,
     _build_vllm_command,
+    _build_vllm_multi_instance_multi_node_command,
     _build_vllm_ray_command,
+    _build_vllm_ray_serve_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -275,6 +285,13 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
 
 
+def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_service):
+    # Default 30s node-join wait is too short for slow image pulls; must be exported before use.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=" in cmd
+    assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - multiple instances (data parallel) span nodes
 # ---------------------------------------------------------------------------
@@ -311,6 +328,191 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
 
 
 # ---------------------------------------------------------------------------
+# _build_vllm_ray_serve_command / Ray Serve gateway selection
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert "ray_serve_gateway.py" in cmd
+    assert "base64 -d" in cmd
+    assert "git clone" not in cmd  # no gym_install needed - the gateway's source is embedded
+    assert "ray symmetric-run" not in cmd
+    assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
+
+
+def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service):
+    # The base64 blob must decode back to the real, current ray_serve_gateway.py source.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    match = re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > ray_serve_gateway\.py", cmd)
+    assert match, cmd
+    decoded = base64.b64decode(match.group(1)).decode()
+    assert decoded == _RAY_SERVE_GATEWAY_SOURCE_PATH.read_text()
+
+
+def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):
+    # Regression test: the single-node path invokes python3 directly, so ray isn't guaranteed
+    # importable there unlike the multi-node path (gated via `ray symmetric-run`/`ray start`).
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default]\\"' in cmd
+    assert cmd.index("command -v ray") < cmd.index("python3 ray_serve_gateway.py")
+
+
+def test_build_vllm_ray_serve_command_single_node_ray_guard_does_not_bypass_earlier_failure(vllm_service, tmp_path):
+    # Regression test: without parens around the ray guard, && and || precedence would let an
+    # earlier step's failure be masked by the ray-install fallback, launching the gateway anyway.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+
+    inner = cmd.replace("pip install --quiet aiohttp", "false").replace(
+        "python3 ray_serve_gateway.py", "echo GATEWAY_LAUNCHED"
+    )
+    script = 'command() { [ "$2" = ray ] && return 1 || builtin command "$@"; }\nexport -f command\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
+
+    assert result.returncode != 0
+    assert "GATEWAY_LAUNCHED" not in result.stdout
+
+
+def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting(tmp_path):
+    # Regression test: shlex.quote() wraps a model name with a space in literal single quotes,
+    # which would terminate the outer bash -lc '...' wrapper early if not double-quote-escaped.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
+
+    inner = cmd.replace("pip install --quiet aiohttp", "true").replace("python3 ray_serve_gateway.py", "fake_gateway")
+    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert "--model" in args, f"corrupted command, got args: {args}"
+    assert args[args.index("--model") + 1] == "org/my model"
+
+
+def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert "ray_serve_gateway.py" in cmd
+    assert "base64 -d" in cmd
+
+
+def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_deadline(vllm_service):
+    # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops; must be
+    # exported before `ray start`/`ray symmetric-run` runs so every node's raylet has it from birth.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=" in cmd
+    assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
+
+
+def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
+    # Regression test: the whole write-then-install-then-launch chain must reach `ray symmetric-run`
+    # as one opaque token, not get split by the outer bash -lc live-parsing its own && operators.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+
+    script = cmd.replace(
+        "ray symmetric-run",
+        'fake_symmetric_run() { for a in "$@"; do echo "ARG:$a"; done; }; fake_symmetric_run',
+    ).replace("if ray symmetric-run --help", "if true")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert args[-3:-1] == ["bash", "-c"]
+    chain = args[-1]
+    assert "base64 -d" in chain
+    assert "&&" in chain
+    assert "python3 ray_serve_gateway.py" in chain
+
+
+def test_build_vllm_ray_serve_command_passes_gpus_per_node():
+    cmd = _build_vllm_ray_serve_command(
+        VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model"),
+        total_nodes=2,
+        gpus_per_node_values=[8],
+    )
+    assert "--gpus-per-node 8" in cmd
+
+
+def test_build_vllm_ray_serve_command_omits_gpus_per_node_when_unknown(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
+    assert "--gpus-per-node" not in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_flags():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        port=9000,
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+        trust_remote_code=True,
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gpus_per_node_values=[8])
+    assert "--model org/model" in cmd
+    assert "--port 9000" in cmd
+    assert "--tensor-parallel-size 8" in cmd
+    assert "--pipeline-parallel-size 2" in cmd
+    assert "--number-of-instances 2" in cmd
+    assert "--trust-remote-code" in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_served_model_name_and_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        served_model_name="my-model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
+    assert "--served-model-name my-model" in cmd
+    assert "--extra-args '--max-model-len 8192'" in cmd
+
+
+def test_build_service_command_uses_ray_serve_when_opted_in(vllm_service):
+    vllm_service.use_ray_serve = True
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_default_ignores_ray_serve_single_node(vllm_service):
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
+    # TP*PP=16 > 8 GPUs/node forces Ray Serve on automatically, with no use_ray_serve set.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+    )
+    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8])
+    assert "ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_default_multi_instance_multi_node_unchanged():
+    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=4,
+    )
+    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "--headless" in cmd
+
+
+# ---------------------------------------------------------------------------
 # render_gym_cmd
 # ---------------------------------------------------------------------------
 
@@ -333,6 +535,36 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 
 
+def test_driver_policy_model_type_defaults_to_openai_model(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type openai_model" in script
+
+
+def test_driver_policy_model_type_is_configurable(submit_config, bench_dir):
+    # Every certified NEL run of these benchmarks serves the policy as
+    # vllm_model, and lmarena_v3 ships its own vllm_model policy that a second
+    # composed server would collide with.
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type vllm_model" in script
+    assert "--model-type openai_model" not in script
+
+
+def test_driver_policy_model_type_empty_composes_nothing(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = ""
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type" not in script
+
+
 def test_render_driver_entrypoint_no_install_no_prepare():
     out = render_driver_entrypoint(None, None, None)
     assert out == '"${GYM_CMD[@]}"'
@@ -341,7 +573,9 @@ def test_render_driver_entrypoint_no_install_no_prepare():
 def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
-    assert "git checkout main" in out
+    # `git -C "$GYM_SRC/gym" checkout`, not `git checkout`: the clone is
+    # out-of-tree. See test_gym_install_does_not_clone_into_the_job_directory.
+    assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
     assert "uv pip install -e ." in out
@@ -349,6 +583,13 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_installs_git_if_missing():
+    # The driver container (e.g. a minimal python image) may not bundle git.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in out
+    assert out.index("command -v git") < out.index("git clone")
 
 
 def test_render_driver_entrypoint_with_prepare():
@@ -360,9 +601,79 @@ def test_render_driver_entrypoint_with_prepare():
 def test_render_driver_entrypoint_install_and_prepare():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare")
     assert "git clone" in out
-    assert "git checkout v1.0" in out
+    assert "checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
+
+
+def test_worker_command_drops_api_server_count():
+    """vLLM exits on `--api-server-count` in headless mode before loading anything:
+    "no API servers are started in headless mode". The flag is valid on the head
+    node and arrives via the service's own extra_args, so only the worker branch
+    is stripped. A real mmlu-prox run lost all five workers to this.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args="--api-server-count 1 --enable-prefix-caching",
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+    head, worker = block.split("else")
+
+    assert "--api-server-count 1" in head
+    assert "--headless" in worker
+    assert "--api-server-count" not in worker
+    # Stripping must not take the neighbouring flag with it.
+    assert "--enable-prefix-caching" in worker
+
+
+def test_multi_instance_multi_node_command_survives_the_shell():
+    """vLLM's JSON flags are single-quoted, and the DP branches are embedded in a
+    single-quoted `bash -lc '...'`. Unescaped they end the block early and the
+    whole invocation word-splits -- a real mmlu-prox submission died of this with
+    "/usr/bin/env: Argument list too long". Run the rendered block through bash
+    and check the JSON arrives as one argument.
+    """
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        tensor_parallel_size=4,
+        number_of_instances=2,
+        extra_args='--hf-overrides \'{"architectures":["Custom"],"norm_mean":[0.5,0.5]}\'',
+    )
+    block = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+
+    # Replace `vllm serve` with a printf that dumps one argument per line, so the
+    # test observes what the shell actually passed rather than the rendered text.
+    # Double quotes, because this substitution happens AFTER rendering and so is
+    # not itself escaped -- single quotes here would break the block the test is
+    # checking.
+    script = "SLURM_NODEID=0 HEAD_NODE_IP=1.2.3.4 " + block.replace("vllm serve", 'printf "%s\\n"', 2)
+    argv = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    assert '{"architectures":["Custom"],"norm_mean":[0.5,0.5]}' in argv
+
+
+def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():
+    """A prepare argument containing spaces must reach Hydra as ONE word.
+
+    The entrypoint body is embedded in a single-quoted `bash -c '...'`, so an
+    inner single quote ends the outer string instead of nesting. Without
+    escaping, gdpval's real prepare argument word-split and Hydra failed with
+    "no viable alternative at input '[{num_tasks:'". Asserting on the rendered
+    string would not catch that -- only running it through a shell does.
+    """
+    arg = "+multistage.stages=[{num_tasks: 45, waivable: [timeout, transient]}]"
+    out = render_driver_entrypoint(None, None, f"printf '%s\\n' {shlex.quote(arg)}")
+
+    script = out.replace('exec "$@"', ":").replace('"${GYM_CMD[@]}"', "''")
+    printed = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    assert printed == [arg]
 
 
 def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
@@ -494,7 +805,10 @@ def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "+output_jsonl_fpath=artifacts/rollouts.jsonl" in script
+    # Absolute: a relative output path lands wherever the container's cwd
+    # happens to be, and cwd cannot be moved without breaking a benchmark's
+    # cwd-relative prepare_script.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
 
 
 def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench_dir):
@@ -575,6 +889,18 @@ def test_resolve_env_value_with_newline_is_quoted():
     assert "KEY='line1\nline2'" in out
 
 
+def test_resolve_env_runtime_marker_emits_unquoted_shell_reference():
+    out = _resolve_env({"FOO": "runtime:NEL_INVOCATION_ID"})
+    assert "FOO=${NEL_INVOCATION_ID}" in out
+    assert "'" not in out
+
+
+def test_resolve_env_runtime_marker_alongside_literal():
+    out = _resolve_env({"LIT": "val", "RUN": "runtime:NEL_INVOCATION_ID"})
+    assert "LIT=val" in out
+    assert "RUN=${NEL_INVOCATION_ID}" in out
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script — env injection
 # ---------------------------------------------------------------------------
@@ -610,11 +936,11 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"SVC_KEY": "svc_val"},
+                    "env": {"SVC_KEY": "lit:svc_val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "drv_val"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "lit:drv_val"}},
             "job": {"output_path": "/remote/jobs"},
         }
     )
@@ -623,8 +949,8 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     svc_env_idx = script.index("SVC_KEY=svc_val")
     drv_env_idx = script.index("DRV_KEY=drv_val")
-    svc_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=vllm:latest")
-    drv_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=python:3.12")
+    svc_srun_idx = script.index("--container-image=vllm:latest")
+    drv_srun_idx = script.index("--container-image=python:3.12")
     # Service env prefix appears before service srun; driver env prefix appears before driver srun.
     assert svc_env_idx < svc_srun_idx
     assert drv_env_idx < drv_srun_idx
@@ -654,7 +980,7 @@ def test_build_sbatch_script_service_env(bench_dir):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"HF_TOKEN": "hf_test", "LIT": "val"},
+                    "env": {"HF_TOKEN": "lit:hf_test", "LIT": "lit:val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
@@ -677,7 +1003,7 @@ def test_build_sbatch_script_driver_env(bench_dir):
             "driver": {
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
-                "env": {"WANDB_API_KEY": "wb_secret"},  # pragma: allowlist secret
+                "env": {"WANDB_API_KEY": "lit:wb_secret"},  # pragma: allowlist secret
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -806,11 +1132,18 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
     assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
 
 
-def test_build_sbatch_script_no_mounts_by_default(submit_config, bench_dir):
+def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
+    """Services get no mounts unless configured. The driver is the exception and
+    always mounts the job directory, because that is where its artifacts go --
+    see test_driver_can_write_its_artifacts_into_the_job_directory."""
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "--container-mounts" not in script
+
+    service_lines = [line for line in script.splitlines() if "srun" in line and "--output=logs/driver.log" not in line]
+    assert service_lines, "expected at least one service srun line"
+    for line in service_lines:
+        assert "--container-mounts" not in line
 
 
 # ---------------------------------------------------------------------------
@@ -1157,3 +1490,78 @@ def submit_config_with_policy():
             "job": {"output_path": "/remote/jobs"},
         }
     )
+
+
+def test_driver_can_write_its_artifacts_into_the_job_directory():
+    """A run that cannot reach the job directory completes cleanly and produces
+    nothing: `output_jsonl_fpath` is relative, `#SBATCH --chdir` only sets the
+    host-side cwd of the batch script, and a Pyxis container starts in whatever
+    directory its image declares. Both the mount and the workdir are required.
+    """
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "gym:latest",
+                "mounts": ["/host/cache:/cache"],
+                "benchmarks": {"gpqa": {}},
+            },
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"{bench_dir}:{bench_dir}" in driver_line
+    # the caller's own mounts must survive alongside the injected one
+    assert "/host/cache:/cache" in driver_line
+    # The output path is absolute rather than cwd-relative, and cwd is left
+    # alone: a benchmark's prepare_script is resolved against cwd, so moving it
+    # breaks `gym eval prepare` on a file that exists.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
+    assert "--container-workdir" not in script
+
+
+def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"gpqa": {}}},
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line
+
+
+def test_gym_install_does_not_clone_into_the_job_directory():
+    """The driver's cwd is the job directory. A clone there gives Gym a second
+    copy of every built-in asset, and named lookups (`--model-type
+    openai_model`) then abort as ambiguous against the installed copy."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    assert "mktemp -d /tmp/gym-install-" in entrypoint
+    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+
+
+def test_gym_install_runs_from_the_install_root():
+    """A benchmark's prepare_script is relative to cwd, and a runtime image bakes no
+    Gym, so the driver has to run from the clone or `gym eval prepare` cannot find
+    its own script. Safe because the clone is outside the job directory and the
+    driver's output path is absolute."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    # Assert the behaviour, not the line layout: the `cd` is chained onto the
+    # checkout with && rather than standing on its own line.
+    assert 'cd "$GYM_SRC/gym"' in entrypoint
+    assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
+    # The only `cd` is into the clone -- nothing else may move cwd.
+    assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')

@@ -9,7 +9,7 @@ This guide covers everything you need to set up your development environment and
 
 ```bash
 # Clone and set up development environment
-git clone git@github.com:NVIDIA-NeMo/Gym.git
+git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
@@ -20,6 +20,8 @@ uv sync --extra dev
 # Install pre-commit hooks (required for contributors)
 pre-commit install
 ```
+
+Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registered with GitHub, `git clone git@github.com:NVIDIA-NeMo/Gym.git` also works.
 
 ## Development Commands
 
