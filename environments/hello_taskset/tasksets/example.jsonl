@@ -1,0 +1,2 @@
+{"task_id":"hello-taskset-001","task_data":{"expected_path":"/workspace/hello-gym.txt","expected_content":"Hello from NeMo Gym!"}}
+{"task_id":"hello-taskset-002","task_data":{"expected_path":"/workspace/goodbye-gym.txt","expected_content":"Goodbye from NeMo Gym!"}}
