@@ -1725,6 +1725,7 @@ def test_response_field_set_is_pinned() -> None:
         "metadata",
         "model",
         "moderation",
+        "native_finish_reason",
         "object",
         "output",
         "parallel_tool_calls",
