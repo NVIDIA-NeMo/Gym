@@ -31,6 +31,9 @@ MODEL_CALL_CHECKS = {
     "model_call_runaway_generation",
 }
 RUNNER_CHECKS = {"check_execution_error", "record_unreadable"}
+# Unlike the bound-call checks, this one reads the captured calls directly, so it
+# is unobserved only when no canonical call exists -- not when none of them bind.
+NO_CANONICAL_CALL_CHECKS = MODEL_CALL_CHECKS | {"rollout_ended_on_failed_model_call"}
 
 
 def _record(
@@ -333,7 +336,8 @@ def test_each_canonical_model_call_unobserved_state_is_not_unhealthy(tmp_path: P
 
     [digest] = result.rollouts
     assert digest.verdict == "unobserved"
-    assert set(digest.unobserved) == MODEL_CALL_CHECKS
+    expected = MODEL_CALL_CHECKS if state == "missing bindings" else NO_CANONICAL_CALL_CHECKS
+    assert set(digest.unobserved) == expected
     assert not digest.findings
     assert result.summary["run"]["verdicts"] == {"healthy": 0, "unhealthy": 0, "unobserved": 1}
 
@@ -711,7 +715,7 @@ def test_noncanonical_embedded_capture_is_ignored(tmp_path: Path) -> None:
     [digest] = result.rollouts
     assert not digest.capture_observed
     assert digest.model_calls == 0
-    assert set(digest.unobserved) == MODEL_CALL_CHECKS
+    assert set(digest.unobserved) == NO_CANONICAL_CALL_CHECKS
     assert digest.verdict == "unobserved"
 
 
@@ -1136,6 +1140,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "check_execution_error",
         "rollout_duplicate_identity",
         "rollout_missing_agent_turns",
+        "rollout_ended_on_failed_model_call",
         "agent_turn_hollow",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
@@ -1271,3 +1276,109 @@ def test_health_check_config_accepts_csv_and_rejects_unknown_ids(tmp_path: Path)
             upload_rollouts=False,
             health_check_ignored_checks=["not_a_check"],
         )
+
+
+def _unreferenced_failure_record(calls: list[dict]) -> dict:
+    """A rollout whose calls failed: nothing references them, because a failed
+    call comes back with no response id for a producer to reference."""
+    record = _record(0, 0, include_turn=False, include_response_output=False)
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "status": "incomplete", "model_calls": []}
+    ]
+    record["ng_trajectory"]["gaps"] = [{"code": "turns_unavailable"}]
+    return record
+
+
+def test_a_rollout_whose_last_model_call_failed_is_unhealthy(tmp_path: Path) -> None:
+    """The case every bound-call check is blind to.
+
+    A 403 carries no response id, so it is absent from `matched_calls` and
+    `model_call_failed` cannot see it. Measured on a real run: six `403 auth`
+    rows in the capture reported as `0 healthy, 0 unhealthy, 2 unobserved` with
+    reward 0.0 -- indistinguishable from a model that scored zero.
+    """
+    record = _unreferenced_failure_record([])
+    calls = [
+        _call(call_index=index, model_call_id=None, response_id=None, status_code=403, error_category="auth")
+        for index in range(3)
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.verdict == "unhealthy"
+    [finding] = [item for item in digest.findings if item.check == "rollout_ended_on_failed_model_call"]
+    assert finding.detail["status"] == 403
+    assert finding.detail["error_category"] == "auth"
+    assert finding.detail["observed_calls"] == 3
+    assert finding.detail["successful_calls"] == 0
+    assert "model_call_failed" in digest.unobserved
+
+
+def test_a_failure_the_client_retried_successfully_stays_healthy(tmp_path: Path) -> None:
+    """Positive control for the previous test.
+
+    The capture records every HTTP attempt, so a transient 429 the SDK retried
+    appears as its own row. Judging any failed call would turn ordinary retries
+    unhealthy; only the rollout ENDING on a failure is the signal.
+    """
+    record = _unreferenced_failure_record([])
+    calls = [
+        _call(call_index=0, model_call_id=None, response_id=None, status_code=429, error_category="rate_limit"),
+        _call(call_index=1, model_call_id=None, response_id=None),
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert not [item for item in digest.findings if item.check == "rollout_ended_on_failed_model_call"]
+
+
+def test_the_check_is_unobserved_when_no_calls_were_captured(tmp_path: Path) -> None:
+    record = _unreferenced_failure_record([])
+    rollout_path = _write_fixture(tmp_path, [(record, [])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in digest.unobserved
+
+
+def test_a_producer_reporting_no_turns_is_missing_turns_not_unobserved() -> None:
+    """`rollout_missing_agent_turns` exists to catch a rollout with no turns,
+    and was skipped in exactly that case: `turns_unavailable` was appended
+    whenever the turn list was empty, and the AGENT_TURNS gate then dropped the
+    check."""
+    result = {
+        "ng_trajectory": {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "invocations": [{"kind": "agent_invocation", "invocation_id": "root", "status": "incomplete"}],
+            "turns": [],
+        }
+    }
+    trajectory = rollout_collection._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, result)
+
+    assert "turns_unavailable" not in {gap.code for gap in trajectory.gaps}
+
+
+def test_an_agent_that_publishes_no_trajectory_still_reports_turns_unavailable() -> None:
+    """Regression guard: 45 of 47 agents publish no `TrajectoryRecord`. Their
+    turns are genuinely unavailable, not empty, and must stay unobserved rather
+    than turn the whole fleet unhealthy."""
+    trajectory = rollout_collection._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, {})
+
+    assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
+
+
+def test_the_ended_on_error_statistic_and_the_finding_agree(tmp_path: Path) -> None:
+    """The digest already reported `ended_on_error` for this rollout while the
+    verdict stayed `unobserved` -- the gate knew and said nothing. Both now read
+    one predicate, so they cannot drift apart again."""
+    record = _unreferenced_failure_record([])
+    calls = [_call(call_index=0, model_call_id=None, response_id=None, status_code=500)]
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.ended_on_error is True
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
