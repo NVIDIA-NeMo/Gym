@@ -1,0 +1,42 @@
+environment_routing_mode: taskset
+tasksets:
+  example_single_tool_call_native:
+    task_input_contract: nemo_gym.single_agent.v1
+environment_server_routes:
+  example_single_tool_call_native: example_single_tool_call_native_environment_server
+
+example_single_tool_call_native:
+  resources_servers:
+    example_single_tool_call:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Native single-agent tool calling
+
+example_single_tool_call_native_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: native_example
+          type: example
+          jsonl_fpath: resources_servers/example_single_tool_call/data/native_example.jsonl
+
+example_single_tool_call_native_environment_server:
+  environment_servers:
+    single_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: example_single_tool_call_native
+      agent_server:
+        type: responses_api_agents
+        name: example_single_tool_call_native_simple_agent
+      task_input_contract: nemo_gym.single_agent.v1
+      resources_tool_transports:
+        - direct_http
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
