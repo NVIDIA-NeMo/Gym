@@ -1,90 +1,48 @@
-# ASB Modal Campaign Handoff
+# ASB Modal Campaign — status
 
-This is a defensive, controlled evaluation of four NVIDIA baseline models using
-the public [Agent Security Bench (ASB)](https://github.com/agiresearch/ASB)
-runner. The user explicitly authorized the work. Do not contact ASB authors,
-send Slack, open a PR, publish results, or modify/stop/resize shared serving
-deployments.
+**Superseded.** The adapter described here is built. See:
 
-## Honest current state
+- [`benchmarks/asb/README.md`](benchmarks/asb/README.md) — layout and usage
+- [`benchmarks/asb/METRICS.md`](benchmarks/asb/METRICS.md) — denominators, metrics, deviations
 
-**No ASB score rows or generated ASB trajectories exist yet.** The prior work
-completed input and runtime preflight only. Do not call this branch or any
-receipt a benchmark result.
+## Correction to the earlier handoff
 
-The required target models are:
+The previous version of this file stated that the complete expansion is **2,040 selectors
+per attack condition** and warned against the runner's `task_num=1` default. **Both are
+wrong, and following them would have produced numbers comparable to no published ASB
+result** — at five times the cost.
 
-1. `moonshotai/Kimi-K3`
-2. `Qwen/Qwen3.5-122B-A10B-FP8`
-3. `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`
-4. `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`
+`main_attacker.py` defaults `--task_num` to 1, and `scripts/agent_attack.py` — the driver
+behind the DPI, OPI, MP and mixed tables — never overrides it. Each published condition is
+therefore `10 agents x 1 task x 40 agent-matched attacker tools = 400 rows`.
+`config/POT.yml` is the only config that sets it explicitly (`task_num: 2`), over a
+5-agent task file: `5 x 2 x 40 = 400` as well.
 
-Fresh `/v1/models` receipts were obtained for all four exact model IDs on
-2026-09-19/20 CDT. Kimi, Qwen, and Ultra authenticate using the local,
-untracked workspace `.env` variable `MODAL_PROXY_TOKEN`. Super VL has a
-separate service authentication boundary; a stopped, one-shot Modal FDR probe
-mounted `nemotron-super-vl-service` and confirmed its model receipt. No secret,
-endpoint URL, or credential value is committed here.
+Confirmed three independent ways:
 
-## Preserved source provenance
+1. Every entry in both published defense tables is a multiple of `0.25% = 1/400`. The main
+   table's DPI/OPI/MP columns are multiples of `0.05% = 1/2000` (five attack types x 400).
+   Mixed resolves only on a denominator divisible by three — Gemma2-9B's 92.17% is
+   `1106/1200` — matching the three uncommented attack types in `config/DPI.yml`.
+2. Upstream's shipped Chroma memory stores hold ~400 documents each, one per row of the
+   DPI run that wrote them.
+3. The expansion lands on exactly 400 for all 27 conditions, PoT included.
 
-- Upstream source: `https://github.com/agiresearch/ASB`
-- Pinned commit: `1f561dccf92d55302368fa67679b4ba9d9c8fdc4`
-- Core JSONL input hashes at that commit were inspected. Normal task inputs:
-  10 agent definitions / 51 tasks. Attack tools: 400 total, 200 aggressive and
-  200 non-aggressive. The complete normal task-by-matching-tool expansion is
-  **2,040 selectors per attack condition**.
-- `data/agent_task_pot_all.jsonl` is malformed in the pinned Git object: it is
-  GitHub rate-limit HTML rather than JSONL. It is not referenced by the public
-  runner/configs. Keep it separately labeled as an upstream-invalid auxiliary
-  artifact; do not fabricate a selector matrix from it.
+The 2,040 figure is the full 51-task cross product, which no published run used. It
+remains reachable via `--task-num` and is not the public benchmark.
 
-## What must be built before launch
+## Still true from the earlier handoff
 
-ASB is an older AIOS orchestration stack, not an existing NeMo Gym environment.
-Its upstream `vLLM` path attempts to load local weights and the convenience
-scripts run only one task per agent by default. Do **not** use that default or
-rename AgentDyn evidence as ASB.
+- Upstream pinned at `1f561dccf92d55302368fa67679b4ba9d9c8fdc4`; never vendored.
+- `data/agent_task_pot_all.jsonl` is GitHub rate-limit HTML rather than JSONL. No config
+  references it. `prepare.py` asserts it is still HTML so an upstream fix surfaces as a
+  test failure instead of silently changing the benchmark.
+- All four target endpoints authenticate as documented; Super VL uses a separate token.
+- Provider and infrastructure failures stay in sidecars, outside quality denominators.
 
-Implement a NeMo Gym external-benchmark agent adapter that:
+## Not done
 
-1. Runs the pinned ASB task/tool/action semantics with an OpenAI-compatible
-   remote-model transport.
-2. Materializes all selected public tasks and conditions before collection,
-   rather than using `task_num=1` or a test selector.
-3. Records source revision and input hashes; endpoint/model receipt; sampling
-   and seed; task, agent, normal-tool, attack-tool, attack type, aggressiveness,
-   defense, and retrieval provenance; actions/messages; utility, attack success,
-   retries, and classified failures.
-4. Keeps provider and infrastructure failures in explicit sidecars, outside
-   model-quality denominators. Do not silently retry an invalid provider row
-   into a score.
-5. Generates matched clean and poisoned histories for memory detector metrics.
-   Legacy retrieval-match output is a compatibility diagnostic, not FPR/FNR.
-
-The target treatment set is the full public supported matrix: clean/control,
-direct-prompt injection, observation-prompt injection, memory poisoning,
-mixed attacks, PoT backdoor/control, aggressive and non-aggressive attack tools,
-and their public defenses. Preserve the public attack/defense names; do not
-collapse methods into generic prompt injection.
-
-## FDR constraints
-
-Every new Modal resource and run must be explicit `FDR` (`modal ... --env=FDR`
-or process-scoped `MODAL_ENVIRONMENT=FDR`). Existing shared model deployments
-are inference-only dependencies. Do not stop, resize, redeploy, or otherwise
-alter them.
-
-`scripts/asb_super_receipt.py` is a bounded receipt helper. It requires
-`ASB_SUPER_BASE_URL` at runtime and mounts the existing FDR
-`nemotron-super-vl-service` secret. It returns only receipt status/model count
-and is intentionally unsuitable for benchmarking. It was executed successfully
-once in FDR before this handoff, then stopped.
-
-## Completion bar
-
-Do not declare completion until all planned rows for all four models reconcile.
-Deliver a private internal report and BLADE-compatible package showing per-model
-coverage/denominators, clean utility, ASR/security, defense treatment results,
-actual clean-vs-poison detector metrics, failure accounting, source/model/runtime
-provenance, and every incomplete condition.
+- **Hugging Face dataset push.** `python -m benchmarks.asb.prepare push` is implemented and
+  tested but needs an `HF_TOKEN`; none is present on this machine. Until it runs, the
+  pinned rows exist only locally under `resources_servers/asb/data/` (gitignored), with
+  their content hash recorded in the committed `manifest.json`.
