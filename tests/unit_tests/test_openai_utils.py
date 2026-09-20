@@ -102,6 +102,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    PermanentEndpointError,
     TokenIDLogProbMixin,
     accumulate_response_usage,
     training_variant_of,
@@ -166,9 +167,8 @@ class TestOpenAIUtils:
         assert payload == original
         assert sleep.await_args_list == [call(0.5), call(0.5)]
 
-    @pytest.mark.parametrize("status", [400, 401, 403])
-    async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch, status):
-        response = SimpleNamespace(status=status)
+    async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch):
+        response = SimpleNamespace(status=400)
         request = AsyncMock(return_value=response)
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
@@ -208,6 +208,66 @@ class TestOpenAIUtils:
             await client._request_with_retry()
         assert request.await_count == attempts
         assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
+
+    @pytest.mark.parametrize(
+        "status,body",
+        [
+            (429, b'{"error":{"code":"budget_exceeded"}}'),
+            (429, b'{"error":{"type":"insufficient_quota"}}'),
+            (401, b'{"error":"unauthorized"}'),
+            (403, b'{"error":"forbidden"}'),
+        ],
+    )
+    async def test_permanent_quota_and_auth_errors_fail_fast(self, monkeypatch, status, body):
+        response = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError, match="HTTP " + str(status)):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+        with pytest.raises(PermanentEndpointError):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        request.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    async def test_transient_429_still_retries(self, monkeypatch):
+        failure = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
+        )
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        result = await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert result is success
+        assert request.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_request_skips_the_wire_after_permanent_trip(self, monkeypatch):
+        response = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b"budget_exceeded")),
+        )
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+
+        request.assert_awaited_once()
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
