@@ -22,6 +22,7 @@ import pytest
 from nooa import Agent
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
 
@@ -135,10 +136,14 @@ async def test_embedded_runner_invokes_adapter_and_attaches_resource_methods() -
         )
     )
 
-    assert result.episode.response.output == []
+    assert [item.type for item in result.episode.response.output] == ["function_call", "function_call_output"]
     assert result.return_value == "Check delivery: cold"
     assert result.episode.observations.source == "nooa"
     assert result.episode.observations.gaps == []
+    invocation = next(record for record in result.episode.observations.records if isinstance(record, AgentInvocation))
+    tool = next(record for record in result.episode.observations.records if isinstance(record, ToolCallObservation))
+    assert invocation.conversation[0].content == "Check delivery|Paris"
+    assert tool.tool_name == "get_weather"
     assert adapter_requests == [request]
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
