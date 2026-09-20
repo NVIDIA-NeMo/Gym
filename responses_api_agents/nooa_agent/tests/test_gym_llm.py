@@ -192,6 +192,24 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
 
 
 @pytest.mark.asyncio
+async def test_replays_nooa_history_without_injecting_prior_response_metadata() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    llm, client, _ = make_llm(model_response(output))
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+
+    await llm.acall([{"role": "assistant", "content": "Cold"}])
+
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    assert request["input"] == [{"type": "message", "role": "assistant", "content": "Cold"}]
+
+
+@pytest.mark.asyncio
 async def test_preserves_function_call_token_metadata() -> None:
     output = NeMoGymResponseFunctionToolCallForTraining(
         id="fc-1",

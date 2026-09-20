@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -70,57 +69,6 @@ class RolloutLLMState:
             for call in self.calls
             if call.response is not None
         ]
-
-    def restore_prior_outputs(self, items: list[dict[str, Any]]) -> None:
-        """Restore native metadata only when history identifies one prior output."""
-
-        prior = [
-            item.model_dump(mode="json", exclude_none=True)
-            for call in self.calls
-            if call.response is not None
-            for item in call.response.output
-        ]
-        text_counts = Counter(_assistant_text(item) for item in items if _assistant_text(item) is not None)
-        ambiguous = False
-        for index, item in enumerate(items):
-            identity = item.get("call_id") or item.get("id")
-            if identity is not None:
-                candidates = [
-                    raw
-                    for raw in prior
-                    if (raw.get("call_id") or raw.get("id")) == identity and raw.get("type") == item.get("type")
-                ]
-            elif (text := _assistant_text(item)) is not None:
-                candidates = [raw for raw in prior if _assistant_text(raw) == text]
-                if candidates and text_counts[text] != 1:
-                    ambiguous = True
-                    continue
-            else:
-                continue
-            if len(candidates) == 1:
-                items[index] = candidates[0]
-            elif len(candidates) > 1 and item not in candidates:
-                ambiguous = True
-        if ambiguous:
-            self.gaps.append(
-                ObservationGap(
-                    code="prior_output_metadata_ambiguous",
-                    detail="History does not uniquely identify a prior model output; training metadata was not guessed.",
-                )
-            )
-
-
-def _assistant_text(item: dict[str, Any]) -> str | None:
-    if item.get("role") != "assistant":
-        return None
-    content = item.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list) and all(
-        isinstance(part, dict) and part.get("type") in {"text", "output_text"} for part in content
-    ):
-        return "\n".join(part.get("text", "") for part in content)
-    return None
 
 
 def _dump(value: Any) -> Any:
@@ -248,7 +196,6 @@ class GymResponsesLLM(UnifiedLLM):
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
-        self._state.restore_prior_outputs(input_items)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,
