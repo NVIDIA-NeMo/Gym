@@ -17,6 +17,7 @@ import asyncio
 import json
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -29,6 +30,7 @@ from pydantic import BaseModel
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
