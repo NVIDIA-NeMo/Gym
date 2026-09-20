@@ -91,6 +91,20 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     return NOOAInvocationConfig.model_validate(values)
 
 
+def agent_config(**overrides: Any) -> NOOAAgentConfig:
+    values = {
+        "name": "nooa",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "entrypoint": "app.py",
+        "resources_server": {"type": "resources_servers", "name": "resources"},
+        "model_server": {"type": "responses_api_models", "name": "policy"},
+        "nooa": invocation_config().model_dump(),
+    }
+    values.update(overrides)
+    return NOOAAgentConfig.model_validate(values)
+
+
 def test_rejects_agent_class_path_with_multiple_colons() -> None:
     with pytest.raises(ValidationError, match="agent_class must use the format"):
         invocation_config(agent_class="module.path:ClassName:Extra")
@@ -98,22 +112,18 @@ def test_rejects_agent_class_path_with_multiple_colons() -> None:
 
 def test_agent_config_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        NOOAAgentConfig.model_validate(
-            {
-                "name": "nooa",
-                "host": "127.0.0.1",
-                "port": 9000,
-                "entrypoint": "app.py",
-                "resources_server": {"type": "resources_servers", "name": "resources"},
-                "model_server": {"type": "responses_api_models", "name": "policy"},
-                "nooa": invocation_config().model_dump(),
-                "max_step": 20,
-            }
-        )
+        agent_config(max_step=20)
 
     error = exc_info.value.errors()[0]
     assert error["type"] == "extra_forbidden"
     assert error["loc"] == ("max_step",)
+
+
+def test_agent_config_names_policy_call_budget_explicitly() -> None:
+    assert agent_config(max_policy_calls=6).max_policy_calls == 6
+
+    with pytest.raises(ValidationError, match="max_steps"):
+        agent_config(max_steps=6)
 
 
 def test_materialize_arguments_from_complete_run_row() -> None:
