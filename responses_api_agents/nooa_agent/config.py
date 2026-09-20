@@ -87,8 +87,6 @@ class NOOAInvocationConfig(BaseModel):
         invalid = sorted(name for name in self.arguments if not name.isidentifier() or name.startswith("_"))
         if invalid:
             raise ValueError(f"argument mapping names must be public Python identifiers: {invalid}")
-        if "self" in self.arguments:
-            raise ValueError("arguments.self is reserved; Python supplies the agent instance")
         if "llm" in self.init_kwargs:
             raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
         return self
@@ -135,6 +133,7 @@ def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], Call
     except TypeError as error:
         raise ValueError(f"init_kwargs do not match {config.agent_class}: {error}") from error
 
+    descriptor = inspect.getattr_static(agent_class, config.entrypoint, None)
     entrypoint = getattr(agent_class, config.entrypoint, None)
     if entrypoint is None or not callable(entrypoint):
         raise ValueError(f"{config.agent_class} has no callable entrypoint {config.entrypoint!r}")
@@ -142,13 +141,26 @@ def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], Call
         raise ValueError(f"entrypoint {config.entrypoint!r} must be async")
 
     signature = inspect.signature(entrypoint)
+    signature_parameters = dict(signature.parameters)
+
+    if inspect.isfunction(descriptor):
+        receiver_name = next(iter(signature_parameters), None)
+        if receiver_name is None:
+            raise ValueError(f"instance entrypoint {config.entrypoint!r} must declare a receiver parameter")
+        if receiver_name in config.arguments:
+            raise ValueError(
+                f"arguments must not map instance receiver parameter {receiver_name!r}; "
+                "Python supplies the agent instance"
+            )
+        signature_parameters.pop(receiver_name)
+
     parameters = {
         name: parameter
-        for name, parameter in signature.parameters.items()
-        if name != "self" and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for name, parameter in signature_parameters.items()
+        if parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
     }
     accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature_parameters.values()
     )
 
     unknown = set(config.arguments) - set(parameters)

@@ -59,6 +59,17 @@ class SyncAgent(Agent):
         return text
 
 
+class UnconventionalReceiverAgent(Agent):
+    async def analyze(this, text: str, **kwargs: Any) -> str:
+        return text
+
+
+class StaticEntrypointAgent(Agent):
+    @staticmethod
+    async def analyze(text: str) -> str:
+        return text
+
+
 class InputItem(BaseModel):
     role: str
     content: str
@@ -262,16 +273,48 @@ def test_rejects_static_llm_override() -> None:
         invocation_config(init_kwargs={"llm": "provider-model"})
 
 
-def test_rejects_reserved_self_argument_mapping() -> None:
-    with pytest.raises(ValidationError, match=r"arguments\.self is reserved"):
-        invocation_config(
-            arguments={
-                "self": {
-                    "source": "responses_create_params.input",
-                    "transform": "latest_user_text",
-                }
+def test_validate_invocation_recognizes_instance_receiver_by_position() -> None:
+    config = invocation_config(
+        agent_class=f"{__name__}:UnconventionalReceiverAgent",
+        arguments={
+            "text": {
+                "source": "responses_create_params.input",
+                "transform": "latest_user_text",
             }
-        )
+        },
+    )
+
+    validate_invocation(config)
+
+
+def test_validate_invocation_rejects_mapped_instance_receiver() -> None:
+    config = invocation_config(
+        agent_class=f"{__name__}:UnconventionalReceiverAgent",
+        arguments={
+            "this": {"source": "responses_create_params.input"},
+            "text": {
+                "source": "responses_create_params.input",
+                "transform": "latest_user_text",
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="receiver parameter 'this'"):
+        validate_invocation(config)
+
+
+def test_validate_invocation_preserves_static_entrypoint_arguments() -> None:
+    config = invocation_config(
+        agent_class=f"{__name__}:StaticEntrypointAgent",
+        arguments={
+            "text": {
+                "source": "responses_create_params.input",
+                "transform": "latest_user_text",
+            }
+        },
+    )
+
+    validate_invocation(config)
 
 
 def test_validate_invocation_rejects_synchronous_entrypoint() -> None:
