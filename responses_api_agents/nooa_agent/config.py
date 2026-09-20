@@ -101,7 +101,6 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
     max_policy_calls: int = Field(default=10, gt=0)
-    concurrency: int = Field(default=8, gt=0)
     run_timeout_secs: float = Field(default=2100, gt=0)
 
 
