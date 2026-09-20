@@ -163,6 +163,9 @@ def test_capability_config_resolves_with_gym_components() -> None:
             "policy_base_url": "https://example.invalid/v1",
             "policy_api_key": "test-key",
             "policy_model_name": "test-model",
+            # The parent test env runs the rewritten unifiedllm's openai pin;
+            # let server venvs resolve openai from nemo-gym's own constraint.
+            "allow_openai_version_skew": True,
         }
     )
     resolved = GlobalConfigDictParser().parse(
@@ -242,7 +245,6 @@ async def test_native_and_gym_calculate_results_have_exact_score_parity(row: dic
                     )
                 ],
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": ""},
             )
         ]
     )

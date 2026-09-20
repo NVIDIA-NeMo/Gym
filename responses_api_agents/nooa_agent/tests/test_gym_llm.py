@@ -18,7 +18,7 @@ from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from nooa.unifiedllm import Tool
+from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
@@ -32,6 +32,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
     PolicyCallBudgetExceeded,
     RolloutLLMState,
     _finish_reason,
+    _responses_input,
     _responses_tool_schema,
 )
 
@@ -259,7 +260,38 @@ async def test_preserves_function_call_token_metadata() -> None:
 
     assert result.finish_reason == "tool_calls"
     assert result.tool_calls[0].name == "weather"
-    assert result.assistant_message["_batch"][0]["generation_token_ids"] == [11, 12]
+    assert result.raw_response.output[0].generation_token_ids == [11, 12]
+    replayed, _ = _responses_input([result])
+    assert replayed[0]["generation_token_ids"] == [11, 12]
+
+
+def test_cache_boundary_is_never_a_model_input() -> None:
+    replayed, instructions = _responses_input([{"role": "user", "content": "Weather?"}, CacheBoundary()])
+
+    assert replayed == [{"role": "user", "content": "Weather?"}]
+    assert instructions is None
+
+
+def test_foreign_llm_response_projects_portable_and_records_gap() -> None:
+    foreign = LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[ToolCall(id="call-9", name="weather", arguments='{"city":"Oslo"}')],
+        finish_reason="tool_calls",
+    )
+    gaps: list = []
+
+    replayed, _ = _responses_input([foreign], gaps=gaps)
+
+    assert replayed == [
+        {
+            "type": "function_call",
+            "call_id": "call-9",
+            "name": "weather",
+            "arguments": '{"city":"Oslo"}',
+        }
+    ]
+    assert [gap.code for gap in gaps] == ["foreign_turn_projected_portable"]
 
 
 @pytest.mark.asyncio
@@ -275,7 +307,8 @@ async def test_structured_output_schema_and_parsing() -> None:
 
     result = await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
 
-    assert result.content == StructuredAnswer(verdict="positive")
+    assert result.parsed == StructuredAnswer(verdict="positive")
+    assert json.loads(result.content) == {"verdict": "positive"}
     assert client.post.await_args.kwargs["json"].text["format"]["name"] == "StructuredAnswer"
 
 
