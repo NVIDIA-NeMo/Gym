@@ -44,12 +44,12 @@ VLLM_COMMON_ARGS=(
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
-    --max-num-batched-tokens 135680
-    --max-num-seqs 1024
+    --max-num-batched-tokens 33920
+    --max-num-seqs 128
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-seqs 128
 )
