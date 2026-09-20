@@ -263,6 +263,94 @@ class TestBatchManifest:
 
 
 class TestBatchStatusTracker:
+    @pytest.mark.parametrize("record_kind", ["completed", "failure"])
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {TASK_INDEX_KEY_NAME: 999},
+            {ROLLOUT_INDEX_KEY_NAME: 999},
+            {AGENT_REF_KEY_NAME: {"name": "unknown"}},
+            {AGENT_REF_KEY_NAME: {"name": "beta"}},
+        ],
+        ids=["wrong-task", "wrong-repeat", "unknown-agent", "task-owned-by-another-agent"],
+    )
+    def test_rejects_unexpected_identity_without_replacing_status(
+        self, tmp_path: Path, record_kind: str, overrides: dict
+    ) -> None:
+        """A wrong shard cannot report completion or failures for an expected task."""
+        rows = [
+            materialized_row("alpha", "alpha_source", 0, 0),
+            materialized_row("beta", "beta_source", 1, 0),
+        ]
+        tracker = BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        tracker.write_status([], [], force=True)
+        previous_status = tracker.status_fpath.read_bytes()
+        unexpected = {**rows[0], **overrides}
+        completed = [unexpected] if record_kind == "completed" else []
+        failures = [unexpected] if record_kind == "failure" else []
+
+        with pytest.raises(ConfigError, match="not present in materialized inputs"):
+            tracker.write_status(completed, failures, force=True)
+
+        assert tracker.status_fpath.read_bytes() == previous_status
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {AGENT_REF_KEY_NAME: None},
+            {AGENT_REF_KEY_NAME: "alpha"},
+            {AGENT_REF_KEY_NAME: {"name": 1}},
+            {AGENT_REF_KEY_NAME: {"name": " "}},
+            {TASK_INDEX_KEY_NAME: None},
+            {TASK_INDEX_KEY_NAME: False},
+            {TASK_INDEX_KEY_NAME: 0.0},
+            {TASK_INDEX_KEY_NAME: "0"},
+            {TASK_INDEX_KEY_NAME: -1},
+            {TASK_INDEX_KEY_NAME: []},
+            {ROLLOUT_INDEX_KEY_NAME: None},
+            {ROLLOUT_INDEX_KEY_NAME: False},
+            {ROLLOUT_INDEX_KEY_NAME: 0.0},
+            {ROLLOUT_INDEX_KEY_NAME: "0"},
+            {ROLLOUT_INDEX_KEY_NAME: -1},
+            {ROLLOUT_INDEX_KEY_NAME: {}},
+        ],
+    )
+    def test_rejects_malformed_result_identity(self, tmp_path: Path, overrides: dict) -> None:
+        """Missing or coerced IDs must not silently match an expected integer identity."""
+        rows = [materialized_row("alpha", "source", 0, 0)]
+        tracker = BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+
+        with pytest.raises(ConfigError, match="invalid rollout identity"):
+            tracker.build_status([{**rows[0], **overrides}], [])
+
+    def test_counts_only_unique_expected_results_and_clears_retried_failures(self, tmp_path: Path) -> None:
+        """Progress distinguishes agents and repeats while deduplicating successful retries."""
+        rows = [
+            materialized_row(agent, f"{agent}_source", 0, repeat) for agent in ("alpha", "beta") for repeat in (0, 1)
+        ]
+        tracker = BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        completed = [rows[0], {**rows[0], ATTEMPT_INDEX_KEY_NAME: 1}, rows[2]]
+        failures = [
+            {**rows[0], "_ng_failure_class": "agent_request_failed"},
+            {**rows[1], "_ng_failure_class": "agent_request_failed"},
+            {**rows[1], ATTEMPT_INDEX_KEY_NAME: 1, "_ng_failure_class": "timeout_exceeded"},
+        ]
+
+        partial = tracker.build_status(completed, failures)["members"]
+
+        for member in partial.values():
+            assert member["completed_rollout_count"] == 1
+            assert member["remaining_rollout_count"] == 1
+        assert partial["alpha"]["failures_by_class"] == {"timeout_exceeded": 1}
+        assert partial["beta"]["failures_by_class"] == {}
+
+        complete = tracker.build_status([*completed, rows[1], rows[3]], failures)["members"]
+
+        for member in complete.values():
+            assert member["completed_rollout_count"] == 2
+            assert member["remaining_rollout_count"] == 0
+            assert member["failures_by_class"] == {}
+
     def test_writes_compact_per_agent_status_without_error_messages(self, tmp_path: Path) -> None:
         rows = [
             materialized_row("alpha", "alpha_source", 0, 0),

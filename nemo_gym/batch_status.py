@@ -406,11 +406,45 @@ class BatchStatusTracker:
         self.manifest, self.manifest_sha256 = load_batch_manifest(manifest_fpath)
         self.observations = observe_materialized_rows(materialized_rows)
         validate_batch_manifest(self.manifest, self.observations)
+        self._expected_rollout_identities: set[tuple[str, int, int]] = {
+            (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            for row in materialized_rows
+        }
         self.write_interval_seconds = (
             BATCH_STATUS_WRITE_INTERVAL_SECONDS if write_interval_seconds is None else write_interval_seconds
         )
         self._last_write = 0.0
         self._last_progress_count = 0
+
+    def _validated_rollout_identity(
+        self, row: Mapping[str, object], *, record_kind: str, row_index: int
+    ) -> tuple[str, int, int]:
+        """Reject malformed IDs and records belonging to a different materialized batch."""
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        agent_name = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        task_index = row.get(TASK_INDEX_KEY_NAME)
+        rollout_index = row.get(ROLLOUT_INDEX_KEY_NAME)
+        if (
+            not isinstance(agent_name, str)
+            or not agent_name.strip()
+            or not isinstance(task_index, int)
+            or isinstance(task_index, bool)
+            or task_index < 0
+            or not isinstance(rollout_index, int)
+            or isinstance(rollout_index, bool)
+            or rollout_index < 0
+        ):
+            raise ConfigError(
+                f"Batch {record_kind} row {row_index} has an invalid rollout identity; expected a non-empty "
+                "agent_ref.name and non-negative integer task/rollout indices."
+            )
+        identity = (agent_name, task_index, rollout_index)
+        if identity not in self._expected_rollout_identities:
+            raise ConfigError(
+                f"Batch {record_kind} row {row_index} has rollout identity {identity!r}, which is not present "
+                "in materialized inputs. Check that the result files belong to this batch."
+            )
+        return identity
 
     def build_status(
         self,
@@ -420,21 +454,18 @@ class BatchStatusTracker:
         aggregate_metrics_fpath: Optional[Path] = None,
         aggregation_deferred: bool = False,
     ) -> Dict[str, Any]:
-        completed_by_agent: Dict[str, set] = defaultdict(set)
-        for result in completed_results:
-            agent_name = (result.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            task_index = result.get(TASK_INDEX_KEY_NAME)
-            rollout_index = result.get(ROLLOUT_INDEX_KEY_NAME)
-            if agent_name is not None and task_index is not None and rollout_index is not None:
-                completed_by_agent[str(agent_name)].add((task_index, rollout_index))
+        """Build status from expected identities, raising ConfigError for mismatched result records."""
+        completed_by_agent: Dict[str, set[tuple[int, int]]] = defaultdict(set)
+        for position, result in enumerate(completed_results):
+            agent_name, task_index, rollout_index = self._validated_rollout_identity(
+                result, record_kind="completed result", row_index=position
+            )
+            completed_by_agent[agent_name].add((task_index, rollout_index))
 
         latest_failures = {}
-        for failure in failure_rows:
-            agent_name = (failure.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            task_index = failure.get(TASK_INDEX_KEY_NAME)
-            rollout_index = failure.get(ROLLOUT_INDEX_KEY_NAME)
-            if agent_name is not None and task_index is not None and rollout_index is not None:
-                latest_failures[(str(agent_name), task_index, rollout_index)] = failure
+        for position, failure in enumerate(failure_rows):
+            identity = self._validated_rollout_identity(failure, record_kind="failure", row_index=position)
+            latest_failures[identity] = failure
 
         failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
         for (agent_name, task_index, rollout_index), failure in latest_failures.items():
