@@ -32,7 +32,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     PolicyCallBudgetExceeded,
     _finish_reason,
-    _tool_schema,
+    _responses_tool_schema,
 )
 
 
@@ -134,13 +134,15 @@ def make_llm(payload: dict, *, max_policy_calls: int = 2) -> tuple[GymResponsesL
         ),
     ],
 )
-def test_tool_schema_enables_strict_mode_only_for_closed_required_schemas(schema: dict, expected: bool) -> None:
+def test_responses_tool_schema_enables_strict_mode_only_for_closed_required_schemas(
+    schema: dict, expected: bool
+) -> None:
     tool = MagicMock()
     tool.name = "execute_python"
     tool.description = "Execute Python"
     tool.get_parameter_schema.return_value = schema
 
-    assert _tool_schema(tool)["strict"] is expected
+    assert _responses_tool_schema(tool)["strict"] is expected
 
 
 @pytest.mark.parametrize(
