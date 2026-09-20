@@ -78,20 +78,25 @@ GOLDEN_PATCH_SOLVE_SH_PATCHES = {
     "terminal-bench/build-pov-ray": [
         ("wget=1.21.4-1ubuntu4.1", "wget"),
         ("ncompress=5.0-1", "ncompress"),
+        # The official host rejects downloads and the previous mirror is unreachable.
+        # These archived copies retain the SHA-256 pins below.
+        # https://github.com/harbor-framework/terminal-bench-2/pull/77
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
             "wget --tries=5 --timeout=60 --output-document=POVDOC.TAR.Z "
-            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povdoc.tar.Z",
+            "https://web.archive.org/web/20180330013814id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
         ),
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
             "wget --tries=5 --timeout=60 --output-document=POVSCN.TAR.Z "
-            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povscn.tar.Z",
+            "https://web.archive.org/web/20180330013815id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
         ),
         (
             "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z",
             """wget --tries=5 --timeout=60 --output-document=POVSRC.TAR.Z \\
-  http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povsrc.tar.Z
+  https://web.archive.org/web/20180330013813id_/http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z
 cat <<'EOF' | sha256sum --check -
 e70e44d1fe8835c4dff7c7a55bd6629b15e6a15b2ab7f2f49ee9e2dc016cc470  POVDOC.TAR.Z
 4272e2d4724d8dfd916d68827194577221d17b733d99e84e7040f3a9f7eb92a7  POVSCN.TAR.Z
