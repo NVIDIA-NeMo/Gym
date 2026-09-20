@@ -223,29 +223,6 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         done
     }
 
-    wait_for_vllm_health() {
-        local role=\$1
-        local url=\$2
-        local local_pid=\${3:-}
-        local local_role=\${4:-\$role}
-
-        while true; do
-            if [[ -n "\$local_pid" ]] && ! kill -0 "\$local_pid" 2>/dev/null; then
-                local status=0
-                wait "\$local_pid" || status=\$?
-                (( status != 0 )) || status=1
-                echo "ERROR: \$local_role vLLM process exited while waiting for \$role health (status=\$status)." >&2
-                return "\$status"
-            fi
-            # Bound each probe so a stalled endpoint cannot block process checks.
-            # Timeouts retry below; they do not limit overall model startup time.
-            if curl -fs --connect-timeout 5 --max-time 10 "\$url" >/dev/null; then
-                return 0
-            fi
-            sleep 5
-        done
-    }
-
     if (( SLURM_PROCID == 0 )); then
         # The first prefill rank owns its tier's API server. The remaining
         # prefill ranks run headless so expert parallelism spans the tier.
@@ -272,11 +249,6 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         trap cleanup_coupled_head EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
-
-        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$WORKER_SERVER_PORT/health" "\$prefill_pid"
-        # Monitor the local prefill process while the remote decode API
-        # starts. The enclosing srun handles failures on the decode ranks.
-        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$WORKER_SERVER_PORT/health" "\$prefill_pid" "prefill"
 
         vllm-router \
             --prefill-policy $ROUTER_PREFILL_POLICY \
