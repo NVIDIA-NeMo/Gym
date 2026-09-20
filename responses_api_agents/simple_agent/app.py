@@ -50,7 +50,11 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
@@ -367,3 +371,5 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SimpleAgent.run_webserver()  # noqa: F401

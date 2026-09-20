@@ -41,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -441,3 +442,5 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
 if __name__ == "__main__":
     LibraryJudgeMathResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LibraryJudgeMathResourcesServer.run_webserver()  # noqa: F401

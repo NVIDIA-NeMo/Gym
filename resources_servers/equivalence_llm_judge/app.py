@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -534,3 +535,5 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LLMJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LLMJudgeResourcesServer.run_webserver()  # noqa: F401

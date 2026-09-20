@@ -59,6 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -718,3 +719,5 @@ Output your answer in this format:
 
 if __name__ == "__main__":
     JailbreakDetectionResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = JailbreakDetectionResourcesServer.run_webserver()  # noqa: F401
