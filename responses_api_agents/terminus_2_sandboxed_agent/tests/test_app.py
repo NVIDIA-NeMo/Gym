@@ -183,7 +183,10 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("interleaved_thinking", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, interleaved_thinking):
+@pytest.mark.parametrize("recover_stalled_interrupts", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(
+    monkeypatch, dump_trajectory, debug, interleaved_thinking, recover_stalled_interrupts
+):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -201,6 +204,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         model_context_limit=32_000,
         model_output_limit=4_000,
         interleaved_thinking=interleaved_thinking,
+        recover_stalled_interrupts=recover_stalled_interrupts,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -226,6 +230,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             self._times_spent = [1.0, 3.0]
             self._num_proactive_compactions = 0
             self._num_compactions = 2
+            self._terminal_interrupt_drains = 2
+            self._terminal_interrupt_drain_errors = 1
 
         async def stop(self):
             return None
@@ -237,6 +243,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             assert self.kwargs["interleaved_thinking"] is interleaved_thinking
+            assert self.kwargs["recover_stalled_interrupts"] is recover_stalled_interrupts
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             self.kwargs["llm"]._num_compactions = 2
@@ -289,6 +296,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         "model_calls_gt_10min": 0,
         "num_proactive_compactions": 0,
         "num_compactions": 2,
+        "terminal_interrupt_drains": 2,
+        "terminal_interrupt_drain_errors": 1,
         "error": None,
         "usages": [],
     }
