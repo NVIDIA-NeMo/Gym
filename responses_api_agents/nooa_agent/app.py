@@ -141,12 +141,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Embedded NOOA adapter that keeps Gym authoritative for every external interaction."""
 
     config: NOOAAgentConfig
-    sem: Any = None
     runner: Any = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, context: Any) -> None:
-        self.sem = asyncio.Semaphore(self.config.concurrency)
         self.runner = EmbeddedNOOARunner(
             invocation=self.config.nooa,
             server_client=self.server_client,
@@ -177,7 +175,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         run_body = NOOAAgentRunRequest(responses_create_params=body)
         cookies = dict(request.cookies)
         try:
-            async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
+            async with asyncio.timeout(self.config.run_timeout_secs):
                 run_result = await self.runner.run(
                     NOOARunRequest(
                         responses_create_params=run_body.responses_create_params,
@@ -199,8 +197,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NOOAAgentVerifyResponse:
         record = body.model_dump()
         try:
-            async with self.sem:
-                result = await self._execute_rollout(request, body, record)
+            result = await self._execute_rollout(request, body, record)
         except NOOACookieConflictError:
             raise
         # Preserve the terminal episode timeout: the generic classifier treats its
