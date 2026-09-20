@@ -1,0 +1,4 @@
+# Materialized selector rows are pinned on the Hub, not in git.
+*.jsonl
+memory_corpus.json
+!example.jsonl

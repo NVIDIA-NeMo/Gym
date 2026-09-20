@@ -1,0 +1,72 @@
+# Agent Security Bench (ASB) — ICLR 2025, arXiv:2410.02644, upstream `agiresearch/ASB`.
+#
+# ASB ships construction tools rather than a dataset. `python -m benchmarks.asb.prepare
+# materialize` performs the agent x task x attacker-tool expansion and writes the rows
+# this config reads; `... pull` restores the same rows from the Hub instead. See
+# benchmarks/asb/README.md for why those rows are pinned rather than regenerated per run.
+#
+# Denominators are upstream's, recovered from the published tables' own granularity:
+# every condition is 400 rows (10 agents x 1 task x 40 agent-matched attacker tools;
+# PoT is 5 agents x 2 tasks x 40). 27 conditions, 10,800 rows per model.
+
+asb_resources_server:
+  resources_servers:
+    asb:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Score LLM-agent prompt-injection, memory-poisoning and backdoor attacks with Agent Security Bench
+      value: Measure whether an agent can be steered into an attacker's tool via its prompt, its observations, its memory, or a planted plan
+
+      # ASB's Refusal Rate column comes from an LLM judge reading the agent's thinking
+      # turns. Upstream uses gpt-4o-mini; this routes to the same model through OpenRouter
+      # so no model under test ever scores itself.
+      judge_model_server:
+        type: responses_api_models
+        name: asb_judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 1.0
+        # The judge is instructed to emit a bare "0" or "1".
+        max_output_tokens: 16
+      judge_name: gpt-4o-mini
+
+      datasets:
+      - name: all
+        type: validation
+        jsonl_fpath: resources_servers/asb/data/all.jsonl
+        num_repeats: 1
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/asb/data/example.jsonl
+        num_repeats: 1
+
+asb_agent:
+  responses_api_agents:
+    asb_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: asb_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Upstream caps generation at 256 tokens, which predates reasoning models: a
+      # reasoning trace exhausts that budget before any plan is emitted, turning every
+      # rollout into a workflow failure. Raised here and disclosed in METRICS.md.
+      max_output_tokens: 4096
+      upstream_max_output_tokens: 256
+
+      datasets:
+      - name: all
+        type: validation
+        jsonl_fpath: resources_servers/asb/data/all.jsonl
+        num_repeats: 1
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/asb/data/example.jsonl
+        num_repeats: 1

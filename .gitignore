@@ -242,3 +242,11 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
+
+# Per-model env files are generated as env.<key>.yaml by benchmarks/asb/run_all_models.sh.
+# A root env.yaml is auto-loaded by Gym and would shadow their port blocks.
+env.yaml
+env.*.yaml
+
+# ASB campaign outputs and runner lock files.
+/results/asb/

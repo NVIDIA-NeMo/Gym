@@ -1,0 +1,51 @@
+{
+  "upstream_repo": "https://github.com/agiresearch/ASB",
+  "upstream_revision": "1f561dccf92d55302368fa67679b4ba9d9c8fdc4",
+  "upstream_sha256": {
+    "agent_task.jsonl": "d6c1d214811b5d908ae9c04ffbbde36ce35d39932766feb8bf24e202441c1dc8",
+    "agent_task_pot.jsonl": "a66a3271ee4b5e8b4052a85c07eddb2e5828d4f9ce05dcd2cf109dc8f8df1d7b",
+    "agent_task_pot_msg.jsonl": "5d2d5f35dbac6f3ed029eff18be94a93094da60c15d5d8cfa4b2ed3a9f489f6a",
+    "all_attack_tools.jsonl": "c960ab1e60dee2038d51bc64e8f119e565c037c95a8565f176899de8d819a4b2",
+    "all_attack_tools_aggressive.jsonl": "e46485f66e2d7a50493272554213896a60f06f743b5c6cd3f008cd13b72fb990",
+    "all_attack_tools_non_aggressive.jsonl": "53d8514b90bda4e2c7b939a767e937947d2806b4d0dc0b832de6131941be39f4",
+    "all_normal_tools.jsonl": "45b821931348993de3eda474a997d62cb5b9e7a3fe358e5c81a7ef0417ccb73f"
+  },
+  "rows_total": 10800,
+  "rows_by_condition": {
+    "direct_prompt_injection.naive.no_defense.all": 400,
+    "observation_prompt_injection.naive.no_defense.all": 400,
+    "memory_attack.naive.no_defense.all": 400,
+    "direct_prompt_injection.fake_completion.no_defense.all": 400,
+    "observation_prompt_injection.fake_completion.no_defense.all": 400,
+    "memory_attack.fake_completion.no_defense.all": 400,
+    "direct_prompt_injection.escape_characters.no_defense.all": 400,
+    "observation_prompt_injection.escape_characters.no_defense.all": 400,
+    "memory_attack.escape_characters.no_defense.all": 400,
+    "direct_prompt_injection.context_ignoring.no_defense.all": 400,
+    "observation_prompt_injection.context_ignoring.no_defense.all": 400,
+    "memory_attack.context_ignoring.no_defense.all": 400,
+    "direct_prompt_injection.combined_attack.no_defense.all": 400,
+    "observation_prompt_injection.combined_attack.no_defense.all": 400,
+    "memory_attack.combined_attack.no_defense.all": 400,
+    "mixed_attack.fake_completion.no_defense.all": 400,
+    "mixed_attack.escape_characters.no_defense.all": 400,
+    "mixed_attack.naive.no_defense.all": 400,
+    "pot_backdoor.naive.no_defense.all.with_perspicacious_discernment": 400,
+    "pot_clean.naive.no_defense.all.with_perspicacious_discernment": 400,
+    "clean.combined_attack.no_defense.all": 400,
+    "direct_prompt_injection.combined_attack.delimiters_defense.all": 400,
+    "direct_prompt_injection.combined_attack.direct_paraphrase_defense.all": 400,
+    "direct_prompt_injection.combined_attack.instructional_prevention.all": 400,
+    "observation_prompt_injection.combined_attack.delimiters_defense.all": 400,
+    "observation_prompt_injection.combined_attack.instructional_prevention.all": 400,
+    "observation_prompt_injection.combined_attack.ob_sandwich_defense.all": 400
+  },
+  "memory_corpus_sizes": {
+    "combined_attack": 462,
+    "context_ignoring": 400,
+    "escape_characters": 398,
+    "fake_completion": 398,
+    "naive": 399
+  },
+  "content_hash": "6351e7ee6a94fd6a6521f310f46b623ca81f03376ab54da8199e9289a406dbc1"
+}
