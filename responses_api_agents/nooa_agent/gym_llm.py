@@ -123,7 +123,7 @@ class GymResponsesLLM(UnifiedLLM):
         server_client: ServerClient,
         model_server_name: str,
         model_url_path: str,
-        max_steps: int,
+        max_policy_calls: int,
         model_call_collector: list[ModelCallRef],
         cookies: dict[str, str],
         model: str = "gym-policy",
@@ -132,7 +132,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
-        self._max_steps = max_steps
+        self._max_policy_calls = max_policy_calls
         self._model_call_collector = model_call_collector
         self._cookies = cookies
         self._calls = 0
@@ -157,8 +157,10 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        if self._calls >= self._max_steps:
-            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_steps} calls")
+        if self._calls >= self._max_policy_calls:
+            raise PolicyCallBudgetExceeded(
+                f"NOOA policy call budget exhausted after {self._max_policy_calls} calls"
+            )
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)

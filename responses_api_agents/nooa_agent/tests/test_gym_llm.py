@@ -79,7 +79,7 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
     ).model_dump(mode="json")
 
 
-def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, list[ModelCallRef]]:
+def make_llm(payload: dict, *, max_policy_calls: int = 2) -> tuple[GymResponsesLLM, MagicMock, list[ModelCallRef]]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
     collected: list[ModelCallRef] = []
@@ -87,7 +87,7 @@ def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, Mag
         server_client=server_client,
         model_server_name="policy_model",
         model_url_path="/ng-rollout/rollout-1/v1/responses",
-        max_steps=max_steps,
+        max_policy_calls=max_policy_calls,
         model_call_collector=collected,
         cookies={},
     )
@@ -236,7 +236,7 @@ async def test_enforces_total_policy_call_budget() -> None:
         generation_token_ids=[2],
         generation_log_probs=[-0.1],
     )
-    llm, client, _ = make_llm(model_response(output), max_steps=1)
+    llm, client, _ = make_llm(model_response(output), max_policy_calls=1)
     await llm.acall([{"role": "user", "content": "first"}])
 
     with pytest.raises(PolicyCallBudgetExceeded, match="exhausted"):
