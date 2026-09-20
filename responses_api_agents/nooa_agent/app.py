@@ -152,7 +152,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             server_client=self.server_client,
             model_server_name=self.config.model_server.name,
             resources_server_name=self.config.resources_server.name,
-            max_steps=self.config.max_steps,
+            max_policy_calls=self.config.max_policy_calls,
         )
         super().model_post_init(context)
 
