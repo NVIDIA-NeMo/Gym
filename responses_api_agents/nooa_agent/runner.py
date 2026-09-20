@@ -20,11 +20,11 @@ from typing import Any, Protocol
 
 from nooa import Agent
 
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
-from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -34,7 +34,7 @@ from responses_api_agents.nooa_agent.resource_tools import (
 
 @dataclass(slots=True)
 class NOOARunRequest:
-    row: Any
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     rollout_id: str
     task_id: str
     model_url_path: str
@@ -67,12 +67,14 @@ class EmbeddedNOOARunner:
         resources_server_name: str,
         max_policy_calls: int,
     ) -> None:
+        if invocation.execution_mode == "sandboxed":
+            raise NotImplementedError("NOOA sandboxed execution is not implemented")
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._resources_server_name = resources_server_name
         self._max_policy_calls = max_policy_calls
-        self._agent_class, _ = validate_invocation(invocation)
+        self._agent_class, self._invocation_adapter = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         model_calls: list[ModelCallRef] = []
@@ -92,14 +94,12 @@ class EmbeddedNOOARunner:
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
             dispatcher=dispatcher,
-            tools=list(request.row.responses_create_params.tools),
+            tools=list(request.responses_create_params.tools),
         )
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
 
-        arguments = materialize_arguments(request.row, self._invocation.arguments)
-        entrypoint = getattr(agent, self._invocation.entrypoint)
-        return_value = await entrypoint(**arguments)
+        return_value = await self._invocation_adapter(agent, request.responses_create_params)
         return NOOARunResult(
             return_value=return_value,
             agent=agent,
