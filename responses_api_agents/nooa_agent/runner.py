@@ -65,13 +65,13 @@ class EmbeddedNOOARunner:
         server_client: ServerClient,
         model_server_name: str,
         resources_server_name: str,
-        max_steps: int,
+        max_policy_calls: int,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._resources_server_name = resources_server_name
-        self._max_steps = max_steps
+        self._max_policy_calls = max_policy_calls
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
@@ -80,7 +80,7 @@ class EmbeddedNOOARunner:
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
-            max_steps=self._max_steps,
+            max_policy_calls=self._max_policy_calls,
             model_call_collector=model_calls,
             cookies=request.model_cookies,
         )

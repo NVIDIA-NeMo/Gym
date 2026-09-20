@@ -89,7 +89,7 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
         server_client=client,
         model_server_name="policy_model",
         resources_server_name="weather_resources",
-        max_steps=3,
+        max_policy_calls=3,
     )
     runner._agent_class = FakeAgent
     return runner, client
