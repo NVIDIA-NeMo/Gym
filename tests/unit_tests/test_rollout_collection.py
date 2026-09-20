@@ -361,12 +361,14 @@ class TestRolloutCollection:
         empty_global_config.assert_called_once_with()
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
+    @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
     async def test_batch_status_tracks_collection_and_standalone_aggregation_repair(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
         resume_from_cache: bool,
+        route_failures_to_sidecar: bool,
     ) -> None:
         """Validate the full batch on fresh and resumed runs, then refresh repaired scores."""
         input_fpath = tmp_path / "input.jsonl"
@@ -391,6 +393,7 @@ class TestRolloutCollection:
             batch_manifest_fpath=str(manifest_fpath),
             disable_health_check=True,
             resume_from_cache=resume_from_cache,
+            route_failures_to_sidecar=route_failures_to_sidecar,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         if resume_from_cache:
@@ -448,11 +451,16 @@ class TestRolloutCollection:
 
         monkeypatch.setattr(nemo_gym.batch_status, "_atomic_write_json", capture_status_write)
 
-        await RolloutCollectionHelper().run_from_config(config)
+        with pytest.raises(RuntimeError, match="Aggregation failed for agents: beta"):
+            await RolloutCollectionHelper().run_from_config(config)
 
         assert [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()] == (
             materialized_rows
         )
+        assert len(output_fpath.read_bytes().splitlines()) == 2
+        metrics = orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        assert metrics[0]["key_metrics"]["mean/reward"] == 1.0
+        assert AGGREGATION_ERROR_KEY not in metrics[0]
         status_fpath = tmp_path / "batch_status.json"
         status = orjson.loads(status_fpath.read_bytes())
         assert status["members"]["alpha"]["completed_rollout_count"] == 1
@@ -469,13 +477,19 @@ class TestRolloutCollection:
         }
         assert observed_progress == ({1, 2} if resume_from_cache else {0, 1, 2})
 
-        fail_beta_aggregation = False
         aggregate_config = RolloutAggregationConfig(
             input_glob=str(output_fpath),
             output_jsonl_fpath=str(output_fpath),
             batch_manifest_fpath=str(manifest_fpath),
             disable_health_check=True,
         )
+        with pytest.raises(RuntimeError, match="Aggregation failed for agents: beta"):
+            await RolloutAggregationHelper().run_from_config(aggregate_config)
+        failed_status = orjson.loads(status_fpath.read_bytes())
+        assert failed_status["members"]["alpha"]["aggregation_status"] == "complete"
+        assert failed_status["members"]["beta"]["aggregation_status"] == "error"
+
+        fail_beta_aggregation = False
         await RolloutAggregationHelper().run_from_config(aggregate_config)
 
         repaired_status = orjson.loads(status_fpath.read_bytes())
@@ -3785,9 +3799,11 @@ class TestRolloutAggregationHelper:
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
 
+    @pytest.mark.parametrize("include_successful_agent", [False, True])
     async def test_standalone_aggregation_repairs_a_failed_agent_entry(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_successful_agent: bool
     ) -> None:
+        """Failed single- and multi-agent aggregation keeps repairable metrics but raises."""
         shard = tmp_path / "shard.jsonl"
         records = [
             {
@@ -3803,6 +3819,8 @@ class TestRolloutAggregationHelper:
                 "reward": 0.0,
             },
         ]
+        if not include_successful_agent:
+            records = records[1:]
         shard.write_bytes(b"\n".join(orjson.dumps(record) for record in records) + b"\n")
         fail_agent_b = True
 
@@ -3819,10 +3837,14 @@ class TestRolloutAggregationHelper:
             disable_health_check=True,
         )
 
-        metrics_fpath = await RolloutAggregationHelper().run_from_config(config)
+        with pytest.raises(RuntimeError, match="Aggregation failed for agents: agent_b"):
+            await RolloutAggregationHelper().run_from_config(config)
+        metrics_fpath = tmp_path / "rollouts_aggregate_metrics.json"
         first_attempt = orjson.loads(metrics_fpath.read_bytes())
-        assert AGGREGATION_ERROR_KEY not in first_attempt[0]
-        assert first_attempt[1][AGGREGATION_ERROR_KEY]["http_status"] == 500
+        assert first_attempt[-1][AGGREGATION_ERROR_KEY]["http_status"] == 500
+        if include_successful_agent:
+            assert AGGREGATION_ERROR_KEY not in first_attempt[0]
+            assert first_attempt[0]["key_metrics"]["mean/reward"] == 1.0
 
         fail_agent_b = False
         repaired_fpath = await RolloutAggregationHelper().run_from_config(config)
@@ -3830,8 +3852,9 @@ class TestRolloutAggregationHelper:
         assert repaired_fpath == metrics_fpath
         repaired = orjson.loads(repaired_fpath.read_bytes())
         assert not any(AGGREGATION_ERROR_KEY in entry for entry in repaired)
-        assert repaired[0]["key_metrics"]["mean/reward"] == 1.0
-        assert repaired[1]["key_metrics"]["mean/reward"] == 0.0
+        assert repaired[-1]["key_metrics"]["mean/reward"] == 0.0
+        if include_successful_agent:
+            assert repaired[0]["key_metrics"]["mean/reward"] == 1.0
 
     async def test_health_failure_does_not_fail_aggregation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

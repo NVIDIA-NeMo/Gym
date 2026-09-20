@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import subprocess
+import sys
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
 from omegaconf import DictConfig
@@ -102,3 +106,54 @@ class TestValidatePreparedSplitFileExists:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(ConfigError, match=r"none"):
             _validate_prepared_split_file_exists(missing_dir / "train.jsonl", "train", missing_dir)
+
+
+def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: Path) -> None:
+    """A single-agent HTTP 500 must fail the real CLI process after saving error details."""
+    shard = tmp_path / "shard.jsonl"
+    shard.write_text(
+        json.dumps({"agent_ref": {"name": "agent_a"}, "_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0})
+        + "\n"
+    )
+    output = tmp_path / "rollouts.jsonl"
+    script = dedent("""\
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from aiohttp import ClientResponseError
+        from nemo_gym.cli.main import main
+        from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+        error = ClientResponseError(
+            request_info=SimpleNamespace(real_url="http://agent/aggregate_metrics"),
+            history=(), status=500, message="aggregation unavailable",
+        )
+        client = SimpleNamespace(post=AsyncMock(side_effect=error))
+        with patch.object(RolloutCollectionHelper, "setup_server_client", return_value=client):
+            main()
+        """)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            "eval",
+            "aggregate",
+            "--input",
+            str(shard),
+            "--output",
+            str(output),
+            "--no-health-check",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert "Aggregation failed for agents: agent_a" in completed.stdout + completed.stderr
+    metrics = json.loads((tmp_path / "rollouts_aggregate_metrics.json").read_text())
+    assert metrics[0]["aggregation_error"]["http_status"] == 500
+    assert json.loads(output.read_text()) == json.loads(shard.read_text())

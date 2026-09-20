@@ -922,6 +922,23 @@ def _aggregation_error_entry(
     }
 
 
+def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
+    """Signal failure after partial metrics and any batch status have been saved."""
+    if metrics_fpath is None:
+        return
+    failed_agents = sorted(
+        entry[AGENT_REF_KEY_NAME]["name"]
+        for entry in orjson.loads(metrics_fpath.read_bytes())
+        if AGGREGATION_ERROR_KEY in entry
+    )
+    if failed_agents:
+        raise RuntimeError(
+            f"Aggregation failed for agents: {', '.join(failed_agents)}. "
+            f"Metrics and error details were saved to {metrics_fpath}. "
+            "Retry with `gym eval aggregate` after resolving the aggregation errors."
+        )
+
+
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
     """The last attempt recorded for each rollout across the failures sidecars."""
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
@@ -1731,6 +1748,8 @@ class RolloutCollectionHelper(BaseModel):
                 force=True,
             )
 
+        _raise_for_aggregation_errors(aggregate_metrics_fpath)
+
         expected_rollouts = (
             sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
             if config.materialized_jsonl_fpath.exists()
@@ -1782,7 +1801,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Writes a single _aggregate_metrics.json with one entry per agent. If an agent's
         request fails, its entry contains empty metric collections plus ``aggregation_error``;
         rerunning aggregation overwrites that entry with real metrics after the service recovers.
-        Returns the file path.
+        Returns the file path. Collection and aggregation entrypoints raise for recorded errors
+        after updating batch status.
         """
         if not results:
             return None
@@ -2328,6 +2348,8 @@ class RolloutAggregationHelper(BaseModel):
                 aggregate_metrics_fpath=aggregate_metrics_fpath,
                 force=True,
             )
+
+        _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
         # The shards' own sidecars say which rollouts never made it into the files just scored.
         counted_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted}
