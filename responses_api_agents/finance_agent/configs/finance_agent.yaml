@@ -11,6 +11,8 @@ finance_agent:
       continue_if_not_tool_call: true
       prose_only_behavior: nudge
       tool_call_execution: sequential
+      raise_on_tool_http_error: false
+      sequential_done_tool_requires_success: false
       max_time_seconds: null
       abort_on_tool_error_types: []
       max_steps: 50

@@ -1,4 +1,4 @@
 # Install Gym plus the tools-only BigFinanceBench fork. Both repositories are
 # commit-pinned so the resource-server environment is reproducible.
 -e nemo-gym[dev] @ ../../
-big-finance-harness @ git+https://github.com/wowowoxuan1994/big-finance-benchmark.git@b533a0ab670f2b1b1eb2bbfa6add836f1cf21475
+big-finance-harness @ git+https://github.com/wowowoxuan1994/big-finance-benchmark.git@dffb39459dbfc96a7b38d179fec420900d616a69

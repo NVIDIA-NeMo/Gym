@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientTimeout
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -107,6 +107,80 @@ class TestApp:
         policy = self._setup_server()
         assert judge._client.max_http_attempts == 5
         assert policy._client.max_http_attempts == 3
+
+    @pytest.mark.parametrize(
+        "overrides,expected_attempts",
+        [
+            ({}, 3),
+            ({"max_http_attempts": 5}, 5),
+            ({"max_retries": 0}, 1),
+            ({"max_retries": 1, "max_http_attempts": 5}, 2),
+            ({"max_retries": 5, "upstream_max_num_tries": 1}, 1),
+        ],
+    )
+    async def test_retry_alias_preserves_attempt_limits(
+        self, monkeypatch: MonkeyPatch, overrides: dict, expected_attempts: int
+    ) -> None:
+        server = self._setup_server(**overrides)
+        response = SimpleNamespace(status=429, content=SimpleNamespace(read=AsyncMock(return_value=b"rate limited")))
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(actual_response, content=None):
+            assert actual_response is response
+            assert content == b"rate limited"
+            raise RuntimeError("retry budget exhausted")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+
+        with pytest.raises(RuntimeError, match="retry budget exhausted"):
+            await server._client._request(method="POST", url="https://example.com/v1/responses")
+
+        assert request.await_count == expected_attempts
+        assert sleep.await_count == expected_attempts - 1
+        assert all(
+            call.kwargs["_max_num_tries"] == overrides.get("upstream_max_num_tries")
+            for call in request.await_args_list
+        )
+
+    @pytest.mark.parametrize("upstream_timeout,expected_timeout", [(None, 1800), (300, 300)])
+    async def test_timeout_alias_preserves_connection_timeout_and_upstream_precedence(
+        self, monkeypatch: MonkeyPatch, upstream_timeout: float | None, expected_timeout: float
+    ) -> None:
+        server = self._setup_server(
+            max_connection_retries=12,
+            request_timeout_s=1800,
+            upstream_request_timeout_seconds=upstream_timeout,
+            upstream_connect_timeout_seconds=60,
+        )
+        response = SimpleNamespace(status=200)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+
+        assert await server._client._request(method="POST", url="https://example.com/v1/responses") is response
+
+        request.assert_awaited_once()
+        kwargs = request.await_args.kwargs
+        assert kwargs["_max_connection_retries"] == 12
+        assert isinstance(kwargs["timeout"], ClientTimeout)
+        assert kwargs["timeout"].total == expected_timeout
+        assert kwargs["timeout"].connect == 60
+
+    def test_extra_body_reaches_responses_endpoint(self) -> None:
+        server = self._setup_server(extra_body={"reasoning_effort": "high"})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=_response_data())
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        server._client.create_response.assert_awaited_once_with(
+            input="hello",
+            model="dummy_model",
+            reasoning_effort="high",
+        )
 
     @pytest.mark.parametrize(
         "status,message,code",

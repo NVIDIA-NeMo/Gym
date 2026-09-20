@@ -140,6 +140,22 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         "model order or concurrently. Concurrent results are still appended "
         "in the original call order.",
     )
+    tool_error_observation: Literal["json", "error_prefix"] = Field(
+        default="json",
+        description="How failed tool calls are shown to the model. 'json' keeps "
+        "the shared loop's legacy JSON payload; 'error_prefix' renders the "
+        "BigFinance-compatible '[ERROR] <message>' observation.",
+    )
+    raise_on_tool_http_error: bool = Field(
+        default=False,
+        description="Convert unsuccessful tool HTTP responses to error observations. "
+        "False preserves the legacy behavior of forwarding their response bodies.",
+    )
+    sequential_done_tool_requires_success: bool = Field(
+        default=False,
+        description="Require a successful terminal tool result before ending a sequential loop. "
+        "False preserves termination whenever a terminal tool is invoked.",
+    )
     max_time_seconds: Optional[float] = Field(
         ...,
         description="Wall-clock budget for the loop, checked before each model "
@@ -279,6 +295,13 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             None,
         )
 
+    def _render_tool_observation(self, tool_output: str) -> str:
+        """Render an error for the selected harness without changing success output."""
+        error = self._tool_error_message(tool_output)
+        if error is not None and self.config.tool_error_observation == "error_prefix":
+            return f"[ERROR] {error}"
+        return tool_output
+
     async def _execute_tool_call(
         self,
         output_function_call: NeMoGymResponseFunctionToolCall,
@@ -295,6 +318,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             )
             api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
             response_cookies = api_response.cookies
+            if self.config.raise_on_tool_http_error:
+                await raise_for_status(api_response)
             tool_output = (await api_response.content.read()).decode()
         except asyncio.TimeoutError:
             logger.warning(
@@ -460,7 +485,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         NeMoGymFunctionCallOutput(
                             type="function_call_output",
                             call_id=output_function_call.call_id,
-                            output=tool_output,
+                            output=self._render_tool_observation(tool_output),
                         )
                     )
 
@@ -492,11 +517,14 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=tool_output,
+                    output=self._render_tool_observation(tool_output),
                 )
                 new_outputs.append(tool_response)
 
-                if output_function_call.name in done_tools_set:
+                if output_function_call.name in done_tools_set and (
+                    not self.config.sequential_done_tool_requires_success
+                    or self._tool_error_message(tool_output) is None
+                ):
                     logger.info(
                         "Tool '%s' signaled done — terminating agent loop",
                         output_function_call.name,

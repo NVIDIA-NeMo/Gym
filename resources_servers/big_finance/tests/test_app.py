@@ -18,11 +18,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from big_finance_harness.prompts import SYSTEM_PROMPT
 from big_finance_harness.tools import (
     EdgarSearchTool,
     FetchUrlTool,
     FinalAnswerTool,
     PythonExecTool,
+    ToolError,
     WebSearchTool,
 )
 
@@ -136,6 +138,7 @@ def test_packaged_tool_surface_matches_pinned_snapshot() -> None:
     ]
     assert [tool.name for tool in tools] == spec["tool_order"]
     assert actual == spec["tools"]
+    assert spec["system_prompt"] == SYSTEM_PROMPT
 
 
 def test_tools_package_dependency_is_commit_pinned() -> None:
@@ -169,6 +172,16 @@ async def test_routes_use_upstream_tool_output_and_stateless_reverify() -> None:
     response = await handler({"answer": "$10 million"})
     assert response.body.decode() == "$10 million"
     assert await server.get_reverify_mode() == ReverifyMode.STATELESS
+
+
+@pytest.mark.asyncio
+async def test_tool_errors_preserve_upstream_message() -> None:
+    server = _server()
+    server._tools["web_search"].run = AsyncMock(side_effect=ToolError("query is required"))
+
+    response = await server._handler("web_search")({})
+
+    assert json.loads(response.body) == {"error": "query is required"}
 
 
 def test_final_answer_and_trace_support_tool_and_prose() -> None:
@@ -214,6 +227,44 @@ def test_final_answer_and_trace_support_tool_and_prose() -> None:
         ]
     )
     assert extract_final_answer(prose) == "$11 million"
+
+
+def test_truncated_or_failed_terminal_call_does_not_become_final_answer() -> None:
+    truncated = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "final_answer",
+                "arguments": '{"answer":"unaccepted"}',
+                "status": "completed",
+            }
+        ]
+    )
+    truncated.metadata = {"stop_reason": "max_turns"}
+    assert extract_final_answer(truncated) is None
+
+    failed = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "final_answer",
+                "arguments": '{"answer":"invalid"}',
+                "status": "completed",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "[ERROR] answer is required",
+            },
+        ]
+    )
+    failed.metadata = {"stop_reason": "done_tool"}
+    assert extract_final_answer(failed) is None
+    assert "tool_result [ERROR]: answer is required" in format_trace(failed)
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
@@ -63,10 +64,10 @@ _POLICY_FIELDS = (
     "abort_on_tool_error_types",
 )
 _SHIPPED_LOOP_EXPECTATIONS = {
-    "big_finance": ("finish", "concurrent", ["final_answer"]),
-    "big_finance_benchmark_agent": ("finish", "concurrent", ["final_answer"]),
-    "finance_agent": ("nudge", "sequential", ["submit_final_result"]),
-    "finance_agent_v2": ("nudge", "sequential", ["submit_final_result"]),
+    "big_finance": ("finish", "concurrent", "error_prefix", ["final_answer"]),
+    "big_finance_benchmark_agent": ("finish", "concurrent", "error_prefix", ["final_answer"]),
+    "finance_agent": ("nudge", "sequential", "json", ["submit_final_result"]),
+    "finance_agent_v2": ("nudge", "sequential", "json", ["submit_final_result"]),
 }
 
 
@@ -271,19 +272,33 @@ class TestFinanceAgentConfig:
         block = _shipped_block(instance)
         loop_overrides = {
             field: block[field]
-            for field in ("continue_if_not_tool_call", "prose_only_behavior", "tool_call_execution", "done_tools")
+            for field in (
+                "continue_if_not_tool_call",
+                "prose_only_behavior",
+                "tool_call_execution",
+                "tool_error_observation",
+                "raise_on_tool_http_error",
+                "sequential_done_tool_requires_success",
+                "done_tools",
+            )
             if field in block
         }
         config = _make_config(
             policy=_shipped_policy(instance),
             **loop_overrides,
         )
-        expected_prose, expected_execution, expected_done_tools = _SHIPPED_LOOP_EXPECTATIONS[instance]
+        expected_prose, expected_execution, expected_error_observation, expected_done_tools = (
+            _SHIPPED_LOOP_EXPECTATIONS[instance]
+        )
         assert config.no_tool_call_nudge
         assert config.continue_if_not_tool_call is True
         assert config.prose_only_behavior == expected_prose
         assert config.tool_call_execution == expected_execution
+        assert config.tool_error_observation == expected_error_observation
         assert config.done_tools == expected_done_tools
+        is_big_finance = instance in {"big_finance", "big_finance_benchmark_agent"}
+        assert config.raise_on_tool_http_error is is_big_finance
+        assert config.sequential_done_tool_requires_success is is_big_finance
 
     @pytest.mark.parametrize("field", _POLICY_FIELDS)
     def test_omitting_a_policy_field_is_rejected(self, field: str) -> None:
@@ -310,6 +325,9 @@ class TestFinanceAgentConfig:
         assert config.continue_if_not_tool_call is True
         assert config.prose_only_behavior == "nudge"
         assert config.tool_call_execution == "sequential"
+        assert config.tool_error_observation == "json"
+        assert config.raise_on_tool_http_error is False
+        assert config.sequential_done_tool_requires_success is False
 
     def test_custom_config(self) -> None:
         config = _make_config(
@@ -324,6 +342,7 @@ class TestFinanceAgentConfig:
             truncate_on_overflow=True,
             prose_only_behavior="finish",
             tool_call_execution="concurrent",
+            tool_error_observation="error_prefix",
         )
         assert config.max_steps == 10
         assert config.max_time_seconds == 60.0
@@ -336,6 +355,7 @@ class TestFinanceAgentConfig:
         assert config.truncate_on_overflow is True
         assert config.prose_only_behavior == "finish"
         assert config.tool_call_execution == "concurrent"
+        assert config.tool_error_observation == "error_prefix"
 
     def test_sanity_construction(self) -> None:
         agent, _ = _make_agent_and_client()
@@ -744,6 +764,7 @@ class TestResponses:
         config = _make_config(
             max_steps=1,
             tool_call_execution="concurrent",
+            tool_error_observation="error_prefix",
         )
         agent, client = _make_agent_and_client(config)
         model_mock = _dotjson_mock(
@@ -766,7 +787,53 @@ class TestResponses:
 
         assert res.status_code == 200
         assert res.json()["metadata"]["stop_reason"] == "max_turns"
-        assert len([item for item in res.json()["output"] if item["type"] == "function_call_output"]) == 2
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert len(tool_outputs) == 2
+        assert tool_outputs[0]["output"] == "[ERROR] ValidationError: missing answer"
+
+    @pytest.mark.parametrize("instance", ["finance_agent", "finance_agent_v2"])
+    def test_existing_profiles_stop_on_failed_terminal_tool(self, instance: str) -> None:
+        agent, client = _make_agent_and_client(_make_config(policy=_shipped_policy(instance), max_steps=2))
+        model_mock = _dotjson_mock(
+            _multi_tool_call_response(("submit_final_result", "terminal"), ("sec_filing_search", "skipped"))
+        )
+        error = {"error": "answer is required"}
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, _dotjson_mock(error)))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "done_tool"
+        resource_calls = [
+            call for call in agent.server_client.post.call_args_list if call.kwargs["server_name"] == _RS_SERVER
+        ]
+        assert [call.kwargs["url_path"] for call in resource_calls] == ["/submit_final_result"]
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert len(tool_outputs) == 1
+        assert json.loads(tool_outputs[0]["output"]) == error
+
+    def test_failed_sequential_terminal_call_does_not_finish(self) -> None:
+        config = _make_config(
+            max_steps=2,
+            prose_only_behavior="finish",
+            tool_error_observation="error_prefix",
+            sequential_done_tool_requires_success=True,
+        )
+        agent, client = _make_agent_and_client(config)
+        model_mock = _dotjson_mock(
+            _tool_call_response("submit_final_result", "{}", call_id="terminal"),
+            _text_response("I could not produce a valid answer.", resp_id="resp_2"),
+        )
+        agent.server_client.post = AsyncMock(
+            side_effect=_route(model_mock, _dotjson_mock({"error": "answer is required"}))
+        )
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "assistant_message"
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert tool_outputs[0]["output"] == "[ERROR] answer is required"
 
     def test_max_steps_terminates_loop(self) -> None:
         """Loop exits after max_steps even if model keeps producing tool calls."""
@@ -955,6 +1022,39 @@ class TestResponses:
         assert len(tool_outputs) >= 1
         error_payload = json.loads(tool_outputs[0]["output"])
         assert "timed out" in error_payload["error"]
+
+    @pytest.mark.parametrize("raise_on_tool_http_error", [False, True])
+    def test_tool_http_error_handling_is_opt_in(self, raise_on_tool_http_error: bool) -> None:
+        config = _make_config(max_steps=1, raise_on_tool_http_error=raise_on_tool_http_error)
+        agent, client = _make_agent_and_client(config)
+        model_mock = _dotjson_mock(_tool_call_response("sec_filing_search", "{}"))
+        tool_response = _dotjson_mock({})
+        tool_response.ok = False
+        tool_response.content.read = AsyncMock(return_value=b"service unavailable")
+        tool_response.raise_for_status = MagicMock(
+            side_effect=ClientResponseError(
+                request_info=MagicMock(
+                    url="http://resources/sec_filing_search",
+                    real_url="http://resources/sec_filing_search",
+                    method="POST",
+                    headers={},
+                ),
+                history=(),
+                status=503,
+                message="Service Unavailable",
+            )
+        )
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, tool_response))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert len(tool_outputs) == 1
+        if raise_on_tool_http_error:
+            assert "503" in json.loads(tool_outputs[0]["output"])["error"]
+        else:
+            assert tool_outputs[0]["output"] == "service unavailable"
 
     def test_tool_call_exception_returns_error(self) -> None:
         """Tool call exception → error JSON fed back to model, loop continues."""

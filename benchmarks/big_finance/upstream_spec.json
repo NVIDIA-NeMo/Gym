@@ -2,10 +2,10 @@
   "upstream_commit_id": "d794a65fe583edc6852b44c817b0a2aef33ca831",
   "repository": "https://github.com/Rogo-Technologies/big-finance-benchmark",
   "tools_package_repository": "https://github.com/wowowoxuan1994/big-finance-benchmark",
-  "tools_package_commit_id": "b533a0ab670f2b1b1eb2bbfa6add836f1cf21475",
+  "tools_package_commit_id": "dffb39459dbfc96a7b38d179fec420900d616a69",
   "dataset_url": "https://raw.githubusercontent.com/Rogo-Technologies/big-finance-benchmark/d794a65fe583edc6852b44c817b0a2aef33ca831/data/big_finance_subset.jsonl",
   "dataset_license": "CC BY 4.0",
-  "system_prompt": "You are answering finance research questions for an academic benchmark.\n\nYou have access to a small set of tools: web search, SEC EDGAR filings, URL fetching with optional in-document retrieval, a sandboxed Python REPL, and a final-answer tool. Use them to investigate primary sources, perform calculations, and arrive at a single defensible answer.\n\nWhen you are confident in your answer, call the `final_answer` tool with a short response. Reference answers are typically a single number with units; match that format when possible. If the question cannot be answered from the available sources, say so explicitly in `final_answer`.\n",
+  "system_prompt": "You are answering finance research questions for an academic benchmark.\n\nYou have access to a small set of tools: web search, SEC EDGAR filings, URL fetching with\noptional in-document retrieval, a sandboxed Python REPL, and a final-answer tool. Use them\nto investigate primary sources, perform calculations, and arrive at a single defensible\nanswer.\n\nWhen you are confident in your answer, call the `final_answer` tool with a short response.\nReference answers are typically a single number with units; match that format when\npossible. If the question cannot be answered from the available sources, say so explicitly\nin `final_answer`.\n",
   "tool_order": ["web_search", "edgar_search", "fetch_url", "python_exec", "final_answer"],
   "tools": [
     {

@@ -106,6 +106,20 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    max_connection_retries: Optional[int] = Field(default=None, ge=0)
+    max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "HTTP-status retries after the initial attempt. Overrides max_http_attempts "
+            "when set; upstream_max_num_tries=1 takes precedence."
+        ),
+    )
+    request_timeout_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Total timeout per attempt when upstream_request_timeout_seconds is unset.",
+    )
 
     reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
         default=None,
@@ -190,7 +204,11 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
             )
         if self.upstream_pool_timeout_seconds is not None and self.max_concurrent_requests is None:
             raise ValueError("upstream_pool_timeout_seconds requires max_concurrent_requests")
-        if self.upstream_connect_timeout_seconds is not None and self.upstream_request_timeout_seconds is None:
+        if (
+            self.upstream_connect_timeout_seconds is not None
+            and self.upstream_request_timeout_seconds is None
+            and self.request_timeout_s is None
+        ):
             raise ValueError("upstream_connect_timeout_seconds requires upstream_request_timeout_seconds")
         invalid_status_codes = sorted(
             status for status in self.propagate_upstream_http_status_codes if status < 400 or status > 599
@@ -227,9 +245,16 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
             max_num_tries=self.config.upstream_max_num_tries,
-            request_timeout_seconds=self.config.upstream_request_timeout_seconds,
+            request_timeout_seconds=(
+                self.config.upstream_request_timeout_seconds
+                if self.config.upstream_request_timeout_seconds is not None
+                else self.config.request_timeout_s
+            ),
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
-            max_http_attempts=self.config.max_http_attempts,
+            max_http_attempts=(
+                self.config.max_retries + 1 if self.config.max_retries is not None else self.config.max_http_attempts
+            ),
+            max_connection_retries=self.config.max_connection_retries,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)
