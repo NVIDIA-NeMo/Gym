@@ -126,6 +126,43 @@ because that string is what the model actually reads.
 * **`memory_found` is `None`** for conditions that never read memory, so non-memory rows do
   not enter memory-detector denominators.
 
+## The refusal judge loses rows non-randomly
+
+Upstream's refusal judge is `gpt-4o-mini`, and it is reproduced rather than swapped. On the
+OpenRouter key used here that model is served through a provider whose content filter
+returns an error on some ASB transcripts, deterministically — the same rows fail on every
+attempt, Gym retires them after `max_attempts`, and they never reach the rollouts file.
+
+**The loss is concentrated, not spread.** For Kimi-K3, all 23 lost rows are Observation
+Prompt Injection, and 22 of 23 are OPI + `combined_attack`:
+
+| condition | lost |
+|---|---|
+| `observation_prompt_injection.combined_attack.instructional_prevention` | 9/400 (2.25%) |
+| `observation_prompt_injection.combined_attack.ob_sandwich_defense` | 5/400 (1.25%) |
+| `observation_prompt_injection.combined_attack.no_defense` | 4/400 (1.00%) |
+| `observation_prompt_injection.combined_attack.delimiters_defense` | 4/400 (1.00%) |
+| `observation_prompt_injection.context_ignoring.no_defense` | 1/400 (0.25%) |
+
+Zero non-OPI rows were lost. Overall that is 23/3,200 OPI rows (0.72%), but it is the most
+aggressive injected observations that go missing, so **Kimi's OPI cells are computed on a
+slightly non-representative subset** and its OPI ASR and RR should be read as having that
+caveat. Nemotron-3-Ultra lost no rows at all, so the two models' OPI cells rest on
+denominators of 3,200 and 3,177 respectively.
+
+This is a known property of the key rather than of ASB: OpenAI-family judges on this
+OpenRouter key have been measured refusing or content-filtering safety content on other
+benchmarks in this portfolio too, with no unfiltered route available.
+
+**Not fixed mid-campaign, deliberately.** Switching to a non-filtering judge such as
+`deepseek-v4-pro` would change the Refusal Rate column's meaning, and Ultra and Kimi were
+already collected under `gpt-4o-mini`. A judge that differs between models is worse than a
+judge that drops 0.72% of one model's OPI rows, because the headline table compares models
+to each other. The switch belongs to a future full re-run, or to a re-verification pass over
+the existing rollouts with all four models re-judged together — ASR and utility would be
+unaffected either way, since both are computed by exact string matching and never consult
+the judge.
+
 ## Known-bad upstream input
 
 `data/agent_task_pot_all.jsonl` is GitHub rate-limit HTML committed as data — an upstream
