@@ -360,12 +360,15 @@ class TestRolloutCollection:
         ]
         empty_global_config.assert_called_once_with()
 
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_batch_status_tracks_collection_and_standalone_aggregation_repair(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
+        resume_from_cache: bool,
     ) -> None:
+        """Validate the full batch on fresh and resumed runs, then refresh repaired scores."""
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
             "\n".join(
@@ -387,8 +390,14 @@ class TestRolloutCollection:
             output_jsonl_fpath=str(output_fpath),
             batch_manifest_fpath=str(manifest_fpath),
             disable_health_check=True,
+            resume_from_cache=resume_from_cache,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        if resume_from_cache:
+            config.materialized_jsonl_fpath.write_bytes(
+                b"".join(orjson.dumps(row) + b"\n" for row in materialized_rows)
+            )
+            output_fpath.write_bytes(orjson.dumps({**materialized_rows[0], "reward": 1.0}) + b"\n")
         observations = observe_materialized_rows(materialized_rows)
         manifest_fpath.write_bytes(
             orjson.dumps(
@@ -415,6 +424,7 @@ class TestRolloutCollection:
 
         async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
             if url_path == "/run":
+                assert not (resume_from_cache and server_name == "alpha")
                 return FakeResponse(200, {"reward": 1.0 if server_name == "alpha" else 0.0})
             assert url_path == "/aggregate_metrics"
             if server_name == "beta" and fail_beta_aggregation:
@@ -440,6 +450,9 @@ class TestRolloutCollection:
 
         await RolloutCollectionHelper().run_from_config(config)
 
+        assert [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()] == (
+            materialized_rows
+        )
         status_fpath = tmp_path / "batch_status.json"
         status = orjson.loads(status_fpath.read_bytes())
         assert status["members"]["alpha"]["completed_rollout_count"] == 1
@@ -454,7 +467,7 @@ class TestRolloutCollection:
             sum(member["completed_rollout_count"] for member in snapshot["members"].values())
             for snapshot in status_snapshots
         }
-        assert observed_progress == {0, 1, 2}
+        assert observed_progress == ({1, 2} if resume_from_cache else {0, 1, 2})
 
         fail_beta_aggregation = False
         aggregate_config = RolloutAggregationConfig(
@@ -472,7 +485,15 @@ class TestRolloutCollection:
         assert repaired_status["members"]["beta"]["observed_metric_keys"] == ["mean/reward"]
         assert not any(AGGREGATION_ERROR_KEY in member for member in repaired_status["members"].values())
 
-    async def test_batch_manifest_is_validated_before_existing_outputs_are_cleared(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "resume_from_cache, existing_rollouts",
+        [(False, True), (True, True), (True, False)],
+        ids=["fresh-run", "resume", "resume-missing-output"],
+    )
+    async def test_batch_manifest_failure_preserves_existing_artifacts(
+        self, tmp_path: Path, resume_from_cache: bool, existing_rollouts: bool
+    ) -> None:
+        """Reject an invalid manifest without replacing inputs or clearing saved progress."""
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
             json.dumps(
@@ -485,17 +506,28 @@ class TestRolloutCollection:
             + "\n"
         )
         output_fpath = tmp_path / "rollouts.jsonl"
-        output_fpath.write_bytes(b"existing rollout\n")
         failures_fpath = _failures_path_for(output_fpath)
-        failures_fpath.write_bytes(b"existing failure\n")
         manifest_fpath = tmp_path / "batch_manifest.json"
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_fpath),
             output_jsonl_fpath=str(output_fpath),
             batch_manifest_fpath=str(manifest_fpath),
             disable_health_check=True,
+            resume_from_cache=resume_from_cache,
         )
         materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        cached_row = deepcopy(materialized_rows[0])
+        cached_row["responses_create_params"]["input"] = [{"role": "user", "content": "original prompt"}]
+        saved_artifacts = {
+            config.materialized_jsonl_fpath: orjson.dumps(cached_row) + b"\n",
+            failures_fpath: orjson.dumps({**cached_row, "_ng_failure_class": "agent_error"}) + b"\n",
+            tmp_path / "batch_status.json": b'{"members": {}}\n',
+        }
+        if existing_rollouts:
+            saved_artifacts[output_fpath] = orjson.dumps({**cached_row, "reward": 1.0}) + b"\n"
+        for path, content in saved_artifacts.items():
+            path.write_bytes(content)
+
         observations = observe_materialized_rows(materialized_rows)
         observed = observations["alpha"]
         manifest_fpath.write_bytes(
@@ -521,8 +553,9 @@ class TestRolloutCollection:
         with pytest.raises(ConfigError, match="dataset_sha256 mismatch"):
             await RolloutCollectionHelper().run_from_config(config)
 
-        assert output_fpath.read_bytes() == b"existing rollout\n"
-        assert failures_fpath.read_bytes() == b"existing failure\n"
+        for path, content in saved_artifacts.items():
+            assert path.read_bytes() == content, f"Manifest validation changed {path.name}"
+        assert output_fpath.exists() == existing_rollouts
 
     async def test_run_examples_queues_preordered_rows_deterministically(
         self, monkeypatch: pytest.MonkeyPatch

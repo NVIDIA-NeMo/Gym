@@ -1395,17 +1395,20 @@ class RolloutCollectionHelper(BaseModel):
             ):
                 self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
 
-            with config.materialized_jsonl_fpath.open("wb") as f:
-                for row in tqdm(input_rows, desc="Writing materialized rows"):
-                    f.write(orjson.dumps(row) + b"\n")
-
         batch_tracker = None
         if config.batch_manifest_fpath:
-            with config.materialized_jsonl_fpath.open("rb") as materialized_file:
-                materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+            materialized_rows = input_rows
+            if not should_clear_outputs:
+                # A resume validates the full dataset, including attempts already completed.
+                with config.materialized_jsonl_fpath.open("rb") as materialized_file:
+                    materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
             batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
 
         if should_clear_outputs:
+            # Validate before replacing any saved inputs or clearing their corresponding results.
+            with config.materialized_jsonl_fpath.open("wb") as f:
+                for row in tqdm(input_rows, desc="Writing materialized rows"):
+                    f.write(orjson.dumps(row) + b"\n")
             output_fpath.unlink(missing_ok=True)
             failures_fpath.unlink(missing_ok=True)
 
