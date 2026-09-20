@@ -66,8 +66,12 @@ class NOOAInvocationConfig(BaseModel):
     @field_validator("agent_class")
     @classmethod
     def validate_agent_class_path(cls, value: str) -> str:
-        module_name, separator, class_name = value.partition(":")
-        if not separator or not module_name or not class_name or "." in class_name:
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError("agent_class must use the format 'module.path:ClassName'")
+
+        module_name, class_name = parts
+        if not module_name or not class_name or "." in class_name:
             raise ValueError("agent_class must use the format 'module.path:ClassName'")
         return value
 
