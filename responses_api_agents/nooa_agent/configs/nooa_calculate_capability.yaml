@@ -10,18 +10,8 @@ nooa_calculate_capability:
         name: policy_model
       nooa:
         agent_class: responses_api_agents.nooa_agent.capabilities.calculate:CalculateSingleAgent
-        entrypoint: calculate
+        invocation_adapter: responses_api_agents.nooa_agent.capabilities.adapters:invoke_calculate
         init_kwargs: {}
-        arguments:
-          a:
-            source: agent_inputs.a
-            transform: identity
-          b:
-            source: agent_inputs.b
-            transform: identity
-          calculation:
-            source: agent_inputs.calculation
-            transform: identity
       max_policy_calls: 4
       run_timeout_secs: 600
       datasets:

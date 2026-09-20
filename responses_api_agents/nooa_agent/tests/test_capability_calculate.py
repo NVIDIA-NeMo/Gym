@@ -139,8 +139,7 @@ def test_shipped_calculate_capability_matches_immutable_source_manifest() -> Non
     ]
 
     assert config.nooa.agent_class.endswith(":CalculateSingleAgent")
-    assert config.nooa.entrypoint == "calculate"
-    assert set(config.nooa.arguments) == {"a", "b", "calculation"}
+    assert config.nooa.invocation_adapter.endswith(":invoke_calculate")
     assert manifest["source_commit"] == "54e8fa23778ec384dc5813cee61b8f814276e05b"
     assert (
         manifest["agent_sha256"]
@@ -179,7 +178,7 @@ def test_capability_config_resolves_with_gym_components() -> None:
     )
 
     agent = resolved.nooa_calculate_capability.responses_api_agents.nooa_agent
-    assert agent.nooa.entrypoint == "calculate"
+    assert agent.nooa.invocation_adapter.endswith(":invoke_calculate")
     assert agent.resources_server.name == "nooa_capability"
     assert resolved.policy_model.responses_api_models.openai_model.openai_model == "test-model"
 
