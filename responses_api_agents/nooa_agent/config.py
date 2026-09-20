@@ -83,6 +83,8 @@ class NOOAInvocationConfig(BaseModel):
         invalid = sorted(name for name in self.arguments if not name.isidentifier() or name.startswith("_"))
         if invalid:
             raise ValueError(f"argument mapping names must be public Python identifiers: {invalid}")
+        if "self" in self.arguments:
+            raise ValueError("arguments.self is reserved; Python supplies the agent instance")
         if "llm" in self.init_kwargs:
             raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
         return self
