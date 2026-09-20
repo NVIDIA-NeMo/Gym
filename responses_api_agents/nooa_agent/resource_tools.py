@@ -18,12 +18,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from typing import Any
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
 from nemo_gym.server_utils import ServerClient
+
+
+if TYPE_CHECKING:
+    from nemo_gym.rollout_observability import TrajectoryToolCall
+    from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 
 def _as_tool_dict(tool: Any) -> dict[str, Any]:
@@ -56,11 +62,13 @@ class ResourceToolDispatcher:
         server_client: ServerClient,
         resources_server_name: str,
         cookies: dict[str, str],
+        trace_hooks: GymTraceHooks | None = None,
     ) -> None:
         self._server_client = server_client
         self._resources_server_name = resources_server_name
         self._cookies = cookies
         self._lock = asyncio.Lock()
+        self._trace_hooks = trace_hooks
 
     async def call(
         self,
@@ -69,8 +77,18 @@ class ResourceToolDispatcher:
         arguments: dict[str, Any],
         validator: Draft202012Validator,
     ) -> Any:
-        async with self._lock:
-            return await self._call(name=name, arguments=arguments, validator=validator)
+        scope = self._trace_hooks.resource_call(name, arguments) if self._trace_hooks else nullcontext()
+        with scope as observation:
+            async with self._lock:
+                output = await self._call(
+                    name=name,
+                    arguments=arguments,
+                    validator=validator,
+                    observation=observation,
+                )
+            if observation is not None:
+                observation.output = output
+            return output
 
     async def _call(
         self,
@@ -78,11 +96,15 @@ class ResourceToolDispatcher:
         name: str,
         arguments: dict[str, Any],
         validator: Draft202012Validator,
+        observation: TrajectoryToolCall | None = None,
     ) -> Any:
         try:
             validator.validate(arguments)
         except ValidationError as error:
             output: Any = {"error": f"Invalid arguments for {name}: {error.message}"}
+            if observation is not None:
+                observation.status = "failed"
+                observation.error_type = "invalid_arguments"
         else:
             try:
                 response = await self._server_client.post(
