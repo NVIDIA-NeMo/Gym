@@ -33,7 +33,6 @@ pytestmark = pytest.mark.sandbox
 
 
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
-pytest.importorskip("httpx_aiohttp", reason="httpx-aiohttp optional sandbox dependency is not installed")
 
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 
@@ -723,7 +722,7 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None) -> None:
-    from nemo_gym.sandbox.providers.opensandbox._http_transport import GymAiohttpTransport
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     # The default backend borrows Gym's global aiohttp client.
     provider = opensandbox_provider.OpenSandboxProvider()
@@ -798,8 +797,6 @@ async def test_connection_tls_is_independent_of_pool_settings(
 ) -> None:
     import ssl
 
-    if backend == "aiohttp":
-        pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "transport_backend": backend,
@@ -829,7 +826,7 @@ async def test_connection_tls_is_independent_of_pool_settings(
 
 
 def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
-    from nemo_gym.sandbox.providers.opensandbox._http_transport import GymAiohttpTransport
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
     transport = provider._build_transport()
@@ -2070,7 +2067,7 @@ def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:
     verified = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx", "tls_verify": True})
     assert verified._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_REQUIRED
 
-    from nemo_gym.sandbox.providers.opensandbox._http_transport import GymAiohttpTransport
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     bridge = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})._build_transport()
     assert isinstance(bridge, GymAiohttpTransport)

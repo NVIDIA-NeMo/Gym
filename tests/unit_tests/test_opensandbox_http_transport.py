@@ -13,11 +13,12 @@ import pytest
 from aiohttp import web
 
 from nemo_gym import server_utils
+from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
 
 pytestmark = pytest.mark.sandbox
-pytest.importorskip("httpx_aiohttp")
 
 
 @pytest.fixture
@@ -28,6 +29,12 @@ async def shared_server(monkeypatch):
 
     async def echo(request):
         calls.append((request.transport, request.headers, await request.read()))
+        if request.path == "/broken":
+            response = web.StreamResponse(headers={"Content-Length": "100"})
+            await response.prepare(request)
+            await response.write(b"short")
+            request.transport.close()
+            return response
         if request.path == "/hold":
             entered.set()
             await release.wait()
@@ -117,3 +124,69 @@ async def test_tls_is_set_per_request_and_timeouts_are_not_retried(monkeypatch, 
     assert kwargs["timeout"].connect == 7
     assert kwargs["data"] == b"run once"
     await provider.aclose()
+
+
+async def test_e2b_and_opensandbox_share_connections(shared_server):
+    e2b = pytest.importorskip("e2b")
+    from e2b.api import client_async
+
+    e2b_sdk.require_e2b_sdk("Testing shared sandbox HTTP")
+    provider = OpenSandboxProvider(connection={"tls_verify": True})
+    async with httpx.AsyncClient(transport=client_async.get_transport(e2b.ConnectionConfig())) as client:
+        assert (await client.get(shared_server.url + "/echo")).content == b"response body"
+    assert not shared_server.client.closed
+    async with httpx.AsyncClient(transport=provider._get_transport()) as client:
+        assert (await client.get(shared_server.url + "/echo")).content == b"response body"
+    await provider.aclose()
+    assert shared_server.calls[0][0] is shared_server.calls[1][0]
+    assert not shared_server.client.closed
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (aiohttp.SocketTimeoutError("timeout"), httpx.ReadTimeout),
+        (aiohttp.ConnectionTimeoutError("timeout"), httpx.ConnectTimeout),
+        (TimeoutError("timeout"), httpx.TimeoutException),
+        (aiohttp.ClientConnectionError("connection"), httpx.ConnectError),
+        (aiohttp.ClientPayloadError("payload"), httpx.ReadError),
+        (aiohttp.ServerDisconnectedError("disconnected"), httpx.ReadError),
+        (aiohttp.InvalidURL("bad-url"), httpx.UnsupportedProtocol),
+        (aiohttp.NonHttpUrlClientError("ftp://example"), httpx.UnsupportedProtocol),
+        (
+            aiohttp.ClientHttpProxyError(SimpleNamespace(real_url="http://proxy.example"), (), status=407),
+            httpx.ProxyError,
+        ),
+        (RuntimeError("unexpected"), RuntimeError),
+    ],
+)
+async def test_transport_maps_errors_without_retrying(monkeypatch, error, expected):
+    request = AsyncMock(side_effect=error)
+    monkeypatch.setattr(server_utils, "request", request)
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        with pytest.raises(expected):
+            await client.post("https://sandbox.example/command", content=b"run once")
+    request.assert_awaited_once()
+    assert request.call_args.kwargs["_max_connection_retries"] == 1
+
+
+async def test_transport_preserves_proxy_auth_and_headers(monkeypatch):
+    proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"), headers={"X-Proxy": "value"})
+    request = AsyncMock(side_effect=aiohttp.ConnectionTimeoutError("timeout"))
+    monkeypatch.setattr(server_utils, "request", request)
+    async with httpx.AsyncClient(transport=GymAiohttpTransport(proxy=proxy)) as client:
+        with pytest.raises(httpx.ConnectTimeout):
+            await client.get("https://sandbox.example/command")
+    kwargs = request.call_args.kwargs
+    assert kwargs["proxy"] == "http://proxy.example:8080"
+    assert kwargs["proxy_auth"] == aiohttp.BasicAuth("user", "password")
+    assert kwargs["proxy_headers"]["X-Proxy"] == "value"
+
+
+async def test_truncated_stream_raises_read_error_and_releases_connection(shared_server):
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        with pytest.raises(httpx.ReadError):
+            await client.get(shared_server.url + "/broken")
+        response = await client.get(shared_server.url + "/echo", timeout=1)
+        assert response.content == b"response body"
+    assert not shared_server.client.closed
