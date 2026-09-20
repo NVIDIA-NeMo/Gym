@@ -60,7 +60,9 @@ def _load_rows() -> list[dict[str, Any]]:
 
 def _agent_config() -> NOOAAgentConfig:
     document = yaml.safe_load(CONFIG_PATH.read_text())
-    values = document["nooa_calculate_capability"]["responses_api_agents"]["nooa_agent"]
+    type_config = document["nooa_calculate_capability"]["responses_api_agents"]["nooa_agent"]
+    # Dataset declarations belong to the server type and are not passed to runtime instances.
+    values = {key: value for key, value in type_config.items() if key != "datasets"}
     return NOOAAgentConfig.model_validate(
         {"name": "nooa_calculate_capability", "host": "127.0.0.1", "port": 9000, **values}
     )
