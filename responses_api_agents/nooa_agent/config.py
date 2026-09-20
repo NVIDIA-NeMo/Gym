@@ -113,7 +113,7 @@ def load_agent_class(path: str) -> type[Agent]:
     module_name, _, class_name = path.partition(":")
     try:
         module = importlib.import_module(module_name)
-    except ImportError as error:
+    except (ImportError, TypeError) as error:
         raise ValueError(f"could not import NOOA agent module {module_name!r}") from error
 
     try:
