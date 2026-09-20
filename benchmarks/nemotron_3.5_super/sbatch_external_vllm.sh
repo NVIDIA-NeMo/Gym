@@ -260,6 +260,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
+            --worker-startup-timeout-secs 1200 \
             "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
