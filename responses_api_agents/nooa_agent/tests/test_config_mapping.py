@@ -257,6 +257,18 @@ def test_rejects_static_llm_override() -> None:
         invocation_config(init_kwargs={"llm": "provider-model"})
 
 
+def test_rejects_reserved_self_argument_mapping() -> None:
+    with pytest.raises(ValidationError, match=r"arguments\.self is reserved"):
+        invocation_config(
+            arguments={
+                "self": {
+                    "source": "responses_create_params.input",
+                    "transform": "latest_user_text",
+                }
+            }
+        )
+
+
 def test_validate_invocation_rejects_synchronous_entrypoint() -> None:
     config = invocation_config(
         agent_class=f"{__name__}:SyncAgent",
