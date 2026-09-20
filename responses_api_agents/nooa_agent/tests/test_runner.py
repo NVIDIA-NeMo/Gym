@@ -220,8 +220,13 @@ def test_sandboxed_execution_mode_fails_during_runner_construction() -> None:
 
 
 async def invoke_policy(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
-    assert isinstance(request.input, str)
-    return await agent.analyze(request.input)
+    if isinstance(request.input, str):
+        text = request.input
+    else:
+        content = request.input[-1].content
+        assert isinstance(content, str)
+        text = content
+    return await agent.analyze(text)
 
 
 def policy_runner(agent_class: type[Agent] = PolicyAgent) -> tuple[EmbeddedNOOARunner, list[dict[str, Any]]]:
