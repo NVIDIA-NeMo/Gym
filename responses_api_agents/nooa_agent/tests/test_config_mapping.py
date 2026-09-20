@@ -297,3 +297,10 @@ def test_rejects_private_or_invalid_argument_names() -> None:
 def test_load_agent_class_rejects_non_agent_class() -> None:
     with pytest.raises(ValueError, match="subclass of nooa.Agent"):
         load_agent_class(f"{__name__}:NotAnAgent")
+
+
+def test_load_agent_class_reports_relative_import_as_config_error() -> None:
+    with pytest.raises(ValueError, match="could not import NOOA agent module") as exc_info:
+        load_agent_class(".relative.agents:Agent")
+
+    assert isinstance(exc_info.value.__cause__, TypeError)
