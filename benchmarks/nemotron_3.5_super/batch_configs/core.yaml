@@ -7,13 +7,6 @@ config_paths:
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 num_samples_in_parallel: 512
-num_samples_in_parallel_by_agent:
-  tau2_benchmark_agent: 64
-  tau2_banking_knowledge_bm25_grep_artificial_analysis_agent: 64
-  hle_equivalence_llm_judge_simple_agent: 64
-  omniscience_omniscience_simple_agent: 64
-  aalcr_benchmark_simple_agent: 64
-  lmarena_v2_benchmark_agent: 32
 num_repeats:
   apex_shortlist_math_with_judge_simple_agent: 16
   lmarena_v2_benchmark_agent: 3

@@ -38,7 +38,7 @@ These job shapes have been tuned to finish evaluation on Nemotron 3.5 Super chec
 
 ### Batched evaluations
 
-Several benchmarks can share one model-serving deployment while retaining separate tasks, scores, and completion status. Gym interleaves attempts across agents, supports per-agent concurrency limits, and preserves other agents' metrics if one agent's aggregation fails.
+Several benchmarks can share one model-serving deployment while retaining separate tasks, scores, and completion status. Gym interleaves attempts across agents under one global concurrency limit and preserves other agents' metrics if one agent's aggregation fails.
 
 | Batch | Members | Suite configuration | Global concurrency ceiling |
 | --- | --- | --- | ---: |
@@ -49,23 +49,22 @@ Several benchmarks can share one model-serving deployment while retaining separa
 
 The SWE batch shares 4 nodes (16 GPUs), compared with 8 nodes (32 GPUs) when running Verified and Multilingual as separate 4-node jobs at the same time.
 
-The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) add the pilot's concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials.
+The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) retain the pilot's global concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials. The completed core pilots also used per-agent collection caps, which have since been removed; GPU validation of the global-only core recipe is pending. Existing judge/model-service request limits are unchanged.
 
 The prepared SWE inputs already include three copies of each task. Use `num_repeats=1` and `num_repeats_add_seed=false` during collection so Gym doesn’t add more repeats or sampling seeds.
 
 Submit either full batch with [benchmarks/nemotron_3.5_super/submit_batch.sh](submit_batch.sh). It checks the configuration, then calls [benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh](sbatch_external_vllm.sh) to submit the job. Serving allocation settings and Gym configuration are separate:
 
 - Launcher environment variables `NUM_PREFILL_NODES` and `NUM_DECODE_NODES` default to `2` each, matching the tested four-node allocation. Each node has four GPUs.
-- In Gym YAML configuration or Hydra overrides, `num_samples_in_parallel_by_agent` limits selected agents within the global ceiling. `num_repeats` and `num_repeats_add_seed` accept per-agent mappings with an `_default` value, preserving each benchmark's repeat and seed policy. For example:
+- In Gym YAML configuration or Hydra overrides, `num_samples_in_parallel` sets one shared limit on active evaluation attempts. `num_repeats` and `num_repeats_add_seed` accept per-agent mappings with an `_default` value, preserving each benchmark's repeat and seed policy. For example:
 
   ```yaml
   num_samples_in_parallel: 512
-  num_samples_in_parallel_by_agent: {lmarena_v2_benchmark_agent: 64}
   num_repeats: {_default: 1, lmarena_v2_benchmark_agent: 3}
   num_repeats_add_seed: {_default: false, lmarena_v2_benchmark_agent: true}
   ```
 
-  LMArena gets at most 64 of the 512 shared slots and three collection attempts per prepared row, with added seeds; other agents use the defaults. Collection repeats multiply any repeats already in the prepared inputs.
+  All agents share the 512 slots. LMArena gets three collection attempts per prepared row, with added seeds; other agents use the repeat and seed defaults. Collection repeats multiply any repeats already in the prepared inputs.
 
 - When `batch_manifest_fpath` is supplied, Gym validates the declared members and input fingerprints before dispatch, then writes per-agent progress and aggregation state to `batch_status.json` beside the manifest. A shared metrics file alone does not prove every member is complete; inspect each member's counts and aggregation state. Successful collection also does not replace a review of infrastructure failures and score validity.
 

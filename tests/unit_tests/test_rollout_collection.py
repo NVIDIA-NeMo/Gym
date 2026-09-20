@@ -226,9 +226,6 @@ class TestGetMaxRolloutAttempts:
 class TestRolloutConcurrencyConfig:
     BASE = {"input_jsonl_fpath": "in.jsonl", "output_jsonl_fpath": "out.jsonl"}
 
-    def test_per_agent_limits_default_to_empty(self) -> None:
-        assert RolloutCollectionConfig.model_validate(self.BASE).num_samples_in_parallel_by_agent == {}
-
     @pytest.mark.parametrize(
         "config_type, config",
         [
@@ -236,24 +233,24 @@ class TestRolloutConcurrencyConfig:
             (E2ERolloutCollectionConfig, {"output_jsonl_fpath": "out.jsonl", "split": "train"}),
         ],
     )
-    def test_per_agent_limits_are_available_in_both_collection_modes(self, config_type, config) -> None:
-        validated = config_type.model_validate({**config, "num_samples_in_parallel_by_agent": {"alpha": 1, "beta": 2}})
+    @pytest.mark.parametrize("limit", [None, 1, 512])
+    def test_global_limit_is_available_in_both_collection_modes(
+        self,
+        config_type: type[RolloutCollectionConfig | E2ERolloutCollectionConfig],
+        config: dict[str, str],
+        limit: int | None,
+    ) -> None:
+        """Both collection entrypoints accept the same optional run-wide limit."""
+        validated = config_type.model_validate({**config, "num_samples_in_parallel": limit})
 
-        assert validated.num_samples_in_parallel_by_agent == {"alpha": 1, "beta": 2}
-        assert validated.model_dump()["num_samples_in_parallel_by_agent"] == {"alpha": 1, "beta": 2}
+        assert validated.num_samples_in_parallel == limit
+        assert validated.model_dump()["num_samples_in_parallel"] == limit
 
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            {"num_samples_in_parallel": 0},
-            {"num_samples_in_parallel_by_agent": {"alpha": 0}},
-            {"num_samples_in_parallel_by_agent": {"alpha": -1}},
-            {"num_samples_in_parallel_by_agent": {" ": 1}},
-        ],
-    )
-    def test_concurrency_limits_must_be_positive_and_named(self, overrides) -> None:
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_global_limit_must_be_positive(self, limit: int) -> None:
+        """Reject unusable global limits before dispatching any work."""
         with pytest.raises(ValidationError):
-            RolloutCollectionConfig.model_validate({**self.BASE, **overrides})
+            RolloutCollectionConfig.model_validate({**self.BASE, "num_samples_in_parallel": limit})
 
 
 class TestRolloutCollection:
@@ -575,7 +572,9 @@ class TestRolloutCollection:
 
         assert started == [("alpha", 0), ("beta", 1), ("alpha", 2), ("beta", 3)]
 
-    async def test_per_agent_limits_are_nested_inside_the_global_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("limit", [1, 2, 3])
+    async def test_global_limit_is_shared_across_agents(self, monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
+        """Mixed-agent work fills but never exceeds the single shared limit."""
         examples = [
             {
                 AGENT_REF_KEY_NAME: {"name": agent},
@@ -586,7 +585,6 @@ class TestRolloutCollection:
             for task_index, agent in enumerate(("alpha", "beta", "alpha", "beta", "alpha", "beta"))
         ]
         active_by_agent = Counter()
-        max_active_by_agent = Counter()
         active_total = 0
         max_active_total = 0
         first_wave_started = asyncio.Event()
@@ -598,8 +596,7 @@ class TestRolloutCollection:
             active_total += 1
             active_by_agent[server_name] += 1
             max_active_total = max(max_active_total, active_total)
-            max_active_by_agent[server_name] = max(max_active_by_agent[server_name], active_by_agent[server_name])
-            if active_total == 3:
+            if active_total == limit:
                 first_wave_started.set()
             try:
                 await release.wait()
@@ -617,23 +614,24 @@ class TestRolloutCollection:
         )
         completions = RolloutCollectionHelper()._run_examples_with_metadata(
             examples,
-            semaphore=asyncio.Semaphore(3),
-            num_samples_in_parallel_by_agent={"alpha": 1, "beta": 2},
+            semaphore=asyncio.Semaphore(limit),
         )
         collection = asyncio.gather(*list(completions))
 
         try:
             await asyncio.wait_for(first_wave_started.wait(), timeout=1)
-            assert active_total == 3
-            assert active_by_agent == {"alpha": 1, "beta": 2}
+            assert active_total == limit
+            assert active_by_agent == Counter(row[AGENT_REF_KEY_NAME]["name"] for row in examples[:limit])
         finally:
             release.set()
             await collection
 
-        assert max_active_total == 3
-        assert max_active_by_agent == {"alpha": 1, "beta": 2}
+        assert max_active_total == limit
+        assert active_total == 0
+        assert server_client.post.await_count == len(examples)
 
-    async def test_agent_without_a_specific_limit_uses_the_global_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_single_agent_can_use_all_global_slots(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The global limit does not reserve slots for other configured agents."""
         examples = [
             {
                 AGENT_REF_KEY_NAME: {"name": "gamma"},
@@ -670,7 +668,6 @@ class TestRolloutCollection:
         completions = RolloutCollectionHelper().run_examples(
             examples,
             semaphore=asyncio.Semaphore(3),
-            num_samples_in_parallel_by_agent={"alpha": 1},
         )
         collection = asyncio.gather(*list(completions))
 
@@ -680,28 +677,6 @@ class TestRolloutCollection:
         finally:
             release.set()
             await collection
-
-    async def test_unknown_agent_in_concurrency_limits_fails_before_dispatch(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        post = AsyncMock()
-        server_client = install_fake_server_client(monkeypatch, post)
-        server_client.global_config_dict = OmegaConf.create({"alpha": {"responses_api_agents": {}}})
-        examples = [
-            {
-                AGENT_REF_KEY_NAME: {"name": "alpha"},
-                TASK_SOURCE_KEY_NAME: "alpha",
-                TASK_INDEX_KEY_NAME: 0,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-            }
-        ]
-
-        with pytest.raises(ValueError, match=r"'alpah' \(did you mean 'alpha'\?\)"):
-            RolloutCollectionHelper()._run_examples_with_metadata(
-                examples, num_samples_in_parallel_by_agent={"alpah": 1}
-            )
-
-        post.assert_not_awaited()
 
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {

@@ -137,7 +137,7 @@ def test_submit_forwards_settings_to_prefetch_prepare_and_run(checkout, batch: s
     config.touch()
     overrides = [
         "++resume_from_cache=true",
-        "++num_samples_in_parallel_by_agent={one:2,two:3}",
+        "++num_repeats_add_seed={_default:false,one:true}",
         '++description="literal $(touch INJECTED); spaces and braces {a,b}"',
     ]
     args = ["--config", str(BENCHMARK / f"batch_configs/{batch}.yaml"), "--config", str(config), *overrides]
@@ -312,6 +312,7 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
     assert len(members) == expected_members
     assert not any("swebench_pro" in server.name for server in members)
     assert config.model_endpoint_readiness_timeout_seconds == 1800
+    assert rollout.num_samples_in_parallel == (512 if batch == "core" else 1024)
     sampling = config.policy_model.responses_api_models.vllm_model.sampling_overrides
     assert sampling.temperature == 1.0 and sampling.top_p == 0.95
     if batch == "swe":
