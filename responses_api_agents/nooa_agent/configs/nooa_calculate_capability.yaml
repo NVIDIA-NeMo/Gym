@@ -22,8 +22,7 @@ nooa_calculate_capability:
           calculation:
             source: agent_inputs.calculation
             transform: identity
-      max_steps: 4
-      concurrency: 8
+      max_policy_calls: 4
       run_timeout_secs: 600
       datasets:
         - name: calculate
