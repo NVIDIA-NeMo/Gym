@@ -20,7 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 import aiohttp
-from fastapi import Body, HTTPException, Request, Response
+from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
