@@ -84,7 +84,7 @@ def _responses_input(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any
     return result, "\n\n".join(instructions) or None
 
 
-def _tool_schema(tool: Tool) -> dict[str, Any]:
+def _responses_tool_schema(tool: Tool) -> dict[str, Any]:
     schema = tool.get_parameter_schema()
     return {
         "type": "function",
@@ -158,9 +158,7 @@ class GymResponsesLLM(UnifiedLLM):
         **kwargs: Any,
     ) -> LLMResponse:
         if self._calls >= self._max_policy_calls:
-            raise PolicyCallBudgetExceeded(
-                f"NOOA policy call budget exhausted after {self._max_policy_calls} calls"
-            )
+            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_policy_calls} calls")
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
@@ -169,7 +167,7 @@ class GymResponsesLLM(UnifiedLLM):
             "instructions": instructions,
             "model": None,
             "parallel_tool_calls": False,
-            "tools": [_tool_schema(tool) for tool in tools or []],
+            "tools": [_responses_tool_schema(tool) for tool in tools or []],
         }
         if output_model is not None:
             request["text"] = {
