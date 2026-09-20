@@ -41,7 +41,7 @@ class NOOAInvocationConfig(BaseModel):
 
     agent_class: str
     invocation_adapter: str
-    execution_mode: Literal["embedded"] = "embedded"
+    execution_mode: Literal["embedded", "sandboxed"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("agent_class")
