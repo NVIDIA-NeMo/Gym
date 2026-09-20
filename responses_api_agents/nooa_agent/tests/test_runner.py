@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent
-from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
@@ -49,11 +48,14 @@ class FakeAgent:
         return f"{text}: {weather['weather']}"
 
 
-class Row(BaseModel):
-    model_config = ConfigDict(extra="allow")
+adapter_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
 
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    agent_inputs: dict[str, str]
+
+async def invoke(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+    adapter_requests.append(request)
+    assert isinstance(request.input, str)
+    text, customer_id = request.input.split("|", maxsplit=1)
+    return await agent.analyze(text, customer_id)
 
 
 class FakeContent:
@@ -67,19 +69,13 @@ class FakeResponse:
     cookies = SimpleCookie()
 
 
-def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
+def make_runner(*, execution_mode: str = "embedded") -> tuple[EmbeddedNOOARunner, MagicMock]:
     invocation = NOOAInvocationConfig.model_validate(
         {
             "agent_class": f"{__name__}:ValidAgent",
-            "entrypoint": "analyze",
+            "invocation_adapter": f"{__name__}:invoke",
+            "execution_mode": execution_mode,
             "init_kwargs": {"label": "configured"},
-            "arguments": {
-                "text": {
-                    "source": "responses_create_params.input",
-                    "transform": "latest_user_text",
-                },
-                "customer_id": {"source": "agent_inputs.customer_id"},
-            },
         }
     )
     client = MagicMock()
@@ -95,11 +91,10 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
     return runner, client
 
 
-def row(customer_id: str) -> Row:
-    return Row(
-        agent_inputs={"customer_id": customer_id},
-        responses_create_params={
-            "input": [{"role": "user", "content": "Check delivery"}],
+def responses_create_params(customer_id: str) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {
+            "input": f"Check delivery|{customer_id}",
             "tools": [
                 {
                     "type": "function",
@@ -114,17 +109,19 @@ def row(customer_id: str) -> Row:
                     },
                 }
             ],
-        },
+        }
     )
 
 
 @pytest.mark.asyncio
-async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> None:
+async def test_embedded_runner_invokes_adapter_and_attaches_resource_methods() -> None:
     runner, client = make_runner()
+    request = responses_create_params("Paris")
+    adapter_requests.clear()
 
     result = await runner.run(
         NOOARunRequest(
-            row=row("Paris"),
+            responses_create_params=request,
             rollout_id="rollout-1",
             task_id="task-1",
             model_url_path="/ng-rollout/rollout-1/v1/responses",
@@ -137,6 +134,7 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
     assert result.agent.llm.model == "gym-policy"
     assert "get_weather" in vars(type(result.agent))
     assert "gym_tools" not in vars(result.agent)
+    assert adapter_requests == [request]
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
 
@@ -147,7 +145,7 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
 
     first = await runner.run(
         NOOARunRequest(
-            row=row("Paris"),
+            responses_create_params=responses_create_params("Paris"),
             rollout_id="one",
             task_id="task",
             model_url_path="/one/v1/responses",
@@ -155,7 +153,7 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     )
     second = await runner.run(
         NOOARunRequest(
-            row=row("Berlin"),
+            responses_create_params=responses_create_params("Berlin"),
             rollout_id="two",
             task_id="task",
             model_url_path="/two/v1/responses",
@@ -165,3 +163,8 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     assert FakeAgent.instances == 2
     assert first.agent is not second.agent
     assert first.resource_cookies is not second.resource_cookies
+
+
+def test_sandboxed_execution_mode_fails_during_runner_construction() -> None:
+    with pytest.raises(NotImplementedError, match="sandboxed execution is not implemented"):
+        make_runner(execution_mode="sandboxed")
