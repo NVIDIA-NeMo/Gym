@@ -80,6 +80,11 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     return NOOAInvocationConfig.model_validate(values)
 
 
+def test_rejects_agent_class_path_with_multiple_colons() -> None:
+    with pytest.raises(ValidationError, match="agent_class must use the format"):
+        invocation_config(agent_class="module.path:ClassName:Extra")
+
+
 def test_agent_config_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError) as exc_info:
         NOOAAgentConfig.model_validate(
