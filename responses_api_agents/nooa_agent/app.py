@@ -174,17 +174,16 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         run_body = NOOAAgentRunRequest(responses_create_params=body)
         cookies = dict(request.cookies)
-        try:
-            async with asyncio.timeout(self.config.run_timeout_secs):
-                run_result = await self.runner.run(
-                    NOOARunRequest(
-                        responses_create_params=run_body.responses_create_params,
-                        model_url_path=self.url_path_for_request("/v1/responses", request),
-                        model_cookies=dict(cookies),
-                        resource_cookies=dict(cookies),
-                        **_identity(run_body, request.path_params.get("rollout_id")),
-                    )
+        async with asyncio.timeout(self.config.run_timeout_secs):
+            run_result = await self.runner.run(
+                NOOARunRequest(
+                    responses_create_params=run_body.responses_create_params,
+                    model_url_path=self.url_path_for_request("/v1/responses", request),
+                    model_cookies=dict(cookies),
+                    resource_cookies=dict(cookies),
+                    **_identity(run_body, request.path_params.get("rollout_id")),
                 )
+            )
         for name, value in _merge_downstream_cookies(run_result.model_cookies, run_result.resource_cookies).items():
             response.set_cookie(name, value)
         return run_result.episode.response
