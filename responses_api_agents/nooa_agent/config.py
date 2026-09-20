@@ -17,39 +17,21 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from nooa import Agent
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
-class NOOAArgumentBinding(BaseModel):
-    """Map one entrypoint argument from a Gym run row."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source: str
-    transform: str = "identity"
-
-    @field_validator("source")
-    @classmethod
-    def validate_source(cls, source: str) -> str:
-        from responses_api_agents.nooa_agent.mapping import validate_source_path
-
-        validate_source_path(source)
-        return source
-
-    @field_validator("transform")
-    @classmethod
-    def validate_transform(cls, transform: str) -> str:
-        from responses_api_agents.nooa_agent.mapping import get_transform
-
-        get_transform(transform)
-        return transform
+NOOAInvocationAdapter = Callable[
+    [Agent, NeMoGymResponseCreateParamsNonStreaming],
+    Awaitable[object],
+]
 
 
 class NOOAInvocationConfig(BaseModel):
@@ -58,10 +40,9 @@ class NOOAInvocationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_class: str
-    entrypoint: str
+    invocation_adapter: str
     execution_mode: Literal["embedded"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
-    arguments: dict[str, NOOAArgumentBinding]
 
     @field_validator("agent_class")
     @classmethod
@@ -75,21 +56,24 @@ class NOOAInvocationConfig(BaseModel):
             raise ValueError("agent_class must use the format 'module.path:ClassName'")
         return value
 
-    @field_validator("entrypoint")
+    @field_validator("invocation_adapter")
     @classmethod
-    def validate_entrypoint_name(cls, value: str) -> str:
-        if not value.isidentifier() or value.startswith("_"):
-            raise ValueError("entrypoint must be a public Python method name")
+    def validate_invocation_adapter_path(cls, value: str) -> str:
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
+
+        module_name, function_name = parts
+        if not module_name or not function_name or "." in function_name:
+            raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
         return value
 
-    @model_validator(mode="after")
-    def validate_argument_names(self) -> "NOOAInvocationConfig":
-        invalid = sorted(name for name in self.arguments if not name.isidentifier() or name.startswith("_"))
-        if invalid:
-            raise ValueError(f"argument mapping names must be public Python identifiers: {invalid}")
-        if "llm" in self.init_kwargs:
+    @field_validator("init_kwargs")
+    @classmethod
+    def validate_init_kwargs(cls, init_kwargs: dict[str, Any]) -> dict[str, Any]:
+        if "llm" in init_kwargs:
             raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
-        return self
+        return init_kwargs
 
 
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
@@ -123,8 +107,31 @@ def load_agent_class(path: str) -> type[Agent]:
     return candidate
 
 
-def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], Callable[..., Any]]:
-    """Validate imports and constructor/entrypoint signatures at server startup."""
+def load_invocation_adapter(path: str) -> NOOAInvocationAdapter:
+    """Import and validate an async ``module:function`` invocation adapter."""
+
+    module_name, _, function_name = path.partition(":")
+    try:
+        module = importlib.import_module(module_name)
+    except (ImportError, TypeError) as error:
+        raise ValueError(f"could not import NOOA invocation adapter module {module_name!r}") from error
+
+    try:
+        candidate = getattr(module, function_name)
+    except AttributeError as error:
+        raise ValueError(f"module {module_name!r} has no attribute {function_name!r}") from error
+
+    if not callable(candidate) or not inspect.iscoroutinefunction(candidate):
+        raise ValueError(f"{path!r} must resolve to an async function")
+    try:
+        inspect.signature(candidate).bind(object(), object())
+    except TypeError as error:
+        raise ValueError(f"invocation adapter must accept positional agent and request arguments: {error}") from error
+    return candidate
+
+
+def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], NOOAInvocationAdapter]:
+    """Validate agent construction and the Responses invocation adapter at startup."""
 
     agent_class = load_agent_class(config.agent_class)
     try:
@@ -132,54 +139,4 @@ def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], Call
     except TypeError as error:
         raise ValueError(f"init_kwargs do not match {config.agent_class}: {error}") from error
 
-    descriptor = inspect.getattr_static(agent_class, config.entrypoint, None)
-    entrypoint = getattr(agent_class, config.entrypoint, None)
-    if entrypoint is None or not callable(entrypoint):
-        raise ValueError(f"{config.agent_class} has no callable entrypoint {config.entrypoint!r}")
-    if not inspect.iscoroutinefunction(entrypoint):
-        raise ValueError(f"entrypoint {config.entrypoint!r} must be async")
-
-    signature = inspect.signature(entrypoint)
-    signature_parameters = dict(signature.parameters)
-
-    if inspect.isfunction(descriptor):
-        receiver_name = next(iter(signature_parameters), None)
-        if receiver_name is None:
-            raise ValueError(f"instance entrypoint {config.entrypoint!r} must declare a receiver parameter")
-        if receiver_name in config.arguments:
-            raise ValueError(
-                f"arguments must not map instance receiver parameter {receiver_name!r}; "
-                "Python supplies the agent instance"
-            )
-        signature_parameters.pop(receiver_name)
-
-    parameters = {
-        name: parameter
-        for name, parameter in signature_parameters.items()
-        if parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    }
-    accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature_parameters.values()
-    )
-
-    unknown = set(config.arguments) - set(parameters)
-    if unknown and not accepts_kwargs:
-        raise ValueError(f"arguments not accepted by {config.entrypoint}: {sorted(unknown)}")
-
-    positional_only = {
-        name for name, parameter in parameters.items() if parameter.kind == inspect.Parameter.POSITIONAL_ONLY
-    }
-    mapped_positional_only = positional_only & set(config.arguments)
-    if mapped_positional_only:
-        raise ValueError(f"entrypoint parameters must accept keyword arguments: {sorted(mapped_positional_only)}")
-
-    required = {
-        name
-        for name, parameter in parameters.items()
-        if parameter.default is inspect.Parameter.empty and parameter.kind != inspect.Parameter.POSITIONAL_ONLY
-    }
-    missing = required - set(config.arguments)
-    if missing:
-        raise ValueError(f"required entrypoint arguments are not mapped: {sorted(missing)}")
-
-    return agent_class, entrypoint
+    return agent_class, load_invocation_adapter(config.invocation_adapter)
