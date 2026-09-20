@@ -20,6 +20,7 @@ from nooa import Agent
 from pydantic import BaseModel, ValidationError
 
 from responses_api_agents.nooa_agent.config import (
+    NOOAAgentConfig,
     NOOAArgumentBinding,
     NOOAInvocationConfig,
     load_agent_class,
@@ -77,6 +78,26 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
     }
     values.update(overrides)
     return NOOAInvocationConfig.model_validate(values)
+
+
+def test_agent_config_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        NOOAAgentConfig.model_validate(
+            {
+                "name": "nooa",
+                "host": "127.0.0.1",
+                "port": 9000,
+                "entrypoint": "app.py",
+                "resources_server": {"type": "resources_servers", "name": "resources"},
+                "model_server": {"type": "responses_api_models", "name": "policy"},
+                "nooa": invocation_config().model_dump(),
+                "max_step": 20,
+            }
+        )
+
+    error = exc_info.value.errors()[0]
+    assert error["type"] == "extra_forbidden"
+    assert error["loc"] == ("max_step",)
 
 
 def test_materialize_arguments_from_complete_run_row() -> None:
