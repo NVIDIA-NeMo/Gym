@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import Response
 from nooa import Agent, PredictStrategy, strategy
 from nooa.config import PredictConfig
 from pydantic import BaseModel
