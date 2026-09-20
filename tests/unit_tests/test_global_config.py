@@ -32,6 +32,7 @@ from nemo_gym.config_types import (
     ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -1985,6 +1986,49 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert "config_paths" in message
         assert "list" in message
+
+    @mark.parametrize(
+        ("head_server", "named_fields"),
+        [
+            ({"port": "notanint"}, ["head_server.port"]),  # what `++head_server.port=notanint` arrives as
+            ({"host": None}, ["head_server.host"]),  # setdefault keeps an explicit null
+            ({"host": None, "port": "notanint"}, ["head_server.host", "head_server.port"]),  # all at once
+        ],
+    )
+    def test_parse_malformed_head_server_raises_actionable_error(
+        self, head_server: dict, named_fields: list[str]
+    ) -> None:
+        from pydantic import ValidationError
+
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        for field in named_fields:
+            assert field in message
+        assert "++head_server.port=" in message
+        assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
+        assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
+
+    def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
+        # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
+        # block is left exactly as written, so `gym env resolve` still prints what the user configured.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": {"host": "127.0.0.1", "port": "8080"}}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": "8080"}
 
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()

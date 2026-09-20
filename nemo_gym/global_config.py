@@ -41,10 +41,12 @@ from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_al
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
+    BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -1311,6 +1313,22 @@ Found global config dict yaml:
             head_server.setdefault("host", default_host)
             head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
             global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
+
+            # Checked here rather than where the block is first read (ServerClient.load_head_server_config,
+            # after Ray is up for `gym env start`): BaseServerConfig is not a CLI config, so its pydantic
+            # error would otherwise escape `main()` as a raw traceback (#2686).
+            try:
+                BaseServerConfig.model_validate(head_server)
+            except ValidationError as e:
+                problems = "; ".join(
+                    f"{'.'.join([HEAD_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})"
+                    for error in e.errors()
+                )
+                raise HeadServerConfigMalformedError(
+                    f"""'{HEAD_SERVER_KEY_NAME}' is invalid: {problems}.
+`{HEAD_SERVER_KEY_NAME}.host` must be a hostname or IP and `{HEAD_SERVER_KEY_NAME}.port` an integer. Set them in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+                ) from e
 
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
