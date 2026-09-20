@@ -613,6 +613,66 @@ class TestFriendlyValidationError:
         with pytest.raises(ValidationError):
             main()
 
+    # #2686: BaseServerConfig is not a CLI config, so the router keeps re-raising its ValidationError (test above).
+    # The parser therefore reports a bad head_server value as a ConfigError at the source, which every command
+    # turns into a single `Error:` line and exit 1 before any server (or Ray) starts.
+
+    def _run_real_cli_with_a_malformed_head_server(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
+    ) -> str:
+        """Drive the real router + config parse for `gym <argv> ++head_server.port=notanint`; return stdout."""
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv, "++head_server.port=notanint"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert "head_server.port" in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        return captured.out
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["env", "validate"],  # printed "Config is valid." before the fix
+            ["env", "resolve"],  # dumped `port: notanint` and exited 0 before the fix
+            ["eval", "run", "--no-serve", "--agent", "simple_agent", "-i", "in.jsonl", "-o", "out"],  # raw traceback
+        ],
+        ids=["env-validate", "env-resolve", "eval-run-no-serve"],
+    )
+    def test_malformed_head_server_override_is_a_config_error_not_a_traceback(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
+    ) -> None:
+        # A real row, so that without the fix `eval run` gets past its input checks to the head-server lookup.
+        (tmp_path / "in.jsonl").write_text(
+            json.dumps({"responses_create_params": {"input": [{"role": "user", "content": "hi"}]}}) + "\n"
+        )
+
+        out = self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, argv)
+
+        assert "Config is valid" not in out
+
+    def test_malformed_head_server_is_rejected_before_any_server_starts(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
+    ) -> None:
+        # The issue's headline: `gym env start` used to initialise Ray and spawn the head server, then die on the
+        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
+        import nemo_gym.cli.env as cli_env
+
+        class _NoServerMayStart:
+            def __init__(self, *args, **kwargs) -> None:
+                raise AssertionError("RunHelper must not be built for a malformed head_server")
+
+        monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
+
+        self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
+
 
 class TestDispatch:
     """Exercise the real `dispatch` (every router test above stubs it), so argv rewriting and
