@@ -31,6 +31,7 @@ from big_finance_harness.tools import (
     FetchUrlTool,
     FinalAnswerTool,
     PythonExecTool,
+    ToolError,
     WebSearchTool,
 )
 from big_finance_harness.tools.web_search import _SerpApiBackend, _TavilyBackend
@@ -161,11 +162,44 @@ def _responses_output_text(response: Any) -> str:
     return "".join(chunks)
 
 
+def _is_error_observation(output: str) -> bool:
+    """Recognize both the upstream-style marker and legacy Gym JSON errors."""
+    if output.startswith("[ERROR]"):
+        return True
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("error"), str)
+
+
 def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
-    """Prefer the last valid final_answer call, then the last assistant prose."""
+    """Extract only an answer accepted by the agent's recorded stop semantics."""
+    stop_reason = (response.metadata or {}).get("stop_reason")
+    if stop_reason is not None and stop_reason not in {"done_tool", "assistant_message"}:
+        return None
+
+    if stop_reason == "assistant_message":
+        for item in reversed(response.output):
+            text = _message_text(item)
+            if text.strip():
+                return text
+        return None
+
+    tool_outputs = {
+        getattr(item, "call_id", None): str(getattr(item, "output", "") or "")
+        for item in response.output
+        if getattr(item, "type", None) == "function_call_output"
+    }
     prose: Optional[str] = None
     for item in reversed(response.output):
         if getattr(item, "type", None) == "function_call" and getattr(item, "name", None) == "final_answer":
+            call_id = getattr(item, "call_id", None)
+            output = tool_outputs.get(call_id)
+            if output is not None and _is_error_observation(output):
+                continue
+            if stop_reason == "done_tool" and output is None:
+                continue
             try:
                 args = json.loads(getattr(item, "arguments", "{}"))
             except (TypeError, json.JSONDecodeError):
@@ -176,7 +210,7 @@ def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
         text = _message_text(item)
         if prose is None and text.strip():
             prose = text
-    return prose
+    return prose if stop_reason is None else None
 
 
 def format_trace(response: NeMoGymResponse) -> str:
@@ -204,9 +238,13 @@ def format_trace(response: NeMoGymResponse) -> str:
             lines.append(f"tool_call {getattr(item, 'name', '')}({args})")
         elif item_type == "function_call_output":
             content = str(getattr(item, "output", "") or "")
+            is_error = _is_error_observation(content)
+            if content.startswith("[ERROR]"):
+                content = content[len("[ERROR]") :].lstrip()
             if len(content) > _TOOL_RESULT_CAP:
                 content = content[:_TOOL_RESULT_CAP] + "..."
-            lines.append(f"tool_result: {content}")
+            marker = " [ERROR]" if is_error else ""
+            lines.append(f"tool_result{marker}: {content}")
             in_model_batch = False
         elif item_type == "message":
             # A harness-injected user nudge separates two model turns.
@@ -332,9 +370,14 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 # function_call_output. Returning the upstream string directly keeps
                 # model-visible observations identical to the standalone harness.
                 return PlainTextResponse(await tool.run(body if isinstance(body, dict) else {}))
+            except ToolError as exc:
+                return PlainTextResponse(
+                    json.dumps({"error": str(exc)}),
+                    media_type="application/json",
+                )
             except Exception as exc:  # noqa: BLE001 - tool errors are observations, not HTTP 500s
                 return PlainTextResponse(
-                    json.dumps({"error": f"{type(exc).__name__}: {exc}"}),
+                    json.dumps({"error": f"unexpected tool error: {type(exc).__name__}: {exc}"}),
                     media_type="application/json",
                 )
 

@@ -59,10 +59,10 @@ _SHIPPED_CONFIGS = {
 #: Fields with no default, so each profile has to state its own policy.
 _POLICY_FIELDS = ("no_tool_call_nudge", "max_time_seconds", "abort_on_tool_error_types")
 _SHIPPED_LOOP_EXPECTATIONS = {
-    "big_finance": ("finish", "concurrent", ["final_answer"]),
-    "big_finance_benchmark_agent": ("finish", "concurrent", ["final_answer"]),
-    "finance_agent": ("nudge", "sequential", ["submit_final_result"]),
-    "finance_agent_v2": ("nudge", "sequential", ["submit_final_result"]),
+    "big_finance": ("finish", "concurrent", "error_prefix", ["final_answer"]),
+    "big_finance_benchmark_agent": ("finish", "concurrent", "error_prefix", ["final_answer"]),
+    "finance_agent": ("nudge", "sequential", "json", ["submit_final_result"]),
+    "finance_agent_v2": ("nudge", "sequential", "json", ["submit_final_result"]),
 }
 
 
@@ -255,17 +255,20 @@ class TestFinanceAgentConfig:
         block = _shipped_block(instance)
         loop_overrides = {
             field: block[field]
-            for field in ("prose_only_behavior", "tool_call_execution", "done_tools")
+            for field in ("prose_only_behavior", "tool_call_execution", "tool_error_observation", "done_tools")
             if field in block
         }
         config = _make_config(
             policy=_shipped_policy(instance),
             **loop_overrides,
         )
-        expected_prose, expected_execution, expected_done_tools = _SHIPPED_LOOP_EXPECTATIONS[instance]
+        expected_prose, expected_execution, expected_error_observation, expected_done_tools = (
+            _SHIPPED_LOOP_EXPECTATIONS[instance]
+        )
         assert config.no_tool_call_nudge
         assert config.prose_only_behavior == expected_prose
         assert config.tool_call_execution == expected_execution
+        assert config.tool_error_observation == expected_error_observation
         assert config.done_tools == expected_done_tools
 
     @pytest.mark.parametrize("field", _POLICY_FIELDS)
@@ -292,6 +295,7 @@ class TestFinanceAgentConfig:
         assert config.truncate_on_overflow is False
         assert config.prose_only_behavior == "nudge"
         assert config.tool_call_execution == "sequential"
+        assert config.tool_error_observation == "json"
 
     def test_custom_config(self) -> None:
         config = _make_config(
@@ -305,6 +309,7 @@ class TestFinanceAgentConfig:
             truncate_on_overflow=True,
             prose_only_behavior="finish",
             tool_call_execution="concurrent",
+            tool_error_observation="error_prefix",
         )
         assert config.max_steps == 10
         assert config.max_time_seconds == 60.0
@@ -316,6 +321,7 @@ class TestFinanceAgentConfig:
         assert config.truncate_on_overflow is True
         assert config.prose_only_behavior == "finish"
         assert config.tool_call_execution == "concurrent"
+        assert config.tool_error_observation == "error_prefix"
 
     def test_sanity_construction(self) -> None:
         agent, _ = _make_agent_and_client()
@@ -697,6 +703,7 @@ class TestResponses:
         config = _make_config(
             max_steps=1,
             tool_call_execution="concurrent",
+            tool_error_observation="error_prefix",
         )
         agent, client = _make_agent_and_client(config)
         model_mock = _dotjson_mock(
@@ -719,7 +726,31 @@ class TestResponses:
 
         assert res.status_code == 200
         assert res.json()["metadata"]["stop_reason"] == "max_turns"
-        assert len([item for item in res.json()["output"] if item["type"] == "function_call_output"]) == 2
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert len(tool_outputs) == 2
+        assert tool_outputs[0]["output"] == "[ERROR] ValidationError: missing answer"
+
+    def test_failed_sequential_terminal_call_does_not_finish(self) -> None:
+        config = _make_config(
+            max_steps=2,
+            prose_only_behavior="finish",
+            tool_error_observation="error_prefix",
+        )
+        agent, client = _make_agent_and_client(config)
+        model_mock = _dotjson_mock(
+            _tool_call_response("submit_final_result", "{}", call_id="terminal"),
+            _text_response("I could not produce a valid answer.", resp_id="resp_2"),
+        )
+        agent.server_client.post = AsyncMock(
+            side_effect=_route(model_mock, _dotjson_mock({"error": "answer is required"}))
+        )
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "assistant_message"
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert tool_outputs[0]["output"] == "[ERROR] answer is required"
 
     def test_max_steps_terminates_loop(self) -> None:
         """Loop exits after max_steps even if model keeps producing tool calls."""

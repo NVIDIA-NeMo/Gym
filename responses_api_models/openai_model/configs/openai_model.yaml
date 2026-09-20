@@ -5,5 +5,9 @@ policy_model:
       openai_base_url: ${policy_base_url}
       openai_api_key: ${policy_api_key}
       openai_model: ${policy_model_name}
+      extra_body: ${oc.select:policy_extra_body,{}}
       openai_default_headers: {}
       drop_input_reasoning_items: ${oc.env:POLICY_DROP_REASONING_ITEMS,false}
+      max_connection_retries: ${oc.select:policy_max_connection_retries,null}
+      max_retries: ${oc.select:policy_max_retries,null}
+      request_timeout_s: ${oc.select:policy_request_timeout_s,null}

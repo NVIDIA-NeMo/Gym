@@ -1058,6 +1058,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "Allows callers that can resolve a moved endpoint to avoid stalling forever."
         ),
     )
+    max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum HTTP-status retries after the initial request. None keeps "
+            "the legacy policy: three attempts for HTTP 500 and unbounded "
+            "attempts for rate-limit-class status codes."
+        ),
+    )
+    request_timeout_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Total timeout for each upstream HTTP attempt; None uses the global client default.",
+    )
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
@@ -1073,10 +1087,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_internal": self.internal,
             "_max_connection_retries": self.max_connection_retries,
         }
+        if self.request_timeout_s is not None:
+            request_kwargs["timeout"] = self.request_timeout_s
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = self.max_retries + 1 if self.max_retries is not None else MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:
             tries += 1
@@ -1084,7 +1100,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
+                if self.max_retries is None and response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()

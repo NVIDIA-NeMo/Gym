@@ -26,6 +26,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -65,6 +66,7 @@ from openai.types.responses.response_output_item import (
 )
 from pydantic import ValidationError
 
+from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -123,6 +125,45 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_explicit_max_retries_bounds_rate_limit_retries(self, monkeypatch) -> None:
+        class Response:
+            status = 429
+            content = type("Content", (), {"read": AsyncMock(return_value=b"rate limited")})()
+
+        request = AsyncMock(return_value=Response())
+        exhausted = AsyncMock(side_effect=RuntimeError("retry budget exhausted"))
+        monkeypatch.setattr(openai_utils_module, "request", request)
+        monkeypatch.setattr(openai_utils_module, "sleep", AsyncMock())
+        monkeypatch.setattr(openai_utils_module, "raise_for_status", exhausted)
+
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_retries=2)
+        with pytest.raises(RuntimeError, match="retry budget exhausted"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert request.await_count == 3
+        exhausted.assert_awaited_once()
+
+    async def test_default_rate_limit_policy_keeps_legacy_unbounded_behavior(self, monkeypatch) -> None:
+        class Content:
+            async def read(self) -> bytes:
+                return b"rate limited"
+
+        class Response:
+            def __init__(self, status: int) -> None:
+                self.status = status
+                self.content = Content()
+
+        request = AsyncMock(side_effect=[Response(429), Response(429), Response(200)])
+        monkeypatch.setattr(openai_utils_module, "MAX_NUM_TRIES", 2)
+        monkeypatch.setattr(openai_utils_module, "request", request)
+        monkeypatch.setattr(openai_utils_module, "sleep", AsyncMock())
+
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert response.status == 200
+        assert request.await_count == 3
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

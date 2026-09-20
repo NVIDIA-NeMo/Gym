@@ -56,9 +56,13 @@ model server rather than LiteLLM.
 
 The shared Gym `finance_agent` is configured here with
 `prose_only_behavior: finish`, `tool_call_execution: concurrent`, and
-`done_tools: [final_answer]`. This matches the standalone harness's prose
+`tool_error_observation: error_prefix`, and `done_tools: [final_answer]`.
+The policy model uses 12 bounded retries and the judge uses 20; each upstream
+HTTP attempt has a 1,800-second timeout. This matches the standalone harness's prose
 fallback, concurrent execution of a returned tool-call batch, and terminal-tool
-semantics without adding BigFinance-specific branches to the shared loop.
+and error-observation semantics without adding BigFinance-specific branches to
+the shared loop. Retry scheduling still belongs to each API client, so LiteLLM
+and Gym may use different backoff timing even with equal retry counts.
 
 `python_exec` starts an isolated Python child process with a timeout, but it is
 **not a security sandbox**. Only run trusted policies in an appropriately

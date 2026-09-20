@@ -1,4 +1,8 @@
 # BigFinanceBench public 50-question benchmark.
+policy_max_connection_retries: 12
+policy_max_retries: 12
+policy_request_timeout_s: 1800
+
 config_paths:
   - resources_servers/big_finance/configs/big_finance.yaml
 
@@ -19,8 +23,10 @@ big_finance_benchmark_agent:
       # final answer, and independent calls emitted in one turn run concurrently.
       prose_only_behavior: finish
       tool_call_execution: concurrent
+      tool_error_observation: error_prefix
       max_steps: 50
-      tool_call_timeout: 300
+      model_call_timeout: null
+      tool_call_timeout: null
       datasets:
         - name: big_finance
           type: benchmark

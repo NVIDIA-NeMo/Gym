@@ -39,6 +39,9 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    max_connection_retries: Optional[int] = Field(default=None, ge=0)
+    max_retries: Optional[int] = Field(default=None, ge=0)
+    request_timeout_s: Optional[float] = Field(default=None, gt=0)
 
     max_concurrent_requests: Optional[int] = Field(
         default=None,
@@ -68,6 +71,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            max_connection_retries=self.config.max_connection_retries,
+            max_retries=self.config.max_retries,
+            request_timeout_s=self.config.request_timeout_s,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)

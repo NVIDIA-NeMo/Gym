@@ -63,7 +63,7 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False, **overrides):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -74,11 +74,37 @@ class TestApp:
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
             drop_input_reasoning_items=drop_input_reasoning_items,
+            **overrides,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    async def test_retry_and_timeout_config_reaches_client(self) -> None:
+        server = self._setup_server(
+            max_connection_retries=12,
+            max_retries=12,
+            request_timeout_s=1800,
+        )
+
+        assert server._client.max_connection_retries == 12
+        assert server._client.max_retries == 12
+        assert server._client.request_timeout_s == 1800
+
+    def test_extra_body_reaches_responses_endpoint(self) -> None:
+        server = self._setup_server(extra_body={"reasoning_effort": "high"})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=_response_data())
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        server._client.create_response.assert_awaited_once_with(
+            input="hello",
+            model="dummy_model",
+            reasoning_effort="high",
+        )
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()

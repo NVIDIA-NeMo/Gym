@@ -21,7 +21,7 @@ big_finance_resources_server:
       judge_responses_create_params:
         input: []
         max_output_tokens: 16384
-      judge_call_timeout_s: 1800
+      judge_call_timeout_s: null
       reward_mode: ${oc.select:big_finance_reward_mode,final_answer}
 
 big_finance:
@@ -40,9 +40,11 @@ big_finance:
       done_tools: [final_answer]
       prose_only_behavior: finish
       tool_call_execution: concurrent
+      tool_error_observation: error_prefix
       max_steps: 50
+      model_call_timeout: null
       truncate_on_overflow: false
-      tool_call_timeout: 300
+      tool_call_timeout: null
       datasets:
         - name: example
           type: example
@@ -56,3 +58,6 @@ big_finance_judge_model:
       openai_base_url: ${oc.select:big_finance_judge_base_url,https://api.openai.com/v1}
       openai_api_key: ${oc.select:big_finance_judge_api_key,unset}
       openai_model: ${oc.select:big_finance_judge_model_name,gpt-5-mini}
+      max_connection_retries: 20
+      max_retries: 20
+      request_timeout_s: 1800
