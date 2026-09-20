@@ -1,0 +1,130 @@
+---
+title: "Warm Process Pool for CPU-Heavy Verification"
+description: "Why resources servers run pure-Python verification in a shared pool of warm worker processes, and what the pool guarantees."
+---
+TL;DR: an `async def verify()` that does real CPU work stalls every other request on the server's event loop, and threads do not help while the GIL is held. Servers that escaped to a child process each wrote their own fork, poll, terminate, kill, join sequence. `nemo_gym.process_pool.WarmProcessPool` is the one shared implementation, with bounded queueing, deadlines, kill-and-replace, recycling, explicit serialization errors, and a shutdown that leaves no descendants.
+
+## The problem
+
+A resources server is one asyncio event loop. Three verification patterns existed on `main` when this was written, and each hurt in a different way.
+
+Most servers grade inline. `instruction_following`, `mcqa`, `structured_outputs`, `reasoning_gym` and others grade the response with no `await` in the hot path. While one request is graded, every other request on that server waits. At 8,192 concurrent rollouts the p99 is set by the slowest peer, not by the verifier.
+
+Some offload with `asyncio.to_thread`. That helps only while the GIL is released. Pure-Python graders, regex, SymPy and NLTK hold it, so the loop still stutters, and the default executor is a shared 32-slot pool that other parts of the server also use.
+
+`math_with_judge` forked one process per verification and polled `is_alive()` every 50 ms. That was correct, but it paid process start and SymPy import per call, its throughput ceiling was permits divided by the polling interval, and the lifecycle code was thirty lines of terminate, kill, join and pipe cleanup that two other servers had reimplemented with different bugs.
+
+## What the pool is
+
+`WarmProcessPool` owns `num_workers` long-lived child processes. Each is started once, runs an optional `initializer`, and then serves tasks one at a time over its own pipe. Callers await `pool.run(fn, *args, timeout=...)` from the event loop and get the result back, or one of a small set of typed errors.
+
+```python
+from nemo_gym.process_pool import WarmProcessPool, WarmProcessPoolConfig
+
+pool = WarmProcessPool(
+    WarmProcessPoolConfig(num_workers=8, max_pending=32, default_timeout_seconds=10.0),
+    initializer=_build_verifier,        # runs once per worker
+)
+await pool.start()
+reward = await pool.run(_verify_task, expected, generated)
+await pool.aclose()
+```
+
+### Process model and start method
+
+Workers are started with `spawn` by default, `forkserver` optionally. `fork` is not offered. A server process owns an event loop, a thread pool, an aiohttp client and often a Ray connection; none of those survive a fork intact, and the failure mode is a child that hangs on a lock it inherited half-held. `math_with_judge` used `fork` because a fresh child per request had to be cheap to start. Warm workers amortize the spawn and import cost across thousands of tasks, so the cheapness argument for `fork` disappears with the per-request model.
+
+Workers are daemonic and each has a private duplex pipe to the parent. The parent reads a pipe only when the event loop reports it readable, so a large result never deadlocks against a full pipe buffer, which a wait-for-exit-then-read loop does at 64 KB.
+
+### Queue bounds
+
+Submissions wait in an `asyncio.Queue` of at most `max_pending` tasks. When it is full, `run()` waits for a slot, or fails with `PoolSaturatedError` once `queue_timeout` elapses (`0` fails fast). Live children never exceed `num_workers`, plus at most one per slot during a replacement. Both bounds are asserted under load in the unit tests, sampled every 5 ms.
+
+### Deadline semantics
+
+`timeout` is measured from dispatch to a worker, not from submission. Queue wait and child execution are therefore separate numbers, reported on every task through `run_with_timing()` and aggregated in `stats()`. On expiry the worker is killed and replaced and the caller gets `TaskTimeoutError`. `timeout=None` disables the deadline for a call; the default is a config field so servers cannot forget it.
+
+### Worker replacement
+
+A worker is replaced when its task times out, when the caller cancels an in-flight task, or when the child exits mid-task. Replacement is `SIGTERM`, then `SIGKILL` after `kill_grace_seconds`, then `join`. Because each worker owns its pipe, killing one cannot corrupt another worker's in-flight bytes; the tests run a stuck worker alongside a healthy one and check thirty results arrive intact.
+
+Cancelling a task that is still queued simply drops it. Cancelling one that is executing kills the worker, because the alternative is a cancelled request that keeps occupying a slot until its deadline, and the issue that motivated this work names that as a requirement.
+
+If the replacement itself cannot be spawned, for example because the machine is out of process slots, the slot is left empty and logged rather than taken down. The next task that reaches that slot retries the spawn; if it fails again, that task fails with `WorkerStartError` and the slot keeps retrying on the one after. Capacity degrades and recovers by itself instead of shrinking silently. A bug on the parent side while handling a reply is treated the same way as a crash: one task fails, the worker is replaced, the slot survives.
+
+### Recycling
+
+`max_tasks_per_worker` retires a worker gracefully after that many tasks and starts a fresh one in its slot. This bounds memory growth from caches in the task code. SymPy in particular grows caches per expression. It is also the hook that would let a server whose tasks mutate process-global state run safely with the value set to `1`, though that is a per-server decision and not the default.
+
+### Serialization
+
+The task, meaning the function reference and its arguments, is pickled in the parent before anything is sent. An unpicklable function or argument raises `TaskSerializationError` at the call site, and nothing reaches a worker. A function the parent can pickle but the worker cannot import is reported back as the same error with the child's traceback. A result the child cannot pickle raises `ResultSerializationError`. An exception inside the task arrives as `TaskFailedError` carrying the type name, message and traceback text; the original exception object is never unpickled in the server. These four cases are distinct on purpose, because they are debugged differently.
+
+### Delivery and context
+
+Delivery is at most once. A task whose worker dies mid-flight fails with `WorkerCrashedError` and is not retried, because the pool cannot know how far the child got. Callers that know their task is idempotent retry themselves.
+
+Nothing non-picklable crosses into a child. `run()` executes in the caller's task, so `contextvars` such as the rollout correlation id are intact where timings are recorded and where the server logs the outcome. The optional OpenTelemetry instruments in `nemo_gym.telemetry.metrics` are undimensioned and fixed by the pinned lens version, so pool metrics are exposed through `stats()` and structured logs rather than a new instrument; adding one is a lens change.
+
+### Shutdown
+
+`aclose()` stops accepting work, fails every queued submission with `PoolClosedError`, waits `shutdown_grace_seconds` for in-flight tasks, cancels the slot loops, which kills any worker still busy and fails its task with `PoolClosedError`, sends idle workers a shutdown message, and reaps whatever is left with the same terminate-then-kill sequence. Every child is joined, and a reap interrupted by the shutdown itself finishes synchronously before the cancellation propagates, so a worker that ignores `SIGTERM` cannot slip through half-killed. Concurrent `aclose()` calls wait for the first to finish, and `start()` is serialized the same way. The tests assert no descendants remain after stress and after shutdown, counting zombies as leaks, and excluding only the resource-tracker daemon that `multiprocessing` itself keeps for the life of the interpreter.
+
+There are two parent-death cases. A worker that is idle sees the parent's death as end-of-file on its pipe and exits. A worker deep in a hung task never reads the pipe, so on Linux each worker asks the kernel to `SIGKILL` it when its parent dies (`prctl(PR_SET_PDEATHSIG)`); on macOS there is no equivalent, and a hung task can outlive a server that was itself `SIGKILL`ed.
+
+## Scope
+
+The pool is for trusted, pure-CPU work. Tasks run with the server's privileges in a long-lived interpreter that other tasks share.
+
+`math_with_judge` migrated first. Its result contract is unchanged: a verification that times out, crashes, or raises scores `(0.0, None)`, exactly as the per-request fork did. `library_verifier_max_concurrency` keeps its meaning as the number of verifications executing at once, capped at the machine's core count because CPU-bound SymPy cannot use more. A new `library_verifier_max_tasks_per_worker` recycles workers, default 1,000. The footprint changes shape: a warm worker with SymPy and math_verify imported costs about 80 MB of system memory (measured as the memory delta for 8 workers, 666 MB, the same under `spawn` and `forkserver`), held for the life of the server, where the per-request fork held nothing at idle. Eight workers on an 8-core box is about 0.7 GB; 32 on a large training node is about 2.7 GB.
+`code_gen` is excluded until its isolation constraints are addressed. Its reliability guard mutates builtins and OS functions, so worker reuse is unsafe without recycling after every task. `nvarc` is excluded as well: it executes untrusted model-written code and needs a fresh interpreter per task, which this pool does not provide.
+
+Using the pool for untrusted code requires an explicit review, not a config change.
+
+## Measurements
+
+Numbers below come from `scripts/benchmark_process_pool.py`, which drives each strategy from one event loop the way `verify()` would, with pure-Python CPU spins and payloads that must round-trip. The harness records completions per second, latency percentiles, event-loop lag from a 10 ms heartbeat, CPU and RSS of the process tree, worker restarts, and live descendants after shutdown. Fault injection makes a fraction of tasks hang, crash, return an unpicklable value, or get cancelled.
+
+Reduced local matrix (arm64 macOS 26.2, 14 cores, Python 3.13.14; 200 tasks per cell, 1 KB payload, offered concurrency 256; `fork_per_task` and `pool` at 1 and 4 workers). Loop lag is how late a 10 ms heartbeat on the same event loop woke up.
+
+| strategy | task ms | payload KB | workers | concurrency | ok | compl/s | p50 ms | p99 ms | loop lag p95 ms | loop lag max ms | peak RSS MB | restarts | left after close |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `inline` | 10 | 1 | 1 | 256 | 200/200 | 97 | 10 | 10 | 2045.7 | 2046 | 40 | 0 | 0 |
+| `to_thread` | 10 | 1 | 1 | 256 | 200/200 | 125 | 1040 | 1582 | 489.9 | 490 | 42 | 0 | 0 |
+| `fork_per_task` | 10 | 1 | 1 | 256 | 200/200 | 18 | 5546 | 10892 | 1.7 | 34 | 74 | 0 | 0 |
+| `fork_per_task` | 10 | 1 | 4 | 256 | 200/200 | 75 | 1352 | 2633 | 1.2 | 19 | 80 | 0 | 0 |
+| `pool` | 10 | 1 | 1 | 256 | 200/200 | 98 | 1024 | 2003 | 0.1 | 4 | 202 | 0 | 0 |
+| `pool` | 10 | 1 | 4 | 256 | 200/200 | 360 | 281 | 529 | 4.3 | 7 | 316 | 0 | 0 |
+| `inline` | 100 | 1 | 1 | 256 | 200/200 | 10 | 100 | 100 | 20055.6 | 20056 | 40 | 0 | 0 |
+| `to_thread` | 100 | 1 | 1 | 256 | 200/200 | 53 | 2775 | 3782 | 689.8 | 943 | 42 | 0 | 0 |
+| `fork_per_task` | 100 | 1 | 1 | 256 | 200/200 | 7 | 15390 | 30055 | 1.1 | 16 | 99 | 0 | 0 |
+| `fork_per_task` | 100 | 1 | 4 | 256 | 200/200 | 26 | 3897 | 7716 | 1.1 | 21 | 123 | 0 | 0 |
+| `pool` | 100 | 1 | 1 | 256 | 200/200 | 10 | 10115 | 19829 | 1.1 | 13 | 217 | 0 | 0 |
+| `pool` | 100 | 1 | 4 | 256 | 200/200 | 40 | 2604 | 5007 | 1.1 | 17 | 331 | 0 | 0 |
+
+Fault injection (10 ms tasks, 4 workers, concurrency 32, 1 s deadline, 5% of tasks faulty):
+
+| strategy | injected fault (5% of tasks) | ok | other outcomes | compl/s | loop lag p95 ms | restarts | left after close |
+|---|---|---|---|---|---|---|---|
+| `fork_per_task` | hang | 190/200 | timeout 10 | 34 | 1.1 | 0 | 0 |
+| `pool` | hang | 190/200 | timeout 10 | 53 | 1.1 | 10 | 0 |
+| `fork_per_task` | crash | 190/200 | crash 10 | 75 | 1.5 | 0 | 0 |
+| `pool` | crash | 190/200 | WorkerCrashedError 10 | 280 | 5.7 | 10 | 0 |
+| `fork_per_task` | unpicklable | 190/200 | TypeError 10 | 75 | 1.4 | 0 | 0 |
+| `pool` | unpicklable | 190/200 | ResultSerializationError 10 | 360 | 4.7 | 0 | 0 |
+| `fork_per_task` | cancel | 190/200 | cancelled 10 | 79 | 1.5 | 0 | 0 |
+| `pool` | cancel | 190/200 | cancelled 10 | 374 | 5.9 | 0 | 0 |
+
+Full raw output for every cell, including 1 ms tasks, 100 KB payloads and concurrency 32: `results/pool_bench_local.jsonl` from the run (72 matrix cells, 8 fault cells).
+
+The full matrix from the tracking issue, task durations from 1 ms to 1 s, payloads from 1 KB to 2 MB, 1 to 32 workers, offered concurrency from 1 to 8,192, is meant for a Linux machine with cores to spare:
+
+```bash
+python scripts/benchmark_process_pool.py --out results/pool_bench.jsonl
+python scripts/benchmark_process_pool.py --strategies fork_per_task pool --inject hang crash unpicklable cancel
+```
+
+## Related
+
+- Tracking issue: NVIDIA-NeMo/Gym#3038. Parent workstream: #3001. Migrations: #3025 (`math_with_judge`), #3028 (`code_gen`), #3029 (NVARC).
+- The same reasoning about shared clients and hidden O(n²) costs, applied to HTTP: [aiohttp vs httpx](/infrastructure/engineering-notes/aiohttp-vs-httpx).
