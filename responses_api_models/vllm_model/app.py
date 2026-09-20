@@ -97,6 +97,15 @@ from nemo_gym.token_id_capture.staging.records import (
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 _GENERATION_CUT_RPC_MAX_CONCURRENCY = 32
+_STRUCTURED_GENERATION_FIELDS = (
+    "guided_choice",
+    "guided_grammar",
+    "guided_json",
+    "guided_regex",
+    "guided_whitespace_pattern",
+    "structural_tag",
+    "structured_outputs",
+)
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -554,6 +563,48 @@ class VLLMModel(SimpleResponsesAPIModel):
         with self._generation_cut_restore_lock:
             self._restored_generation_cuts.pop(context.generation_cut_key[0], None)
 
+    def _decline_generation_cut_for_context(self, prefix: GenerationCutPrefixAck) -> None:
+        """Retire one restored cut that this replacement call cannot safely use."""
+        context = current_capture_context()
+        if context is None or context.logical_rollout_id is None:
+            raise RuntimeError("cannot decline a generation cut without a logical rollout context")
+        with self._generation_cut_restore_lock:
+            current = self._restored_generation_cuts.get(context.logical_rollout_id)
+            if current is None:
+                return
+            if current != prefix:
+                raise RuntimeError(
+                    "restored generation cut changed while declining prefix recovery: "
+                    f"rollout_id={context.logical_rollout_id!r}"
+                )
+            self._restored_generation_cuts.pop(context.logical_rollout_id)
+
+    @staticmethod
+    def _generation_cut_restart_reason(body_dict: Dict[str, Any]) -> str | None:
+        """Return why a restored prefix cannot safely resume structured decoding."""
+        tool_choice = body_dict.get("tool_choice")
+        if isinstance(tool_choice, str):
+            if tool_choice not in {"auto", "none"}:
+                return f"tool_choice:{tool_choice}"
+        elif tool_choice is not None:
+            # Named function/custom choices and allowed-tool constraints are
+            # represented as objects. vLLM may compile them into a structured
+            # decoder whose state is not reconstructed by token-prefix restore.
+            return "tool_choice:constrained"
+
+        response_format = body_dict.get("response_format")
+        if response_format is not None:
+            if not isinstance(response_format, dict) or response_format.get("type") != "text":
+                format_type = (
+                    response_format.get("type", "unknown") if isinstance(response_format, dict) else "unknown"
+                )
+                return f"response_format:{format_type}"
+
+        for field in _STRUCTURED_GENERATION_FIELDS:
+            if field in body_dict and body_dict[field] is not None:
+                return field
+        return None
+
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
 
@@ -946,6 +997,20 @@ class VLLMModel(SimpleResponsesAPIModel):
         if admission is None:
             return body_dict
         restored_cut = self._generation_cut_for_context()
+        if restored_cut is not None:
+            restart_reason = self._generation_cut_restart_reason(body_dict)
+            if restart_reason is not None:
+                self._decline_generation_cut_for_context(restored_cut)
+                LOG.info(
+                    "generation prefix restart: rollout_id=%s attempt_index=%s "
+                    "model_call_id=%s source_model_call_id=%s reason=%s",
+                    context.logical_rollout_id,
+                    context.attempt_index,
+                    context.model_call_id,
+                    restored_cut.model_call_id,
+                    restart_reason,
+                )
+                restored_cut = None
         if restored_cut is not None:
             if (
                 not restored_cut.staging_keys

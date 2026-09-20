@@ -491,7 +491,8 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
     )
     token = set_token_sink(context)
     try:
-        payload = model._apply_external_capture({})
+        payload = model._apply_external_capture({"tool_choice": "auto"})
+        assert payload["tool_choice"] == "auto"
         continuation = payload["ng_capture"]["generation_cut"]
         assert continuation.pop("schema_version") == context.capture_admission.schema_version
         assert continuation == {
@@ -501,12 +502,12 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
                 "__generation_cut__/checkpoint-0/rollout-1/old-call",
                 "__generation_cut__/checkpoint-1/rollout-1/old-call",
             ],
-                "generation_token_count": 2,
-                "digest": "a" * 64,
-                "effective_output_limit": 128,
-                "terminal_finish_reason": None,
-                "terminal_stop_reason": None,
-            }
+            "generation_token_count": 2,
+            "digest": "a" * 64,
+            "effective_output_limit": 128,
+            "terminal_finish_reason": None,
+            "terminal_stop_reason": None,
+        }
         context.attempt_index = 2
         assert model._generation_cut_for_context() == receipt.prefixes[0]
         context.attempt_index = 1
@@ -531,6 +532,109 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
         )
         await model.restore_generation_cut(terminal_receipt)
         assert model._generation_cut_for_context() is None
+    finally:
+        reset_token_sink(token)
+
+
+@mark.parametrize(
+    ("body_dict", "expected_reason"),
+    [
+        ({}, None),
+        ({"tool_choice": "auto", "tools": [{"type": "function"}]}, None),
+        ({"tool_choice": "none", "tools": [{"type": "function"}]}, None),
+        ({"tool_choice": "required"}, "tool_choice:required"),
+        (
+            {"tool_choice": {"type": "function", "function": {"name": "increment_counter"}}},
+            "tool_choice:constrained",
+        ),
+        ({"response_format": {"type": "text"}}, None),
+        ({"response_format": {"type": "json_schema"}}, "response_format:json_schema"),
+        ({"guided_json": {}}, "guided_json"),
+        ({"structured_outputs": {}}, "structured_outputs"),
+    ],
+)
+def test_generation_cut_restart_reason_for_structured_decoding(
+    body_dict: dict[str, Any],
+    expected_reason: str | None,
+) -> None:
+    assert VLLMModel._generation_cut_restart_reason(body_dict) == expected_reason
+
+
+def test_generation_cut_restore_restarts_constrained_tool_call(
+    monkeypatch: MonkeyPatch,
+    caplog: Any,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    restored_cut = GenerationCutPrefixAck(
+        ticket_id="ticket-1",
+        rollout_id="rollout-1",
+        attempt_index=0,
+        model_call_id="old-call",
+        admitted_at=1.0,
+        disposition="durable_prefix",
+        cut_kind="active_prefix",
+        frozen_buffer_id="active/checkpoint-1",
+        staging_keys=("__generation_cut__/checkpoint-1/rollout-1/old-call",),
+        prefix_token_count=2,
+        prefix_digest="a" * 64,
+        effective_output_limit=128,
+    )
+    model._restored_generation_cuts["rollout-1"] = restored_cut
+    context = CaptureContext(
+        rollout_id="rollout-1-a1",
+        model_call_id="new-call",
+        token_sink=None,
+        logical_rollout_id="rollout-1",
+        attempt_index=1,
+        external_staging=True,
+        capture_admission=CaptureAdmission(
+            rollout_id="rollout-1-a1",
+            model_call_id="new-call",
+            mode="text",
+        ),
+    )
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.INFO, logger="nemo_gym.vllm_model"):
+            payload = model._apply_external_capture(
+                {
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "increment_counter"},
+                    }
+                }
+            )
+        assert payload["ng_capture"]["generation_cut"] is None
+        assert context.capture_admission.generation_cut is None
+        assert context.generation_cut_key is None
+        assert model._generation_cut_for_context() is None
+        assert "generation prefix restart:" in caplog.text
+        assert "reason=tool_choice:constrained" in caplog.text
     finally:
         reset_token_sink(token)
 
