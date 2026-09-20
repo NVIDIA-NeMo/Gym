@@ -108,13 +108,13 @@ config_paths:
 
 ```
 nemo_gym.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
-`head_server.host` must be a hostname or IP and `head_server.port` an integer. Set them in a config or as overrides, e.g.:
+`head_server.host` must be a hostname or IP; `head_server.port` and, if set, `head_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
   ++head_server.host=127.0.0.1 ++head_server.port=11000
 ```
 
 **When**: A `head_server` field has the wrong type — typically a `++head_server.port=` override that is not an
-integer, or an explicit `host: null`. Either key may be omitted (Gym fills the default), but a value that is
-present must be well-typed.
+integer, or an explicit `host: null` — or the whole block was given as a scalar (`++head_server=foo`). Either key
+may be omitted (Gym fills the default), but a value that is present must be well-typed.
 
 **Fix**: Give `host` a hostname or IP and `port` an integer, in the config or on the command line:
 

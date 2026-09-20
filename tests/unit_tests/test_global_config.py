@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
+from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
@@ -1998,8 +1999,6 @@ class TestConfigLoadErrors:
     def test_parse_malformed_head_server_raises_actionable_error(
         self, head_server: dict, named_fields: list[str]
     ) -> None:
-        from pydantic import ValidationError
-
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
             initial_global_config_dict=DictConfig({"head_server": head_server}),
@@ -2016,9 +2015,25 @@ class TestConfigLoadErrors:
         assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
         assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
 
+    def test_parse_scalar_head_server_raises_actionable_error(self) -> None:
+        # `++head_server=foo` used to die with an AttributeError on the block's first `.get`.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": "foo"}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "'foo'" in message
+        assert "++head_server.port=" in message
+
     def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
         # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
-        # block is left exactly as written, so `gym env resolve` still prints what the user configured.
+        # block is left exactly as written, so `gym env resolve` still prints what the user configured. The
+        # validated int is what reaches the port allocator, so the head server's port is still kept off it.
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
             initial_global_config_dict=DictConfig({"head_server": {"host": "127.0.0.1", "port": "8080"}}),
@@ -2029,6 +2044,7 @@ class TestConfigLoadErrors:
         parsed = parser.parse(parse_config)
 
         assert parsed["head_server"] == {"host": "127.0.0.1", "port": "8080"}
+        assert parsed["disallowed_ports"] == [8080]
 
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()

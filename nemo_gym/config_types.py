@@ -161,7 +161,7 @@ class MalformedConfigPathsError(ConfigError, ValueError):
 
 
 class HeadServerConfigMalformedError(ConfigError, ValueError):
-    """A `head_server` field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
 
 
 class NoServerInstancesError(ConfigError, ValueError):
