@@ -7,14 +7,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from nemo_gym.token_id_capture.staging.media import build_multimodal_extras
-
 
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
-MEDIA_FIELD = "media"
 MEDIA_SPANS_FIELD = "media_spans"
+# The former digest-covered media geometry summary. Pixels now travel as
+# opaque sink attachments, so a payload still carrying the summary comes from
+# a stale worker; reject it so the skew surfaces as ``capture_failed`` rather
+# than a row whose media was silently dropped. Remove after one release.
+_LEGACY_MEDIA_SUMMARY_FIELD = "media"
 
 
 def _message(choice: dict[str, Any]) -> dict[str, Any]:
@@ -69,14 +71,16 @@ class VLLMCaptureAdapter:
         return extract_generation_token_info(_single_choice(response_payload))
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
-        extras = build_multimodal_extras(compact_token_ids_delta=None, media=response_payload.get(MEDIA_FIELD)) or {}
+        if _LEGACY_MEDIA_SUMMARY_FIELD in response_payload:
+            raise ValueError("vLLM media summaries are no longer accepted; pass pixels as staging attachments")
+        extras: dict[str, Any] = {}
         routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
         if routed_experts is not None:
             if not isinstance(routed_experts, (str, dict, list)):
                 raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
             extras[ROUTED_EXPERTS_FIELD] = routed_experts
         # Expanded-space prefix replacement needs the original placeholder
-        # positions. Pixels use the shared media contract and framework storage.
+        # positions. Pixels travel beside the record as sink attachments.
         if MEDIA_SPANS_FIELD in response_payload:
             spans = response_payload[MEDIA_SPANS_FIELD]
             if not isinstance(spans, list) or any(not isinstance(span, dict) for span in spans):

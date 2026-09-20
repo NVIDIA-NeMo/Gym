@@ -40,14 +40,6 @@ from nemo_gym.token_id_capture.staging.digest import (
     encode_token_ids,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.media import (
-    COMPACT_TOKEN_IDS_DELTA_FIELD,
-    MEDIA_FIELD,
-    MediaCaptureExtras,
-    build_compact_token_ids_delta,
-    build_multimodal_extras,
-    parse_multimodal_extras,
-)
 from nemo_gym.token_id_capture.staging.protocols import (
     CaptureAdapter,
     StagingSink,
@@ -101,7 +93,6 @@ from nemo_gym.token_id_capture.terminal import (
 
 
 __all__ = [
-    "COMPACT_TOKEN_IDS_DELTA_FIELD",
     "EMPTY_EXTRAS_DIGEST",
     "EXTRAS_DIGEST_VERSION",
     "MISSING_ROUTE_SENTINEL",
@@ -154,9 +145,4 @@ __all__ = [
     "select_terminal_call",
     "staging_key",
     "verify_and_linearize",
-    "MEDIA_FIELD",
-    "MediaCaptureExtras",
-    "build_compact_token_ids_delta",
-    "build_multimodal_extras",
-    "parse_multimodal_extras",
 ]
