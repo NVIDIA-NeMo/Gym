@@ -66,7 +66,7 @@ benchmark.
 
 ## Deviations from upstream
 
-Four, all forced, all disclosed. None is a judgement call about what "should" be measured.
+Five, all forced, all disclosed. None is a judgement call about what "should" be measured.
 
 ### 1. Generation length: 256 → 4,096 output tokens
 
@@ -105,7 +105,23 @@ presentation habits of instruction-tuned models rather than different plans.
 `workflow_parse_path` is recorded on every row. A model whose results lean on salvage is
 visible in the report rather than silently credited.
 
-### 4. Tool schema envelope
+### 4. Consecutive system messages merged
+
+ASB opens every rollout with two system messages -- the agent description, then the planning
+instruction -- which the OpenAI chat API it was written against accepts. **Qwen3.5's chat
+template rejects it outright** with HTTP 400 "System message must be at the beginning", so
+every Qwen row would have failed while the other three models scored.
+
+The two are merged into one system turn, joined with a blank line. No text is added, removed
+or reordered, and only *consecutive* system turns collapse.
+
+The merge is applied to **every model, not only Qwen**. Sending Qwen a merged prompt and the
+others a split one would mean the four models were not answering the same input, which is the
+one property a cross-model table has to guarantee. Measured: Ultra, Kimi and Super-VL accept
+both shapes, so uniformity costs nothing except that all four differ from upstream's exact
+message layout in the same way.
+
+### 5. Tool schema envelope
 
 ASB declares `parameters: None` on normal tools and omits the key entirely on the attacker
 tool. The Responses API requires a schema object, so an empty one (`strict: false`) is

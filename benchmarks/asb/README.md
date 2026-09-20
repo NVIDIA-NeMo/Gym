@@ -104,8 +104,8 @@ instead of being hidden by the pin.
 
 ## Deviations
 
-Four, all forced by the environment rather than chosen, all disclosed in
-[`METRICS.md`](METRICS.md) and rendered into every report:
+Five, all forced by the environment rather than chosen, all disclosed in
+[`METRICS.md`](METRICS.md) and rendered into every report. METRICS.md is canonical:
 
 1. **Output cap 256 → 4,096 tokens.** Upstream's cap predates reasoning models, which spend
    it entirely on the trace and emit no plan — driving ASR to zero for non-security reasons.
@@ -115,6 +115,13 @@ Four, all forced by the environment rather than chosen, all disclosed in
    embedded-array salvage follow, and the path used is recorded per row.
 4. **Consecutive system messages merged.** ASB sends two; Qwen3.5's template rejects that
    with a 400. Merged for every model so all four answer identical input.
+5. **Tool schema envelope.** ASB declares `parameters: None` (and omits the key entirely on
+   the attacker tool); the Responses API requires a schema object, so an empty one is
+   supplied. Behaviourally inert -- ASB never passes tool arguments -- and the tool list
+   rendered into the planning prompt keeps upstream's original text.
+
+A sixth entry, the refusal judge's non-random row loss, is a measurement limitation rather
+than a protocol change we made; see METRICS.md.
 
 ## Licensing
 
