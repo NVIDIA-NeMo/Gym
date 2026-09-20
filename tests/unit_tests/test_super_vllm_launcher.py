@@ -267,6 +267,47 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         self.assertEqual(status, 0, stderr)
         self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
 
+    def test_api_server_count_is_removed_only_from_headless_ranks(self):
+        with TemporaryDirectory(prefix="gym-headless-args-") as directory:
+            config = Path(directory) / "config with spaces.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--api-server-count 3 --common-test 'value with spaces')\n"
+                "VLLM_PREFILL_ARGS=(--prefill-test producer --api-server-count=2)\n"
+                "VLLM_DECODE_ARGS=(--api-server-count 5 --decode-test consumer)\n"
+            )
+            for mode, ranks in (("coupled", (1, 3, 4, 5, 7)), ("independent", (1,))):
+                env = {"VLLM_PD_DEPLOYMENT_MODE": mode, "VLLM_CONFIG": str(config)}
+                _, command = self.generate_commands(env=env)
+                for rank in ranks:
+                    with self.subTest(mode=mode, rank=rank):
+                        _, _, args, _ = self.serving_arguments(command, rank=rank, env=env)
+                        self.assertIn("value with spaces", args)
+                        self.assertIn("producer" if rank < 4 else "consumer", args)
+                        if mode == "coupled" and rank != 4:
+                            self.assertIn("--headless", args)
+                            self.assertFalse(any(arg.startswith("--api-server-count") for arg in args))
+                            self.assertEqual(
+                                args[: args.index("--headless")],
+                                [
+                                    "serve",
+                                    "/test/model",
+                                    "--served-model-name",
+                                    "/test/model",
+                                    "--common-test",
+                                    "value with spaces",
+                                    "--prefill-test" if rank < 4 else "--decode-test",
+                                    "producer" if rank < 4 else "consumer",
+                                ],
+                            )
+                        else:
+                            self.assertNotIn("--headless", args)
+                            self.assertIn("--api-server-count", args)
+                            self.assertIn("3", args)
+                            if mode == "coupled":
+                                self.assertEqual(args[-2:], ["--api-server-count", "1"])
+                            else:
+                                self.assertIn("--api-server-count=2", args)
+
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self):
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""
         for prefill_count, decode_count in ((1, 1), (1, 4), (2, 3), (4, 4)):

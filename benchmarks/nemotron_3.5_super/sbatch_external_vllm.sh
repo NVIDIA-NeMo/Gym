@@ -207,6 +207,22 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
 
+    set_headless_args() {
+        # Model configs tune API processes for serving ranks. Headless ranks
+        # reject this option, whether supplied as two arguments or with '='.
+        headless_args=()
+        while (( \$# )); do
+            if [[ "\$1" == --api-server-count ]]; then
+                shift 2
+            elif [[ "\$1" == --api-server-count=* ]]; then
+                shift
+            else
+                headless_args+=("\$1")
+                shift
+            fi
+        done
+    }
+
     wait_for_vllm_health() {
         local role=\$1
         local url=\$2
@@ -294,9 +310,10 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         echo "ERROR: \$failed_role process exited after startup (status=\$failed_status)." >&2
         exit "\$failed_status"
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-start-rank \$SLURM_PROCID \
@@ -315,9 +332,10 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
             --api-server-count 1
     else
+        set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
