@@ -16,18 +16,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
-from nooa.atif import atif_scope
+from nooa.runtime.hooks import hooks_scope
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
-from responses_api_agents.nooa_agent.observability import project_nooa_episode
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, RolloutLLMState
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -79,19 +77,21 @@ class EmbeddedNOOARunner:
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        model_calls: list[ModelCallRef] = []
+        state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
+        trace = GymTraceHooks()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
-            max_policy_calls=self._max_policy_calls,
-            model_call_collector=model_calls,
+            state=state,
             cookies=request.model_cookies,
+            on_call=trace.on_model_call,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             cookies=request.resource_cookies,
+            trace_hooks=trace,
         )
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
@@ -101,16 +101,12 @@ class EmbeddedNOOARunner:
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
 
-        with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
-            path = Path(directory) / "trajectory.json"
-            async with atif_scope(agent, path=path) as exporter:
-                return_value = await self._invocation_adapter(agent, request.responses_create_params)
-            trajectory = exporter.get_trajectory()
+        with hooks_scope(trace):
+            return_value = await self._invocation_adapter(agent, request.responses_create_params)
 
-        episode = project_nooa_episode(
+        episode = trace.project(
             create_params=request.responses_create_params,
-            trajectory=trajectory,
-            model_calls=model_calls,
+            state=state,
         )
         return NOOARunResult(
             episode=episode,
