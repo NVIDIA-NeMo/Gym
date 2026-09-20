@@ -91,6 +91,8 @@ class NOOAInvocationConfig(BaseModel):
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     """Gym server configuration for the NOOA adapter."""
 
+    model_config = ConfigDict(extra="forbid")
+
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
