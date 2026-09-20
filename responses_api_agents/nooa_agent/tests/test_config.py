@@ -91,6 +91,10 @@ def test_agent_config_names_policy_call_budget_explicitly() -> None:
         agent_config(max_steps=6)
 
 
+def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:
+    assert invocation_config(execution_mode="sandboxed").execution_mode == "sandboxed"
+
+
 def test_validate_invocation_returns_agent_and_adapter() -> None:
     agent_class, adapter = validate_invocation(invocation_config())
 
