@@ -274,6 +274,7 @@ class TestRolloutCollection:
                     {
                         "kind": "agent_invocation",
                         "invocation_id": "observed",
+                        "exit_code": 7,
                     },
                     {
                         "kind": "tool_call",
@@ -299,6 +300,8 @@ class TestRolloutCollection:
 
         assert [invocation.invocation_id for invocation in trajectory.invocations] == ["root", "observed"]
         assert trajectory.invocations[0].status == "completed"
+        assert trajectory.invocations[0].exit_code is None
+        assert type(trajectory).model_validate_json(trajectory.model_dump_json()).invocations[1].exit_code == 7
         assert len(trajectory.invocations[0].conversation) == 2
         assert [call.model_call_id for call in trajectory.model_calls] == ["capture-only"]
         assert producer_only.tool_call_id == "producer-only" and producer_only.output == "kept"

@@ -90,6 +90,21 @@ Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins 
 
 Codex is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.
 
+## Process outcome observations
+
+With evaluation observability enabled and a rollout identity, `/run` includes one
+root `AgentInvocation` in `ng_agent_observations`. Its `exit_code` preserves the
+observed Codex process return code (negative values indicate signals on POSIX).
+Exit zero is `completed`, a nonzero exit is `failed`, and a timeout is `incomplete`
+with `error_type: timeout`, even when the killed process has a return code.
+An unavailable return code remains `null` and the status remains `unknown`.
+
+These observations describe process execution, not task correctness. Verifier
+rewards, response padding, `turns_used`, and `finished_naturally` retain their
+existing behavior. Observations are omitted when evaluation observability is
+disabled or the request has no rollout identity; `/responses` is unchanged.
+This reports only the root process outcome, not subagents or per-tool timing.
+
 ## Configuration
 
 ```yaml

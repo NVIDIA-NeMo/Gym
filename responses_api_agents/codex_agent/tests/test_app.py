@@ -15,6 +15,8 @@
 
 import asyncio
 import json
+import signal
+import sys
 import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,7 +27,12 @@ import yaml
 from fastapi import Request
 from pydantic import ValidationError
 
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.global_config import (
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -33,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
@@ -311,7 +319,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", AgentInvocation(invocation_id="root")))
         body = CodexAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -325,7 +333,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", AgentInvocation(invocation_id="root")))
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_codex)
@@ -333,13 +341,116 @@ class TestRunForwardsSkillsPath:
         assert run_codex.call_args.kwargs["skills_path"] is None
 
 
+class TestRunObservations:
+    @pytest.mark.parametrize(
+        "exit_code, timeout, status, error_type",
+        [
+            (0, False, "completed", None),
+            (7, False, "failed", "nonzero_exit"),
+            (-signal.SIGTERM, False, "failed", "nonzero_exit"),
+            (-signal.SIGKILL, True, "incomplete", "timeout"),
+        ],
+    )
+    async def test_real_process_outcome_survives_run(
+        self, tmp_path: Path, exit_code: int, timeout: bool, status: str, error_type: str | None
+    ) -> None:
+        agent = _make_agent(timeout=1)
+        agent.server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: True}
+        event = _item_completed({"id": "item_1", "type": "agent_message", "text": "partial answer"})
+        script = f"import os, signal, time; print({event!r}, flush=True); "
+        script += (
+            "time.sleep(30)"
+            if timeout
+            else (f"os.kill(os.getpid(), {-exit_code})" if exit_code < 0 else f"raise SystemExit({exit_code})")
+        )
+        verified = {}
+
+        async def post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                return FakeAioHTTPResponse({}, cookies={"session": "seeded"})
+            assert url_path == "/verify"
+            assert cookies == {"session": "seeded"}
+            verified.update(json)
+            return FakeAioHTTPResponse(json | {"reward": 0.25})
+
+        agent.server_client.post.side_effect = post
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        body = CodexAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "test"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+        )
+        with (
+            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+            patch.object(CodexAgent, "_build_command", return_value=[sys.executable, "-c", script]),
+        ):
+            result = await agent.run(request, body)
+
+        serialized = result.model_dump(mode="json")
+        observations = serialized["ng_agent_observations"]
+        assert AgentObservationBundle.model_validate_json(json.dumps(observations)) == result.ng_agent_observations
+        assert observations["source"] == "codex"
+        [root] = observations["records"]
+        assert root["kind"] == "agent_invocation"
+        assert root["parent_invocation_id"] is None
+        assert root["status"] == status
+        assert root["exit_code"] == exit_code
+        assert root["error_type"] == error_type
+        assert root["duration_ms"] > 0
+        assert result.reward == 0.25
+        assert result.finished_naturally is True
+        assert result.turns_used == 1
+        assert "ng_agent_observations" not in verified
+        assert serialized["response"] == verified["response"]
+        assert result.response.output[-1].content[0].text == ("" if timeout else "partial answer")
+        assert not any((tmp_path / ".codex_agent").iterdir())
+
+    @pytest.mark.parametrize("capture_mode", ["disabled", "missing_identity", "tokens_only"])
+    async def test_observations_require_evaluation_opt_in_and_identity(self, capture_mode: str) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {
+            OBSERVABILITY_ENABLED_KEY_NAME: capture_mode == "missing_identity",
+            "token_id_capture": {"enabled": capture_mode == "tokens_only", "all_agents": True},
+        }
+        body = {"responses_create_params": {"input": "test"}}
+        if capture_mode != "missing_identity":
+            body.update({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+
+        async def post(server_name, url_path, json=None, cookies=None):
+            return FakeAioHTTPResponse(json | {"reward": 0.0} if url_path == "/verify" else {})
+
+        agent.server_client.post.side_effect = post
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        with patch.object(
+            CodexAgent,
+            "_run_codex",
+            AsyncMock(
+                return_value=(
+                    "",
+                    "codex-default",
+                    AgentInvocation(invocation_id="root", status="completed", exit_code=0),
+                )
+            ),
+        ):
+            result = await agent.run(request, CodexAgentRunRequest.model_validate(body))
+            response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="test"))
+        assert "ng_agent_observations" not in result.model_dump(mode="json")
+        assert "ng_agent_observations" not in response.model_dump(mode="json")
+        assert result.response.output[-1].content[0].text == ""
+
+
 class TestRunCodex:
-    def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("exit_code", [0, None])
+    def test_wires_command_env_and_cleans_up(self, tmp_path: Path, exit_code: int | None) -> None:
         agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
         captured: dict = {}
 
         class FakeProc:
-            returncode = 0
+            returncode = exit_code
 
             async def communicate(self):
                 return (
@@ -365,7 +476,7 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
+            stdout, model, invocation = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
 
         assert captured["cmd"][0] == "codex"
         assert captured["cmd"][-1] == "hello"
@@ -380,6 +491,9 @@ class TestRunCodex:
         assert not Path(captured["scratch_cwd"]).exists()
         assert "turn.completed" in stdout
         assert model == "codex-default"
+        assert invocation.status == ("completed" if exit_code == 0 else "unknown")
+        assert invocation.exit_code == exit_code
+        assert invocation.error_type is None
 
     def test_explicit_cwd_is_used_and_kept(self, tmp_path: Path) -> None:
         workdir = tmp_path / "work"
@@ -446,11 +560,14 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello"))
+            stdout, model, invocation = asyncio.run(agent._run_codex("hello"))
 
         assert stdout == ""
         assert killed["called"] is True
         assert model == "codex-default"
+        assert invocation.status == "incomplete"
+        assert invocation.error_type == "timeout"
+        assert invocation.exit_code is None
 
 
 class TestRolloutMCPServers:
@@ -518,9 +635,13 @@ class TestRolloutMCPServers:
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
             captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
-            return _item_completed(
-                {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-            ), "codex-default"
+            return (
+                _item_completed(
+                    {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
+                ),
+                "codex-default",
+                AgentInvocation(invocation_id="root"),
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -563,7 +684,11 @@ class TestRolloutMCPServers:
 
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["mcp_servers"] = mcp_servers
-            return _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}), "codex-default"
+            return (
+                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}),
+                "codex-default",
+                AgentInvocation(invocation_id="root"),
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)

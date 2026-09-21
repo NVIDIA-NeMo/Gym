@@ -25,7 +25,7 @@ import tempfile
 from asyncio import Semaphore
 from copy import deepcopy
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
@@ -48,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentEpisode, AgentInvocation, AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
@@ -322,6 +323,9 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class CodexAgent(SimpleResponsesAPIAgent):
@@ -463,8 +467,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Run ``codex exec --json`` and return (stdout, model_name).
+    ) -> tuple[str, str, AgentInvocation]:
+        """Run ``codex exec --json`` and return stdout, model name, and the process outcome.
 
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
@@ -495,6 +499,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "OPENAI_API_KEY": self.config.openai_api_key or "local",  # pragma: allowlist secret
             }
 
+            invocation = AgentInvocation(invocation_id=f"codex-{uuid4().hex}")
+            started_at = monotonic()
             proc = await asyncio.create_subprocess_exec(
                 *self._build_command(instruction, cwd),
                 stdin=asyncio.subprocess.DEVNULL,  # codex appends piped stdin to the prompt and blocks on it
@@ -511,13 +517,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 _kill_process_group(proc)
                 await proc.communicate()
                 LOG.warning("codex timed out after %ds", self.config.timeout)
-                return "", model
+                stdout = b""
+                invocation.status = "incomplete"
+                invocation.error_type = "timeout"
+            else:
+                if proc.returncode == 0:
+                    invocation.status = "completed"
+                elif proc.returncode is not None:
+                    invocation.status = "failed"
+                    invocation.error_type = "nonzero_exit"
+                    LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
-            if proc.returncode not in (0, None):
-                LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
-
+            invocation.exit_code = proc.returncode
+            invocation.duration_ms = (monotonic() - started_at) * 1000
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+            return stdout.decode(errors="replace"), model, invocation
         finally:
             if codex_home is not None:
                 shutil.rmtree(codex_home, ignore_errors=True)
@@ -564,6 +578,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        episode = await self._create_episode(
+            body, mcp_servers=mcp_servers, skills_path=skills_path, rollout_id=rollout_id
+        )
+        return episode.response
+
+    async def _create_episode(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        mcp_servers: Optional[dict[str, Any]] = None,
+        skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
+    ) -> AgentEpisode:
+        """Keep the CLI process outcome separate from the model response and verifier reward."""
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -572,7 +600,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_codex(
+        stdout, model_name, invocation = await self._run_codex(
             user_message,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
@@ -602,7 +630,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -622,6 +650,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ),
                 total_tokens=input_tokens + output_tokens,
             ),
+        )
+        return AgentEpisode(
+            response=response, observations=AgentObservationBundle(source="codex", records=[invocation])
         )
 
     async def responses(
@@ -651,12 +682,23 @@ class CodexAgent(SimpleResponsesAPIAgent):
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
 
-            agent_resp = await self._create_response(
-                body.responses_create_params,
-                mcp_servers=self._rollout_mcp_servers(seed_resp_json),
-                skills_path=skills_path,
-                rollout_id=rollout_id,
-            )
+            mcp_servers = self._rollout_mcp_servers(seed_resp_json)
+            observations = None
+            if self._model_call_capture_enabled() and rollout_id is not None:
+                episode = await self._create_episode(
+                    body.responses_create_params,
+                    mcp_servers=mcp_servers,
+                    skills_path=skills_path,
+                    rollout_id=rollout_id,
+                )
+                agent_resp, observations = episode.response, episode.observations
+            else:
+                agent_resp = await self._create_response(
+                    body.responses_create_params,
+                    mcp_servers=mcp_servers,
+                    skills_path=skills_path,
+                    rollout_id=rollout_id,
+                )
             agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
@@ -677,9 +719,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return CodexAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return CodexAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":
