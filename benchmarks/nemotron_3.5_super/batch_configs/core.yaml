@@ -3,7 +3,7 @@
 # Pilot evaluation settings. Supply credentials in env.yaml or the environment.
 # Judge/service choices are part of this recipe, not requirements of batching.
 config_paths:
-  - benchmarks/nemotron_3.5_super/suites/core_text.yaml
+  - benchmarks/nemotron_3.5_super/core_text.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 num_samples_in_parallel: 512

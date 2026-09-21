@@ -278,7 +278,7 @@ class TestDiscoverBenchmarksInDir:
         expected_concurrency: int,
     ) -> None:
         repo_root = Path(__file__).parents[2]
-        suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super/suites" / suite_name).read_text())
+        suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super" / suite_name).read_text())
 
         assert suite == {
             "config_paths": expected_config_paths,
@@ -304,7 +304,7 @@ class TestDiscoverBenchmarksInDir:
             lambda: f"openai=={nemo_gym.global_config.openai_version}",
         )
         repo_root = Path(__file__).parents[2]
-        suite_path = repo_root / "benchmarks/nemotron_3.5_super/suites" / suite_name
+        suite_path = repo_root / "benchmarks/nemotron_3.5_super" / suite_name
 
         assert BenchmarkConfig.from_config_path(suite_path, strict=False) is None
         err = capsys.readouterr().err

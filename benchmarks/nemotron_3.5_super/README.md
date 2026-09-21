@@ -42,8 +42,8 @@ Several benchmarks can share one model-serving deployment while retaining separa
 
 | Batch | Members | Suite configuration | Global concurrency ceiling |
 | --- | --- | --- | ---: |
-| Core | Tau2, Tau3 banking, SciCode, HLE, GPQA Diamond, Omniscience, AA-LCR, APEX math shortlist, LMArena v2, LiveCodeBench v6, IFBench | [benchmarks/nemotron_3.5_super/suites/core_text.yaml](suites/core_text.yaml) | 512 |
-| SWE | SWE-bench Verified and Multilingual | [benchmarks/nemotron_3.5_super/suites/swebench_verified_multilingual.yaml](suites/swebench_verified_multilingual.yaml) | 1,024 |
+| Core | Tau2, Tau3 banking, SciCode, HLE, GPQA Diamond, Omniscience, AA-LCR, APEX math shortlist, LMArena v2, LiveCodeBench v6, IFBench | [benchmarks/nemotron_3.5_super/core_text.yaml](core_text.yaml) | 512 |
+| SWE | SWE-bench Verified and Multilingual | [benchmarks/nemotron_3.5_super/swebench_verified_multilingual.yaml](swebench_verified_multilingual.yaml) | 1,024 |
 
 **SWE-bench Pro remains standalone and is excluded from both batches.** Both tested configurations use 2 prefill nodes and 2 decode nodes: 4 nodes with 4 GPUs each, or 16 GPUs total.
 

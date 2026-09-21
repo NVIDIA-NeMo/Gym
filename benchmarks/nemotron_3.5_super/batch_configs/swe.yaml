@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Full Verified + Multilingual recipe; SWE-bench Pro is intentionally excluded.
 config_paths:
-  - benchmarks/nemotron_3.5_super/suites/swebench_verified_multilingual.yaml
+  - benchmarks/nemotron_3.5_super/swebench_verified_multilingual.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 num_samples_in_parallel: 1024
