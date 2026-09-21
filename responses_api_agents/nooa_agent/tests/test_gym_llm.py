@@ -31,6 +31,7 @@ from nemo_gym.rollout_observability import ModelCallRef
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     PolicyCallBudgetExceeded,
+    _responses_input,
     _finish_reason,
     _responses_input,
     _responses_tool_schema,
