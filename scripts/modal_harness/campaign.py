@@ -196,6 +196,8 @@ def run_campaign(
     prepare_module: Optional[str] = None,
     max_attempts: int = 12,
     unscorable_tolerance: int = 60,
+    expected_servers: int = 4,
+    server_ready_timeout: int = 900,
 ) -> dict[str, Any]:
     """Collect one model's rollouts, resuming from whatever the Volume already holds.
 
@@ -285,12 +287,29 @@ def run_campaign(
             cwd=WORKSPACE,
             check=False,
         )
+        # Wait for every server, not just the head.
+        #
+        # The head answers within seconds, but `gym env start` then builds a separate venv
+        # per server directory, which on a fresh container takes minutes. Polling the head
+        # alone declared readiness while the agent server did not yet exist, and the eval
+        # spent 5,000+ retries against a dead port before anyone noticed.
         ready = False
-        for _ in range(40):
-            _run("sleep 5", check=False)
-            probe = _run("curl -s -m 3 http://127.0.0.1:11000/ >/dev/null 2>&1", check=False)
-            if probe == 0:
+        for _ in range(max(1, server_ready_timeout // 10)):
+            _run("sleep 10", check=False)
+            probe = subprocess.run(
+                ".venv/bin/gym env status 2>/dev/null | grep -c '✓'",
+                shell=True,
+                cwd=WORKSPACE,
+                capture_output=True,
+                text=True,
+            )
+            try:
+                healthy = int((probe.stdout or "0").strip() or 0)
+            except ValueError:
+                healthy = 0
+            if healthy >= expected_servers:
                 ready = True
+                print(f"[{slug}] {healthy} servers healthy", flush=True)
                 break
         print(f"[{slug}] servers ready={ready}", flush=True)
         if not ready:
