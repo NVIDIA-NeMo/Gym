@@ -1,0 +1,179 @@
+# KIDBench — child-facing LLM safety for ages 7-11 (arXiv:2605.25510, Findings of EMNLP 2026).
+#
+# Two tracks share one rubric and one resources server:
+#   kidbench_simple_agent      — the ten-cell single-turn condition grid (5,000 rows)
+#   kidbench_multi_turn_agent  — five-turn child-actor conversations (200 rows)
+#
+# Both datasets are materialized by `python -m benchmarks.kidbench.prepare`, which also
+# fetches the pinned upstream checkout the rubrics and category/country rules are read
+# from. Nothing upstream is vendored here: the benchmark's use notice requires that its
+# child-safety context travel with any redistribution.
+#
+# The judge defaults to the paper's own choices — DeepSeek-V4-Pro for single turn, and
+# DeepSeek-V4-Flash for multi turn, which is what upstream's own multi-turn script uses.
+
+kidbench_resources_server:
+  resources_servers:
+    kidbench:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Score child-facing responses for ages 7-11 on the KIDBench developmental-psychology rubric
+      value: Measure whether a model is safe, age-appropriate, supportive, and properly bounded when a child is the user
+
+      judge_model_server:
+        type: responses_api_models
+        name: kidbench_judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 1.0
+        max_output_tokens: 4096
+      judge_name: deepseek-v4-pro
+
+      # Upstream scores multi-turn with the cheaper DeepSeek-V4-Flash — see
+      # scripts/evaluation/multi_turn/deepseek.sh at the pinned revision. That asymmetry is
+      # reproduced rather than normalized so the degradation numbers stay comparable to the
+      # published ones.
+      multi_turn_judge_model_server:
+        type: responses_api_models
+        name: kidbench_multi_turn_judge_model
+      multi_turn_judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 1.0
+        max_output_tokens: 4096
+      multi_turn_judge_name: deepseek-v4-flash
+
+      datasets:
+      - name: single_turn
+        type: validation
+        jsonl_fpath: resources_servers/kidbench/data/single_turn.jsonl
+        num_repeats: 1
+        # `TBD` is Gym's own entry for a dataset whose terms do not match a named licence,
+        # which is this one: upstream ships a bespoke research-use and child-safety notice.
+        # It is not a placeholder for an unknown licence. The terms are in
+        # benchmarks/kidbench/README.md and must travel with any redistribution.
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/kidbench/data/example.jsonl
+        num_repeats: 1
+
+# --- Single-turn track ------------------------------------------------------------
+# One prompt, one response. max_steps: 1 because the rubric judges a first reply to a
+# child; letting the model take another step would score something the child never saw.
+kidbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: kidbench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: single_turn
+        type: validation
+        jsonl_fpath: resources_servers/kidbench/data/single_turn.jsonl
+        num_repeats: 1
+        # `TBD` is Gym's own entry for a dataset whose terms do not match a named licence,
+        # which is this one: upstream ships a bespoke research-use and child-safety notice.
+        # It is not a placeholder for an unknown licence. The terms are in
+        # benchmarks/kidbench/README.md and must travel with any redistribution.
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/kidbench/data/example.jsonl
+        num_repeats: 1
+
+# --- Multi-turn track -------------------------------------------------------------
+# The actor plays a child for five turns against the model under test. It runs on its own
+# model server so the actor and the responder are never the same endpoint — pointing both
+# at one model would have the system under test drive its own interrogation.
+kidbench_multi_turn_agent:
+  responses_api_agents:
+    kidbench_child_actor:
+      entrypoint: app.py
+      num_turns: 5
+      resources_server:
+        type: resources_servers
+        name: kidbench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      actor_model_server:
+        type: responses_api_models
+        name: kidbench_actor_model
+      actor_responses_create_params:
+        input: []
+        # Upstream drives the actor greedily, same as the responder.
+        temperature: 0.0
+        max_output_tokens: 8192
+      datasets:
+      - name: multi_turn
+        type: validation
+        jsonl_fpath: resources_servers/kidbench/data/multi_turn.jsonl
+        num_repeats: 1
+        # `TBD` is Gym's own entry for a dataset whose terms do not match a named licence,
+        # which is this one: upstream ships a bespoke research-use and child-safety notice.
+        # It is not a placeholder for an unknown licence. The terms are in
+        # benchmarks/kidbench/README.md and must travel with any redistribution.
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/kidbench/data/example_multi_turn.jsonl
+        num_repeats: 1
+
+# --- Judge and actor model servers ------------------------------------------------
+# Declared here so the config resolves on its own; endpoints and keys are supplied per
+# deployment (see benchmarks/kidbench/configs/env.yaml.example), and a user env.yaml that
+# defines these instances in full takes precedence. Thinking is disabled on both judges to
+# match upstream's `thinking: {type: disabled}`.
+kidbench_judge_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${kidbench_judge_base_url}
+      api_key: ${kidbench_judge_api_key}
+      model: ${kidbench_judge_model_name}
+      uses_reasoning_parser: false
+      extra_body:
+        reasoning:
+          enabled: false
+
+kidbench_multi_turn_judge_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${kidbench_judge_base_url}
+      api_key: ${kidbench_judge_api_key}
+      model: ${kidbench_multi_turn_judge_model_name}
+      uses_reasoning_parser: false
+      extra_body:
+        reasoning:
+          enabled: false
+
+# Multi turn only. The published runs used the pinned refusal-ablated checkpoint deployed by
+# benchmarks/kidbench/deploy/modal_actor.py; see ACTOR_CHECKPOINTS in upstream_spec.py.
+kidbench_actor_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${kidbench_actor_base_url}
+      api_key: ${kidbench_actor_api_key}
+      model: ${kidbench_actor_model_name}
+      uses_reasoning_parser: false
+
+# Defaults so OmegaConf resolves the interpolations without overrides. Model names default to
+# the paper's judges and this adapter's pinned actor; endpoints and keys have no sensible
+# default and stay null until supplied. Must stay at end of file for update_env_list.py.
+kidbench_judge_base_url: null
+kidbench_judge_api_key: null
+kidbench_judge_model_name: deepseek/deepseek-v4-pro
+kidbench_multi_turn_judge_model_name: deepseek/deepseek-v4-flash
+kidbench_actor_base_url: null
+kidbench_actor_api_key: null
+kidbench_actor_model_name: wangzhang/gemma-4-31B-it-abliterated

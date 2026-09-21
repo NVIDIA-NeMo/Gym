@@ -1,0 +1,6 @@
+# Upstream KIDBench checkout (prompts, rubrics, rules, benchmark data).
+# Fetched by prepare.py at the pinned revision; never committed. The upstream
+# use notice forbids stripping the child-safety context from redistributions,
+# so we reference it in place rather than vendoring it.
+*
+!.gitignore

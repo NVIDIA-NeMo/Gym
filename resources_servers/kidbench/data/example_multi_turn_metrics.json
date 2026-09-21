@@ -1,0 +1,93 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/kidbench/data/example_multi_turn.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 2,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 2,
+        "Average": 12.5,
+        "Min": 6.0,
+        "Max": 19.0,
+        "Standard deviation": 9.19
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 2,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "kidbench_id": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "track": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "condition": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "age_conditioned": {
+        "Total # non-null values": 2,
+        "Average": 0.5,
+        "Min": 0.0,
+        "Max": 1.0,
+        "Standard deviation": 0.707
+    },
+    "language": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "category": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "risk_class": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "example_index": {
+        "Total # non-null values": 2,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "scenario": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "child_goal": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "upstream_file": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "upstream_revision": {
+        "unique_count": 1,
+        "total_count": 2
+    }
+}
