@@ -366,7 +366,7 @@ def _render_collector_health_check(config: SubmitConfig) -> str:
     )
 
 
-def _render_collector_shutdown(remote_bench_dir: Path) -> str:
+def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code.
 
@@ -375,7 +375,10 @@ def _render_collector_shutdown(remote_bench_dir: Path) -> str:
     interrupt; neither reaches the collector, so its final batch would be lost.
     """
     pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
-    pattern = shlex.quote(f"--config {collector_config_path(remote_bench_dir)}")
+    # Anchored to the binary: the srun that launched it carries the same `--config <path>` on its
+    # own command line, and a TERM to srun makes Slurm kill the step before the flush completes.
+    binary = re.escape(config.observability.binary)
+    pattern = shlex.quote(f"^{binary} --config {re.escape(str(collector_config_path(remote_bench_dir)))}")
     return (
         "DRIVER_RC=$?\n"
         f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
@@ -515,7 +518,7 @@ def build_sbatch_script(
         f"--output=logs/driver.log {entrypoint}"
     )
     if observed:
-        driver_command += "\n" + _render_collector_shutdown(remote_bench_dir)
+        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

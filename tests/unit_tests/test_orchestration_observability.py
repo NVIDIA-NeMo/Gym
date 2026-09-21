@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from pathlib import Path
 
 import pytest
@@ -344,7 +345,10 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     script = _script(_config())
     tail = script[script.index("--output=logs/driver.log") :]
     assert "DRIVER_RC=$?" in tail
-    assert f"pkill -TERM -u \"$USER\" -f -- '--config {collector_config_path(BENCH_DIR)}'" in tail
+    # Anchored to the binary so the launching srun, whose command line also carries the path, is
+    # not signalled: TERM to srun kills the step before the collector can flush.
+    expected = re.escape("otelcol-contrib") + " --config " + re.escape(str(collector_config_path(BENCH_DIR)))
+    assert f"pkill -TERM -u \"$USER\" -f -- '^{expected}'" in tail
     assert tail.rstrip().endswith("exit $DRIVER_RC")
     assert tail.index("sleep 20") < tail.index("pkill -TERM") < tail.index("kill -0 $OTEL_COLLECTOR_PID")
     # srun only gets TERM as a last resort, after the collector had its chance to flush.
