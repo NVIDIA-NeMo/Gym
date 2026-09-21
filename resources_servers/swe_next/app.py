@@ -59,6 +59,7 @@ from resources_servers.swe_next.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 
 
 class SWENextResourcesServerConfig(BaseResourcesServerConfig):
@@ -67,6 +68,7 @@ class SWENextResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -179,6 +181,19 @@ class SWENextResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to stop SWE-Next sandbox", format_exc(), file=sys.stderr)
 
+    async def _init_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
+        """These images have no git history at all -- init one fresh so ``seed_session`` has a
+        real base commit to diff the agent's changes against, and the anti-cheat scrub has an
+        actual repo to act on.
+        """
+        result = await sandbox.exec(
+            f"cd {shlex.quote(workdir)} && git init -q "
+            f"&& git config user.email nemo-gym@nvidia.com && git config user.name nemo-gym "
+            f"&& git add -A && git commit -q -m 'nemo_gym: initial snapshot' --allow-empty"
+        )
+        if result.return_code != 0:
+            print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
+
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """List of files ``workdir`` holds untracked before the agent touches it."""
         try:
@@ -218,6 +233,9 @@ class SWENextResourcesServer(SimpleResourcesServer):
         self._session_id_to_base_commit.pop(session_id, None)
 
         sandbox = await self._create_sandbox(body)
+        await self._init_git_repo(sandbox, body.workdir)
+        if self.config.apply_anti_cheating:
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
         self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()

@@ -60,6 +60,7 @@ from resources_servers.scale_swe.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 
 
 class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -68,6 +69,7 @@ class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -185,6 +187,22 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to stop Scale-SWE sandbox", format_exc(), file=sys.stderr)
 
+    async def _ensure_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
+        """Some images ship with no git history at all. Init one fresh, but only when missing, so
+        ``seed_session`` always has a real base commit to diff the agent's changes against without
+        disturbing the git history everywhere else.
+        """
+        precheck = await sandbox.exec(f"git -C {shlex.quote(workdir)} rev-parse --git-dir")
+        if precheck.return_code == 0:
+            return
+        result = await sandbox.exec(
+            f"cd {shlex.quote(workdir)} && git init -q "
+            f"&& git config user.email nemo-gym@nvidia.com && git config user.name nemo-gym "
+            f"&& git add -A && git commit -q -m 'nemo_gym: initial snapshot' --allow-empty"
+        )
+        if result.return_code != 0:
+            print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
+
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """List of files ``workdir`` holds untracked before the agent touches it."""
         try:
@@ -239,6 +257,10 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     f"(non-fatal, matching build_eval_script's own tolerance): {result.stderr}",
                     file=sys.stderr,
                 )
+
+        await self._ensure_git_repo(sandbox, body.workdir)
+        if self.config.apply_anti_cheating:
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "scale_swe")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
         self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()

@@ -13,6 +13,7 @@ swe_next_resources_server:
 
       evaluation_timeout: 1200
       is_verifying_golden_patch: false
+      apply_anti_cheating: true
 
       sandbox_provider: sandbox
       sandbox_config:

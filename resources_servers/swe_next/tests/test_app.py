@@ -309,6 +309,43 @@ class TestVerifyResponseShape:
             )
 
 
+class TestAntiCheating:
+    """seed_session must scrub the sandbox's git history before an agent gets control of it, or
+    it can just `git log --all` / `git show <future-commit>` and read the golden fix instead of
+    solving the task. See resources_servers/swebench/anti_cheat.py."""
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parent.parent / "app.py").read_text()
+
+    def test_seed_session_calls_the_shared_anti_cheat_helper(self) -> None:
+        source = self._source()
+        assert "from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup" in source
+        assert "apply_anti_cheat_setup(" in source
+
+    def test_config_enables_it_by_default(self) -> None:
+        from resources_servers.swe_next.app import SWENextResourcesServerConfig
+
+        assert SWENextResourcesServerConfig.model_fields["apply_anti_cheating"].default is True
+
+    def test_seed_session_inits_a_git_repo_before_scrubbing(self) -> None:
+        source = self._source()
+        assert "_init_git_repo(" in source
+        init_idx = source.index("await self._init_git_repo(")
+        anti_cheat_idx = source.index("apply_anti_cheat_setup(sandbox")
+        assert init_idx < anti_cheat_idx
+
+    def test_agent_facing_config_turns_it_on(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_next.yaml").read_text())
+        assert config["swe_next_resources_server"]["resources_servers"]["swe_next"]["apply_anti_cheating"] is True
+
+
 class TestMultiWorkerEntrypoint:
     """num_workers > 1 makes uvicorn re-import this entrypoint by path in each forked child.
     Without a module-level `app`, every child exits and uvicorn stops the parent, so the server
