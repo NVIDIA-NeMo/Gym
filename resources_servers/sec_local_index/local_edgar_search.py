@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import unquote
+
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,6 @@ DUMP_PATH_COLUMNS = ("canonical_url_key", "source_path")
 # Keeps the IN clause below SQLite's bound-parameter limit on any build.
 DUMP_PATH_CHUNK_SIZE = 500
 
-SEC_ARCHIVES_URL_RE = re.compile(r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)")
-
 
 def default_sidecar_path(index_path: str | Path) -> Path:
     return Path(str(index_path) + SIDECAR_SUFFIX)
@@ -86,13 +85,13 @@ def canonical_url_key(url: str) -> str | None:
     Must stay byte-identical to the key the index builder writes: unpadded CIK,
     dashless accession, lowercased filename.
     """
-    match = SEC_ARCHIVES_URL_RE.search(url)
-    if not match:
+    parsed = parse_sec_archives_url(url)
+    if parsed is None:
         return None
-    filename = unquote(match.group(3)).strip("/").rsplit("/", 1)[-1].lower()
+    filename = parsed.document_basename
     if not filename:
         return None
-    return f"{int(match.group(1))}:{match.group(2)}:{filename}"
+    return f"{parsed.unpadded_cik}:{parsed.accession}:{filename}"
 
 
 def _relative_source_path(source_path: str) -> str | None:

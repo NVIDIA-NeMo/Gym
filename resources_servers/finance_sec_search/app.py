@@ -62,6 +62,7 @@ from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
 )
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
 
 logger = logging.getLogger(__name__)
@@ -927,20 +928,14 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
     def _parse_sec_url(self, url: str) -> Optional[Dict[str, str]]:
         """Parse SEC URL to extract CIK, accession number, and document filename."""
-        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{document}
-        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)"
-        match = re.search(pattern, url)
-        if match:
-            cik = match.group(1).zfill(10)
-            acc_nodash = match.group(2)
-            document = match.group(3).strip("/")
-            # Convert to formatted accession: 0001234567-12-123456
-            if len(acc_nodash) == 18:
-                accession = f"{acc_nodash[:10]}-{acc_nodash[10:12]}-{acc_nodash[12:]}"
-            else:
-                accession = acc_nodash
-            return {"cik": cik, "accession_number": accession, "document": document}
-        return None
+        parsed = parse_sec_archives_url(url)
+        if parsed is None:
+            return None
+        return {
+            "cik": parsed.padded_cik,
+            "accession_number": parsed.dashed_accession,
+            "document": parsed.document_path,
+        }
 
     def _url_to_filing_path(self, url: str) -> Optional[Path]:
         """Convert a SEC EDGAR URL to its local cache file path.
