@@ -288,22 +288,34 @@ mean/median/std/min/p90/max distribution for `num_turns`, and p50/p90/p99/mean `
 
 ## Framework-owned media staging
 
-Training frameworks using `nemo_gym.token_id_capture.staging` can attach a shared
-`media` summary to a call's extras. `MediaCaptureExtras` validates the modality,
-per-frame `imgs_sizes`, and optional `num_frames` or `num_tiles`.
-`build_multimodal_extras` and `parse_multimodal_extras` provide the common envelope.
-The extras digest covers this JSON metadata; the framework owns tensor storage.
+Training frameworks using `nemo_gym.token_id_capture.staging` can hand a framework's
+processed media (for example an inference worker's pixel tensors) to
+`RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
+keyword-only `attachments` mapping. Gym forwards the mapping unchanged to
+`StagingSink.stage(record, attachments=...)` so the media lands in the same durable
+write as the token record, and `staged` coordinates are returned only after that
+combined write succeeds. Attachments are opaque to Gym: they never enter
+`StagedCallRecord`, `extras`, or any digest, so `digest`, `extras_digest`, and
+`CommitCoords` are identical with or without them.
 
-`VLLMCaptureAdapter` reads the worker-supplied `media` summary and preserves optional
-`routed_experts` alongside it. It also passes through `media_spans`, small metadata
-that the RL vLLM worker uses to remap image/video placeholders when reusing a captured
-prefix. vLLM uses expanded token IDs and does not emit a separate compact token delta.
-Tensor payloads stay in framework storage and do not travel in capture receipts.
+The keyword is passed only when the caller supplies a mapping. A legacy `stage(record)`
+sink therefore keeps working for text-only calls; if it is given attachments it raises
+`TypeError`, which the capture boundary reports as `capture_failed`. Gym never retries a
+write with the attachments dropped. A sink that accepts the keyword must store every
+supplied attachment before returning success or reject the call. Validation of the
+attached tensors, their storage layout, and read-back belong to the framework.
 
-This replaces the experimental tensor-attachment extension of the staging sink.
-Deploy the paired RL changes with this adapter; older attachment-format checkpoints
-need a separate migration. Supported processors and modalities are enforced by the
-framework's inference worker.
+`VLLMCaptureAdapter` preserves optional `routed_experts` extras and passes through
+`media_spans`, small metadata that the RL vLLM worker uses to remap image/video
+placeholders when reusing a captured prefix. vLLM uses expanded token IDs and does not
+emit a separate compact token delta. The adapter rejects a response payload that still
+carries the former `media` geometry summary, so a stale worker fails closed as
+`capture_failed` instead of publishing a row whose pixels were dropped.
+
+This replaces both the experimental tensor-attachment sink extension and the
+digest-covered `media` summary. Deploy the paired RL changes with this adapter; rows and
+checkpoints written in either older format need a separate migration. Supported
+processors and modalities are enforced by the framework's inference worker.
 
 ## Limitations
 
