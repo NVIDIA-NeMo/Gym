@@ -103,6 +103,14 @@ Set `validation_mode` and post every row to `/verify` with
 | `wrong_file` | reference solve, then every new artefact renamed `*.wrong` | reward 0.0, `missing_solution` |
 | `hung_process` | a background `sleep`, then an exec that times out | reward 0.0; container still removed |
 
+Two knobs exist for the gold sweep only and never touch what an agent sees.
+`REFERENCE_SOLUTION_PATCHES` in `app.py` fixes upstream's `sterile_processing_robust_schedule`
+reference solver, which at the pin references two undefined names and crashes before writing
+a solution. `reference_solve_time_limit_s` overrides the `ORCLAW_SOLVE_TIME_LIMIT_SECONDS`
+(300) that `solve.sh` passes to the reference solver; several hard-task references run to that
+cap and the objective they reach depends on the host, so a longer limit separates "the
+validator is wrong" from "this host does not reach `reference_metrics.json` in 300 s".
+
 Results of these sweeps over all 107 tasks are recorded in the Surveyor implementation note,
 not here.
 
