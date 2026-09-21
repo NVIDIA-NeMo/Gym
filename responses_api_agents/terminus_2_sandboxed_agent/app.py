@@ -7,6 +7,7 @@ import logging
 import sys
 import tempfile
 from copy import deepcopy
+from hashlib import sha1
 from pathlib import Path
 from time import perf_counter, time
 from traceback import format_exc
@@ -198,11 +199,21 @@ class NeMoGymLLM(BaseLLM):
         self._just_compacted = False
 
     @staticmethod
+    def _item_id(prefix: str, index: int, text: str) -> str:
+        """A valid, deterministic Responses-API item id for echoed assistant history.
+
+        OpenAI-compatible endpoints reject ``id: ""`` ("Expected an ID that contains letters,
+        numbers, underscores, or dashes"), so echoed items carry an id derived from their
+        position and content; the same history always produces the same ids.
+        """
+        return f"{prefix}_{sha1(f'{index}:{text}'.encode()).hexdigest()[:24]}"
+
+    @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
         messages = [*message_history, {"role": "user", "content": prompt}]
 
         res = []
-        for message in messages:
+        for index, message in enumerate(messages):
             if message.get("role") in ("user", "system"):
                 res.append(
                     NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
@@ -211,14 +222,14 @@ class NeMoGymLLM(BaseLLM):
                 if message.get("reasoning_content"):
                     res.append(
                         NeMoGymResponseReasoningItem(
-                            id="",
+                            id=NeMoGymLLM._item_id("rs", index, message.get("reasoning_content")),
                             summary=[NeMoGymSummary(text=message.get("reasoning_content"), type="summary_text")],
                             type="reasoning",
                         )
                     )
                 res.append(
                     NeMoGymResponseOutputMessage(
-                        id="",
+                        id=NeMoGymLLM._item_id("msg", index, message.get("content", "")),
                         content=[NeMoGymResponseOutputText(annotations=[], text=message.get("content", ""))],
                     )
                 )
