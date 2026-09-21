@@ -41,8 +41,9 @@ are one service on one host; nothing here crosses machines.
 
 import asyncio
 import json
+import threading
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from fastapi import FastAPI, Header, Query
 
@@ -83,6 +84,180 @@ class WorkerRegistrationError(ControlError):
     code = "worker_registration_rejected"
 
 
+class CoordinatorServiceError(ControlError):
+    """A coordinator-owned service operation failed."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: str = "coordinator_service_error",
+        status_code: int = 409,
+    ) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.status_code = status_code
+
+
+class RestoredCutAlreadyOwnedError(ControlError):
+    """A second model request attempted to consume a leased restored cut."""
+
+    code = "restored_cut_already_owned"
+
+
+class RestoredCutConsumedError(ControlError):
+    """A duplicate request attempted to reuse an already consumed cut."""
+
+    code = "restored_cut_consumed"
+
+
+CHECKPOINT_COORDINATOR_SOCKET_ENV = "NG_CHECKPOINT_COORDINATOR_SOCKET"
+
+_LEASE_MUTATING_SERVICE_OPERATIONS = frozenset(
+    {
+        "abandon_generation_cut_claim",
+        "claim_generation_cut",
+        "consume_generation_cut",
+        "release_generation_cut",
+    }
+)
+
+
+def _identity_set(values: Iterable[dict[str, Any]]) -> set[tuple[str, int]]:
+    return {(str(value["rollout_id"]), int(value["attempt_index"])) for value in values}
+
+
+class _RestoredCutEntry:
+    """Coordinator-local ownership state for one restored generation cut."""
+
+    def __init__(self, value: dict[str, Any]) -> None:
+        self.value = value
+        self.consumed = False
+        self.owner_worker_id: str | None = None
+        self.owner_model_call_id: str | None = None
+
+
+class RestoredCutRegistry:
+    """Atomically lease restored cuts to one policy-server worker."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, int], _RestoredCutEntry] = {}
+
+    def install(
+        self,
+        entries: dict[tuple[str, int], dict[str, Any]],
+    ) -> None:
+        """Replace the registry with one restored checkpoint's cut inventory."""
+        replacement: dict[tuple[str, int], _RestoredCutEntry] = {}
+        for key, value in entries.items():
+            existing = replacement.get(key)
+            if existing is not None and existing.value != value:
+                raise ValueError(f"multiple restored cuts target replacement attempt {key!r}")
+            replacement[key] = _RestoredCutEntry(value)
+        self._entries = replacement
+
+    def claim(
+        self,
+        key: tuple[str, int],
+        *,
+        worker_id: str,
+        model_call_id: str,
+    ) -> dict[str, Any] | None:
+        """Lease one available cut; return ``None`` when no cut targets the request."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        if entry.consumed:
+            raise RestoredCutConsumedError(f"restored cut {key!r} was already consumed by its replacement request")
+        if entry.owner_worker_id is None:
+            entry.owner_worker_id = worker_id
+            entry.owner_model_call_id = model_call_id
+            return entry.value
+        if entry.owner_worker_id == worker_id and entry.owner_model_call_id == model_call_id:
+            return entry.value
+        raise RestoredCutAlreadyOwnedError(f"restored cut {key!r} is owned by another policy request")
+
+    def consume(
+        self,
+        key: tuple[str, int],
+        *,
+        worker_id: str,
+        model_call_id: str,
+    ) -> None:
+        """Retire one successfully consumed or deliberately declined cut."""
+        entry = self._require_owner(key, worker_id=worker_id, model_call_id=model_call_id)
+        entry.consumed = True
+
+    def release(
+        self,
+        key: tuple[str, int],
+        *,
+        worker_id: str,
+        model_call_id: str,
+    ) -> None:
+        """Make a failed request's restored cut available to another worker."""
+        entry = self._require_owner(key, worker_id=worker_id, model_call_id=model_call_id)
+        entry.owner_worker_id = None
+        entry.owner_model_call_id = None
+
+    def release_if_owned(
+        self,
+        key: tuple[str, int],
+        *,
+        worker_id: str,
+        model_call_id: str,
+    ) -> bool:
+        """Release an abandoned claim without disturbing another owner."""
+        entry = self._entries.get(key)
+        if (
+            entry is None
+            or entry.consumed
+            or entry.owner_worker_id != worker_id
+            or entry.owner_model_call_id != model_call_id
+        ):
+            return False
+        entry.owner_worker_id = None
+        entry.owner_model_call_id = None
+        return True
+
+    def release_worker(self, worker_id: str) -> int:
+        """Release every unfinished lease owned by a disconnected worker."""
+        released = 0
+        for entry in self._entries.values():
+            if entry.consumed or entry.owner_worker_id != worker_id:
+                continue
+            entry.owner_worker_id = None
+            entry.owner_model_call_id = None
+            released += 1
+        return released
+
+    def status(self) -> dict[str, int]:
+        consumed = sum(entry.consumed for entry in self._entries.values())
+        leased = sum(not entry.consumed and entry.owner_worker_id is not None for entry in self._entries.values())
+        return {
+            "entries": len(self._entries),
+            "available": len(self._entries) - leased - consumed,
+            "leased": leased,
+            "consumed": consumed,
+        }
+
+    def has_unconsumed(self) -> bool:
+        """Return whether any restored cut may still be claimed or completed."""
+        return any(not entry.consumed for entry in self._entries.values())
+
+    def _require_owner(
+        self,
+        key: tuple[str, int],
+        *,
+        worker_id: str,
+        model_call_id: str,
+    ) -> _RestoredCutEntry:
+        entry = self._entries.get(key)
+        if entry is None or entry.owner_worker_id != worker_id or entry.owner_model_call_id != model_call_id:
+            raise RestoredCutAlreadyOwnedError(f"restored cut {key!r} is not owned by this policy request")
+        return entry
+
+
 class WorkerRecord:
     __slots__ = (
         "worker_id",
@@ -90,9 +265,14 @@ class WorkerRecord:
         "acked_seq",
         "inflight",
         "generation_pending",
+        "seen_attempts",
+        "checkpoint_exclusions",
         "cut_proof",
         "proof_error",
         "writer",
+        "write_lock",
+        "lease_lock",
+        "lease_tasks",
         "connected",
     )
 
@@ -102,9 +282,14 @@ class WorkerRecord:
         self.acked_seq = 0
         self.inflight = 0
         self.generation_pending = 0
+        self.seen_attempts: set[tuple[str, int]] = set()
+        self.checkpoint_exclusions: set[tuple[str, int]] = set()
         self.cut_proof: GenerationCutWorkerProof | None = None
         self.proof_error: str | None = None
         self.writer = writer
+        self.write_lock = asyncio.Lock()
+        self.lease_lock = asyncio.Lock()
+        self.lease_tasks: set[asyncio.Task[Any]] = set()
         self.connected = True
 
 
@@ -116,18 +301,30 @@ class AdmissionCoordinator:
     drained" apart from "the missing worker never reported".
     """
 
-    def __init__(self, socket_path: Path, expected_workers: int) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        expected_workers: int,
+        *,
+        restored_cuts: RestoredCutRegistry | None = None,
+        service_handler: Callable[[str, str, dict[str, Any]], Awaitable[Any]] | None = None,
+    ) -> None:
         self.socket_path = Path(socket_path)
         self.expected_workers = expected_workers
+        self.restored_cuts = restored_cuts or RestoredCutRegistry()
+        self.service_handler = service_handler
         self._workers: dict[str, WorkerRecord] = {}
         self._state = AdmissionState.ACCEPTING
         self._checkpoint_id: Optional[str] = None
+        self._cut_timeout_s: float | None = None
         self._frozen_worker_ids: tuple[str, ...] = ()
         self._seq = 0
         self._tombstones: list[dict[str, Any]] = []
+        self._checkpoint_exclusions: set[tuple[str, int]] = set()
         self._server: Optional[asyncio.base_events.Server] = None
         self._changed = asyncio.Condition()
         self._broadcast_lock = asyncio.Lock()
+        self._request_tasks: set[asyncio.Task[Any]] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -145,6 +342,11 @@ class AdmissionCoordinator:
         for record in self._workers.values():
             if record.connected:
                 record.writer.close()
+        for task in self._request_tasks:
+            task.cancel()
+        if self._request_tasks:
+            await asyncio.gather(*self._request_tasks, return_exceptions=True)
+        self._request_tasks.clear()
         if self.socket_path.exists():
             self.socket_path.unlink()
 
@@ -182,7 +384,7 @@ class AdmissionCoordinator:
                     self._workers[record.worker_id] = record
                     # A late-joining worker immediately receives the current
                     # state so it can never serve traffic against a stale one.
-                    await _write_message(writer, self._state_message())
+                    await self._write_to_worker(record, self._state_message())
                     await self._notify()
                 elif record is None:
                     continue
@@ -192,6 +394,10 @@ class AdmissionCoordinator:
                         continue
                     record.inflight = int(message.get("inflight", record.inflight))
                     record.generation_pending = int(message.get("generation_pending", record.inflight))
+                    if "seen_attempts" in message:
+                        record.seen_attempts = _identity_set(message["seen_attempts"])
+                    if "checkpoint_exclusions" in message:
+                        record.checkpoint_exclusions = _identity_set(message["checkpoint_exclusions"])
                     if self._state != AdmissionState.ACCEPTING:
                         if not self._accept_cut_proof(record, message, message_seq):
                             await self._notify()
@@ -210,13 +416,99 @@ class AdmissionCoordinator:
                     if self._state != AdmissionState.ACCEPTING:
                         self._accept_cut_proof(record, message, message_seq)
                     await self._notify()
-        except (ConnectionResetError, asyncio.IncompleteReadError):
+                elif kind == "service_request":
+                    operation = str(message.get("operation", ""))
+                    lease_mutating = operation in _LEASE_MUTATING_SERVICE_OPERATIONS
+                    task = asyncio.create_task(
+                        self._handle_service_request(
+                            record,
+                            message,
+                            lease_mutating=lease_mutating,
+                        )
+                    )
+                    self._request_tasks.add(task)
+                    task.add_done_callback(self._request_tasks.discard)
+                    if lease_mutating:
+                        record.lease_tasks.add(task)
+                        task.add_done_callback(record.lease_tasks.discard)
+        except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError):
             pass
         finally:
             if record is not None:
                 record.connected = False
+                # A worker can disconnect after sending a lease mutation but
+                # before receiving its response. Settle those operations in
+                # receive order before reclaiming unfinished leases. This
+                # preserves a durable consume while ensuring a late claim can
+                # never leave a lease owned by a dead worker.
+                if record.lease_tasks:
+                    await asyncio.gather(*tuple(record.lease_tasks), return_exceptions=True)
+                self.restored_cuts.release_worker(record.worker_id)
                 await self._notify()
             writer.close()
+
+    async def _handle_service_request(
+        self,
+        record: WorkerRecord,
+        message: dict[str, Any],
+        *,
+        lease_mutating: bool,
+    ) -> None:
+        request_id = str(message.get("request_id", ""))
+        operation = str(message.get("operation", ""))
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            if not request_id:
+                raise ValueError("service request_id must be non-empty")
+            if self.service_handler is None:
+                raise CoordinatorServiceError("checkpoint coordinator has no service handler")
+            if lease_mutating:
+                async with record.lease_lock:
+                    result = await self.service_handler(record.worker_id, operation, payload)
+            else:
+                result = await self.service_handler(record.worker_id, operation, payload)
+        except ControlError as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": error.code,
+                "detail": error.detail,
+                "status_code": error.status_code,
+            }
+        except ValueError as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": "invalid_service_request",
+                "detail": str(error),
+                "status_code": 409,
+            }
+        except Exception as error:
+            response = {
+                "type": "service_error",
+                "request_id": request_id,
+                "error_code": "coordinator_service_error",
+                "detail": f"{type(error).__name__}: {error}",
+                "status_code": 500,
+            }
+        else:
+            response = {
+                "type": "service_result",
+                "request_id": request_id,
+                "result": result,
+            }
+        if not record.connected:
+            return
+        try:
+            await self._write_to_worker(record, response)
+        except (BrokenPipeError, ConnectionResetError):
+            record.connected = False
+
+    async def _write_to_worker(self, record: WorkerRecord, message: dict[str, Any]) -> None:
+        async with record.write_lock:
+            await _write_message(record.writer, message)
 
     def _accept_cut_proof(self, record: WorkerRecord, message: dict[str, Any], message_seq: int) -> bool:
         try:
@@ -248,8 +540,10 @@ class AdmissionCoordinator:
             "seq": self._seq,
             "state": self._state.value,
             "checkpoint_id": self._checkpoint_id,
+            "cut_timeout_s": self._cut_timeout_s,
             "frozen_worker_ids": self._frozen_worker_ids,
             "tombstones": tuple(self._tombstones),
+            "restored_cuts_available": self.restored_cuts.has_unconsumed(),
         }
 
     async def _broadcast_locked(self) -> None:
@@ -259,11 +553,16 @@ class AdmissionCoordinator:
         for record in tuple(self._workers.values()):
             if record.connected:
                 try:
-                    await _write_message(record.writer, message)
-                except ConnectionResetError:
+                    await self._write_to_worker(record, message)
+                except (BrokenPipeError, ConnectionResetError):
                     record.connected = False
 
-    async def close_admission(self, checkpoint_id: str) -> None:
+    async def close_admission(
+        self,
+        checkpoint_id: str,
+        *,
+        cut_timeout_s: float | None = None,
+    ) -> None:
         async with self._broadcast_lock:
             connected = tuple(sorted(record.worker_id for record in self._workers.values() if record.connected))
             if len(connected) != self.expected_workers:
@@ -273,7 +572,9 @@ class AdmissionCoordinator:
                 )
             self._state = AdmissionState.DRAINING
             self._checkpoint_id = checkpoint_id
+            self._cut_timeout_s = cut_timeout_s
             self._frozen_worker_ids = connected
+            self._checkpoint_exclusions.clear()
             for record in self._workers.values():
                 record.cut_proof = None
                 record.proof_error = None
@@ -283,7 +584,9 @@ class AdmissionCoordinator:
         async with self._broadcast_lock:
             self._state = AdmissionState.ACCEPTING
             self._checkpoint_id = None
+            self._cut_timeout_s = None
             self._frozen_worker_ids = ()
+            self._checkpoint_exclusions.clear()
             for record in self._workers.values():
                 record.cut_proof = None
                 record.proof_error = None
@@ -292,7 +595,39 @@ class AdmissionCoordinator:
     async def add_tombstone(self, rollout_id: str, attempt_index: int) -> None:
         async with self._broadcast_lock:
             self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
+            self._checkpoint_exclusions.add((rollout_id, attempt_index))
             await self._broadcast_locked()
+
+    async def install_tombstones(self, identities: Iterable[tuple[str, int]]) -> None:
+        """Install restored attempt fences and publish them in one state update."""
+        async with self._broadcast_lock:
+            known = {(item["rollout_id"], int(item["attempt_index"])) for item in self._tombstones}
+            for rollout_id, attempt_index in identities:
+                if (rollout_id, attempt_index) in known:
+                    continue
+                self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
+                known.add((rollout_id, attempt_index))
+            await self._broadcast_locked()
+
+    async def publish_restored_cut_state(self) -> None:
+        """Publish a restored-cut availability transition to every worker."""
+        async with self._broadcast_lock:
+            if self._state == AdmissionState.ACCEPTING:
+                await self._broadcast_locked()
+
+    def seen_attempts(self) -> set[tuple[str, int]]:
+        result: set[tuple[str, int]] = set()
+        for record in self._workers.values():
+            if record.connected:
+                result.update(record.seen_attempts)
+        return result
+
+    def checkpoint_exclusions(self) -> set[tuple[str, int]]:
+        result = set(self._checkpoint_exclusions)
+        for record in self._workers.values():
+            if record.connected:
+                result.update(record.checkpoint_exclusions)
+        return result
 
     # -- aggregation ---------------------------------------------------------
 
@@ -373,6 +708,76 @@ class AdmissionCoordinator:
                     return self.status()
 
 
+class AdmissionCoordinatorRunner:
+    """Run one coordinator event loop beside a multi-worker Uvicorn parent."""
+
+    def __init__(self, coordinator: AdmissionCoordinator) -> None:
+        self.coordinator = coordinator
+        self._ready = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._error: BaseException | None = None
+
+    def start(self, *, timeout_s: float = 10.0) -> None:
+        if self._thread is not None:
+            raise RuntimeError("checkpoint coordinator runner is already started")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="nemo-gym-checkpoint-coordinator",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout_s):
+            raise RuntimeError("checkpoint coordinator did not start before its deadline")
+        if self._error is not None:
+            raise RuntimeError("checkpoint coordinator failed to start") from self._error
+
+    def stop(self, *, timeout_s: float = 10.0) -> None:
+        thread = self._thread
+        loop = self._loop
+        stop_event = self._stop_event
+        if thread is None:
+            return
+        if loop is not None and stop_event is not None:
+            loop.call_soon_threadsafe(stop_event.set)
+        thread.join(timeout_s)
+        if thread.is_alive():
+            raise RuntimeError("checkpoint coordinator did not stop before its deadline")
+        self._thread = None
+        if self._error is not None:
+            raise RuntimeError("checkpoint coordinator failed") from self._error
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            try:
+                await self.coordinator.start()
+                self._stop_event = asyncio.Event()
+            except BaseException as error:
+                self._error = error
+                self._ready.set()
+                return
+            self._ready.set()
+            try:
+                await self._stop_event.wait()
+            finally:
+                await self.coordinator.stop()
+
+        try:
+            loop.run_until_complete(serve())
+        except BaseException as error:
+            self._error = error
+            self._ready.set()
+        finally:
+            loop.close()
+            self._loop = None
+            self._stop_event = None
+
+
 class WorkerAdmissionAgent:
     """The per-worker side of the coordination protocol.
 
@@ -390,7 +795,7 @@ class WorkerAdmissionAgent:
         *,
         pid: int = 0,
         server_name: str = "policy",
-        cut_timeout_s: float = 10.0,
+        cut_timeout_s: float | None = None,
     ) -> None:
         self.socket_path = Path(socket_path)
         self.worker_id = worker_id
@@ -400,14 +805,21 @@ class WorkerAdmissionAgent:
         self.cut_timeout_s = cut_timeout_s
         self._writer: Optional[asyncio.StreamWriter] = None
         self._listener: Optional[asyncio.Task] = None
+        self._write_lock = asyncio.Lock()
+        self._service_requests: dict[str, asyncio.Future[Any]] = {}
+        self._next_service_request_id = 0
         self._coordinator_sequence = 0
         self._checkpoint_id: str | None = None
+        self._restored_cuts_available = False
+        self._reported_seen_attempts_checkpoint_id: str | None = None
+        self._counter_report_pending = False
+        self._counter_report_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         reader, writer = await asyncio.open_unix_connection(path=str(self.socket_path))
         self._writer = writer
         self.limiter.add_listener(self._on_limiter_change)
-        await _write_message(writer, {"type": "register", "worker_id": self.worker_id, "pid": self.pid})
+        await self._write({"type": "register", "worker_id": self.worker_id, "pid": self.pid})
         line = await reader.readline()
         if not line:
             self.limiter.remove_listener(self._on_limiter_change)
@@ -427,6 +839,14 @@ class WorkerAdmissionAgent:
 
     async def stop(self) -> None:
         self.limiter.remove_listener(self._on_limiter_change)
+        self._counter_report_pending = False
+        if self._counter_report_task is not None:
+            self._counter_report_task.cancel()
+            try:
+                await self._counter_report_task
+            except asyncio.CancelledError:
+                pass
+            self._counter_report_task = None
         if self._listener is not None:
             self._listener.cancel()
             try:
@@ -437,10 +857,22 @@ class WorkerAdmissionAgent:
         if self._writer is not None:
             self._writer.close()
             self._writer = None
+        for future in self._service_requests.values():
+            if not future.done():
+                future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
+        self._service_requests.clear()
 
     async def _listen(self, reader: asyncio.StreamReader) -> None:
-        async for message in _read_messages(reader):
-            await self._apply_state_message(message)
+        try:
+            async for message in _read_messages(reader):
+                if message.get("type") in {"service_result", "service_error"}:
+                    self._complete_service_request(message)
+                else:
+                    await self._apply_state_message(message)
+        finally:
+            for future in tuple(self._service_requests.values()):
+                if not future.done():
+                    future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
 
     async def _apply_state_message(self, message: dict[str, Any]) -> None:
         if message.get("type") != "state":
@@ -451,46 +883,75 @@ class WorkerAdmissionAgent:
         state = AdmissionState(message["state"])
         self._coordinator_sequence = message_sequence
         self._checkpoint_id = message.get("checkpoint_id")
+        self._restored_cuts_available = bool(message.get("restored_cuts_available", False))
         if state == AdmissionState.ACCEPTING:
             self.limiter.resume()
+            self._reported_seen_attempts_checkpoint_id = None
         else:
             checkpoint_id = message.get("checkpoint_id")
             self.limiter.close(checkpoint_id)
         for tombstone in message.get("tombstones", ()):
             self.limiter.abort_inflight(tombstone["rollout_id"], tombstone["attempt_index"])
         if state != AdmissionState.ACCEPTING and checkpoint_id is not None:
+            requested_cut_timeout_s = message.get("cut_timeout_s")
+            cut_timeout_s = 10.0 if requested_cut_timeout_s is None else max(float(requested_cut_timeout_s), 0.0)
+            if self.cut_timeout_s is not None:
+                cut_timeout_s = min(cut_timeout_s, self.cut_timeout_s)
             await self.limiter.prepare_generation_cut(
                 checkpoint_id,
                 server_name=self.server_name,
-                timeout_s=self.cut_timeout_s,
+                timeout_s=cut_timeout_s,
             )
         assert self._writer is not None
-        await _write_message(
-            self._writer,
-            {
-                "type": "ack",
-                "seq": message_sequence,
-                "inflight": self.limiter.counts()["inflight_total"],
-                "generation_pending": self.limiter.counts()["generation_pending_total"],
-                **self._generation_cut_proof_payload(),
-            },
+        payload = {
+            "type": "ack",
+            "seq": message_sequence,
+            "inflight": self.limiter.counts()["inflight_total"],
+            "generation_pending": self.limiter.counts()["generation_pending_total"],
+            **self._generation_cut_proof_payload(),
+        }
+        report_seen_attempts = (
+            state != AdmissionState.ACCEPTING
+            and checkpoint_id is not None
+            and self._reported_seen_attempts_checkpoint_id != checkpoint_id
         )
+        if report_seen_attempts:
+            payload.update(self._lineage_identity_payload())
+        await self._write(payload)
+        if report_seen_attempts:
+            self._reported_seen_attempts_checkpoint_id = checkpoint_id
 
     def _on_limiter_change(self) -> None:
         writer = self._writer
         if writer is None or writer.is_closing():
             return
-        counts = self.limiter.counts()
-        payload = {
-            "type": "counters",
-            "seq": self._coordinator_sequence,
-            "inflight": counts["inflight_total"],
-            "generation_pending": counts["generation_pending_total"],
-            **self._generation_cut_proof_payload(),
-        }
-        # Fire-and-forget: counter reports are monotone-refreshed, so a lost
-        # one is corrected by the next change or the next ack.
-        asyncio.get_running_loop().create_task(_write_message(writer, payload))
+        self._counter_report_pending = True
+        if self._counter_report_task is None:
+            self._counter_report_task = asyncio.get_running_loop().create_task(self._flush_counter_reports())
+
+    async def _flush_counter_reports(self) -> None:
+        """Publish the latest counters with at most one report task per worker."""
+        try:
+            while self._counter_report_pending:
+                self._counter_report_pending = False
+                counts = self.limiter.counts()
+                payload = {
+                    "type": "counters",
+                    "seq": self._coordinator_sequence,
+                    "inflight": counts["inflight_total"],
+                    "generation_pending": counts["generation_pending_total"],
+                    **self._generation_cut_proof_payload(),
+                }
+                await self._write(payload)
+        except (BrokenPipeError, ConnectionError):
+            # The listener owns connection-loss handling. Counter changes are
+            # snapshots, so reconnect/state acknowledgement supersedes them.
+            self._counter_report_pending = False
+        finally:
+            self._counter_report_task = None
+            writer = self._writer
+            if self._counter_report_pending and writer is not None and not writer.is_closing():
+                self._counter_report_task = asyncio.get_running_loop().create_task(self._flush_counter_reports())
 
     def _generation_cut_proof_payload(self) -> dict[str, Any]:
         if self._checkpoint_id is None or self._coordinator_sequence <= 0:
@@ -501,6 +962,117 @@ class WorkerAdmissionAgent:
             worker_id=self.worker_id,
         )
         return {"generation_cut_proof": proof.model_dump(mode="json")}
+
+    def _lineage_identity_payload(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "seen_attempts": [
+                {"rollout_id": rollout_id, "attempt_index": attempt_index}
+                for rollout_id, attempt_index in sorted(self.limiter.seen_attempts())
+            ],
+            "checkpoint_exclusions": [
+                {"rollout_id": rollout_id, "attempt_index": attempt_index}
+                for rollout_id, attempt_index in sorted(self.limiter.checkpoint_exclusions())
+            ],
+        }
+
+    def service_client(self) -> "CoordinatorServiceClient":
+        """Return the async client for coordinator-owned checkpoint operations."""
+        return CoordinatorServiceClient(self)
+
+    def has_restored_cuts(self) -> bool:
+        """Return whether the coordinator advertises an unconsumed restored cut."""
+        return self._restored_cuts_available
+
+    async def _service_request(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+        wait_without_timeout: bool = False,
+    ) -> Any:
+        if self._writer is None or self._writer.is_closing():
+            raise ConnectionError("checkpoint coordinator connection is not active")
+        self._next_service_request_id += 1
+        request_id = f"{self.worker_id}:service:{self._next_service_request_id}"
+        future = asyncio.get_running_loop().create_future()
+        self._service_requests[request_id] = future
+        try:
+            try:
+                await self._write(
+                    {
+                        "type": "service_request",
+                        "request_id": request_id,
+                        "operation": operation,
+                        "payload": payload,
+                    }
+                )
+                if wait_without_timeout:
+                    return await future
+                return await asyncio.wait_for(
+                    future,
+                    timeout=timeout_s if timeout_s is not None else (self.cut_timeout_s or 10.0),
+                )
+            except (asyncio.CancelledError, TimeoutError):
+                if operation == "claim_generation_cut":
+                    try:
+                        await self._service_request(
+                            "abandon_generation_cut_claim",
+                            payload,
+                            wait_without_timeout=True,
+                        )
+                    except ConnectionError:
+                        # A disconnected worker has all of its unfinished
+                        # leases reclaimed by the coordinator connection's
+                        # teardown path.
+                        pass
+                raise
+        finally:
+            self._service_requests.pop(request_id, None)
+
+    def _complete_service_request(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id", ""))
+        future = self._service_requests.get(request_id)
+        if future is None or future.done():
+            return
+        if message.get("type") == "service_error":
+            future.set_exception(
+                CoordinatorServiceError(
+                    str(message.get("detail", "checkpoint coordinator service request failed")),
+                    code=str(message.get("error_code", "coordinator_service_error")),
+                    status_code=int(message.get("status_code", 409)),
+                )
+            )
+        else:
+            future.set_result(message.get("result"))
+
+    async def _write(self, message: dict[str, Any]) -> None:
+        writer = self._writer
+        if writer is None:
+            raise ConnectionError("checkpoint coordinator connection is not active")
+        async with self._write_lock:
+            await _write_message(writer, message)
+
+
+class CoordinatorServiceClient:
+    """Async client for one coordinator-owned checkpoint service."""
+
+    def __init__(self, worker: WorkerAdmissionAgent) -> None:
+        self._worker = worker
+
+    @property
+    def has_restored_cuts(self) -> bool:
+        """Return whether a claim can possibly succeed without coordinator I/O."""
+        return self._worker.has_restored_cuts()
+
+    async def request(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> Any:
+        return await self._worker._service_request(operation, payload, timeout_s=timeout_s)
 
 
 def build_coordinator_control_app(
@@ -546,7 +1118,10 @@ def build_coordinator_control_app(
         deadline = Deadline(deadline_ts=body.deadline_ts)
 
         async def run() -> dict[str, Any]:
-            await coordinator.close_admission(body.checkpoint_id)
+            await coordinator.close_admission(
+                body.checkpoint_id,
+                cut_timeout_s=deadline.remaining(),
+            )
             try:
                 status = await _await_worker_acks(min(ack_timeout_s, max(deadline.remaining(), 0.001)))
             except BaseException:

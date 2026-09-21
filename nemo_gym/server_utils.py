@@ -28,7 +28,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, Protocol, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -1063,6 +1063,12 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
+class ServerProcessCompanion(Protocol):
+    """Background service owned by the Uvicorn parent process."""
+
+    def stop(self) -> None: ...
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -1148,6 +1154,10 @@ class SimpleServer(BaseServer):
         if self._checkpoint_fence is None:
             self._checkpoint_fence = ControlFence()
         return self._checkpoint_fence
+
+    def start_process_companion(self) -> Optional[ServerProcessCompanion]:
+        """Start an optional service that must outlive the Uvicorn worker pool."""
+        return None
 
     def control_capabilities(self) -> "ControlCapabilities":
         """The declaration served at ``GET /ng-control/v1/capabilities``.
@@ -1381,15 +1391,21 @@ repr(e): {repr(e)}"""
             uvicorn_kwargs["app"] = app
 
         if is_main_fastapi_proc:
+            companion: Optional[ServerProcessCompanion] = None
             try:
+                companion = server.start_process_companion()
                 uvicorn.run(**uvicorn_kwargs)
             finally:
-                # BatchSpanProcessor only exports on a timer, so without an explicit flush
-                # the last seconds of a run — including the spans of whatever was in
-                # flight at shutdown — are silently dropped.
-                from nemo_gym.telemetry.setup import shutdown_telemetry
+                try:
+                    if companion is not None:
+                        companion.stop()
+                finally:
+                    # BatchSpanProcessor only exports on a timer, so without an explicit flush
+                    # the last seconds of a run — including the spans of whatever was in
+                    # flight at shutdown — are silently dropped.
+                    from nemo_gym.telemetry.setup import shutdown_telemetry
 
-                shutdown_telemetry()
+                    shutdown_telemetry()
 
         return app
 

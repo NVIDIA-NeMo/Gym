@@ -552,24 +552,90 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         if context is None or context.logical_rollout_id is None or context.attempt_index is None:
             return None
+        if context.restored_generation_cut is not None:
+            return context.restored_generation_cut
         with self._generation_cut_restore_lock:
             prefix = self._restored_generation_cuts.get(context.logical_rollout_id)
         if prefix is None or context.attempt_index < prefix.attempt_index + 1:
             return None
         return prefix
 
-    def _retire_generation_cut_for_context(self) -> None:
+    async def _claim_generation_cut_for_context(self) -> None:
+        context = current_capture_context()
+        client = self.checkpoint_coordinator_client()
+        if (
+            client is None
+            or not self._generation_prefix_cuts_enabled
+            or not client.has_restored_cuts
+            or context is None
+            or not context.external_staging
+            or context.logical_rollout_id is None
+            or context.attempt_index is None
+        ):
+            return
+        payload = await client.request(
+            "claim_generation_cut",
+            {
+                "rollout_id": context.logical_rollout_id,
+                "attempt_index": context.attempt_index,
+                "model_call_id": context.model_call_id,
+            },
+        )
+        if payload is None:
+            return
+        prefix = GenerationCutPrefixAck.model_validate(payload)
+        context.restored_generation_cut = prefix
+        context.generation_cut_key = (
+            context.logical_rollout_id,
+            context.attempt_index,
+        )
+
+    async def _settle_generation_cut_for_context(
+        self,
+        *,
+        consume: bool,
+    ) -> None:
         context = current_capture_context()
         if context is None or context.generation_cut_key is None:
             return
+        client = self.checkpoint_coordinator_client()
+        if client is not None and context.restored_generation_cut is not None:
+            operation = "consume_generation_cut" if consume else "release_generation_cut"
+            await client.request(
+                operation,
+                {
+                    "rollout_id": context.generation_cut_key[0],
+                    "attempt_index": context.generation_cut_key[1],
+                    "model_call_id": context.model_call_id,
+                },
+            )
+            context.generation_cut_key = None
+            context.restored_generation_cut = None
+            context.generation_cut_declined = False
+            return
+        if not consume:
+            context.generation_cut_key = None
+            return
         with self._generation_cut_restore_lock:
             self._restored_generation_cuts.pop(context.generation_cut_key[0], None)
+        context.generation_cut_key = None
+
+    async def _retire_generation_cut_for_context(self) -> None:
+        await self._settle_generation_cut_for_context(consume=True)
 
     def _decline_generation_cut_for_context(self, prefix: GenerationCutPrefixAck) -> None:
         """Retire one restored cut that this replacement call cannot safely use."""
         context = current_capture_context()
         if context is None or context.logical_rollout_id is None:
             raise RuntimeError("cannot decline a generation cut without a logical rollout context")
+        if context.restored_generation_cut is not None:
+            if context.restored_generation_cut != prefix:
+                raise RuntimeError(
+                    "restored generation cut changed while declining prefix recovery: "
+                    f"rollout_id={context.logical_rollout_id!r}"
+                )
+            context.generation_cut_declined = True
+            return
         with self._generation_cut_restore_lock:
             current = self._restored_generation_cuts.get(context.logical_rollout_id)
             if current is None:
@@ -1147,12 +1213,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             generation_cut_client = self._resolve_client(request)
             self._remember_generation_cut_client(capture_context.model_call_id, generation_cut_client)
         try:
+            await self._claim_generation_cut_for_context()
             return await self._chat_completions(
                 request,
                 body,
                 resolved_client=generation_cut_client,
             )
         finally:
+            if capture_context is not None and capture_context.generation_cut_key is not None:
+                await self._settle_generation_cut_for_context(
+                    consume=capture_context.capture_outcome != "pending",
+                )
             if generation_cut_client is not None and capture_context is not None:
                 self._forget_generation_cut_client(capture_context.model_call_id, generation_cut_client)
 
@@ -1168,6 +1239,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+        context = current_capture_context()
+        if context is not None and context.generation_cut_declined:
+            await self._retire_generation_cut_for_context()
 
         client = resolved_client or self._resolve_client(request)
         if not self.config.sequential_reasoning_allowed:
@@ -1246,7 +1320,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 await mark_no_generation()
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
-                self._retire_generation_cut_for_context()
+                await self._retire_generation_cut_for_context()
                 return res
             else:
                 raise e
@@ -1385,7 +1459,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             try:
                 await self._external_capture_handler.finalize_response(_jsonable(response))
             finally:
-                self._retire_generation_cut_for_context()
+                await self._retire_generation_cut_for_context()
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:

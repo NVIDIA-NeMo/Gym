@@ -62,10 +62,16 @@ from nemo_gym._checkpoint.artifacts import (
 )
 from nemo_gym._checkpoint.control import (
     CONTROL_URL_PREFIX,
+    AdmissionState,
     CheckpointControlRequest,
     CheckpointPhase,
     ControlError,
     ControlFence,
+)
+from nemo_gym._checkpoint.coordinator import (
+    AdmissionCoordinator,
+    CoordinatorServiceClient,
+    MissingWorkersError,
 )
 from nemo_gym._checkpoint.model_admission import NotPolicyInstanceError
 from nemo_gym._checkpoint.model_control_contracts import (
@@ -73,6 +79,9 @@ from nemo_gym._checkpoint.model_control_contracts import (
     GenerationCutLineageRecord,
     GenerationCutReceipt,
     GenerationCutReplacement,
+    ModelAbortInflightRequest,
+    ModelAdmissionPauseRequest,
+    ModelAdmissionResumeRequest,
 )
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
@@ -1128,6 +1137,443 @@ def _load_generation_cut_proof(directory: Path) -> GenerationCutCoordinatorProof
     if not path.exists():
         return None
     return GenerationCutCoordinatorProof.model_validate_json(path.read_bytes())
+async def _commit_model_ledger(
+    checkpoint_dir: Path,
+    *,
+    checkpoint_id: str,
+    server_name: str,
+    ledger: Optional[CaptureLedger],
+    file_ledger_root: Optional[Path],
+    tombstones: set[tuple[str, int]],
+    source_attempts: set[tuple[str, int]],
+    continuation_roots: list[AgentContinuationRoot],
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...],
+) -> dict[str, Any]:
+    if generation_cut_receipts:
+        if not isinstance(ledger, GenerationCutCaptureLedger):
+            raise LedgerNotCheckpointableError(
+                "generation-prefix cuts require a capture ledger that can record cut coordinates"
+            )
+        for receipt in generation_cut_receipts:
+            await ledger.record_generation_cut(receipt)
+    expected_cut_records = sum(len(receipt.prefixes) for receipt in generation_cut_receipts)
+    if isinstance(ledger, CheckpointableCaptureLedger):
+        participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
+        commit_result = await ledger.checkpoint_capture_ledger(
+            participant_dir,
+            checkpoint_id=checkpoint_id,
+            server_name=server_name,
+            tombstones=tuple(tombstones),
+            source_attempts=tuple(source_attempts),
+            continuation_roots=tuple(continuation_roots),
+            generation_cut_receipts=generation_cut_receipts,
+        )
+        validated = CaptureLedgerCommitResult.model_validate(commit_result)
+        if validated.generation_cut_records != expected_cut_records:
+            raise LedgerMismatchError("capture-ledger checkpoint did not commit the complete generation-cut inventory")
+        _validate_storage_reference_artifact(
+            checkpoint_dir,
+            validated.storage_reference_index,
+        )
+        return validated.model_dump(mode="json")
+
+    if file_ledger_root is None:
+        raise LedgerNotCheckpointableError(
+            "the configured CaptureLedger must implement CheckpointableCaptureLedger; "
+            "Gym cannot infer how to snapshot a framework-owned backend"
+        )
+    checkpointer = CaptureLedgerCheckpointer(file_ledger_root, server_name=server_name)
+    return await _run_sync(
+        lambda: checkpointer.commit(
+            checkpoint_dir,
+            checkpoint_id=checkpoint_id,
+            tombstones=sorted(tombstones),
+            source_attempts=sorted(source_attempts),
+            continuation_roots=continuation_roots,
+            generation_cut_receipts=generation_cut_receipts,
+        )
+    )
+
+
+async def _restore_model_ledger(
+    checkpoint_dir: Path,
+    *,
+    server_name: str,
+    ledger: Optional[CaptureLedger],
+    file_ledger_root: Optional[Path],
+) -> dict[str, Any]:
+    if isinstance(ledger, CheckpointableCaptureLedger):
+        participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
+        restore_result = await ledger.restore_capture_ledger(
+            participant_dir,
+            server_name=server_name,
+        )
+        validated = CaptureLedgerRestoreResult.model_validate(restore_result)
+        _validate_storage_reference_artifact(
+            checkpoint_dir,
+            validated.storage_reference_index,
+        )
+        return validated.model_dump(mode="json")
+
+    if file_ledger_root is None:
+        raise LedgerNotCheckpointableError(
+            "the configured CaptureLedger must implement CheckpointableCaptureLedger; "
+            "Gym cannot infer how to restore a framework-owned backend"
+        )
+    checkpointer = CaptureLedgerCheckpointer(file_ledger_root, server_name=server_name)
+    return await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
+
+
+class PolicyModelCheckpointCoordinatorService:
+    """Own policy-model checkpoint state shared by every Uvicorn worker."""
+
+    def __init__(
+        self,
+        coordinator: AdmissionCoordinator,
+        *,
+        ledger_provider: Callable[[], Optional[CaptureLedger]],
+        file_ledger_root_provider: Callable[[], Optional[Path]],
+        instance_role: Literal["policy", "auxiliary"],
+        server_name: str,
+        supports_generation_cuts: bool,
+    ) -> None:
+        self.coordinator = coordinator
+        self.ledger_provider = ledger_provider
+        self.file_ledger_root_provider = file_ledger_root_provider
+        self.instance_role = instance_role
+        self.server_name = _validate_server_name(server_name)
+        self.supports_generation_cuts = supports_generation_cuts
+        self.fence = ControlFence()
+
+    async def __call__(
+        self,
+        worker_id: str,
+        operation: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        self._require_policy()
+        if operation == "model_admission_pause":
+            return await self._pause(ModelAdmissionPauseRequest.model_validate(payload))
+        if operation == "model_admission_status":
+            return await self._status(payload)
+        if operation == "model_admission_resume":
+            return await self._resume(ModelAdmissionResumeRequest.model_validate(payload))
+        if operation == "model_admission_abort_inflight":
+            return await self._abort(ModelAbortInflightRequest.model_validate(payload))
+        if operation == "model_checkpoint_commit":
+            return await self._commit(ModelCheckpointCommitRequest.model_validate(payload))
+        if operation == "model_checkpoint_restore":
+            return await self._restore(ModelCheckpointRestoreRequest.model_validate(payload))
+        if operation == "claim_generation_cut":
+            key = (str(payload["rollout_id"]), int(payload["attempt_index"]))
+            return self.coordinator.restored_cuts.claim(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        if operation == "abandon_generation_cut_claim":
+            key = (str(payload["rollout_id"]), int(payload["attempt_index"]))
+            return self.coordinator.restored_cuts.release_if_owned(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        if operation == "consume_generation_cut":
+            key = (str(payload["rollout_id"]), int(payload["attempt_index"]))
+            self.coordinator.restored_cuts.consume(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+            if not self.coordinator.restored_cuts.has_unconsumed():
+                await self.coordinator.publish_restored_cut_state()
+            return None
+        if operation == "release_generation_cut":
+            key = (str(payload["rollout_id"]), int(payload["attempt_index"]))
+            self.coordinator.restored_cuts.release(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+            return None
+        raise ValueError(f"unknown policy checkpoint coordinator operation {operation!r}")
+
+    def _require_policy(self) -> None:
+        if self.instance_role != "policy":
+            raise NotPolicyInstanceError(
+                "this model-server instance is auxiliary; only policy instances coordinate checkpoints"
+            )
+
+    def _all_workers_acked(self, status: dict[str, Any]) -> bool:
+        workers = status["workers"]
+        return status["missing_workers"] == 0 and workers["acknowledged"] == workers["live"]
+
+    async def _await_worker_acks(self, timeout_s: float) -> dict[str, Any]:
+        status = await self.coordinator.wait_until(
+            self._all_workers_acked,
+            timeout_s=max(timeout_s, 0.001),
+        )
+        if not self._all_workers_acked(status):
+            workers = status["workers"]
+            raise MissingWorkersError(
+                f"{status['missing_workers']} of {self.coordinator.expected_workers} workers missing and "
+                f"{workers['acknowledged']}/{workers['live']} live workers acknowledged"
+            )
+        return status
+
+    def _status_payload(self, status: dict[str, Any]) -> dict[str, Any]:
+        result = {
+            "state": status["state"],
+            "workers": {
+                "acknowledged": status["workers"]["acknowledged"],
+                "expected": self.coordinator.expected_workers,
+            },
+            "missing_workers": status["missing_workers"],
+            "inflight_total": status["inflight_total"],
+            "response_inflight_total": status["response_inflight_total"],
+            "generation_pending_total": status["generation_pending_total"],
+            "waiters_total": status["waiters_total"],
+        }
+        if status["state"] == AdmissionState.PAUSED.value:
+            result["generation_cut_proof"] = self.coordinator.generation_cut_proof().model_dump(mode="json")
+        return result
+
+    async def _pause(self, body: ModelAdmissionPauseRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            await self.coordinator.close_admission(
+                body.checkpoint_id,
+                cut_timeout_s=body.remaining(),
+            )
+            try:
+                status = await self._await_worker_acks(body.remaining())
+            except BaseException:
+                await self.coordinator.resume_admission()
+                raise
+            return self._status_payload(status)
+
+        result = await self.fence.run_operation(
+            body.checkpoint_id,
+            "model-admission/pause",
+            allowed_phases=frozenset({CheckpointPhase.IDLE}),
+            phase_during=CheckpointPhase.PREPARING,
+            phase_after=CheckpointPhase.PREPARING,
+            run=run,
+            deadline=body,
+        )
+        if result["state"] == AdmissionState.PAUSED.value:
+            self.fence.mark_prepared(body.checkpoint_id)
+        return result
+
+    async def _status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(payload["checkpoint_id"])
+        self.fence.require_phase(
+            checkpoint_id,
+            frozenset(
+                {
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTING,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORING,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
+            ),
+        )
+        wait_state = payload.get("wait_state")
+        timeout_s = float(payload.get("timeout_s", 0.0))
+        if wait_state == "paused" and timeout_s > 0:
+            status = await self.coordinator.wait_until(
+                lambda value: value["state"] == AdmissionState.PAUSED.value,
+                timeout_s=timeout_s,
+            )
+        else:
+            status = self.coordinator.status()
+        if status["state"] == AdmissionState.PAUSED.value and self.fence.phase == CheckpointPhase.PREPARING:
+            self.fence.mark_prepared(checkpoint_id)
+        return {"checkpoint_id": checkpoint_id, **self._status_payload(status)}
+
+    async def _resume(self, body: ModelAdmissionResumeRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            await self.coordinator.resume_admission()
+            status = await self._await_worker_acks(10.0)
+            return {
+                "state": status["state"],
+                "workers": {
+                    "acknowledged": status["workers"]["acknowledged"],
+                    "expected": self.coordinator.expected_workers,
+                },
+                "released_waiters": 0,
+            }
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "model-admission/resume",
+            allowed_phases=frozenset(
+                {
+                    CheckpointPhase.IDLE,
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
+            ),
+            phase_during=self.fence.phase,
+            phase_after=CheckpointPhase.IDLE,
+            run=run,
+            retire_outcome="resumed",
+        )
+
+    async def _abort(self, body: ModelAbortInflightRequest) -> dict[str, Any]:
+        entry_phase = self.fence.phase
+
+        async def run() -> dict[str, Any]:
+            await self.coordinator.add_tombstone(body.rollout_id, body.attempt_index)
+            status = await self._await_worker_acks(10.0)
+            return {
+                "state": status["state"],
+                "aborted_inflight": 0,
+                "inflight_total": status["inflight_total"],
+            }
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            f"model-admission/abort_inflight:{body.rollout_id}:{body.attempt_index}",
+            allowed_phases=frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            phase_during=entry_phase,
+            phase_after=entry_phase,
+            run=run,
+        )
+
+    def _generation_cut_receipts(self) -> tuple[GenerationCutReceipt, ...]:
+        proof = self.coordinator.generation_cut_proof()
+        return tuple(
+            worker.generation_cut_receipt for worker in proof.workers if worker.generation_cut_receipt is not None
+        )
+
+    async def _commit(self, body: ModelCheckpointCommitRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            status = self.coordinator.status()
+            if status["state"] != AdmissionState.PAUSED.value:
+                raise LedgerNotQuiescentError("capture-ledger commit requires every policy worker to be paused")
+            continuation_roots = await asyncio.to_thread(
+                load_continuation_roots,
+                Path(body.checkpoint_dir),
+                body.continuation_indexes,
+            )
+            return await _commit_model_ledger(
+                Path(body.checkpoint_dir),
+                checkpoint_id=body.checkpoint_id,
+                server_name=self.server_name,
+                ledger=self.ledger_provider(),
+                file_ledger_root=self.file_ledger_root_provider(),
+                tombstones=self.coordinator.checkpoint_exclusions(),
+                source_attempts=self.coordinator.seen_attempts(),
+                continuation_roots=continuation_roots,
+                generation_cut_receipts=self._generation_cut_receipts(),
+            )
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "model-checkpoint/commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=run,
+        )
+
+    async def _restore(self, body: ModelCheckpointRestoreRequest) -> dict[str, Any]:
+        async def run() -> dict[str, Any]:
+            await self.coordinator.close_admission(
+                body.checkpoint_id,
+                cut_timeout_s=body.remaining(),
+            )
+            await self._await_worker_acks(body.remaining())
+            result = await _restore_model_ledger(
+                Path(body.checkpoint_dir),
+                server_name=self.server_name,
+                ledger=self.ledger_provider(),
+                file_ledger_root=self.file_ledger_root_provider(),
+            )
+            lineage_receipts = tuple(
+                GenerationCutReceipt.model_validate(receipt) for receipt in result.pop("generation_cut_receipts", ())
+            )
+            generation_cut_receipts = _validate_restored_generation_cut_receipts(
+                lineage_receipts=lineage_receipts,
+                requested_receipts=body.generation_cut_receipts,
+                server_name=self.server_name,
+            )
+            if generation_cut_receipts and not self.supports_generation_cuts:
+                raise LedgerNotCheckpointableError(
+                    "checkpoint contains generation cuts but this model server has no restore backend"
+                )
+            exclusions = {(item.rollout_id, item.attempt_index) for item in body.generation_cut_exclusions}
+            restored_entries: dict[tuple[str, int], dict[str, Any]] = {}
+            for receipt in generation_cut_receipts:
+                for prefix in receipt.prefixes:
+                    replacement = (prefix.rollout_id, prefix.attempt_index + 1)
+                    if (
+                        prefix.disposition == "durable_prefix"
+                        and prefix.cut_kind == "active_prefix"
+                        and replacement not in exclusions
+                    ):
+                        value = prefix.model_dump(mode="json")
+                        previous = restored_entries.get(replacement)
+                        if previous is not None and previous != value:
+                            raise LedgerMismatchError(
+                                "multiple durable generation cuts target the same "
+                                f"replacement attempt: {replacement!r}"
+                            )
+                        restored_entries[replacement] = value
+            self.coordinator.restored_cuts.install(restored_entries)
+            restored_tombstones = {
+                (str(item["rollout_id"]), int(item["attempt_index"]))
+                for item in (*result["tombstones"], *result.get("source_attempts", []))
+            }
+            await self.coordinator.install_tombstones(restored_tombstones)
+            await self._await_worker_acks(10.0)
+            result["generation_cuts_restored"] = len(restored_entries)
+            return result
+
+        return await self.fence.run_operation(
+            body.checkpoint_id,
+            "model-checkpoint/restore",
+            allowed_phases=frozenset({CheckpointPhase.IDLE, CheckpointPhase.RESTORE_FAILED_PAUSED}),
+            phase_during=CheckpointPhase.RESTORING,
+            phase_after=CheckpointPhase.RESTORED_PAUSED,
+            run=run,
+            phase_on_failure=CheckpointPhase.RESTORE_FAILED_PAUSED,
+        )
+
+
+def _validate_restored_generation_cut_receipts(
+    *,
+    lineage_receipts: tuple[GenerationCutReceipt, ...],
+    requested_receipts: tuple[GenerationCutReceipt, ...],
+    server_name: str,
+) -> tuple[GenerationCutReceipt, ...]:
+    if lineage_receipts and requested_receipts:
+        lineage_prefixes = sorted(
+            json.dumps(prefix.model_dump(mode="json"), sort_keys=True)
+            for receipt in lineage_receipts
+            for prefix in receipt.prefixes
+        )
+        request_prefixes = sorted(
+            json.dumps(prefix.model_dump(mode="json"), sort_keys=True)
+            for receipt in requested_receipts
+            for prefix in receipt.prefixes
+        )
+        if lineage_prefixes != request_prefixes:
+            raise LedgerMismatchError("request-carried generation cuts disagree with the restored model lineage")
+    receipts = lineage_receipts or requested_receipts
+    for receipt in receipts:
+        if receipt.inventory.server_name != server_name:
+            raise LedgerMismatchError(
+                "generation-cut receipt belongs to a different model server: "
+                f"expected={server_name!r}, actual={receipt.inventory.server_name!r}"
+            )
+    return receipts
 
 
 def install_model_checkpoint(
@@ -1142,6 +1588,7 @@ def install_model_checkpoint(
     auth_token: str,
     generation_cut_proof_provider: Callable[[], GenerationCutCoordinatorProof] | None = None,
     expected_workers: int = 1,
+    coordinator_client: Optional[CoordinatorServiceClient] = None,
 ) -> None:
     """Register ``/ng-control/v1/model-checkpoint`` on a model-server app.
 
@@ -1295,6 +1742,12 @@ def install_model_checkpoint(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_checkpoint_commit",
+                body.model_dump(mode="json"),
+                timeout_s=max(body.remaining(), 0.001),
+            )
 
         async def run() -> dict[str, Any]:
             generation_cut_proof = _require_quiescent(body.checkpoint_id)
@@ -1336,6 +1789,12 @@ def install_model_checkpoint(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_checkpoint_restore",
+                body.model_dump(mode="json"),
+                timeout_s=max(body.remaining(), 0.001),
+            )
 
         async def run() -> dict[str, Any]:
             # The restored server boots into the paused state: nothing may be
