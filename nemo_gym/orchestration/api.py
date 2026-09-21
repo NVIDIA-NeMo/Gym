@@ -262,6 +262,11 @@ class ObservabilityConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
+    # Node-level exporters that clusters commonly run as system services on every compute node;
+    # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
+    # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
+    gpu_metrics_port: int | None = 9400
+    node_metrics_port: int | None = 9100
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
 

@@ -115,6 +115,17 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         }
         for name, port in scrape_targets(config).items()
     ]
+    # Node exporters keep their conventional job names so the standard DCGM / node_exporter
+    # dashboards' queries apply unchanged; DCGM already labels every sample with `hpc_job`.
+    for job_name, port in (("dcgm", obs.gpu_metrics_port), ("node", obs.node_metrics_port)):
+        if port is not None:
+            scrape_configs.append(
+                {
+                    "job_name": job_name,
+                    "scrape_interval": interval,
+                    "static_configs": [{"targets": [f"localhost:{port}"]}],
+                }
+            )
     # vLLM names its metrics `vllm:<name>`; the shared dashboards, and Prometheus convention, use
     # `vllm_<name>`, and the backend keeps whatever name arrives. Renamed after parsing so counters
     # and histograms keep their types (Prometheus relabelling would make them untyped). `$$` escapes

@@ -175,6 +175,18 @@ def test_collector_converts_the_slurm_job_id_to_a_string():
     )
 
 
+def test_collector_scrapes_the_node_exporters_by_default_and_can_skip_them():
+    by_job = {s["job_name"]: s for s in _rendered()["receivers"]["prometheus"]["config"]["scrape_configs"]}
+    assert by_job["dcgm"]["static_configs"][0]["targets"] == ["localhost:9400"]
+    assert by_job["node"]["static_configs"][0]["targets"] == ["localhost:9100"]
+    assert by_job["dcgm"]["scrape_interval"] == "15s"
+
+    off = _config(observability={"gpu_metrics_port": None, "node_metrics_port": 9200})
+    jobs = {s["job_name"]: s for s in _rendered(off)["receivers"]["prometheus"]["config"]["scrape_configs"]}
+    assert "dcgm" not in jobs
+    assert jobs["node"]["static_configs"][0]["targets"] == ["localhost:9200"]
+
+
 def test_collector_scrapes_every_model_service_on_localhost():
     config = _config(
         services={
