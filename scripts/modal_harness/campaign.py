@@ -380,6 +380,7 @@ def run_campaign(
             "published_log": published_log,
             "last_progress_at": time.time(),
             "started_at": time.time(),
+            "results_dir": results_dir,
         }
         publisher = threading.Thread(
             target=_progress_publisher,
@@ -486,6 +487,32 @@ def _publish(work_path: str, output_path: str, high_water: int) -> int:
     return rows
 
 
+def _publish_sidecars(slug: str, results_dir: str) -> None:
+    """Publish the files resume depends on, not just the rollouts.
+
+    `<slug>_materialized_inputs.jsonl` is what resume matches rows against. Publishing it
+    only at end-of-attempt means a container respawned mid-attempt leaves the next one
+    rollouts with no inputs to match them to -- so resume silently re-dispatches every row,
+    the local count restarts at zero, and the no-shrink floor then correctly refuses to
+    publish anything below the volume's count. The cell burns compute redoing work it
+    already has, publishes nothing, and reads as stalled with no errors anywhere.
+
+    Copied only when absent or changed in size: the inputs file is static once written and
+    can be tens of megabytes, so rewriting it every cycle is pure churn.
+    """
+    for suffix in ("_materialized_inputs.jsonl", "_failures.jsonl"):
+        source = os.path.join("/tmp", f"{slug}{suffix}")
+        if not os.path.exists(source):
+            continue
+        target = os.path.join(results_dir, f"{slug}{suffix}")
+        try:
+            if os.path.exists(target) and os.path.getsize(target) == os.path.getsize(source):
+                continue
+            shutil.copyfile(source, target)
+        except OSError:
+            pass
+
+
 def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: str, state: dict[str, Any]) -> None:
     """Publish progress while an attempt is still running.
 
@@ -501,6 +528,7 @@ def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: 
                 print(f"[{slug}] force-stopped externally; publishing and exiting", flush=True)
                 _publish(work_path, output_path, state["high_water"])
                 os._exit(0)
+            _publish_sidecars(slug, state["results_dir"])
             published = _publish(work_path, output_path, state["high_water"])
             if published > state["high_water"]:
                 state["high_water"] = published

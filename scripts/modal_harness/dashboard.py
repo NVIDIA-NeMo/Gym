@@ -78,6 +78,17 @@ nav{margin-bottom:14px;font-size:12px}
 """
 
 
+#: Seconds without a new row before a run is called stuck, per namespace. A constant
+#: cannot serve both a fast benchmark and one whose cold first row legitimately takes
+#: twenty minutes -- AgentDyn's DRIFT is ~55 policy calls per rollout.
+STALL_THRESHOLDS: dict[str, float] = {"agentdyn": 2700.0}
+DEFAULT_STALL_THRESHOLD = 900.0
+
+
+def stall_threshold(namespace: str) -> float:
+    return STALL_THRESHOLDS.get(namespace, DEFAULT_STALL_THRESHOLD)
+
+
 def _page(title: str, body: str, *, subtitle: str = "") -> str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
@@ -258,23 +269,23 @@ def dashboard():
         for run in runs:
             pct = (run["landed"] / run["expected"] * 100) if run["expected"] else 0
             missing = f"<span style='color:var(--bad)'>{run['missing']}</span>" if run["missing"] else "0"
-            # 15 minutes without a new row, on a run that claims to be running. Long enough
-            # that a slow benchmark does not trip it -- a DRIFT rollout is ~55 policy calls
-            # and a cold first row can take twenty minutes -- short enough to catch a hang
-            # in the session it happens. A hung rollout keeps the container healthy and
-            # heartbeating, so this is the only external signal that work has stopped.
+            # A hung rollout keeps its container healthy and heartbeating, so rows-landed
+            # is the only external signal that work has stopped.
             # Only flag when THIS container has itself been alive long enough to have
             # produced a row. Without that clause a cell respawned 300s ago inherits its
             # predecessor's silence and reads as stuck for an hour -- which produced two
             # false alarms out of three the first time this column was used in anger.
             age = run["container_age"]
-            stuck = run["state"] == "running" and run["stalled_for"] > 900 and (age == 0 or age > 900)
+            # Per-namespace: a constant cannot serve a 24s/it defense and one whose cold
+            # first row legitimately takes twenty minutes.
+            threshold = stall_threshold(run["namespace"])
+            stuck = run["state"] == "running" and run["stalled_for"] > threshold and (age == 0 or age > threshold)
             stall = (
                 f"<span style='color:var(--warn)'>{int(run['stalled_for'] // 60)}m</span>"
                 if stuck
                 else (
                     f"<span class='muted'>starting {int(age // 60)}m</span>"
-                    if run["state"] == "running" and 0 < age <= 900
+                    if run["state"] == "running" and 0 < age <= threshold
                     else "-"
                 )
             )
