@@ -115,6 +115,18 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         }
         for name, port in scrape_targets(config).items()
     ]
+    # vLLM names its metrics `vllm:<name>`; the shared dashboards, and Prometheus convention, use
+    # `vllm_<name>`, and the backend keeps whatever name arrives. Renamed after parsing so counters
+    # and histograms keep their types (Prometheus relabelling would make them untyped). `$$` escapes
+    # the collector's own `${...}` expansion so the regexp groups reach OTTL intact.
+    rename_colon_metrics = {
+        "metric_statements": [
+            {
+                "context": "metric",
+                "statements": ['replace_pattern(metric.name, "^([^:]+):(.+)$", "$${1}_$${2}")'],
+            }
+        ]
+    }
 
     attributes = [
         ("service.name", obs.service_name, "upsert"),
@@ -149,6 +161,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         "processors": {
             "batch": {},
             "resource": {"attributes": resource_actions},
+            "transform/metric_names": rename_colon_metrics,
         },
         "exporters": {
             "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
@@ -164,7 +177,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "pipelines": {
                 "metrics": {
                     "receivers": ["prometheus"],
-                    "processors": ["resource", "batch"],
+                    "processors": ["transform/metric_names", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/metrics"],
                 },
                 "traces": {

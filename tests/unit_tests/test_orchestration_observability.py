@@ -189,6 +189,15 @@ def test_collector_scrapes_every_model_service_on_localhost():
     assert by_job["vllm-policy"]["scrape_interval"] == "15s"
 
 
+def test_collector_renames_colon_metrics_to_underscores_before_export():
+    doc = _rendered()
+    statements = doc["processors"]["transform/metric_names"]["metric_statements"]
+    assert statements == [
+        {"context": "metric", "statements": ['replace_pattern(metric.name, "^([^:]+):(.+)$", "$${1}_$${2}")']}
+    ]
+    assert doc["service"]["pipelines"]["metrics"]["processors"][0] == "transform/metric_names"
+
+
 def test_collector_stamps_the_dashboard_labels():
     attrs = _attrs(_rendered())
     assert attrs["user"] == ("someone", "upsert")
