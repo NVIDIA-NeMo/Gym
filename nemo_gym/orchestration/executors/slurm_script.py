@@ -33,8 +33,10 @@ from nemo_gym.orchestration.executors.observability import (
     COLLECTOR_HEALTH_PORT,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
+    GYM_TELEMETRY_EXTRA,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
+    driver_telemetry_env,
     observability_active,
 )
 from nemo_gym.orchestration.executors.script_templates import (
@@ -480,9 +482,15 @@ def build_sbatch_script(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
+        extras=(GYM_TELEMETRY_EXTRA,) if observed else (),
     )
     prepare_command = ""
-    driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
+    # Gym's own Lens instrumentation is switched on through the driver's environment and pointed
+    # at the collector; anything the config sets explicitly wins.
+    driver_env = (
+        {**driver_telemetry_env(remote_bench_dir.parent.name), **config.driver.env} if observed else config.driver.env
+    )
+    driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
     # The driver writes everything relative to the job directory -- `output_path`
     # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
