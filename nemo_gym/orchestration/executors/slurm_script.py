@@ -124,7 +124,7 @@ def _resolve_env(env: dict[str, str]) -> str:
 
 def _render_service_command(
     name: str,
-    container: str,
+    container: str | None,
     command: str,
     env: dict[str, str] | None = None,
     mounts: list[str] | None = None,
@@ -147,9 +147,15 @@ def _render_service_command(
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
+    # Without a container the command runs directly on the node: no image, mounts or workdir flags.
+    container_flags = (
+        f" --no-container-mount-home{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)}"
+        if container is not None
+        else ""
+    )
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -335,7 +341,8 @@ def _build_service_command(
 
 def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
-    startup; the job directory is mounted for its config and its local `otel/*.jsonl` output."""
+    startup. In a container the job directory is mounted for the config and the local
+    `otel/*.jsonl` output; on the node it is simply there."""
     obs = config.observability
     command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
     return _render_service_command(
@@ -347,8 +354,6 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> s
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
         mounts=[f"{remote_bench_dir}:{remote_bench_dir}"],
-        # The upstream image has no /root, and enroot's switchroot cds into $HOME when the image
-        # declares no workdir; the mounted job directory always exists.
         workdir=str(remote_bench_dir),
     )
 

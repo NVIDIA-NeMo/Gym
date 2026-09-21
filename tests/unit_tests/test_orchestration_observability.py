@@ -261,9 +261,21 @@ def test_script_starts_the_collector_before_the_model_service():
     assert script.index("# service: otel_collector") < script.index("# service: policy")
 
 
-def test_script_runs_the_collector_in_its_container_with_the_job_dir_mounted():
+def test_script_runs_the_collector_on_the_node_by_default():
     line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
-    assert "--container-image=otel/opentelemetry-collector-contrib:0.152.1" in line
+    assert "--container" not in line
+    assert line.startswith("env ")
+    assert (
+        f" srun --overlap --output=logs/otel_collector.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
+        in line
+    )
+
+
+def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
+    config = _config(observability={"container": "/lustre/containers/otelcol.sqsh", "binary": "/otelcol-contrib"})
+    line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
+    assert "--container-image=/lustre/containers/otelcol.sqsh" in line
+    assert "--no-container-mount-home" in line
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
     assert f"--container-workdir={BENCH_DIR}" in line
     assert f"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}" in line
@@ -278,11 +290,11 @@ def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkey
     assert "secret-token" not in line
 
 
-def test_script_honours_collector_container_and_binary_overrides():
-    config = _config(observability={"container": "/lustre/containers/otelcol.sqsh", "binary": "otelcol-contrib"})
+def test_script_honours_a_binary_path_on_shared_storage():
+    config = _config(observability={"binary": "/lustre/tools/otelcol-contrib"})
     line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
-    assert "--container-image=/lustre/containers/otelcol.sqsh" in line
-    assert " otelcol-contrib --config " in line
+    assert " /lustre/tools/otelcol-contrib --config " in line
+    assert "--container" not in line
 
 
 def test_script_health_checks_the_collector_before_the_model_service():
