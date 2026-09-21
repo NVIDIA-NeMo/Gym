@@ -399,7 +399,10 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
 
 
 def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
-    assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
+    line = _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
+    assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
+    # Lens exports logs over gRPC whatever the protocol says; they must not be sent to the HTTP port.
+    assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317" in line
     off = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_logs": False})
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
 
