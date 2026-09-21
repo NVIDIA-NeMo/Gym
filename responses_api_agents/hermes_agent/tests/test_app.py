@@ -386,12 +386,17 @@ class TestSandboxSessionCleanup:
 
 @pytest.mark.parametrize("template_location", ["extra_body", "top_level"])
 @pytest.mark.parametrize(
+    "hermes_error",
+    [None, "Model generated invalid tool call: finish", "Model generated only think blocks after 3 retries"],
+)
+@pytest.mark.parametrize(
     "existing_metadata",
     [None, {"trace": "kept", "chat_template_kwargs": '{"existing": true, "enable_thinking": false}'}],
 )
 async def test_sandbox_relay_preserves_template_overrides_in_gym_metadata(
     monkeypatch: pytest.MonkeyPatch,
     template_location: str,
+    hermes_error: str | None,
     existing_metadata: dict[str, str] | None,
 ) -> None:
     client = MagicMock(spec=ServerClient)
@@ -424,7 +429,16 @@ async def test_sandbox_relay_preserves_template_overrides_in_gym_metadata(
         model_request["chat_template_kwargs"] = template_kwargs
         # An explicit top-level value already takes precedence over extra_body.
         model_request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-    output = {"result": {"messages": messages, "completed": True}, "runtime": {"pid": 123}}
+    output = {
+        "result": {
+            "messages": messages,
+            "completed": hermes_error is None,
+            "partial": hermes_error is not None,
+            "error": hermes_error,
+            "api_calls": 1,
+        },
+        "runtime": {"pid": 123},
+    }
     monkeypatch.setattr(HermesAgent, "_upload_json", AsyncMock())
     monkeypatch.setattr(HermesAgent, "_download_json", AsyncMock(side_effect=[model_request, output]))
     request = Request(
@@ -456,7 +470,16 @@ async def test_sandbox_relay_preserves_template_overrides_in_gym_metadata(
     if existing_metadata:
         assert validated.metadata["trace"] == "kept"
         assert existing_metadata["chat_template_kwargs"] == '{"existing": true, "enable_thinking": false}'
-    assert episode.response.status == "completed"
+    assert episode.response.status == ("failed" if hermes_error else "completed")
+    assert episode.response.metadata["turns"] == "1"
+    assert episode.response.metadata["partial"] == ("true" if hermes_error else "false")
+    if hermes_error:
+        assert episode.response.error.message == hermes_error
+        assert episode.response.metadata["hermes_error"] == hermes_error
+        assert episode.response.output[-1].content[0].text == "working"
+    else:
+        assert episode.response.error is None
+    assert episode.observations.records[0].status == ("failed" if hermes_error else "completed")
     assert episode.observations.records[0].model_calls[0].response_id == "completion"
     assert episode.observations.records[0].model_calls[0].model_ref == hermes.config.model_server
     assert state.runner_session is None
@@ -588,7 +611,7 @@ class TestSigtermHandler:
         assert hermes.active_agents == set()
         assert hermes.interrupted_agents == set()
 
-    def test_session_activation_rejects_hermes_error_result(self) -> None:
+    def test_explicit_fail_on_error_rejects_hermes_error_result(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         with pytest.raises(RuntimeError, match="model request failed"):
             hermes._response_from_result(

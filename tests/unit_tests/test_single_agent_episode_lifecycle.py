@@ -217,6 +217,38 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     assert result.result.verification.response == verified_response
 
 
+@pytest.mark.parametrize("reward", [0.0, 1.0])
+@pytest.mark.parametrize("mask_sample", [False, True])
+async def test_failed_agent_response_still_reaches_verification(reward: float, mask_sample: bool) -> None:
+    environment, client = _environment()
+    failed_response = _agent_response().model_dump(mode="json")
+    failed_response.update(
+        status="failed",
+        error={"code": "server_error", "message": "Model generated invalid tool call: finish"},
+        metadata={"partial": "true", "turns": "26"},
+    )
+    client.responses[2] = _Response(failed_response, cookies={"session": "agent-activated"})
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(response=failed_response, reward=reward, mask_sample=mask_sample)
+    client.responses[4] = _Response(verification)
+
+    result = await environment.run_request(_request())
+
+    assert result.failure is None
+    assert [path for _, path, _ in client.calls][-3:] == [
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    forwarded = client.calls[4][2]["json"].verification_input.response
+    assert forwarded == NeMoGymResponse.model_validate(failed_response)
+    assert client.calls[4][2]["cookies"] == {"session": "resources-updated"}
+    assert result.result.verification.response == forwarded
+    assert result.result.verification.reward == reward
+    assert result.result.verification.mask_sample is mask_sample
+    assert result.result.verification.response.status == "failed"
+
+
 @pytest.mark.parametrize("mask_sample", [False, True])
 @pytest.mark.parametrize("result_path", ["native", "flat-adapter"])
 async def test_results_preserve_verification_and_observations(mask_sample: bool, result_path: str) -> None:

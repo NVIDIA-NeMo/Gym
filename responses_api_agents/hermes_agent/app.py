@@ -749,7 +749,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         body=body,
                         result=result,
                         model_name=self._model_name(),
-                        fail_on_error=True,
+                        # Match the local path: preserve failed responses so resources
+                        # can still verify work completed before the harness error.
+                        fail_on_error=False,
                         n_input=len(history) + 1,
                     )
                     response.metadata = {
