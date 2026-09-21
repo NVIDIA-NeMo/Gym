@@ -124,6 +124,7 @@ def _ok() -> dict[str, Any]:
 def plain_run_paths(monkeypatch):
     # No rollout-capture prefix in these tests; the scripted client matches bare paths.
     monkeypatch.setattr(VeriSoftBenchAgent, "url_path_for_run", lambda self, path, body: path)
+    monkeypatch.setattr(VeriSoftBenchAgent, "url_path_for_request", lambda self, path, request: path)
 
 
 async def _run(client) -> Any:
@@ -200,3 +201,18 @@ class TestLoop:
 class TestSanity:
     def test_construct(self) -> None:
         _agent(MagicMock(spec=ServerClient))
+
+
+class TestResponses:
+    @pytest.mark.asyncio
+    async def test_responses_forwards_to_the_policy_model_and_wraps_string_input(self) -> None:
+        client = ScriptedClient([])
+        agent = _agent(client)
+        request = MagicMock(spec=Request)
+        request.cookies = {"sid": "1"}
+        response = MagicMock()
+        out = await agent.responses(request, response, NeMoGymResponseCreateParamsNonStreaming(input="prove"))
+        server_name, path, sent = client.posts[0]
+        assert server_name == "policy_model" and path.endswith("/v1/responses")
+        assert [m.role for m in sent.input] == ["user"]
+        assert out.output[0].content[0].text.startswith("<lean4_proof>")

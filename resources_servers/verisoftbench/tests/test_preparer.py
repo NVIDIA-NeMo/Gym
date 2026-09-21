@@ -175,3 +175,14 @@ class TestBackendFaultMarkers:
     )
     def test_markers(self, msg, expected) -> None:
         assert upstream.is_backend_fault(msg) is expected
+
+
+class TestMain:
+    def test_main_writes_every_prepared_row(self, tmp_path, monkeypatch) -> None:
+        root = _write_dataset(tmp_path, [_row(i) for i in range(1, 501)], monkeypatch)
+        monkeypatch.setattr(prep, "ensure_checkout", lambda d: None)
+        monkeypatch.setattr(prep, "PromptSource", lambda d: FakePrompts())
+        out = tmp_path / "out" / "rows.jsonl"
+        prep.main(["--upstream-dir", str(root), "--output", str(out), "--limit", "7"])
+        lines = out.read_text().splitlines()
+        assert len(lines) == 7 and json.loads(lines[-1])["verifier_metadata"]["id"] == 7
