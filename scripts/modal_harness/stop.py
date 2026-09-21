@@ -16,9 +16,15 @@ from scripts.modal_harness.campaign import app, stop_cell
 
 
 @app.local_entrypoint()
-def main(namespace: str, slugs: str) -> None:
+def main(namespace: str, slugs: str, force: bool = False) -> None:
+    """`--force` handles a cell with no recorded call id by clearing its status entry.
+
+    That makes the idempotency guard respawn it; the stuck container keeps its container
+    until its timeout but can no longer affect the rows. Use it only for a cell that is
+    genuinely stuck -- on a merely slow one it spawns a redundant second container.
+    """
     for slug in [s.strip() for s in slugs.split(",") if s.strip()]:
-        result = stop_cell.remote(namespace, slug)
+        result = stop_cell.remote(namespace, slug, force=force)
         mark = "stopped" if result["stopped"] else f"NOT stopped ({result['reason']})"
         landed = f" at {result['landed']} rows" if result.get("landed") is not None else ""
         print(f"  {slug}: {mark}{landed}")

@@ -463,9 +463,15 @@ def _publish(work_path: str, output_path: str, high_water: int) -> int:
         return high_water
     data = data[: cut + 1]
     rows = data.count(b"\n")
-    if rows < high_water:
-        return high_water
-    if rows == high_water:
+    # Compare against what is ON THE VOLUME, not only this container's own high-water
+    # mark. Two containers can hold the same slug -- after a forced respawn, say -- and a
+    # guard that only knows its own progress would let the older one publish its smaller
+    # file over the newer one's. The volume's current count is the authority.
+    published_rows = _count_rows(output_path)
+    floor = max(high_water, published_rows)
+    if rows < floor:
+        return floor
+    if rows == floor:
         # Nothing new. Returning without writing leaves the file's mtime as the time work
         # last landed, which is what makes a stall visible from outside the container.
         return high_water
@@ -531,6 +537,12 @@ def write_status(namespace: str, slug: str, **fields: Any) -> None:
                 existing = json.load(handle)
         except (OSError, ValueError):
             existing = {}
+    # `landed` is monotonic per slug. A second container holding the same slug would
+    # otherwise report its own smaller count and make the dashboard flap between them.
+    incoming = fields.get("landed")
+    if incoming is not None and existing.get("landed") is not None:
+        fields = dict(fields)
+        fields["landed"] = max(int(incoming), int(existing["landed"]))
     existing.update(fields)
     existing["slug"] = slug
     existing["namespace"] = namespace
@@ -632,7 +644,7 @@ def skip_reason(
 
 
 @app.function(image=IMAGE, volumes={RESULTS_ROOT: RESULTS_VOLUME}, timeout=300)
-def stop_cell(namespace: str, slug: str) -> dict[str, Any]:
+def stop_cell(namespace: str, slug: str, force: bool = False) -> dict[str, Any]:
     """Cancel one running cell, leaving every other cell and the app alone.
 
     Reads the call id the run recorded in its status file. Collected rows are safe: the
@@ -647,8 +659,23 @@ def stop_cell(namespace: str, slug: str) -> dict[str, Any]:
         status = json.load(handle)
     call_id = status.get("function_call_id")
     if not call_id:
-        # Runs started before this was recorded, or a run that never reached the loop.
-        return {"slug": slug, "stopped": False, "reason": "no function_call_id recorded"}
+        if not force:
+            # Runs started before the id was recorded, or one that never reached the loop.
+            return {"slug": slug, "stopped": False, "reason": "no function_call_id recorded"}
+        # Forced: clear the status entry so the idempotency guard stops treating the slug
+        # as live and respawns it. The old container keeps its container, but it is stuck
+        # and writing nothing -- which is why it is being stopped -- and it cannot damage
+        # the rows: `_publish` floors against the volume's current count, and `landed` is
+        # monotonic, so a woken straggler can no longer overwrite a newer container's work.
+        os.remove(path)
+        RESULTS_VOLUME.commit()
+        return {
+            "slug": slug,
+            "stopped": True,
+            "forced": True,
+            "landed": status.get("landed"),
+            "reason": "status cleared; guard will respawn and resume",
+        }
     try:
         modal.FunctionCall.from_id(call_id).cancel()
     except Exception as error:  # noqa: BLE001 - report rather than raise across the boundary

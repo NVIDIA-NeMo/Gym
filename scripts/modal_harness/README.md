@@ -93,6 +93,28 @@ Deployed alongside the runner, HTTP Basic against the `nemo-gym-dashboard-auth` 
 Your runs appear automatically; discovery is driven by the rollout files, so a run whose
 container died still shows up with whatever it collected.
 
+## Stopping a cell
+
+```bash
+modal run -m scripts.modal_harness.stop --namespace mybench --slugs cell-a,cell-b
+modal run -m scripts.modal_harness.stop --namespace mybench --slugs cell-a --force
+```
+
+Cancels those runs and nothing else; `modal app stop` takes down every cell in the app.
+Collected rows are safe — the publisher writes under the no-shrink rule every 45s, so a
+cancel loses at most that interval and the next launch resumes.
+
+`--force` is for a cell with no recorded call id (any run started before that was added).
+It clears the slug's status entry so the idempotency guard respawns it. The stuck container
+keeps its slot until its own timeout but cannot affect the rows: publishing floors against
+the volume's current count, and `landed` is monotonic per slug. Use it only on a genuinely
+stuck cell — on a slow one it just spawns a redundant second container.
+
+**`modal container logs` will not identify an old container.** It returns a short recent
+tail, and the `[slug] attempt N` line is printed at container start — so grepping containers
+for a slug works right after a spawn and silently fails for exactly the long-running cell
+you want to stop. Use `--force` instead.
+
 ## Things that cost me hours
 
 Each of these was found by running it, not by reading the code.
