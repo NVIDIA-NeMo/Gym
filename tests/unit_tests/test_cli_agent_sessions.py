@@ -34,7 +34,6 @@ from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBund
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.tool_access import (
     DirectHTTPToolAccess,
-    MCPStdioConnection,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
 )
@@ -112,12 +111,9 @@ def close_request(session_id: str = "session", rollout: str = "rollout") -> Agen
 def tool_access(kind: str, *, required: bool = True) -> DirectHTTPToolAccess | MCPToolAccess:
     if kind == "direct_http":
         return DirectHTTPToolAccess(name="owner", required=required, base_url="http://verifier")
-    connection = (
-        MCPStdioConnection(command="unused-mcp-server")
-        if kind == "mcp_stdio"
-        else MCPStreamableHTTPConnection(url="http://verifier/mcp")
+    return MCPToolAccess(
+        name="owner", required=required, connection=MCPStreamableHTTPConnection(url="http://verifier/mcp")
     )
-    return MCPToolAccess(name="owner", required=required, connection=connection)
 
 
 def request_for(session_id: str = "session", rollout: str = "rollout") -> Request:
@@ -258,7 +254,7 @@ def test_http_cookie_isolation_and_single_activation(cli):
         )
 
 
-@pytest.mark.parametrize("access", ["sandbox", "direct_http", "mcp_http", "mcp_stdio"])
+@pytest.mark.parametrize("access", ["sandbox", "direct_http", "mcp_http"])
 def test_unsupported_access_fails_before_activation(cli, access):
     agent, _, runner = cli
     mocked = mock_runner(agent, runner)
@@ -278,7 +274,7 @@ def test_unsupported_access_fails_before_activation(cli, access):
     mocked.assert_not_called()
 
 
-@pytest.mark.parametrize("kind", ["direct_http", "mcp_http", "mcp_stdio"])
+@pytest.mark.parametrize("kind", ["direct_http", "mcp_http"])
 def test_configured_required_tools_reject_native_seed_but_preserve_direct_calls(cli, kind):
     agent, _, runner = cli
     mocked = mock_runner(agent, runner)
@@ -292,7 +288,7 @@ def test_configured_required_tools_reject_native_seed_but_preserve_direct_calls(
         mocked.assert_awaited_once()
 
 
-@pytest.mark.parametrize("kind", ["direct_http", "mcp_http", "mcp_stdio"])
+@pytest.mark.parametrize("kind", ["direct_http", "mcp_http"])
 @pytest.mark.parametrize("configured", [False, True])
 def test_optional_tools_can_be_skipped_for_verifier_only_sessions(cli, kind, configured):
     agent, _, runner = cli
