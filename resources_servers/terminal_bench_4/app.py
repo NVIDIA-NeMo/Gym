@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar, Literal
 from uuid import uuid4
@@ -49,6 +50,7 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     environment: EnvironmentConfig
     max_concurrent_sessions: int = Field(default=8, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+    seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
 
 
@@ -176,6 +178,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         if session.execution is not None:
             # Retried seed requests share provisioning, including before the first cookie response.
             await asyncio.shield(session.execution)
+        self._check_expiry(session)
         if session.verified_response is not None:
             return SeedSessionResponse(session_id=session.session_id, verified_response=session.verified_response)
         if session.seed_response is None:
@@ -198,7 +201,12 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     skills_dir=session.task.config.environment.skills_dir,
                 )
                 session.phase = "ready"
+                session.agent_deadline = asyncio.get_running_loop().time() + self.config.seeded_session_timeout_sec
+                session.deadlines["agent_expires_at"] = (
+                    datetime.now(timezone.utc) + timedelta(seconds=self.config.seeded_session_timeout_sec)
+                ).isoformat()
                 session.persist()
+                session.expiry_task = asyncio.create_task(self._watch_agent_deadline(session))
             except (Exception, asyncio.CancelledError) as exc:
                 session.termination = AgentTermination(
                     reason="cancelled" if isinstance(exc, asyncio.CancelledError) else "infrastructure_error",
@@ -209,6 +217,28 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id, termination=session.termination
                 )
+
+    def _expire_seed(self, session: Session) -> None:
+        # No await between claiming expiry and installing the cleanup task: /verify
+        # either owns finalization already or must reject this expired session.
+        if session.phase != "ready" or session.finalization is not None:
+            return
+        session.phase = "expiring"
+        session.deadlines["agent_expired_at"] = lifecycle.now()
+        session.termination = AgentTermination(reason="timeout", detail="Seeded session deadline expired")
+        lifecycle.exception(session, session.termination.detail, "SeededSessionExpired")
+        session.persist()
+        session.finalization = asyncio.create_task(lifecycle.finalize_session(session, grade=False))
+
+    def _check_expiry(self, session: Session) -> None:
+        if session.agent_deadline is not None and asyncio.get_running_loop().time() >= session.agent_deadline:
+            self._expire_seed(session)
+        if "agent_expired_at" in session.deadlines:
+            raise HTTPException(410, "Seeded session deadline expired")
+
+    async def _watch_agent_deadline(self, session: Session) -> None:
+        await asyncio.sleep(max(0, session.agent_deadline - asyncio.get_running_loop().time()))
+        self._expire_seed(session)
 
     async def _finalize_session(self, session: Session) -> None:
         body = session.verify_body
@@ -305,6 +335,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         session = self._session(request, body.session_id)
         if session.execution is not None:
             await asyncio.shield(session.execution)
+        self._check_expiry(session)
         if session.verify_body is not None and session.verify_body != body:
             raise HTTPException(409, "Session is already bound to another verification request")
         if session.verified_response is not None:
@@ -312,6 +343,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         if session.seed_response is None:
             raise HTTPException(409, "Episode has no recorded seed response")
         if session.finalization is None:
+            if session.expiry_task is not None:
+                session.expiry_task.cancel()
+            session.agent_deadline = None
+            session.deadlines["verification_started_at"] = lifecycle.now()
             session.verify_body = body.model_copy(deep=True)
             session.finalization = asyncio.create_task(self._finalize_session(session))
         await asyncio.shield(session.finalization)

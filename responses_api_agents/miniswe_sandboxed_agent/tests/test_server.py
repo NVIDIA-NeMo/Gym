@@ -676,3 +676,182 @@ async def test_reconnect_failure_still_requests_cleanup(fixture, monkeypatch):
         "/seed_session",
         "/verify",
     ]
+
+
+async def test_abandoned_seed_expires_and_releases_slot(fixture):
+    f = fixture
+    assert f.server.config.seeded_session_timeout_sec == 10 * 60 * 60
+    f.server.config.seeded_session_timeout_sec = 0.05
+    f.server._slots = asyncio.Semaphore(1)
+    seed = await f.server.seed_session(f.request, f.body)
+    session = f.server._sessions[seed.session_id]
+    deadline = session.agent_deadline
+    retry = await f.server.seed_session(f.request, f.body)
+    assert retry == seed and session.agent_deadline == deadline
+    assert f.server._slots.locked()
+    async with asyncio.timeout(1):
+        await session.expiry_task
+        await session.finalization
+        await f.server._slots.acquire()
+    f.server._slots.release()
+    assert session.phase == "closed"
+    assert session.termination.reason == "timeout"
+    assert all(e.closed for e in f.envs)
+    assert f.events.index("quiesce") < f.events.index("agent_stop")
+    assert all(e.stop.await_count == 1 for e in f.envs)
+    assert session.result["exception_info"]["exception_type"] == "SeededSessionExpired"
+    state = json.loads(f.server._state_path(session.identity).read_text())
+    assert state["deadlines"]["agent_expired_at"]
+    assert state["deadlines"]["agent_expires_at"]
+    f.grade.assert_not_awaited()
+    for restarted in (False, True):
+        if restarted:
+            f.server._sessions.clear()
+            f.server._by_identity.clear()
+        with pytest.raises(HTTPException) as exc:
+            await f.server.seed_session(f.request, f.body)
+        assert exc.value.status_code == 410
+
+
+async def test_verify_takes_over_before_seed_deadline(fixture):
+    f = fixture
+    f.server.config.seeded_session_timeout_sec = 0.1
+    seed = await f.server.seed_session(f.request, f.body)
+    session = f.server._sessions[seed.session_id]
+    deadline = session.agent_deadline
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def grade(*args):
+        entered.set()
+        await release.wait()
+        return {"rewards": {"reward": 0.75}}
+
+    f.grade.side_effect = grade
+    body = module.SandboxedVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=f.body.responses_create_params,
+        response=module.empty_response(f.body.responses_create_params, "model"),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    caller = asyncio.create_task(f.server.verify(f.request, body))
+    try:
+        async with asyncio.timeout(1):
+            await entered.wait()
+        await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()) + 0.01)
+        assert session.expiry_task.cancelled()
+        assert session.agent_deadline is None
+        assert "agent_expired_at" not in session.deadlines
+        assert session.deadlines["verification_started_at"]
+        assert not f.envs[1].closed
+        assert session.termination.reason == "completed"
+    finally:
+        release.set()
+    result = await caller
+    assert result.reward == 0.75 and result.evaluation_completed
+    assert all(e.closed for e in f.envs)
+
+
+async def test_late_verify_cannot_race_expiry_cleanup(fixture):
+    f = fixture
+    seed = await f.server.seed_session(f.request, f.body)
+    session = f.server._sessions[seed.session_id]
+    # Simulate /verify winning scheduling ahead of an overdue timer callback.
+    session.agent_deadline = asyncio.get_running_loop().time() - 1
+    body = module.SandboxedVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=f.body.responses_create_params,
+        response=module.empty_response(f.body.responses_create_params, "model"),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await f.server.verify(f.request, body)
+    assert exc.value.status_code == 410
+    await session.finalization
+    with pytest.raises(HTTPException) as exc:
+        await f.server.verify(f.request, body)
+    assert exc.value.status_code == 410
+    assert all(e.stop.await_count == 1 for e in f.envs)
+    f.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize("shutdown_timeout", [0, 0.02])
+@pytest.mark.parametrize("blocked_stage", ["preparation", "response"])
+async def test_shutdown_is_bounded_when_seed_response_never_arrives(fixture, shutdown_timeout, blocked_stage):
+    f = fixture
+    f.agent.config.shutdown_timeout_sec = shutdown_timeout
+    f.server.config.seeded_session_timeout_sec = 0.1
+    entered, transport_cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    post = f.agent.server_client.post.side_effect
+    if blocked_stage == "preparation":
+        task = f.server._loader.load.return_value
+
+        async def blocked_load(*args):
+            entered.set()
+            await release.wait()
+            return task
+
+        f.server._loader.load.side_effect = blocked_load
+
+    async def lose_seed_response(**kwargs):
+        try:
+            response = await post(**kwargs)
+            if kwargs["url_path"] == "/seed_session" and blocked_stage == "response":
+                entered.set()
+                await asyncio.Event().wait()
+            return response
+        except asyncio.CancelledError:
+            transport_cancelled.set()
+            raise
+
+    f.agent.server_client.post.side_effect = lose_seed_response
+    caller = asyncio.create_task(f.agent.run(f.request, f.body))
+    async with asyncio.timeout(1):
+        await entered.wait()
+        await f.agent.shutdown()
+        await transport_cancelled.wait()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+    assert not f.harnesses
+    assert [c.kwargs["url_path"] for c in f.agent.server_client.post.await_args_list] == ["/seed_session"]
+    session = next(iter(f.server._sessions.values()))
+    release.set()
+    async with asyncio.timeout(1):
+        await session.execution
+        await session.expiry_task
+        await session.finalization
+    assert session.phase == "closed" and not session.owns_slot
+    assert all(e.closed for e in f.envs)
+    f.grade.assert_not_awaited()
+
+
+async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixture):
+    f = fixture
+    f.agent.config.shutdown_timeout_sec = 0.5
+    entered, release = asyncio.Event(), asyncio.Event()
+    post = f.agent.server_client.post.side_effect
+
+    async def delay_seed(**kwargs):
+        response = await post(**kwargs)
+        if kwargs["url_path"] == "/seed_session":
+            entered.set()
+            await release.wait()
+        return response
+
+    f.agent.server_client.post.side_effect = delay_seed
+    caller = asyncio.create_task(f.agent.run(f.request, f.body))
+    async with asyncio.timeout(1):
+        await entered.wait()
+        shutdown = asyncio.create_task(f.agent.shutdown())
+        await asyncio.sleep(0)
+        release.set()
+        await shutdown
+        result = await caller
+    assert result.termination.reason == "cancelled"
+    assert not f.harnesses
+    assert all(e.closed for e in f.envs)
+    assert [c.kwargs["url_path"] for c in f.agent.server_client.post.await_args_list] == ["/seed_session", "/verify"]
+    session = next(iter(f.server._sessions.values()))
+    assert session.expiry_task.cancelled()
+    f.grade.assert_not_awaited()

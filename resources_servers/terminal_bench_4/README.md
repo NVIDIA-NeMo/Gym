@@ -14,6 +14,15 @@ The task must match the configured manifest. The agent supplies a stable
 cookie response. Verification retries share one finalizer and replay its result;
 conflicting requests fail. Run one resources worker per artifact directory.
 
+A seeded session has a resource-owned 10-hour deadline covering agent setup and
+execution. Configure it with `seeded_session_timeout_sec` or the benchmark override
+`tb4_seeded_session_timeout_sec`. The clock starts when the sandbox is ready;
+retries do not extend it. If `/verify` has not claimed the session by the deadline,
+resources quiesces the agent, destroys the owned resources, and releases its
+concurrency slot. Late seed/verify requests receive HTTP 410, including after
+restart. Expiry does not grade an abandoned rollout. Once `/verify` starts, its
+normal verifier timeout and cleanup lifecycle take over.
+
 The resources server retains the Compose creator, TTL renewal, and shared-volume
 ownership throughout the episode. The agent closes its attached transport after
 joining the mini-SWE worker, then submits its response, termination, execution

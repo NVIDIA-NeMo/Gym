@@ -16,6 +16,11 @@ then sends the response and termination to `/verify`. Cookies from seeding are
 forwarded to model and verification calls. Retried runs share one agent worker.
 The resource server retains provisioning, sandbox renewal, grading, and cleanup.
 
+Agent shutdown uses one `shutdown_timeout_sec` budget for finishing an in-flight
+seed request, joining the harness, and requesting verification or cleanup. If the
+seed response remains unavailable, it cancels the local request and returns;
+the resources server's seeded-session deadline cleans up the abandoned sandbox.
+
 Agent configuration owns `model_server`, `harness`, `agent_max_timeout_sec`, and
 `artifacts_dir`. Harness setup (including reconnect and working-directory discovery)
 has a separate 360-second budget. Execution uses the smaller of the official task

@@ -86,6 +86,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         self._runs = {}
         self._finalizers = set()
         self._closing = False
+        self._shutdown_deadline: float | None = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -104,19 +105,27 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     async def shutdown(self) -> None:
         self._closing = True
+        if self._shutdown_deadline is None:
+            self._shutdown_deadline = monotonic() + self.config.shutdown_timeout_sec
         workers = [worker for _, worker in self._runs.values() if not worker.done()]
         for worker in workers:
-            worker.cancel()
+            if not worker.cancelling():
+                worker.cancel()
         if workers:
-            # The harness joins its worker before /verify can collect artifacts.
-            await asyncio.wait(workers, timeout=self.config.shutdown_timeout_sec)
-        if self._finalizers:
-            _, pending = await asyncio.wait(self._finalizers, timeout=self.config.shutdown_timeout_sec)
+            # One budget covers seed completion, worker joining, and verification.
+            await asyncio.wait(workers, timeout=max(0, self._shutdown_deadline - monotonic()))
+        finalizers = set(self._finalizers)
+        if finalizers:
+            _, pending = await asyncio.wait(finalizers, timeout=max(0, self._shutdown_deadline - monotonic()))
             for task in pending:
                 task.cancel()
-            await asyncio.gather(*self._finalizers, return_exceptions=True)
-        if workers:
-            await asyncio.gather(*workers, return_exceptions=True)
+        # Do not gather unfinished work without a timeout. In particular a lost
+        # seed response must not keep shutdown alive; resources owns its expiry.
+
+    @staticmethod
+    def _observe_background_task(task: asyncio.Task) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            LOGGER.error("mini-SWE background operation failed", exc_info=(type(error), error, error.__traceback__))
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise NotImplementedError("This agent requires /run")
@@ -133,6 +142,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         key = (payload["client_session_id"], payload["rollout_id"])
         if key not in self._runs:
             worker = asyncio.create_task(self._run(payload, dict(request.cookies), bool(rollout_id)))
+            worker.add_done_callback(self._observe_background_task)
             self._runs[key] = (payload, worker)
         saved, worker = self._runs[key]
         if saved != payload:
@@ -150,12 +160,20 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
         )
+        seed_task.add_done_callback(self._observe_background_task)
         cancelled = False
         try:
             seed_response = await asyncio.shield(seed_task)
         except asyncio.CancelledError:
             cancelled = True
-            seed_response = await seed_task
+            deadline = self._shutdown_deadline
+            if deadline is None:
+                deadline = monotonic() + self.config.shutdown_timeout_sec
+            done, _ = await asyncio.wait({seed_task}, timeout=max(0, deadline - monotonic()))
+            if not done:
+                seed_task.cancel()
+                raise
+            seed_response = seed_task.result()
         await raise_for_status(seed_response)
         cookies = cookies | seed_response.cookies
         seed = SeedSessionResponse.model_validate(await get_response_json(seed_response))
@@ -263,6 +281,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 finalizer = asyncio.create_task(self._verify(verify_body, cookies))
                 self._finalizers.add(finalizer)
                 finalizer.add_done_callback(self._finalizers.discard)
+                finalizer.add_done_callback(self._observe_background_task)
             return await asyncio.shield(finalizer)
 
     async def _verify(self, body: SandboxedVerifyRequest, cookies: dict) -> MiniSWEVerifyResponse:

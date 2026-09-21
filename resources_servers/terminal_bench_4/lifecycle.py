@@ -36,6 +36,8 @@ class Session:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     execution: asyncio.Task | None = None
     finalization: asyncio.Task | None = None
+    expiry_task: asyncio.Task | None = None
+    agent_deadline: float | None = None
     task: Any = None
     environment: Any = None
     verifier_environment: Any = None
@@ -61,6 +63,8 @@ def exception(session, error, error_type=None):
 
 
 async def cleanup(session):
+    if session.expiry_task is not None:
+        session.expiry_task.cancel()
     session.subphase = "cleanup"
     session.persist()
     for env in (session.environment, session.verifier_environment):
@@ -228,13 +232,19 @@ async def finalize_session(session, *, grade):
 async def shutdown(sessions: list[Session], timeout: float) -> None:
     preparations = []
     finalizers = []
+    expiries = []
     for session in sessions:
+        if session.expiry_task is not None:
+            session.expiry_task.cancel()
+            expiries.append(session.expiry_task)
         if session.execution and not session.execution.done():
             await session.started.wait()
             session.execution.cancel()
             preparations.append(session.execution)
         if session.finalization and not session.finalization.done():
             finalizers.append(session.finalization)
+    if expiries:
+        await asyncio.gather(*expiries, return_exceptions=True)
     if preparations:
         await asyncio.gather(*preparations, return_exceptions=True)
     if finalizers:
