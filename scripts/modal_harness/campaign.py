@@ -33,6 +33,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Optional
 
@@ -264,6 +265,13 @@ def run_campaign(
             check=False,
         )
         _run("sleep 45", check=False)
+        pub_state: dict[str, Any] = {"stop": False, "high_water": high_water}
+        publisher = threading.Thread(
+            target=_progress_publisher,
+            args=(work_path, output_path, namespace, slug, pub_state),
+            daemon=True,
+        )
+        publisher.start()
         code = _run(
             f".venv/bin/gym eval run --no-serve --resume {config_flags} "
             f"--agent {shlex.quote(agent)} --input {shlex.quote(input_path)} "
@@ -271,6 +279,8 @@ def run_campaign(
             cwd=WORKSPACE,
             check=False,
         )
+        pub_state["stop"] = True
+        high_water = max(high_water, pub_state["high_water"])
         rows = _count_rows(work_path)
         if rows >= high_water:
             # Only now is it safe to publish: the attempt did not lose ground.
@@ -323,6 +333,50 @@ def run_campaign(
         "missing": max(0, expected_rows - landed),
         "output": output_path,
     }
+
+
+def _publish(work_path: str, output_path: str, high_water: int) -> int:
+    """Copy work -> volume if it has not lost ground. Returns the published row count.
+
+    Copies only through the last newline. A file being appended to can end mid-line, and
+    publishing that would put a truncated JSON object on the volume where every later
+    reader -- the dashboard, the next resume, the report -- would hit it.
+    """
+    if not os.path.exists(work_path):
+        return high_water
+    with open(work_path, "rb") as handle:
+        data = handle.read()
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return high_water
+    data = data[: cut + 1]
+    rows = data.count(b"\n")
+    if rows < high_water:
+        return high_water
+    tmp = output_path + ".partial"
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, output_path)
+    RESULTS_VOLUME.commit()
+    return rows
+
+
+def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: str, state: dict[str, Any]) -> None:
+    """Publish progress while an attempt is still running.
+
+    Without this the volume only updates when an attempt ends, so a dashboard watching a
+    multi-hour attempt shows a frozen number -- which is indistinguishable from a stall,
+    and a stall is the thing it exists to reveal.
+    """
+    while not state["stop"]:
+        time.sleep(45)
+        try:
+            published = _publish(work_path, output_path, state["high_water"])
+            if published > state["high_water"]:
+                state["high_water"] = published
+                write_status(namespace, slug, landed=published, state="running")
+        except OSError:
+            pass
 
 
 def _status_path(namespace: str, slug: str) -> str:
