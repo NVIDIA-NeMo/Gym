@@ -365,6 +365,24 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
 
 
 @pytest.mark.asyncio
+async def test_run_delegates_agent_execution_to_responses() -> None:
+    agent, _ = make_agent()
+    incoming = request()
+    run_body = body()
+    responses = AsyncMock(wraps=agent.responses)
+    object.__setattr__(agent, "responses", responses)
+
+    await agent.run(incoming, Response(), run_body)
+
+    responses.assert_awaited_once()
+    responses_request, responses_response, responses_body = responses.await_args.args
+    assert responses_request is incoming
+    assert isinstance(responses_response, Response)
+    assert responses_body == run_body.responses_create_params
+    agent.runner.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_direct_responses_propagates_unrelated_value_error() -> None:
     agent, _ = make_agent()
     agent.runner.run = AsyncMock(side_effect=ValueError("agent implementation failed"))
@@ -375,6 +393,21 @@ async def test_direct_responses_propagates_unrelated_value_error() -> None:
             Response(),
             body().responses_create_params,
         )
+
+
+@pytest.mark.asyncio
+async def test_direct_responses_enforces_episode_timeout() -> None:
+    agent, _ = make_agent()
+    agent.config.run_timeout_secs = 0.001
+
+    async def blocked(run_request: object) -> NOOARunResult:
+        await asyncio.sleep(1)
+        return runner_result(run_request)
+
+    agent.runner.run = AsyncMock(side_effect=blocked)
+
+    with pytest.raises(TimeoutError):
+        await agent.responses(request(), Response(), body().responses_create_params)
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -48,6 +50,19 @@ from responses_api_agents.nooa_agent.runner import (
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
 NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
+
+
+@dataclass(slots=True)
+class _RunContext:
+    model_url_path: str
+    model_cookies: dict[str, str]
+    resource_cookies: dict[str, str]
+    task_id: str
+    rollout_id: str
+    result: NOOARunResult | None = None
+
+
+_RUN_CONTEXT: ContextVar[_RunContext | None] = ContextVar("nooa_agent_run_context", default=None)
 
 
 class _EpisodeTimeoutExceeded(TimeoutError):
@@ -194,20 +209,39 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        run_body = NOOAAgentRunRequest(responses_create_params=body)
-        cookies = dict(request.cookies)
-        async with asyncio.timeout(self.config.run_timeout_secs):
+        run_context = _RUN_CONTEXT.get()
+        is_run_request = run_context is not None
+        if run_context is None:
+            run_body = NOOAAgentRunRequest(responses_create_params=body)
+            cookies = dict(request.cookies)
+            run_context = _RunContext(
+                model_url_path=self.url_path_for_request("/v1/responses", request),
+                model_cookies=dict(cookies),
+                resource_cookies=dict(cookies),
+                **_identity(run_body, request.path_params.get("rollout_id")),
+            )
+
+        # /run owns the episode timeout so it can distinguish budget expiry from
+        # downstream timeouts. Direct /v1/responses requests enforce it here.
+        timeout = None if is_run_request else self.config.run_timeout_secs
+        async with asyncio.timeout(timeout):
             run_result = await self.runner.run(
                 NOOARunRequest(
-                    responses_create_params=run_body.responses_create_params,
-                    model_url_path=self.url_path_for_request("/v1/responses", request),
-                    model_cookies=dict(cookies),
-                    resource_cookies=dict(cookies),
-                    **_identity(run_body, request.path_params.get("rollout_id")),
+                    responses_create_params=body,
+                    model_url_path=run_context.model_url_path,
+                    model_cookies=run_context.model_cookies,
+                    resource_cookies=run_context.resource_cookies,
+                    task_id=run_context.task_id,
+                    rollout_id=run_context.rollout_id,
                 )
             )
-        for name, value in _merge_downstream_cookies(run_result.model_cookies, run_result.resource_cookies).items():
-            response.set_cookie(name, value)
+        if is_run_request:
+            run_context.result = run_result
+        else:
+            for name, value in _merge_downstream_cookies(
+                run_result.model_cookies, run_result.resource_cookies
+            ).items():
+                response.set_cookie(name, value)
         return run_result.episode.response
 
     async def run(
@@ -260,21 +294,26 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed)
         _merge_cookies(resource_cookies, seed)
 
+        run_context = _RunContext(
+            model_url_path=self.url_path_for_run("/v1/responses", body),
+            model_cookies=dict(request.cookies),
+            resource_cookies=resource_cookies,
+            **_identity(body),
+        )
+        token = _RUN_CONTEXT.set(run_context)
         try:
-            async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
-                run_result = await self.runner.run(
-                    NOOARunRequest(
-                        responses_create_params=body.responses_create_params,
-                        model_url_path=self.url_path_for_run("/v1/responses", body),
-                        model_cookies=dict(request.cookies),
-                        resource_cookies=resource_cookies,
-                        **_identity(body),
-                    )
-                )
-        except TimeoutError as error:
-            if not episode_timeout.expired():
-                raise
-            raise _EpisodeTimeoutExceeded(getattr(error.__cause__, "nooa_result", None)) from error
+            try:
+                async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
+                    await self.responses(request, Response(), body.responses_create_params)
+                    if run_context.result is None:
+                        raise RuntimeError("NOOA responses execution completed without a run result")
+                    run_result = run_context.result
+            except TimeoutError as error:
+                if not episode_timeout.expired():
+                    raise
+                raise _EpisodeTimeoutExceeded(getattr(error.__cause__, "nooa_result", None)) from error
+        finally:
+            _RUN_CONTEXT.reset(token)
 
         try:
             projected, observations = self._finalize_run_result(run_result)
