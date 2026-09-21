@@ -442,6 +442,20 @@ class _Exec:
         return ("" if drop_out else out), code
 
 
+def _unroot(text: str, root: str) -> str:
+    """Render absolute workspace paths the way the agent typed them.
+
+    Every argument is resolved against the workspace root before it is opened, and an
+    OSError carries that RESOLVED path in ``filename``. Formatting the exception would
+    hand the agent the sandbox root, which leaks the host layout (and, when the root is
+    named after the task, the task itself). The subprocess implementation this replaced
+    ran with cwd=workspace, so its errors quoted only the relative argument. Match that.
+    """
+    if not text or not root:
+        return text
+    return text.replace(root.rstrip("/") + "/", "").replace(root.rstrip("/"), ".")
+
+
 def run(keystrokes: str, workspace: str, timeout: float = DEFAULT_TIMEOUT) -> Result:
     """Execute ``keystrokes`` read-only inside ``workspace``.
 
@@ -452,12 +466,14 @@ def run(keystrokes: str, workspace: str, timeout: float = DEFAULT_TIMEOUT) -> Re
     try:
         ws = Workspace(workspace)
     except (OSError, PathEscape) as exc:
-        return Result("", f"[workspace error: {exc}]", -2)
+        return Result("", _unroot(f"[workspace error: {exc}]", workspace), -2)
+
+    root = str(ws.root)
 
     try:
         script = parse(keystrokes or "")
     except ParseError as exc:
-        return Result("", f"[blocked: {exc}]", -3)
+        return Result("", _unroot(f"[blocked: {exc}]", root), -3)
 
     ex = _Exec(ws, timeout)
     try:
@@ -465,8 +481,8 @@ def run(keystrokes: str, workspace: str, timeout: float = DEFAULT_TIMEOUT) -> Re
     except TimeoutError:
         return Result("", f"[command timed out after {timeout:.0f}s]", -1)
     except PocketShellError as exc:
-        return Result("", f"[error: {exc}]", 2)
+        return Result("", _unroot(f"[error: {exc}]", root), 2)
     except RecursionError:
         return Result("", "[error: expression too deeply nested]", 2)
 
-    return Result(out, "\n".join(x for x in ex.err if x), code)
+    return Result(_unroot(out, root), _unroot("\n".join(x for x in ex.err if x), root), code)

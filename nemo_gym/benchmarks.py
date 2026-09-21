@@ -37,6 +37,7 @@ from nemo_gym.global_config import (
 
 BENCHMARKS_SUBDIR = "benchmarks"
 BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
+MANIFEST_FILENAME = "manifest.yaml"
 
 
 class BenchmarkConfig(BaseModel):
@@ -141,6 +142,8 @@ def _is_benchmark_config(config_path: Path) -> bool:
     name, agent, or repeat count to catalog it under, so it is not a valid `--benchmark` argument. An
     unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
     """
+    if config_path.name == MANIFEST_FILENAME:
+        return False
 
     def count(node: object) -> int:
         if isinstance(node, dict):

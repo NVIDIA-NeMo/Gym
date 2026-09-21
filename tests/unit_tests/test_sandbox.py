@@ -352,6 +352,39 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+
+    async def failing_setup(started: AsyncSandbox) -> None:
+        assert started is sandbox
+        await started.exec("apt-get update")
+        raise RuntimeError("setup command failed")
+
+    with pytest.raises(RuntimeError, match="setup command failed"):
+        await sandbox.start_with_setup(SandboxSpec(image="image:tag"), failing_setup)
+
+    handle = provider.created_handles[0]
+    assert provider.exec_calls[0]["command"] == "apt-get update"
+    assert provider.closed == [handle]
+    assert await sandbox.status() == SandboxStatus.STOPPED
+
+
+async def test_start_with_setup_returns_the_started_sandbox_on_success() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+
+    async def setup(started: AsyncSandbox) -> None:
+        await started.exec("apt-get update")
+
+    result = await sandbox.start_with_setup(SandboxSpec(image="image:tag"), setup)
+
+    assert result is sandbox
+    assert provider.exec_calls[0]["command"] == "apt-get update"
+    assert provider.closed == []
+    assert await sandbox.status() == SandboxStatus.RUNNING
+
+
 def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
     asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
 
