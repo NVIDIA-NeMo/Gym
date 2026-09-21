@@ -10,9 +10,20 @@ benchmark code and has no dataset, provisioning, verification, or sandbox lifecy
 The synchronous mini-SWE loop uses a bridge to async model and sandbox operations.
 Cancellation closes pending I/O and joins the worker before returning its outcome,
 response, and trajectory metadata. The caller owns subsequent collection and
-cleanup. `app.py` is a thin Gym collector adapter: it forwards `/run` to the
-configured resources runner, preserving session identity and model-call capture
-routing, and returns its verification response.
+cleanup. `app.py` owns the Gym `/run` loop: it calls the TB4 resources server's
+`/seed_session`, attaches to the returned sandbox, sets up and executes mini-SWE,
+then sends the response and termination to `/verify`. Cookies from seeding are
+forwarded to model and verification calls. Retried runs share one agent worker.
+The resource server retains provisioning, sandbox renewal, grading, and cleanup.
+
+Agent configuration owns `model_server`, `harness`, `agent_max_timeout_sec`, and
+`artifacts_dir`. Harness setup (including reconnect and working-directory discovery)
+has a separate 360-second budget. Execution uses the smaller of the official task
+budget and the configured cap. The benchmark retains the `tb4_max_steps`,
+`tb4_step_timeout_sec`, and `tb4_agent_max_timeout_sec` overrides; custom nested
+overrides must now target `terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent`.
+Agent trajectories default to `results/terminal_bench_4/agent/<session_id>/` and can
+be relocated with `tb4_agent_artifacts_dir` or a run's `artifact_directory`.
 
 The adapter loads system and instance prompts from the pinned package's `mini.yaml`
 and exposes mini-SWE's native `bash` tool through Gym's Responses API. The version

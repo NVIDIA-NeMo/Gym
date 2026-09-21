@@ -63,5 +63,4 @@ terminal_bench_4:
         sandbox_ready_timeout_s: 1200
         default_exec_timeout_s: 64800
       artifacts_dir: ${oc.select:tb4_jobs_dir,results/terminal_bench_4/resources}
-      agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
       max_concurrent_sessions: ${oc.select:tb4_concurrency,8}

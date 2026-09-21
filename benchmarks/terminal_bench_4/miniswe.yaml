@@ -15,12 +15,11 @@ terminal_bench_4_miniswe:
         jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
         prepare_script: benchmarks/terminal_bench_4/prepare.py
         num_repeats: 1
-terminal_bench_4:
-  resources_servers:
-    terminal_bench_4:
       model_server:
         type: responses_api_models
         name: policy_model
       harness:
         step_limit: ${oc.select:tb4_max_steps,500}
         step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
+      agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
+      artifacts_dir: ${oc.select:tb4_agent_artifacts_dir,results/terminal_bench_4/agent}

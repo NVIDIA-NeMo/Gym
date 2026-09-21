@@ -9,7 +9,6 @@ from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
-from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -94,8 +93,7 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     root = Path(preparation.__file__).resolve().parents[2]
     config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
-    harness = config.terminal_bench_4.resources_servers.terminal_bench_4.harness
+    harness = agent.harness
     assert harness.step_limit == steps
     assert harness.step_timeout_sec == timeout
     assert agent.datasets[0].num_repeats == 1
-    assert MiniSWEConfig.model_fields["step_timeout_sec"].default == 600

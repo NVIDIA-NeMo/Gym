@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run real single-runner smoke checks in CPU, Compose, GPU order.
+"""Run real agent/resources smoke checks in CPU, Compose, GPU order.
 
 Uses loopback HTTP between Gym services. mini-SWE routes model calls through
 the local Gym model server.
@@ -107,6 +107,7 @@ async def main(args):
     config.tb4_split_sandbox_endpoints = True
     config.tb4_agent_max_timeout_sec = args.agent_timeout
     config.tb4_jobs_dir = str(args.output / "resources")
+    config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
     profile = OmegaConf.load(root / f"{args.harness}.yaml")

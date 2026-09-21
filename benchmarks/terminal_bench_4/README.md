@@ -51,8 +51,9 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for one deployment. For the
 established split deployment, set `OPENSANDBOX_DOMAIN_CPU`,
 `OPENSANDBOX_API_KEY_CPU`, `OPENSANDBOX_DOMAIN_GPU`, and
 `OPENSANDBOX_API_KEY_GPU`, then use `++tb4_split_sandbox_endpoints=true`.
-Credentials resolve only in the resources runner. The harness receives the live
-sandbox object in the same process. Keep resolved configs private.
+The resources server resolves credentials and returns the sandbox descriptor and
+connection configuration to the agent server, which reconnects for execution.
+Keep resolved configs and internal seed responses private.
 
 Agent and verifier select the endpoint independently from their official GPU
 requirements. The selected GPU deployment must supply H100s; its unsupported
