@@ -1,0 +1,2871 @@
+{
+  "summary": {
+    "rows": 100,
+    "statement_status": {
+      "has_sorry": 100
+    },
+    "statement_failures": [],
+    "gold_answer_rows": 45,
+    "gold_answer_status": {
+      "has_sorry": 45
+    },
+    "gold_answer_failures": [],
+    "controls": {
+      "empty": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "empty_output": 100
+        }
+      },
+      "echo_with_sorry": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "proof_failed": 45,
+          "has_sorry": 55
+        }
+      },
+      "axiom": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "forbidden_keyword": 100
+        }
+      },
+      "weakened": {
+        "denominator": 99,
+        "nonzero_reward": 0,
+        "status": {
+          "statement_mismatch": 99
+        }
+      }
+    }
+  },
+  "rows": {
+    "hackmath_4": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.030205
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.043521
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_1": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.038377
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.034942
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_3": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.053639
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.040596
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_2": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.072443
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.046722
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_7": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.03214
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.040312
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_8": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.058869
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.058199
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_5": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.051988
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.052285
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_16": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.080853
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_9": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.05233
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.046895
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_10": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.037688
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.050241
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_10": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.055786
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.035452
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.050336
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_36": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.044795
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.042774
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.068311
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.049562
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_5": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.162945
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.131819
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_4": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.04759
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_27": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.049428
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_18": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.046933
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.076492
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_59": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.061002
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_35": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.051128
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_51": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.036773
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_26": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.078156
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_21": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.026779
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.037495
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.03981
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.043152
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.058993
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_7": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.057181
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.044296
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.064377
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_6": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.600628
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.711614
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_30": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.030895
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_15": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.027994
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.221131
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.047958
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.045193
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.098301
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_13": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.06412
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_27": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.064513
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.115479
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_31": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.072643
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_34": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.118555
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_5": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.028706
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_60": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.096981
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_59": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.045598
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_20": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.027027
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_62": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.048249
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_34": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.020305
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_37": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.160716
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.17051
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.18679
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.666818
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_45": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.028125
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_10": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.214645
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.189436
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_33": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.016876
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "apmo_1991_p2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.096852
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "apmo_2023_p1": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.114443
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "balticway_2015_p7": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.042816
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_26": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.178249
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.209866
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2015_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.050487
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_8": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.825082
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.802017
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2011_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.112596
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2019_c2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.043917
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "izho_2019_p1": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.054522
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2021_c5": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.136056
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "egmo_2022_p5": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.169727
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.16111
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "izho_2014_p3": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.135508
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.138532
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2009_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.044912
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "usamo_2000_p4": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.038515
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.053903
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2024_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.050756
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2020_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.093683
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2001_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.043124
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2000_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.069666
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.093445
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2001_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.141219
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2003_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.080507
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2002_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.172452
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2005_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.081323
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "bxmo_2017_p2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.467158
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.431841
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2007_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.017693
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2008_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.219326
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.216765
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2006_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.496739
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.458094
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2010_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.482192
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.426509
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        }
+      }
+    },
+    "imo_2011_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.472067
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2012_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.178803
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2022_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 1.015572
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 1.028968
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2013_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.136523
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.13238
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2011_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.297278
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.377901
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2014_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.136757
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.163743
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2013_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.377883
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2014_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.141094
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2015_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.068602
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.090209
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2015_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.205555
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2017_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.147114
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2016_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.255361
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.231674
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2016_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.358679
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2017_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.239414
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.21889
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2018_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.187787
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.18088
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2019_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.132704
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.154732
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2020_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.080681
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.105258
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2018_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.382405
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.39015
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2021_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.251829
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2023_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.186066
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.230799
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2022_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.251831
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.305409
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2024_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.238554
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.254055
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "proof_failed"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2019_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 7.796893
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    }
+  },
+  "input": "benchmarks/combibench/data/combibench_test.jsonl",
+  "answer_check_ascription": true,
+  "lean_server_url": "http://127.0.0.1:12332"
+}

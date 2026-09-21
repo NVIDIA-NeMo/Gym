@@ -1,0 +1,71 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/combibench/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 55.4,
+        "Min": 48.0,
+        "Max": 71.0,
+        "Standard deviation": 9.76
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "theorem_name": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "formal_statement": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "answers": {
+        "unique_count": 4,
+        "total_count": 4
+    },
+    "natural_language": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "tag": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "dataset_source": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "prompt_config_used": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}

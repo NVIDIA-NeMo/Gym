@@ -1,0 +1,28 @@
+config_paths:
+- resources_servers/combibench/configs/combibench.yaml
+
+# "with solution": the published answers are already substituted into each
+# statement and only the proof is missing (the paper's second setting). Gym
+# allows one benchmark dataset per workload, so this setting is its own
+# benchmark; the verifier, prompt and preparation code are shared with
+# benchmarks/combibench.
+combibench_with_solution_resources_server:
+  _inherit_from: combibench
+  resources_servers:
+    combibench:
+      datasets:
+      - name: combibench_with_solution
+        type: benchmark
+        jsonl_fpath: benchmarks/combibench_with_solution/data/combibench_test_with_solution.jsonl
+        prepare_script: benchmarks/combibench_with_solution/prepare.py
+        prompt_config: benchmarks/combibench/prompt.yaml
+        num_repeats: 16
+        license: MIT
+
+combibench_with_solution_agent:
+  _inherit_from: combibench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: combibench_with_solution_resources_server
+      datasets: []

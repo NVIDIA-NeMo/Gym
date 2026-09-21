@@ -1,0 +1,30 @@
+combibench:
+  resources_servers:
+    combibench:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: CombiBench Lean 4 combinatorics verifier (one-stage Fine-Eval via Kimina Lean Server)
+      value: Evaluate formal combinatorial reasoning with statement-tamper checks and answer verification
+      # Kimina Lean Server built for Lean/Mathlib v4.24.0; see README "Lean server".
+      lean_server_url: ${oc.env:COMBIBENCH_LEAN_SERVER_URL,http://127.0.0.1:8000}
+      lean_server_api_key: ${oc.env:COMBIBENCH_LEAN_SERVER_API_KEY,null}
+      lean_timeout_seconds: 60
+      max_code_characters: 200000
+      normalize_trailing_whitespace: true
+      answer_check_ascription: true
+combibench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: combibench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/combibench/data/example.jsonl
+        license: Apache 2.0
