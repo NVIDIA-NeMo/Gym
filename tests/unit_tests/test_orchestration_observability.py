@@ -162,7 +162,16 @@ def _rendered(config=None):
 
 
 def _attrs(doc):
-    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"]["resource"]["attributes"]}
+    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"]["resource"]["attributes"] if "value" in a}
+
+
+def test_collector_converts_the_slurm_job_id_to_a_string():
+    actions = _rendered()["processors"]["resource"]["attributes"]
+    convert = [a for a in actions if a["action"] == "convert"]
+    assert convert == [{"key": "slurm_job_id", "action": "convert", "converted_type": "string"}]
+    assert actions.index(convert[0]) > max(
+        i for i, a in enumerate(actions) if a["key"] == "slurm_job_id" and "value" in a
+    )
 
 
 def test_collector_scrapes_every_model_service_on_localhost():
@@ -215,7 +224,7 @@ def test_collector_routes_via_service_name_and_token_attribute():
     assert attrs["service.name"] == ("my-registered-service", "upsert")
     assert attrs["service.name.override"] == ("gym-vllm", "insert")
     assert attrs["Authorization"] == ("${env:OBSERVABILITY_TOKEN}", "upsert")
-    exporter = doc["exporters"]["otlphttp/managed"]
+    exporter = doc["exporters"]["otlp_http/managed"]
     assert exporter["endpoint"] == "https://otlp.example.com"
     assert exporter["headers"]["Authorization"] == "Bearer ${env:OBSERVABILITY_TOKEN}"
 
@@ -223,7 +232,7 @@ def test_collector_routes_via_service_name_and_token_attribute():
 def test_collector_token_reference_follows_token_env():
     doc = _rendered(_config(observability={"token_env": "MY_TOKEN"}))
     assert _attrs(doc)["Authorization"][0] == "${env:MY_TOKEN}"
-    assert doc["exporters"]["otlphttp/managed"]["headers"]["Authorization"] == "Bearer ${env:MY_TOKEN}"
+    assert doc["exporters"]["otlp_http/managed"]["headers"]["Authorization"] == "Bearer ${env:MY_TOKEN}"
 
 
 def test_collector_writes_a_local_copy_next_to_the_managed_export():
@@ -231,7 +240,7 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
     assert doc["exporters"]["file/metrics"]["path"] == str(BENCH_DIR / "otel" / "metrics.jsonl")
     for signal in ("metrics", "traces", "logs"):
         exporters = doc["service"]["pipelines"][signal]["exporters"]
-        assert exporters == ["otlphttp/managed", f"file/{signal}"]
+        assert exporters == ["otlp_http/managed", f"file/{signal}"]
 
 
 def test_collector_receives_otlp_for_the_job_processes():
@@ -380,7 +389,7 @@ def test_dry_run_prints_the_collector_config(tmp_path, monkeypatch, capsys):
     SlurmExecutor().run(_executor_config(tmp_path), dry_run=True)
     out = capsys.readouterr().out
     assert "otel/collector.yaml for benchmark: scicode" in out
-    assert "otlphttp/managed" in out
+    assert "otlp_http/managed" in out
     assert "secret-token" not in out
 
 
