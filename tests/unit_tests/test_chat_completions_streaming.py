@@ -21,13 +21,14 @@ response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream. No
 requests keep the historical strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import (
@@ -296,6 +297,131 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestChatDispatchRoute:
+    @pytest.mark.asyncio
+    async def test_keepalives_arrive_before_delayed_backend_answer(self, monkeypatch) -> None:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        _, server = _client(_EchoChatModel)
+        release = asyncio.Event()
+
+        async def delayed(*args):
+            await release.wait()
+            return _completion(content="answer", usage=_USAGE)
+
+        monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", delayed)
+        response = await server.chat_completions_dispatch(
+            MagicMock(), {"stream": True, "messages": [], "stream_options": {"include_usage": True}}
+        )
+        stream = response.body_iterator
+        assert response.headers["Cache-Control"] == "no-cache"
+        assert response.headers["X-Accel-Buffering"] == "no"
+        assert await asyncio.wait_for(anext(stream), 1) == b": keep-alive\n\n"
+        assert await asyncio.wait_for(anext(stream), 1) == b": keep-alive\n\n"
+        release.set()
+        chunks = [chunk async for chunk in stream]
+        text = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
+        assert rebuilt["choices"][0]["message"]["content"] == "answer"
+        assert rebuilt["usage"]["total_tokens"] == 10
+        assert text.endswith("data: [DONE]\n\n")
+
+    @pytest.mark.asyncio
+    async def test_closing_stream_cancels_pending_backend(self, monkeypatch) -> None:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        _, server = _client(_EchoChatModel)
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def delayed(*args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", delayed)
+        response = await server.chat_completions_dispatch(MagicMock(), {"stream": True, "messages": []})
+        await anext(response.body_iterator)
+        await asyncio.wait_for(started.wait(), 1)
+        await response.body_iterator.aclose()
+        assert cancelled.is_set()
+
+    @pytest.mark.parametrize("status", [400, 401, 429, 503])
+    def test_fast_streaming_backend_failure_preserves_http_status(self, monkeypatch, status) -> None:
+        client, _ = _client(_EchoChatModel)
+        monkeypatch.setattr(
+            _EchoChatModel,
+            "_invoke_chat_completions",
+            AsyncMock(side_effect=HTTPException(status, "backend rejected request", headers={"Retry-After": "2"})),
+        )
+        response = client.post("/v1/chat/completions", json={"stream": True, "messages": []})
+        assert response.status_code == status
+        assert response.json()["detail"] == "backend rejected request"
+        assert response.headers["Retry-After"] == "2"
+
+    async def test_delayed_failure_is_terminal_error_with_status(self, monkeypatch) -> None:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        _, server = _client(_EchoChatModel)
+        release = asyncio.Event()
+
+        async def delayed(*args):
+            await release.wait()
+            raise HTTPException(429, "rate limited")
+
+        monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", delayed)
+        response = await server.chat_completions_dispatch(MagicMock(), {"stream": True, "messages": []})
+        assert await anext(response.body_iterator) == b": keep-alive\n\n"
+        release.set()
+        events = [event async for event in response.body_iterator]
+        assert len(events) == 1
+        assert _events(events[0])[-1]["error"] == {
+            "message": "rate limited",
+            "type": "invalid_request_error",
+            "code": 429,
+        }
+        assert "[DONE]" not in events[0]
+
+    @pytest.mark.parametrize("delayed", [False, True])
+    async def test_capture_finalization_failure_is_not_hidden_in_sse(self, monkeypatch, delayed) -> None:
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        _, server = _client(_EchoChatModel)
+        release = asyncio.Event()
+
+        async def completion(*args):
+            if delayed:
+                await release.wait()
+            return _completion(content="answer")
+
+        monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", completion)
+        monkeypatch.setattr(
+            _EchoChatModel,
+            "_stream_served_response",
+            AsyncMock(side_effect=RuntimeError("capture failed")),
+        )
+        with pytest.raises(RuntimeError, match="capture failed"):
+            response = await server.chat_completions_dispatch(MagicMock(), {"stream": True, "messages": []})
+            assert delayed
+            assert await anext(response.body_iterator) == b": keep-alive\n\n"
+            release.set()
+            await anext(response.body_iterator)
+
+    async def test_cancel_before_headers_cancels_backend(self, monkeypatch) -> None:
+        _, server = _client(_EchoChatModel)
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def delayed(*args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", delayed)
+        dispatch = asyncio.create_task(server.chat_completions_dispatch(MagicMock(), {"stream": True, "messages": []}))
+        await started.wait()
+        dispatch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+        assert cancelled.is_set()
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoChatModel)
         resp = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi there"}]})
@@ -345,6 +471,8 @@ class TestChatDispatchRoute:
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers["Cache-Control"] == "no-cache"
+        assert resp.headers["X-Accel-Buffering"] == "no"
         assert resp.text.endswith("data: [DONE]\n\n")
         # the server saw sanitized params (no stream flag reaches the strict model)
         assert server.last_params.stream is None

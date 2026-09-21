@@ -1,0 +1,40 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+pi_benchmark_agent:
+  responses_api_agents:
+    pi_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: benchmark-model
+      pi_version: 0.85.1
+      concurrency: 512
+      timeout: 14400
+      bash_timeout: 120
+      context_window: 262144
+      max_output_tokens: 262144
+      output_token_policy: remaining_context
+      auto_compaction: false
+      execution_failure_reward_zero: true
+      artifacts_dir: ${oc.env:PI_ARTIFACTS_DIR,results/pi}
+      sandbox_provider: sandbox
+      network_access: model_only
+      system_prompt: |
+        Internet access is disabled on this machine.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+      sandbox_config:
+        image: ${oc.env:PI_SANDBOX_IMAGE}
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        workdir: /workspace
+        entrypoint: [sleep, infinity]
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms

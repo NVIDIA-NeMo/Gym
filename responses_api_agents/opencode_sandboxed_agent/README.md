@@ -37,7 +37,7 @@ aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 aws s3 ls /path/to/folder/opencode/
 ```
 
-## Python and search benchmark variants (development)
+## Python and search benchmark variants
 
 `benchmarks/apex_shortlist/opencode.yaml`, `benchmarks/hle/opencode.yaml`, and
 `benchmarks/hle/opencode_search.yaml` compose this agent with the existing graders.
@@ -51,7 +51,7 @@ your assigned HTTPS API endpoint, and `OPENSANDBOX_API_KEY` in the trusted runti
 Search additionally needs `TAVILY_API_KEY` (one key or comma-separated keys).
 Use `OPENCODE_ARTIFACTS_DIR` for durable result paths. Tool calls and returned
 text are captured in the normal OpenCode transcript and Gym observability.
-The image Dockerfile and lock are in `image/`.
+The image Dockerfile and lock are in `offline_science_image/`.
 
 The agent supports `preinstalled_opencode`, `output_token_policy`,
 `tool_servers`, `network_access`, `artifacts_dir`, and the
@@ -61,16 +61,15 @@ entrypoint are configurable. `remaining_context` removes the output request cap;
 it cannot recover history that already exceeds the model's context window.
 
 OpenCode configuration overlays are deep-merged so model settings do not discard
-Gym's model route. Request temperature/top-p reach the build agent. Use only
-`permission`; combining it with legacy `tools` raises a configuration error.
+Gym's model route. Request temperature/top-p reach the build agent. Prefer `permission`; native legacy `tools` precedence can override permission denies.
 Execution/proxy/rollout limits should agree at four hours for this recipe. Sandbox
 creation and individual Bash command timeouts are separate operational limits.
 
 Search uses the resource server's native authenticated MCP endpoint and a
 per-rollout token. No custom SSH gateway or Tavily key is installed in the sandbox.
 The Gym model and tool servers must advertise hosts reachable from Kubernetes;
-loopback/wildcard advertised hosts are rejected for restricted-network runs.
-`model_only` and `model_and_search` create new sandboxes with explicit allowlists;
+loopback/wildcard addresses are rewritten to the Gym host, which must be reachable from the sandbox.
+`model_only` and `model_and_tools` create new sandboxes with explicit allowlists;
 externally supplied sandboxes are rejected because their policy cannot be verified.
 
 These variants are not yet certified: run a real model canary through normal Gym
@@ -78,9 +77,9 @@ execution, inspect trajectories/grader artifacts, and verify interruption/resume
 sandbox cleanup before promotion. Unit tests and an image smoke are insufficient.
 
 The benchmark variants set `execution_failure_reward_zero=true`: completed
-execution failures (including errors in the OpenCode export) produce reward zero
+execution failures (including terminal model errors recorded in the transcript) produce reward zero
 and explicit failure/exit fields without calling the judge. A generation receipt
-is written before verification. For request/setup/judge failures, enable Gym's
+is written before verification. Transcript export failures propagate instead of returning an empty result. For request/setup/judge failures, enable Gym's
 `route_failures_to_sidecar` so unrelated rollouts continue; unresolved sidecar
 rows are missing from the main metric and must not be reported as full coverage.
 
@@ -91,3 +90,5 @@ single user message, since OpenCode's CLI receives only the user turn. OpenCode
 keeps its default agent prompt plus the short network/tool availability notice.
 This adapts the current text benchmarks; a general benchmark-to-harness adapter
 is not implemented.
+
+See [offline scientific evaluation](../../fern/versions/latest/pages/evaluation/harness.mdx#offline-scientific-evaluation-with-opencode-or-pi) for both adapters and image build instructions.

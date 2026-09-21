@@ -1,4 +1,9 @@
-# OpenCode offline science image
+# Offline scientific base image
+
+This image supplies OpenCode and offline scientific tools. Scientific Python and
+Sage both use Python 3.13.14, with separate dependency locks. The dedicated agent
+runs Gym on the host; no Gym installation or source upload is needed inside the
+sandbox. Pi adds its CLI in a [small runtime layer](../../../fern/versions/latest/pages/evaluation/harness.mdx#reproducible-offline-images).
 
 Build from this directory:
 
@@ -8,7 +13,7 @@ docker build --platform linux/amd64 -t <registry/repository>:<tag> .
 
 The image contains three independent toolchains:
 
-- **Python 3.12** with the scientific packages in `requirements.in`. Exact
+- **Python 3.13.14** with the scientific packages in `requirements.in`. Exact
   versions and artifact hashes are in `requirements.lock`; PyTorch uses CPU wheels.
 - **SageMath 10.8**, including GAP, PARI and Singular, in `/opt/sage`. Its own
   Python/native dependencies are locked in `sage-linux-64.lock`. The `sage` wrapper
@@ -30,8 +35,7 @@ are not generally included. No credentials, benchmark datasets or reference
 answers are included. OpenSandbox injects execd; network policy is configured by
 the sandbox caller, not by the image.
 
-The direct package list is intentionally owned here rather than inheriting the
-entire Skills sandbox lock. It retains scientific computation, CPU ML, image/PDF
+The package list covers scientific computation, CPU ML, image/PDF
 and spreadsheet support; unrelated web-service clients and dataset downloaders
 are not part of this image. TensorFlow is not installed; CPU JAX and PyTorch are.
 Python-MIP is also excluded: its bundled CBC library conflicts with OR-Tools in
@@ -50,7 +54,7 @@ Docker and, for the Sage lock, `jq`:
 docker build --platform linux/amd64 --target base -t opencode-science-builder .
 docker run --rm --user "$(id -u):$(id -g)" -e UV_CACHE_DIR=/tmp/uv \
   -v "$PWD:/work" -w /work \
-  opencode-science-builder uv --no-config pip compile requirements.in --python-version 3.12 \
+  opencode-science-builder uv --no-config pip compile requirements.in --python-version 3.13.14 \
   --python-platform x86_64-unknown-linux-gnu --torch-backend cpu \
   --generate-hashes --no-header --output-file requirements.lock --upgrade
 

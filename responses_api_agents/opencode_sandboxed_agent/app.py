@@ -16,13 +16,13 @@
 import json
 import sqlite3
 import sys
+from asyncio import Semaphore
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Request
@@ -30,7 +30,6 @@ from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_METADATA_KEY,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -65,17 +64,19 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url, seed_mcp_servers
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
-    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -93,7 +94,9 @@ def _milliseconds(value: Any) -> Optional[float]:
     return float(value) / 1000
 
 
-def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
+def parse_opencode_observations(
+    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
         return AgentObservationBundle(
@@ -380,6 +383,9 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
+    if trajectory is not None:
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
+
     return AgentObservationBundle(
         source="opencode",
         records=[*invocations, *tools, *compactions],
@@ -397,10 +403,11 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    concurrency: int = Field(default=64, gt=0)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
-    network_access: Literal["inherit", "model_only", "model_and_search"] = "inherit"
+    network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
 
@@ -471,6 +478,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
+        self._sem = Semaphore(self.config.concurrency)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -514,17 +522,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
         if self.config.network_access != "inherit":
-            targets = {urlsplit(get_server_url(self.config.model_server.name)).hostname}
-            if self.config.network_access == "model_and_search":
+            urls = [sandbox_server_url(self.config.model_server.name)]
+            if self.config.network_access == "model_and_tools":
                 if not self.config.tool_servers:
-                    raise ValueError("model_and_search requires tool_servers")
-                targets.update(urlsplit(get_server_url(server.name)).hostname for server in self.config.tool_servers)
-            if None in targets or any(target in {"localhost", "127.0.0.1", "0.0.0.0"} for target in targets):
-                raise ValueError("Sandbox endpoints must advertise a sandbox-reachable host")
-            sandbox_spec.provider_options["network_policy"] = {
-                "defaultAction": "deny",
-                "egress": [{"action": "allow", "target": target} for target in sorted(targets)],
-            }
+                    raise ValueError("model_and_tools requires tool_servers")
+                urls.extend(sandbox_server_url(server.name) for server in self.config.tool_servers)
+            sandbox_spec.provider_options["network_policy"] = restricted_network_policy(
+                resolved_sandbox_provider.name, urls
+            )
         if self.config.output_token_policy == "remaining_context":
             sandbox_spec.files["/tmp/nemo-gym-remaining-context.js"] = (
                 Path(__file__).with_name("remaining-context.js").read_text()
@@ -568,7 +573,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
         base_url = (
             self.base_url_for_run(
-                base_url=get_server_url(self.config.model_server.name),
+                base_url=sandbox_server_url(self.config.model_server.name),
                 body=await request.json(),
             )
             + "/v1"
@@ -588,6 +593,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     },
                     "models": {
                         "dummy_model": {
+                            "temperature": True,
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
@@ -608,8 +614,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     base[key] = deepcopy(value)
 
         merge(config, self.config.opencode_config)
-        if config.get("tools") and config.get("permission"):
-            raise ValueError("Use permission only; legacy tools can override permission denies")
         if self.config.output_token_policy == "remaining_context":
             config.setdefault("plugin", []).append("file:///tmp/nemo-gym-remaining-context.js")
         rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
@@ -618,23 +622,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return config
 
     async def _seed_tool_servers(self, request: Request, body: OpenCodeSandboxedAgentRunRequest) -> Dict[str, Any]:
-        entries = {}
-        for server in self.config.tool_servers:
-            seeded = await self.server_client.post(
-                server_name=server.name, url_path="/seed_session", json=body.model_dump(), cookies=request.cookies
-            )
-            await raise_for_status(seeded)
-            metadata = (await seeded.json()).get(NEMO_GYM_MCP_METADATA_KEY)
-            if not isinstance(metadata, dict) or not metadata.get("headers"):
-                raise ValueError(f"Tool server {server.name} must expose authenticated MCP tools")
-            entries[server.name] = {
-                "type": "remote",
-                "url": get_server_url(server.name).rstrip("/") + "/" + metadata.get("url_path", "/mcp").lstrip("/"),
-                "headers": metadata["headers"],
-                "enabled": True,
-                "timeout": int(self.config.sandbox_timeout * 1000),
-            }
-        return entries
+        entries = await seed_mcp_servers(
+            self.server_client, self.config.tool_servers, body, request.cookies, timeout_s=self.config.sandbox_timeout
+        )
+        return {name: {"type": "remote", **entry} for name, entry in entries.items()}
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -719,6 +710,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self.config.tool_servers and not isinstance(getattr(request.state, "_ng_opencode_mcp", None), dict):
+            raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
@@ -822,6 +815,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             session_list_result = await sandbox.exec(
                 command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
                 env=session_env,
+                timeout_s=self.config.sandbox_timeout,
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
@@ -832,10 +826,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
+                timeout_s=self.config.sandbox_timeout,
             )
         except Exception:
-            export_result = None
-            print("Failed to export results", format_exc(), file=sys.stderr)
+            raise RuntimeError("Failed to export OpenCode results") from None
+        if export_result.return_code != 0 or export_result.error_type:
+            raise RuntimeError("OpenCode export command failed")
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
@@ -846,17 +842,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir = results_root / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if export_result is not None and export_result.return_code == 0:
-            if self.config.debug:
-                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(export_remote_fpath, results_local_fpath)
-            except:
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        results_local_fpath.unlink(missing_ok=True)
+        await sandbox.download(export_remote_fpath, results_local_fpath)
 
         observations = None
+        trajectory = (
+            TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
+        )
         if collect_observations:
             assert remote_data_home is not None
             observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
@@ -874,13 +866,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     command=(
                         f"python3 -c {quote(snapshot_script)} "
                         f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
-                    )
+                    ),
+                    timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError("OpenCode database snapshot failed")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
-                observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
+                observations = parse_opencode_observations(
+                    observations_local_fpath, observation_invocation_id, trajectory
+                )
             except Exception:
+                trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                 print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
                 observations = AgentObservationBundle(
                     source="opencode",
@@ -899,6 +895,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if results_local_fpath.exists():
             opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
 
+        if not opencode_export:
+            raise RuntimeError("OpenCode export did not contain a transcript")
         output = []
         usage = None
         opencode_export_found = False
@@ -915,14 +913,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if len(std_out_split) > 1:
             opencode_finished = "OpenCode run finished" in std_out_split[1]
 
-        exported_errors = [
-            message.get("info", {}).get("error")
+        assistant_infos = [
+            message.get("info", {})
             for message in opencode_export.get("messages", [])
-            if message.get("info", {}).get("error")
+            if message.get("info", {}).get("role") == "assistant"
         ]
-        if exported_errors and not run_error_type:
-            error = exported_errors[-1]
-            run_error_type = error.get("name", "OpenCodeError") if isinstance(error, dict) else "OpenCodeError"
+        terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
+        if terminal_error and not run_error_type:
+            run_error_type = (
+                terminal_error.get("name", "OpenCodeError") if isinstance(terminal_error, dict) else "OpenCodeError"
+            )
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -962,6 +962,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
+            run_result["_ng_trajectory"] = trajectory
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         response = NeMoGymResponse(
@@ -977,7 +978,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         receipt = {
             "response": response.model_dump(mode="json"),
-            "execution": {key: value for key, value in run_result.items() if key != "_ng_agent_observations"},
+            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
         }
         pending = results_dir / "generation.json.partial"
         pending.write_text(json.dumps(receipt))
@@ -985,6 +986,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return response
 
     async def run(
+        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    ) -> OpenCodeSandboxedAgentVerifyResponse:
+        async with self._sem:
+            return await self._run(request, body)
+
+    async def _run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         cookies = request.cookies
@@ -1020,6 +1027,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
+            trajectory = run_result.pop("_ng_trajectory", None)
             if self.config.execution_failure_reward_zero and run_result.get("opencode_failed", False):
                 response_dict = body.model_dump(mode="json") | {
                     "response": response.model_dump(mode="json"),
@@ -1049,6 +1057,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
+        if trajectory is not None:
+            response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
         if rollout_id is not None:
             if observations is None:

@@ -3,8 +3,7 @@
 Runs the [pi](https://github.com/earendil-works/pi) CLI (`pi --print --mode json --no-session`). 
 pi runs its own tools internally. Resources server for verifier.
 
-Minimal, meant to be modified if needed, and currently eval-only. Token IDs and logprobs are not wired up and
-it does not use a Gym model server yet.
+Minimal, meant to be modified if needed, and currently eval-only. Token IDs and logprobs are not wired up.
 
 ## Quick start
 
@@ -55,13 +54,32 @@ configuration is unchanged.
 - `model_server`: optional Gym model server used to generate the provider entry
 - `context_window`: context limit for a generated model entry
 - `max_output_tokens`: output limit for a generated model entry
+- `output_token_policy`: `fixed` (native behavior) or `remaining_context`; the latter
+  omits both output-limit fields from Gym-provider chat-completion requests so vLLM
+  can calculate the available budget. Server-side defaults may still cap output.
+- `auto_compaction`: Pi automatic compaction, including overflow recovery (default true);
+  the benchmark preset disables it so history is preserved until the context is full.
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `workspace_root`: where per-request HOMEs are created and deleted
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)
 - `system_prompt`: appended via `--append-system-prompt`
 - `timeout`: seconds for the `pi` run
+- `bash_timeout`: optional per-call Bash limit in seconds. Supplies omitted deadlines
+  and caps model-requested deadlines, preserving shorter ones. Pi terminates the
+  command's process tree and returns a tool error so the agent can continue.
+  Unset preserves Pi's native behavior (no default Bash deadline).
 - `extra_args`: extra flags appended to the `pi` command
 - `models_config`: written to `~/.pi/agent/models.json`
 - `pi_version`: npm version to pin on install (null means latest)
+- `mcp_servers`: Gym MCP endpoints, keyed by server name, with `url`, session `headers`,
+  `enabled` (default true), and `timeout` in milliseconds (default 60000).
+  The dedicated `pi_sandboxed_agent` fills these from `tool_servers` for each rollout.
+
+The bundled extension discovers Gym-hosted tools and registers them as
+`<server>_<tool>` alongside Pi's native tools. It supports Gym's authenticated,
+stateless JSON MCP endpoint; arbitrary MCP transports and SSE are not supported.
+Connection details are written to a private file in the temporary workspace and
+removed with that workspace. Initialization failures stop the rollout; tool-call
+failures appear as Pi tool errors. Calls have deadlines and honor cancellation.
 
 See `configs/pi_agent.yaml`.

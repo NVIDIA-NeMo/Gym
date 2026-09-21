@@ -16,7 +16,9 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 
 from nemo_gym import (
     NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
@@ -191,6 +193,50 @@ class TestTolerantInterpolationParse:
         _parse_no_environment_tolerating_unset_values(cfg)
         after = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
         assert after == before == {"foo": "???", "bar": "${baz}"}
+
+    def test_included_required_values_are_listing_only(self, tmp_path: Path) -> None:
+        from nemo_gym.config_types import ConfigMissingValuesError
+        from nemo_gym.global_config import GlobalConfigDictParser
+
+        included = tmp_path / "base.yaml"
+        included.write_text("runtime:\n  harness: ???\n  model: fixed-model\n")
+        config = OmegaConf.create({"config_paths": [str(included)]})
+        resolved = _parse_no_environment_tolerating_unset_values(config)
+        assert resolved.runtime.harness == _UNSET_VALUE_PLACEHOLDER
+        assert resolved.runtime.model == "fixed-model"
+        with pytest.raises(ConfigMissingValuesError, match="runtime.harness"):
+            GlobalConfigDictParser().parse_no_environment(config)
+        assert included.read_text() == "runtime:\n  harness: ???\n  model: fixed-model\n"
+        assert OmegaConf.to_container(config) == {"config_paths": [str(included)]}
+
+    def test_included_environment_values_are_listing_only(self, tmp_path: Path, monkeypatch) -> None:
+        from nemo_gym.global_config import GlobalConfigDictParser
+
+        monkeypatch.delenv("GYM_TEST_LISTING_IMAGE", raising=False)
+        monkeypatch.setenv("GYM_TEST_LISTING_MODEL", "configured-model")
+        included = tmp_path / "base.yaml"
+        included.write_text(
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    harness_agent:\n"
+            "      entrypoint: app.py\n"
+            "      sandbox_image: ${oc.env:GYM_TEST_LISTING_IMAGE}\n"
+            "      model: ${oc.env:GYM_TEST_LISTING_MODEL}\n"
+            "      fallback: ${oc.env:GYM_TEST_LISTING_IMAGE,default-image}\n"
+        )
+        config = OmegaConf.create({"config_paths": [str(included)]})
+        resolved = _parse_no_environment_tolerating_unset_values(config)
+        agent = resolved.agent.responses_api_agents.harness_agent
+        assert agent.sandbox_image == _UNSET_VALUE_PLACEHOLDER
+        assert agent.model == "configured-model"
+        assert agent.fallback == "default-image"
+        assert "GYM_TEST_LISTING_IMAGE" not in os.environ
+        with pytest.raises(InterpolationResolutionError, match="GYM_TEST_LISTING_IMAGE"):
+            GlobalConfigDictParser().parse_no_environment(config)
+
+    def test_other_resolver_errors_propagate(self) -> None:
+        with pytest.raises(InterpolationResolutionError):
+            self._resolve({"foo": "${oc.decode:'['}"})
 
 
 class TestReadConfigMetadata:

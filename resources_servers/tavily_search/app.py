@@ -184,9 +184,13 @@ class URLExclusionPolicy:
 
     def __init__(self, path: Path):
         properties = [p for n in json.loads(path.read_text())["notices"] for p in n["properties"]]
-        self.domains = [
-            p["value"].encode("idna").decode().lower().rstrip(".") for p in properties if p["type"] == "domain"
-        ]
+        self.domains = []
+        for prop in properties:
+            if prop["type"] == "domain":
+                try:
+                    self.domains.append(prop["value"].encode("idna").decode().lower().rstrip("."))
+                except UnicodeError as exc:
+                    raise ValueError(f"Invalid exclusion domain in {path}: {prop['value']!r}") from exc
         self.substrings = [p["value"].lower() for p in properties if p["type"] == "url_substring"]
         unknown = {p["type"] for p in properties} - {"domain", "url_substring", "author_name", "publisher_name"}
         if unknown:
@@ -279,7 +283,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    def mcp_allowed_tools_for_session(self, seed_body):
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
         return ["web_search", "find_in_page", "scroll_page"]
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
@@ -305,6 +309,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             max_results=self.config.max_results,
             exclude_domains=self._exclude_domains,
             search_depth=self.config.search_depth,
+            # Tavily receives domain exclusions, but URL-pattern exclusions are applied locally.
+            # Its LLM-generated answer could summarize a page we later discard, so return
+            # source results only, including for domain-only policies for consistent behavior.
             include_answer=False,
             include_raw_content=False,
         )
@@ -412,9 +419,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             else:
                 page_content = ""
 
-            if self.config.max_cached_page_chars is not None:
-                page_content = page_content[: self.config.max_cached_page_chars]
             if self.config.max_cached_pages:
+                if self.config.max_cached_page_chars is not None:
+                    page_content = page_content[: self.config.max_cached_page_chars]
                 self._page_cache[body.url] = page_content
                 self._page_cache.move_to_end(body.url)
                 while len(self._page_cache) > self.config.max_cached_pages:
@@ -524,7 +531,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return text[:cut], True
 
     def _postprocess_search_results(self, results: dict) -> list[str]:
-        # Generated aggregate answers cannot be checked against the URL exclusion policy.
+        # Ignore any aggregate answer even if returned despite include_answer=False:
+        # filtering source URLs cannot remove blocked content from a generated summary.
         formatted_results = ["Search Results\n==============\n"]
         for i, result in enumerate(self._allowed_results(results)[: self.config.max_results], 1):
             domain = self._extract_domain(result["url"])

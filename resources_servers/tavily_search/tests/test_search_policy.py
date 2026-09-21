@@ -62,6 +62,16 @@ def test_domain_boundaries(exclusions):
     assert not policy.blocked("https://blocked.test.example/")
 
 
+def test_invalid_policy_domain_fails_closed_with_actionable_error(tmp_path):
+    path = tmp_path / "invalid-policy.json"
+    domain = "a" * 64 + ".test"
+    path.write_text(json.dumps({"notices": [{"properties": [{"type": "domain", "value": domain}]}]}))
+    with pytest.raises(ValueError, match="Invalid exclusion domain") as error:
+        URLExclusionPolicy(path)
+    assert str(path) in str(error.value)
+    assert domain in str(error.value)
+
+
 @pytest.fixture
 def server(exclusions):
     cfg = TavilySearchResourcesServerConfig(
@@ -172,6 +182,22 @@ async def test_cache_and_output_limits_are_configurable(server):
     assert list(server._page_cache) == ["https://two.test/"]
     await server.scroll_page(tool_request(), ScrollPageRequest(url="https://one.test/"))
     assert backend.extract.await_count == 3
+
+
+async def test_disabling_cache_preserves_page_content(server):
+    server.config.max_cached_pages = 0
+    server.config.max_cached_page_chars = 3
+    backend = MagicMock()
+    backend.extract = AsyncMock(return_value={"results": [{"url": "https://ok.test/", "raw_content": "a b c d e"}]})
+    server._async_tavily_clients = [backend]
+    for _ in range(2):
+        result = await server.scroll_page(
+            tool_request(), ScrollPageRequest(url="https://ok.test/", start_index=3, n=2)
+        )
+        assert result.total_words == 5
+        assert "d e" in result.results_string
+    assert backend.extract.await_count == 2
+    assert not server._page_cache
 
 
 def test_mcp_exposes_only_existing_browser_tools(server):

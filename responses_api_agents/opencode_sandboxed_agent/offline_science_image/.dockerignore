@@ -5,3 +5,7 @@
 !sage-environment.yaml
 !sage-linux-64.lock
 !tools.md
+
+!opencode/
+!opencode/package.json
+!opencode/package-lock.json

@@ -4,7 +4,7 @@
 # OpenCode and offline scientific tools, linux/amd64.
 FROM ghcr.io/astral-sh/uv:0.12.7@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945 AS uv
 FROM mambaorg/micromamba:2.9.0@sha256:5681ae3caa12844c41d31e1d70f636fbaba31b01bdfd1b5b521742d7e490614d AS micromamba
-FROM python:3.12.14-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970 AS base
+FROM python:3.13.14-bookworm@sha256:7a6b87c02e1f4d6bb572e379235cbbdd7892add0572442c9b0b860a3f5aa9857 AS base
 
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
@@ -53,7 +53,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv --no-config pip install --system --require-hashes --torch-backend cpu -r /opt/image-provenance/requirements.lock && \
     uv --no-config pip check --system
 
+FROM base AS opencode-dependencies
+RUN curl -fL --retry 3 https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz -o /tmp/node.tar.xz && \
+    echo 'd60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307  /tmp/node.tar.xz' | sha256sum -c - && \
+    mkdir /opt/node && tar -xf /tmp/node.tar.xz -C /opt/node --strip-components=1 && rm /tmp/node.tar.xz
+ENV PATH=/opt/node/bin:$PATH
+COPY opencode/package.json opencode/package-lock.json /root/.config/opencode/
+RUN cd /root/.config/opencode && npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
 FROM base AS runtime
+COPY --from=opencode-dependencies /root/.config/opencode /root/.config/opencode
 COPY --from=sage /opt/sage /opt/sage
 COPY --from=lean /opt/lean /opt/lean
 COPY --from=lean /opt/mathlib /opt/mathlib
@@ -62,7 +71,7 @@ COPY --from=python-tools /usr/local /usr/local
 COPY requirements.in requirements.lock sage-environment.yaml sage-linux-64.lock /opt/image-provenance/
 ENV PATH=/opt/lean/bin:$PATH
 # Sage's environment is separate; ordinary python/python3 keep the scientific stack.
-RUN printf '#!/bin/sh\nexec micromamba run -p /opt/sage sage "$@"\n' > /usr/local/bin/sage && \
+RUN printf '#!/bin/sh\nif [ "$1" = "-python" ]; then\n    shift\n    exec micromamba run -p /opt/sage python "$@"\nfi\nexec micromamba run -p /opt/sage sage "$@"\n' > /usr/local/bin/sage && \
     chmod 0755 /usr/local/bin/sage && \
     mkdir -p /opt/mamba /root/.astropy/config && \
     printf '[utils.iers.iers]\nauto_download = False\n' > /root/.astropy/config/astropy.cfg
