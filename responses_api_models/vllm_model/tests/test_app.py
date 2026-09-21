@@ -25,6 +25,7 @@ from pytest import MonkeyPatch, mark, raises
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -181,6 +182,9 @@ OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
     "safety_identifier",
     "verbosity",
 }
+
+# The converter sets neither, so neither belongs in a round-trip comparison.
+CHAT_FIELDS_OUTSIDE_ROUND_TRIP = OPENAI_2_44_OPTIONAL_CHAT_FIELDS | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
@@ -3215,7 +3219,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=CHAT_FIELDS_OUTSIDE_ROUND_TRIP)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = VLLMConverter(return_token_id_information=True)
@@ -3321,7 +3325,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=CHAT_FIELDS_OUTSIDE_ROUND_TRIP)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())

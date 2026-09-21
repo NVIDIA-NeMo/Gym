@@ -188,6 +188,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     is_responses_native: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    # Whether a request's own top-level ``chat_template_kwargs`` is merged over the
+    # configured baseline (below per-request metadata overrides). Off by default:
+    # the ingress schema accepted-and-dropped that field for every validated
+    # campaign, and agents such as Stirrup attach ``enable_thinking`` on every
+    # call, so forwarding it silently changes the policy's generation regime.
+    # Opt in deliberately, with a same-config calibration run.
+    forward_request_chat_template_kwargs: bool = False
 
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
@@ -566,6 +573,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        # Precedence: config baseline -> direct request field -> metadata override.
+        # The request field is always popped so it never reaches the engine
+        # unmerged; it is applied only when forwarding is enabled.
+        request_chat_template_kwargs = body_dict.pop("chat_template_kwargs", None)
+        if request_chat_template_kwargs and self.config.forward_request_chat_template_kwargs:
+            chat_template_kwargs.update(request_chat_template_kwargs)
 
         metadata = body_dict.get("metadata") or {}
 
