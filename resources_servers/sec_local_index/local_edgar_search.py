@@ -429,17 +429,26 @@ class LocalEdgarSearch:
         form_types: Optional[list[str]] = None,
         ciks: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
-        started = time.perf_counter()
-        request = normalize_request(
-            search_query,
-            start_date,
-            end_date,
-            top_n_results,
-            page,
-            form_types,
-            ciks,
-            max_end_date=self.max_end_date,
+        return self.execute(
+            normalize_request(
+                search_query,
+                start_date,
+                end_date,
+                top_n_results,
+                page,
+                form_types,
+                ciks,
+                max_end_date=self.max_end_date,
+            )
         )
+
+    def execute(self, request: LocalEdgarRequest) -> list[dict[str, Any]]:
+        """Run an already-normalized request.
+
+        Callers that normalize elsewhere use this so a request is not validated
+        and clamped twice.
+        """
+        started = time.perf_counter()
         match_all = request.search_query.strip() == "*"
         results = self._execute(request, match_all=match_all)
         filter_browse_fallback = not results and not match_all and bool(request.ciks)
@@ -510,6 +519,9 @@ class LocalEdgarSearch:
 
     async def search_async(self, **arguments: Any) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.search, **arguments)
+
+    async def execute_async(self, request: LocalEdgarRequest) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.execute, request)
 
     @property
     def supports_dump_paths(self) -> bool:

@@ -58,6 +58,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
@@ -69,6 +70,10 @@ logger = logging.getLogger(__name__)
 
 FILING_READ_SOURCES = ("cache", "sec-corpus", "live")
 FILING_READ_LOG_INTERVAL_SEC = 1800.0
+
+# The Vals v1 benchmark's evaluation cutoff. Dates beyond it are clamped so a
+# rollout cannot see filings the benchmark's answers do not account for.
+DEFAULT_MAX_END_DATE = "2025-04-07"
 
 # The judge explains first and ends with its verdict as "[[N]]" (#2852).
 _JUDGE_RATING_RE = re.compile(r"\[\[(\d+)\]\]")
@@ -488,12 +493,18 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._filing_read_logged_at: Optional[float] = None
 
         self._local_edgar_search: Optional[LocalEdgarSearch] = None
+        self._edgar_search_service: Optional[EdgarSearchService] = None
         if self.config.local_edgar_index_path:
             self._local_edgar_search = LocalEdgarSearch(
                 self.config.local_edgar_index_path,
-                max_end_date=self.config.max_end_date or "2025-04-07",
+                max_end_date=self.config.max_end_date or DEFAULT_MAX_END_DATE,
                 metrics_dir=self.config.local_edgar_metrics_dir,
                 metadata_path=self.config.local_edgar_metadata_path,
+            )
+            self._edgar_search_service = EdgarSearchService(
+                self._local_edgar_search,
+                max_end_date=self.config.max_end_date or DEFAULT_MAX_END_DATE,
+                on_results=self._record_dump_paths,
             )
             logger.info(
                 "Local EDGAR search initialized from %s (metadata sidecar: %s)",
@@ -1039,28 +1050,14 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return EdgarSearchResponse(results=timeout_msg)
 
-        if self._local_edgar_search is None:
+        if self._edgar_search_service is None:
             return EdgarSearchResponse(
                 results=json.dumps(
                     {"error": "edgar_search is not available. local_edgar_index_path is not configured."}
                 )
             )
 
-        try:
-            results = await self._local_edgar_search.search_async(
-                search_query=body.search_query,
-                start_date=body.start_date or "1900-01-01",
-                end_date=body.end_date or self.config.max_end_date or "2025-04-07",
-                top_n_results=body.top_n_results,
-                page=body.page,
-                form_types=body.form_types,
-                ciks=body.ciks,
-            )
-            await self._record_dump_paths(results)
-            return EdgarSearchResponse(results=json.dumps(results, default=str))
-        except Exception as error:
-            logger.warning("edgar_search failed: %s", error)
-            return EdgarSearchResponse(results=json.dumps({"error": str(error)}))
+        return EdgarSearchResponse(results=await self._edgar_search_service.run(body.model_dump()))
 
     # ========================================================================
     # parse_html_page Endpoint
