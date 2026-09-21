@@ -60,9 +60,6 @@ from openai.types.chat.completion_create_params import (
     ResponseFormat,
     WebSearchOptions,
 )
-from openai.types.chat.completion_create_params import (
-    Moderation as ChatCompletionModeration,
-)
 from openai.types.responses import (
     FunctionToolParam,
     Response,
@@ -150,6 +147,12 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
+
+
+class ChatCompletionModeration(TypedDict, total=False):
+    """Chat moderation shape omitted by some OpenAI SDK artifacts."""
+
+    model: Required[str]
 
 
 ########################################
