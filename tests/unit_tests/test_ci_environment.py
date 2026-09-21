@@ -681,7 +681,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
-    assert "max_steps: 2" in env_config
+    assert "max_policy_calls: 2" in env_config
 
 
 def _valid_inference_provider_rollout() -> dict:
