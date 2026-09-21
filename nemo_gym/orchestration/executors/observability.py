@@ -190,7 +190,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
 
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
-        "connectors": {"spanmetrics": span_metrics},
+        "connectors": {"span_metrics": span_metrics},
         "receivers": {
             "prometheus": {"config": {"scrape_configs": scrape_configs}},
             "otlp": {
@@ -219,14 +219,14 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "telemetry": {"logs": {"level": "debug"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": ["prometheus", "otlp", "spanmetrics"],
+                    "receivers": ["prometheus", "otlp", "span_metrics"],
                     "processors": ["transform/metric_names", "transform/identity", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/metrics"],
                 },
                 "traces": {
                     "receivers": ["otlp"],
                     "processors": ["transform/identity", "resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/traces", "spanmetrics"],
+                    "exporters": ["otlp_http/managed", "file/traces", "span_metrics"],
                 },
                 "logs": {
                     "receivers": ["otlp"],
