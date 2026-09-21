@@ -20,7 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from nooa import Agent
+from nooa import Agent, strategy
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
@@ -46,6 +46,13 @@ class PolicyAgent(Agent):
         return await self.primary(text)
 
     async def primary(self, text: str) -> str:
+        """Answer the question."""
+        ...
+
+
+class MethodLLMOverrideAgent(Agent):
+    @strategy(llm="helper")
+    async def analyze(self, text: str) -> str:
         """Answer the question."""
         ...
 
@@ -217,6 +224,11 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
 def test_sandboxed_execution_mode_fails_during_runner_construction() -> None:
     with pytest.raises(NotImplementedError, match="sandboxed execution is not implemented"):
         make_runner(execution_mode="sandboxed")
+
+
+def test_method_level_llm_override_fails_during_runner_construction() -> None:
+    with pytest.raises(ValueError, match=r"method-level LLM overrides.*analyze"):
+        policy_runner(MethodLLMOverrideAgent)
 
 
 async def invoke_policy(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:

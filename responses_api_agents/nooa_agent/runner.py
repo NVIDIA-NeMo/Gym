@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
@@ -74,6 +75,22 @@ class NOOARunner(Protocol):
     async def run(self, request: NOOARunRequest) -> NOOARunResult: ...
 
 
+def _validate_agent_llm_bindings(agent_class: type) -> None:
+    # `_plan_llm` is not a publicly documented NOOA API; this is only an
+    # additional safeguard check against method-level overrides bypassing Gym.
+    overridden = sorted(
+        name
+        for name, method in inspect.getmembers_static(agent_class)
+        if getattr(method, "_plan_llm", None) is not None
+    )
+    if overridden:
+        names = ", ".join(overridden)
+        raise ValueError(
+            "NOOA method-level LLM overrides bypass Gym's model server and are unsupported; "
+            f"remove llm= from @strategy on: {names}"
+        )
+
+
 class EmbeddedNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -94,6 +111,7 @@ class EmbeddedNOOARunner:
         self._resources_server_name = resources_server_name
         self._max_policy_calls = max_policy_calls
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
+        _validate_agent_llm_bindings(self._agent_class)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
