@@ -67,8 +67,24 @@ class TestApp:
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
         server = ExampleMultiTurnEnv(config=config, server_client=MagicMock(spec=ServerClient))
         server.session_turns["sid"] = 3
+        both_steps_started = asyncio.Event()
+        started = 0
 
-        await asyncio.gather(*(server.close_session("sid") for _ in range(3)))
+        async def finish_together(*_args, **_kwargs):
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_steps_started.set()
+            await both_steps_started.wait()
+            return None, 0.0, True, False, {}
+
+        http_request = SimpleNamespace(session={SESSION_ID_KEY: "sid"})
+        with patch.object(type(server), "step", new=finish_together):
+            await asyncio.gather(
+                server._step_endpoint(_step_request(), http_request),
+                server._step_endpoint(_step_request(), http_request),
+            )
+        await server.close_session("sid")
 
         assert "sid" not in server.session_turns
 
