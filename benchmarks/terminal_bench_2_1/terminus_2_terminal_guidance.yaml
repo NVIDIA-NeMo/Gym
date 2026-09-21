@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Opt-in terminal interaction guidance; use terminus_2.yaml for the original prompts.
+config_paths:
+  - benchmarks/terminal_bench_2_1/terminus_2.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets:
+        - name: terminal_bench_2_1_terminal_guidance
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark_terminal_guidance.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare_terminal_guidance.py
+          num_repeats: 8
