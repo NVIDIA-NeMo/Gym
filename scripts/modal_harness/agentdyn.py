@@ -34,9 +34,12 @@ MODELS: dict[str, tuple[str, str, str, str]] = {
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
         "MODAL_PROXY_TOKEN",
     ),
+    # Dedicated deployment for this grid. Same model id as the shared endpoint
+    # (`moonshotai/Kimi-K3`, verified via /v1/models), so this is a deployment change
+    # rather than a model change and kimi rows stay poolable across it.
     "kimi": (
         "kimi",
-        "https://snorkelai-fdr--ep-kimi-k3-server.us-west.modal.direct/v1",
+        "https://snorkelai-fdr--ep-kimi-k3-tb3-a-server.us-west.modal.direct/v1",
         "moonshotai/Kimi-K3",
         "MODAL_PROXY_TOKEN",
     ),

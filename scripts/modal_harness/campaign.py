@@ -317,6 +317,9 @@ def run_campaign(
         namespace,
         slug,
         state="running",
+        # Recorded so one cell can be cancelled without stopping the app. `modal app stop`
+        # is the only other lever and it takes every cell down, including other people's.
+        function_call_id=modal.current_function_call_id(),
         model=policy_model,
         expected=expected_rows,
         landed=rows_before,
@@ -614,3 +617,29 @@ def skip_reason(
     if entry["state"] == "running" and age < live_within_seconds:
         return f"already running ({entry['landed']} rows, {age:.0f}s ago)"
     return None
+
+
+@app.function(image=IMAGE, volumes={RESULTS_ROOT: RESULTS_VOLUME}, timeout=300)
+def stop_cell(namespace: str, slug: str) -> dict[str, Any]:
+    """Cancel one running cell, leaving every other cell and the app alone.
+
+    Reads the call id the run recorded in its status file. Collected rows are safe: the
+    publisher copies to the volume under the no-shrink rule every 45s, so a cancel loses
+    at most the last interval of work, and the next launch resumes from what landed.
+    """
+    RESULTS_VOLUME.reload()
+    path = _status_path(namespace, slug)
+    if not os.path.exists(path):
+        return {"slug": slug, "stopped": False, "reason": "no status file"}
+    with open(path, encoding="utf-8") as handle:
+        status = json.load(handle)
+    call_id = status.get("function_call_id")
+    if not call_id:
+        # Runs started before this was recorded, or a run that never reached the loop.
+        return {"slug": slug, "stopped": False, "reason": "no function_call_id recorded"}
+    try:
+        modal.FunctionCall.from_id(call_id).cancel()
+    except Exception as error:  # noqa: BLE001 - report rather than raise across the boundary
+        return {"slug": slug, "stopped": False, "reason": f"{type(error).__name__}: {error}"}
+    write_status(namespace, slug, state="stopped", stop_requested_at=time.time())
+    return {"slug": slug, "stopped": True, "landed": status.get("landed"), "call_id": call_id}
