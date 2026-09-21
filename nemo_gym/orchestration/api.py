@@ -262,6 +262,10 @@ class OtelConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
+    # Gym span groups to switch on (a preset or comma-separated names). `default` gives one trace
+    # per rollout and the rollout duration metric; `verify` adds the verify duration and success
+    # metrics, which are gated on that group.
+    gym_span_groups: str = "default,verify"
     # Node-level exporters that clusters commonly run as system services on every compute node;
     # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.

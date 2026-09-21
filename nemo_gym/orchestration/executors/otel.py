@@ -46,7 +46,7 @@ OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"
 
 
-def driver_telemetry_env(gym_job_id: str) -> dict[str, str]:
+def driver_telemetry_env(gym_job_id: str, span_groups: str) -> dict[str, str]:
     """Environment that switches on Gym's Lens instrumentation and points it at the collector.
 
     Gym reads these in every server process (`NEMO_GYM_OTEL_*` are Gym's own, the `OTEL_*` ones
@@ -55,6 +55,7 @@ def driver_telemetry_env(gym_job_id: str) -> dict[str, str]:
     return {
         "NEMO_GYM_OTEL_ENABLED": "1",
         "NEMO_GYM_OTEL_RUN_ID": gym_job_id,
+        "NEMO_GYM_OTEL_SPAN_GROUPS": span_groups,
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
     }
