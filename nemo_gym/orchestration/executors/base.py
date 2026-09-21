@@ -17,8 +17,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 
+import yaml
+
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
 
 class BaseExecutor(ABC):
@@ -31,8 +33,13 @@ class BaseExecutor(ABC):
         raises.
         """
 
-    def persist(self, record: SubmissionRecord, write_manifest: Callable[[Path, str], None]) -> None:
-        """Store the record, in the order that survives a partial failure.
+    def persist(
+        self,
+        record: SubmissionRecord,
+        config: SubmitConfig,
+        write_manifest: Callable[[Path, str], None],
+    ) -> None:
+        """Store the record and the resolved config, in the order that survives a partial failure.
 
         Shared by every executor because the ordering and the failure handling
         are policy rather than transport. The machine-local index goes first
@@ -40,7 +47,11 @@ class BaseExecutor(ABC):
         does fail there is still a parseable record for the by-hand recovery the
         error asks for.
 
-        Only the manifest's transport differs per executor, so it arrives as
+        The resolved config is written here, not by each executor's staging
+        step, so that every executor -- today Slurm, tomorrow k8s or a local
+        runner -- gets it for free from the one place all of them already call.
+
+        Only the files' transport differs per executor, so it arrives as
         `write_manifest` -- `Connection.write_text` already has this signature --
         rather than this class owning a connection it cannot know how to open.
         Call it while that transport is still open: reopening one here would pay
@@ -50,12 +61,15 @@ class BaseExecutor(ABC):
         or they are stranded with no record anywhere.
         """
         record.write_local_index()
-        manifest = Path(record.run_dir) / MANIFEST_NAME
+        run_dir = Path(record.run_dir)
+        resolved_config = run_dir / RESOLVED_CONFIG_NAME
+        manifest = run_dir / MANIFEST_NAME
         try:
+            write_manifest(resolved_config, yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
             write_manifest(manifest, record.dumps())
         except Exception as error:
             queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
             raise RuntimeError(
-                f"Submitted jobs but could not write the manifest to {manifest}: {error}. "
+                f"Submitted jobs but could not write the manifest/resolved config under {run_dir}: {error}. "
                 f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
             ) from error

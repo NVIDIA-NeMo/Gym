@@ -6,10 +6,12 @@
 import asyncio
 import threading
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
 from nemo_gym.token_id_capture.adapters.vllm import (
     VLLMCaptureAdapter,
     extract_generation_token_info,
@@ -197,6 +199,12 @@ def test_weight_version_is_stamped_at_admission() -> None:
     first = capture.begin_call(_root("c1"))
     second = capture.begin_call(_root("c2"))
     assert (first.weight_version, second.weight_version) == (3, 9)
+
+
+def test_explicit_worker_weight_version_overrides_provider() -> None:
+    capture, _ = _capture(weight_version=1)
+    call = capture.begin_call(_root(), weight_version=9)
+    assert call.weight_version == 9
 
 
 @pytest.mark.parametrize("bad_version", [-1, 1.5, True])
@@ -449,11 +457,11 @@ def test_slow_sink_write_does_not_serialize_other_completions() -> None:
     release_first = threading.Event()
 
     class _BlockingSink(_MemorySink):
-        def stage(self, record: StagedCallRecord) -> StageResult:
+        def stage(self, record: StagedCallRecord, *, attachments: Mapping[str, Any] | None = None) -> StageResult:
             if record.model_call_id == "c1":
                 first_staging.set()
                 assert release_first.wait(timeout=10.0), "test deadlocked releasing the first stage"
-            return super().stage(record)
+            return super().stage(record, attachments=attachments)
 
     capture, sink = _capture(_BlockingSink())
     first_call = capture.begin_call(_root("c1"))
@@ -602,6 +610,85 @@ def test_vllm_extraction_failure_returns_poisoned_coords() -> None:
     )
     assert coords.disposition == "capture_failed"
     assert sink.events == []
+
+
+def _minf_payload(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "prompt_token_ids": [10, 11],
+        "generated_token_ids": [12, 13],
+        "generated_log_probs": [-0.2, -0.3],
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**{name: value for name, value in fields.items() if value is not ...})
+
+
+def test_megatron_adapter_stages_offloaded_payload_objects() -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(capture.begin_call(_root()), _minf_payload())
+    assert coords.disposition == "staged"
+    assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
+    assert sink.records[0].generation_log_probs_delta == [0.0, 0.0, -0.2, -0.3]
+    assert sink.records[0].extras is None
+
+
+def test_megatron_adapter_reads_mapping_payloads_and_casts_scalars() -> None:
+    adapter = MegatronCaptureAdapter()
+    payload = {"prompt_token_ids": (1, 2), "generated_token_ids": [3], "generated_log_probs": [-1]}
+    assert adapter.extract_prompt_ids(payload) == [1, 2]
+    assert adapter.extract_generation(payload) == ([3], [-1.0])
+    assert adapter.extract_extras(payload) is None
+
+
+@pytest.mark.parametrize("missing", ["prompt_token_ids", "generated_token_ids", "generated_log_probs"])
+def test_megatron_adapter_missing_field_poisons_capture(missing: str) -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        _minf_payload(**{missing: ...}),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
+def test_megatron_adapter_rejects_malformed_fields() -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="prompt_token_ids must be a token-id sequence"):
+        adapter.extract_prompt_ids(_minf_payload(prompt_token_ids=5))
+    with pytest.raises(ValueError, match="lengths differ"):
+        adapter.extract_generation(_minf_payload(generated_log_probs=[-0.1]))
+
+
+@pytest.mark.parametrize("bad_ids", [[1.0, 2], ["1", 2], [True, 2], [None]])
+def test_megatron_adapter_rejects_non_integer_token_ids(bad_ids: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="prompt_token_ids must contain only integer token ids"):
+        adapter.extract_prompt_ids(_minf_payload(prompt_token_ids=bad_ids))
+    with pytest.raises(ValueError, match="generated_token_ids must contain only integer token ids"):
+        adapter.extract_generation(
+            _minf_payload(generated_token_ids=bad_ids, generated_log_probs=[-0.1] * len(bad_ids))
+        )
+
+
+@pytest.mark.parametrize("bad_log_probs", [["-0.1", -0.2], [True, -0.2], [None, -0.2]])
+def test_megatron_adapter_rejects_non_numeric_log_probs(bad_log_probs: list) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="generated_log_probs must contain only numeric log probabilities"):
+        adapter.extract_generation(_minf_payload(generated_log_probs=bad_log_probs))
+
+
+def test_megatron_adapter_malformed_element_poisons_capture() -> None:
+    capture, sink = _capture(adapter=MegatronCaptureAdapter())
+    coords = capture.complete_call_from_response(
+        capture.begin_call(_root()),
+        _minf_payload(generated_token_ids=[12.0, 13.0]),
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
+def test_megatron_adapter_enter_prefix_writes_the_required_prefix_field() -> None:
+    request = MegatronCaptureAdapter().enter_prefix({"n": 1}, [1, 2])
+    assert request == {"n": 1, "required_prefix_token_ids": [1, 2]}
 
 
 def test_install_capture_uses_the_worker_host_seam() -> None:

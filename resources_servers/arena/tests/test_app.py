@@ -800,6 +800,8 @@ class TestArenaResourcesServer:
                 "responses_create_params",
                 "response",
                 "reward",
+                "mask_sample",
+                "failure_kind",
                 "failure_reason",
                 "question_id",
                 "question",

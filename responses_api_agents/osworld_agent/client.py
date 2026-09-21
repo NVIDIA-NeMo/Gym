@@ -486,43 +486,6 @@ def _patch_pdf_image_evaluator_cleanup() -> None:
     metrics_package.compare_pdf_images = wrapped
 
 
-def _patch_unreadable_result_image_evaluator() -> None:
-    """Score missing/corrupt result images zero, while preserving reference errors."""
-    try:
-        from desktop_env.evaluators import metrics as metrics_package  # type: ignore
-        from desktop_env.evaluators.metrics import vlc as vlc_metrics  # type: ignore
-        from PIL import Image, UnidentifiedImageError
-    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
-        return
-
-    current = vlc_metrics.compare_images
-    if getattr(current, "_nemo_gym_result_image_patch", False):
-        return
-
-    def wrapped(image1_path: Any, image2_path: Any, **options: Any) -> float:
-        # Decode the reference separately: even two broken images must not score zero.
-        if image2_path:
-            with Image.open(image2_path) as image:
-                image.convert("L")
-        try:
-            if image1_path:
-                with Image.open(image1_path) as image:
-                    image.convert("L")
-        except OSError as exc:
-            # Pillow's truncated-image OSError has no errno or filename.
-            if not isinstance(exc, (FileNotFoundError, UnidentifiedImageError)) and (
-                type(exc) is not OSError or exc.errno is not None
-            ):
-                raise
-            LOG.warning("OSWorld unreadable result image %s; scoring zero: %s", image1_path, exc)
-            return 0.0
-        return current(image1_path, image2_path, **options)
-
-    wrapped._nemo_gym_result_image_patch = True  # type: ignore[attr-defined]
-    vlc_metrics.compare_images = wrapped
-    metrics_package.compare_images = wrapped
-
-
 def _normalize_prompt_agent_computer_13_action(action: Any) -> Any:
     """Normalize native PromptAgent computer_13 actions for DesktopEnv.
 
@@ -1675,7 +1638,6 @@ def run_osworld_task(
     event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
     _patch_extension_name_aliases()
     _patch_pdf_image_evaluator_cleanup()
-    _patch_unreadable_result_image_evaluator()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []

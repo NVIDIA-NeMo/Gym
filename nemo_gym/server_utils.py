@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import logging
 import resource
 import socket
 import sys
@@ -83,9 +84,147 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_a
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
+logger = logging.getLogger(__name__)
+
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
+# Bound both the raw request prefix and its escaped representation to 4 KiB.
+_VALIDATION_ERROR_LOG_BODY_CHARS = 4096
+_VALIDATION_ERROR_LOG_MAX_ERRORS = 20
+_VALIDATION_ERROR_LOG_FIELD_CHARS = 256
+_VALIDATION_ERROR_LOG_LOC_ITEMS = 8
+
+
+def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
+    """Return bounded, control-safe text with a visible marker when truncated."""
+    raw_prefix = value[:max_chars]
+    rendered = json.dumps(raw_prefix, ensure_ascii=True)[1:-1]
+    truncated = len(value) > len(raw_prefix) or len(rendered) > max_chars
+    suffix = "...[truncated]" if truncated else ""
+    # The marker shares the existing budget; preserve complete JSON escapes.
+    content_limit = max_chars - len(suffix)
+    safe_end = 0
+    index = 0
+    while index < len(rendered) and index < content_limit:
+        escape_chars = 1
+        if rendered[index] == "\\":
+            escape_chars = 6 if index + 1 < len(rendered) and rendered[index + 1] == "u" else 2
+        if index + escape_chars > content_limit:
+            break
+        index += escape_chars
+        safe_end = index
+
+    return rendered[:safe_end] + suffix, truncated
+
+
+def _escaped_log_prefix(value: str, max_chars: int) -> tuple[str, bool]:
+    """Return a quoted, control-safe prefix bounded by ``max_chars``."""
+    escaped, truncated = _escaped_log_text(value, max_chars - 2)
+    return f'"{escaped}"', truncated
+
+
+def _bounded_validation_error_value(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        return _escaped_log_text(value, _VALIDATION_ERROR_LOG_FIELD_CHARS)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, False
+    return f"<{type(value).__name__}>", True
+
+
+def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    summaries = []
+    truncated = len(errors) > _VALIDATION_ERROR_LOG_MAX_ERRORS
+    for error in errors[:_VALIDATION_ERROR_LOG_MAX_ERRORS]:
+        error_type, type_truncated = _bounded_validation_error_value(error.get("type"))
+        message, message_truncated = _bounded_validation_error_value(error.get("msg"))
+        location = error.get("loc")
+        if isinstance(location, (list, tuple)):
+            location_items = []
+            location_truncated = len(location) > _VALIDATION_ERROR_LOG_LOC_ITEMS
+            for item in location[:_VALIDATION_ERROR_LOG_LOC_ITEMS]:
+                bounded_item, item_truncated = _bounded_validation_error_value(item)
+                location_items.append(bounded_item)
+                location_truncated = location_truncated or item_truncated
+        else:
+            bounded_location, location_truncated = _bounded_validation_error_value(location)
+            location_items = [bounded_location]
+
+        summaries.append({"type": error_type, "loc": location_items, "msg": message})
+        truncated = truncated or type_truncated or location_truncated or message_truncated
+
+    return summaries, truncated
+
+
+async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
+    errors = exc.errors()
+    error_summaries, errors_truncated = _validation_error_summaries(errors)
+    errors_suffix = " ...[truncated]" if errors_truncated else ""
+    extra = {
+        "validation_error_count": len(errors),
+        "validation_errors": error_summaries,
+        "validation_errors_truncated": errors_truncated,
+    }
+
+    has_body_error = any(
+        isinstance(error.get("loc"), (list, tuple)) and error["loc"] and error["loc"][0] == "body" for error in errors
+    )
+    if not has_body_error:
+        logger.warning(
+            "Request validation failed; validation_error_count=%d validation_errors_truncated=%s%s",
+            len(errors),
+            errors_truncated,
+            errors_suffix,
+            extra=extra,
+        )
+        return
+
+    try:
+        body = await request.body()
+    except Exception:
+        logger.warning(
+            "Request validation failed; request body unavailable; "
+            "validation_error_count=%d validation_errors_truncated=%s%s",
+            len(errors),
+            errors_truncated,
+            errors_suffix,
+            extra=extra,
+        )
+        return
+
+    raw_prefix = body[:_VALIDATION_ERROR_LOG_BODY_CHARS]
+    escaped_prefix, prefix_truncated = _escaped_log_prefix(
+        raw_prefix.decode("utf-8", errors="replace"), _VALIDATION_ERROR_LOG_BODY_CHARS
+    )
+    body_truncated = len(body) > len(raw_prefix) or prefix_truncated
+    extra.update(
+        {
+            "request_body_size_bytes": len(body),
+            "request_body_prefix": escaped_prefix,
+            "request_body_truncated": body_truncated,
+        }
+    )
+    logger.warning(
+        "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
+        "validation_error_count=%d validation_errors_truncated=%s%s",
+        len(body),
+        body_truncated,
+        escaped_prefix,
+        len(errors),
+        errors_truncated,
+        errors_suffix,
+        extra=extra,
+    )
+
+
+async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
+    try:
+        await _log_validation_exception(request, exc)
+    except Exception:
+        # Diagnostics must not alter FastAPI's response contract.
+        pass
+    return await request_validation_exception_handler(request, exc)
+
 
 NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
 NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
@@ -386,6 +525,9 @@ async def _request_with_retries(
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
+
+            if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                raise
 
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
@@ -779,6 +921,7 @@ _TELEMETRY_SERVER_TYPE_BY_BASE = {
     "SimpleResourcesServer": "resources_servers",
     "SimpleResponsesAPIAgent": "responses_api_agents",
     "SimpleResponsesAPIModel": "responses_api_models",
+    "BaseEnvironmentServer": "environment_servers",
 }
 
 
@@ -1084,14 +1227,7 @@ repr(e): {repr(e)}"""
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
 
-        @app.exception_handler(RequestValidationError)
-        async def validation_exception_handler(request: Request, exc):
-            print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
-"""
-            )
-            return await request_validation_exception_handler(request, exc)
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:

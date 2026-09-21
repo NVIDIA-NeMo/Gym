@@ -28,6 +28,7 @@ from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
     SubmissionRecord,
+    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
@@ -166,7 +167,7 @@ class SlurmExecutor(BaseExecutor):
                 # Inside the connection, because that is the transport persist()
                 # needs and reopening one would cost a second connection per
                 # submit. Ordering and failure handling live in the base class.
-                self.persist(record, conn.write_text)
+                self.persist(record, config, conn.write_text)
 
         return record
 
@@ -198,6 +199,7 @@ class SlurmExecutor(BaseExecutor):
         return SubmissionRecord(
             gym_job_id=gym_job_id,
             gym_version=__version__,
+            gym_commit=installed_gym_commit(),
             submitted_at=utc_timestamp(now),
             run_dir=str(remote_run_dir),
             cluster=cluster,
