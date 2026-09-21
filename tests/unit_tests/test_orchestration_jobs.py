@@ -15,6 +15,7 @@
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -309,12 +310,67 @@ def test_installed_gym_commit_is_none_for_an_index_wheel(monkeypatch: MonkeyPatc
     assert "installed from a package index" in caplog.text
 
 
-def test_installed_gym_commit_is_none_for_an_editable_checkout(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
-    """`pip install -e .` records only the checkout path; its HEAD would not describe uncommitted edits."""
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _checkout(tmp_path: Path) -> str:
+    """A one-commit git checkout; returns its HEAD."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "f").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "f"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "-m", "seed"], check=True, env={**os.environ, **_GIT_IDENTITY}
+    )
+    return subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_installed_gym_commit_reads_a_clean_editable_checkouts_head(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """`pip install -e .` records only the checkout path; a clean checkout's HEAD is what ran."""
+    head = _checkout(tmp_path)
+    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    assert installed_gym_commit() == head
+
+
+def test_installed_gym_commit_marks_a_dirty_editable_checkout(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """Uncommitted edits ran too, so the HEAD alone must not read as the Gym that ran."""
+    head = _checkout(tmp_path)
+    (tmp_path / "f").write_text("edited")
+    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    assert installed_gym_commit() == f"{head}-dirty"
+
+
+def test_installed_gym_commit_is_none_for_an_editable_install_outside_git(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog
+):
     _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
     with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
         assert installed_gym_commit() is None
-    assert "not installed from git" in caplog.text
+    assert "is not a git checkout" in caplog.text
+
+
+def test_installed_gym_commit_is_none_without_git(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.subprocess.run", no_git)
+    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        assert installed_gym_commit() is None
+    assert "git is not available" in caplog.text
+
+
+def test_installed_gym_commit_is_none_for_a_local_archive(monkeypatch: MonkeyPatch, caplog):
+    _install(monkeypatch, {"url": "file:///somewhere/nemo_gym.whl", "archive_info": {}})
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        assert installed_gym_commit() is None
+    assert "neither a git install nor an editable checkout" in caplog.text
 
 
 def test_installed_gym_commit_is_none_when_the_package_is_not_installed(monkeypatch: MonkeyPatch, caplog):

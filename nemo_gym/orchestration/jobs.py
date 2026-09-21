@@ -45,10 +45,12 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import sys
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel
 
@@ -70,7 +72,10 @@ RESOLVED_CONFIG_NAME = "resolved-config.yaml"
 
 
 def installed_gym_commit() -> str | None:
-    """Return the git commit of the installed nemo-gym, or None when the install does not record one."""
+    """Return the git commit of the installed nemo-gym, or None when the install does not record one.
+
+    An editable checkout reports its HEAD, suffixed ``-dirty`` when it has uncommitted changes.
+    """
     try:
         raw = distribution("nemo-gym").read_text("direct_url.json")
     except PackageNotFoundError:
@@ -82,14 +87,37 @@ def installed_gym_commit() -> str | None:
             "(no direct_url.json)."
         )
         return None
-    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
-    if not commit:
+    direct_url = json.loads(raw)
+    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
+    if commit:
+        return str(commit)
+    url = direct_url.get("url", "")
+    if not ((direct_url.get("dir_info") or {}).get("editable") and url.startswith("file://")):
         logger.warning(
-            "Cannot determine the installed Gym commit: nemo-gym was not installed from git (url=%r).",
-            json.loads(raw).get("url"),
+            "Cannot determine the installed Gym commit: nemo-gym is neither a git install nor an editable "
+            "checkout (url=%r).",
+            url,
         )
         return None
-    return str(commit)
+    return _checkout_commit(Path(unquote(urlparse(url).path)))
+
+
+def _checkout_commit(checkout: Path) -> str | None:
+    try:
+        head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True)
+        status = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"], capture_output=True, text=True)
+    except FileNotFoundError:
+        logger.warning("Cannot determine the installed Gym commit: git is not available to inspect %s.", checkout)
+        return None
+    if head.returncode != 0 or status.returncode != 0:
+        logger.warning(
+            "Cannot determine the installed Gym commit: %s is not a git checkout: %s",
+            checkout,
+            (head.stderr or status.stderr).strip(),
+        )
+        return None
+    commit = head.stdout.strip()
+    return f"{commit}-dirty" if status.stdout.strip() else commit
 
 
 class BenchmarkJob(BaseModel):
@@ -123,7 +151,8 @@ class SubmissionRecord(BaseModel):
     leave it None.
 
     `gym_commit` is the commit of the Gym that wrote the record, when its install
-    records one (see `installed_gym_commit`).
+    records one (see `installed_gym_commit`). A `-dirty` suffix marks a checkout
+    with uncommitted changes: the commit alone does not reproduce that Gym.
     """
 
     gym_job_id: str
