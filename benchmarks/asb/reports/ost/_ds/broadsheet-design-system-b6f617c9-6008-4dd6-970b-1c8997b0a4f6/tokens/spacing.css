@@ -1,0 +1,21 @@
+/* Broadsheet spacing — 4px × 1.25 density; radius 2px; ink-tinted elevation. */
+:root {
+  --space-1: 5.0px;
+  --space-2: 10.0px;
+  --space-3: 15.0px;
+  --space-4: 20.0px;
+  --space-6: 30.0px;
+  --space-8: 40.0px;
+
+  --radius-sm: 1px;
+  --radius-md: 2px;
+  --radius-lg: 4px;
+
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
+  --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
+  --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+
+  --control-height: 36px;
+  --page-edge: clamp(20px, 5vw, 72px); /* @kind spacing */
+  --page-max: 1200px;
+}

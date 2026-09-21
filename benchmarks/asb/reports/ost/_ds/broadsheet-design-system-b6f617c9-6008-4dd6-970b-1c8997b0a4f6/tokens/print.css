@@ -1,0 +1,37 @@
+/* Print treatments — the newsprint dot screen, the four-plate CMYK separation, and plate-set display text. .cmyk needs the filter defs from assets/print-plates.js in the document. */
+.halftone{position:relative;filter:grayscale(0.35) contrast(1.15);overflow:hidden}
+.halftone::after{content:"";position:absolute;inset:0;pointer-events:none;background-image:radial-gradient(circle,rgba(0,0,0,0.22) 30%,transparent 32%);background-size:3px 3px;mix-blend-mode:multiply}
+
+/* figure.cmyk > five <img> copies (sizer + .sep-c/.sep-m/.sep-y/.sep-k), or figure.cmyk > .print > one image for the compound #sep-all filter */
+.cmyk{position:relative;overflow:hidden;background:var(--color-bg)}
+.cmyk img:first-child{opacity:0}
+.cmyk img+img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;mix-blend-mode:multiply}
+.cmyk .sep-c{filter:url(#sep-c)}
+.cmyk .sep-m{filter:url(#sep-m)}
+.cmyk .sep-y{filter:url(#sep-y)}
+.cmyk .sep-k{filter:url(#sep-k)}
+.cmyk::after{content:"";position:absolute;inset:0;pointer-events:none;background-image:radial-gradient(circle,rgba(0,0,0,0.22) 30%,transparent 32%);background-size:3px 3px;mix-blend-mode:multiply}
+.cmyk .print{position:relative;width:100%;filter:url(#sep-all)}
+@media (prefers-reduced-motion: reduce), (hover: none), (pointer: coarse) { .cmyk .print:hover{filter:none} }
+.cmyk .print image-slot,.cmyk .print img{width:100%;height:100%;display:block;object-fit:cover}
+
+/* Plate numeral — C/M/Y plates over the white of the sheet; dark core from the multiply overlap */
+.cmyk-num{--cmyk-num-ground:var(--color-bg);position:relative;width:fit-content;line-height:0.9;font-feature-settings:"pnum" 1;background:var(--cmyk-num-ground);padding:0.12em;margin:-0.12em}
+.cmyk-num .paper{color:var(--color-bg);text-shadow:0.036em 0.025em 0 var(--color-bg),-0.031em -0.023em 0 var(--color-bg)}
+.cmyk-num .plate{position:absolute;inset:0.12em;mix-blend-mode:multiply;text-box:trim-both cap alphabetic}
+.cmyk-num .plate-c{color:var(--color-accent)}
+.cmyk-num .plate-m{color:var(--color-accent-2);translate:calc(0.036em + 0.018em*var(--press-nx, 0)) calc(0.025em + 0.0125em*var(--press-ny, 0))}
+.cmyk-num .plate-y{color:var(--color-process-yellow);translate:calc(-0.031em + 0.018em*var(--press-nx, 0)) calc(-0.023em + 0.0125em*var(--press-ny, 0))}
+
+/* Plate headline — same construction at half the spread, for display heads in running text */
+.cmyk-head{position:relative}
+.cmyk-head .paper{color:var(--color-bg);text-shadow:0.027em 0.0185em 0 var(--color-bg),-0.0245em -0.0175em 0 var(--color-bg)}
+.cmyk-head .plate{position:absolute;inset:0;mix-blend-mode:multiply;pointer-events:none;user-select:none;text-box:trim-both cap alphabetic}
+.cmyk-head .plate-c{color:var(--color-accent)}
+.cmyk-head .plate-m{color:var(--color-accent-2);translate:calc(0.018em + 0.009em*var(--press-nx, 0)) calc(0.0125em + 0.006em*var(--press-ny, 0))}
+.cmyk-head .plate-y{color:var(--color-process-yellow);translate:calc(-0.0155em + 0.009em*var(--press-nx, 0)) calc(-0.0115em + 0.006em*var(--press-ny, 0))}
+
+/* Front-page head furniture — the thick-thin head pair and the cut rule, full-strength ink */
+.rule-head{height:5px;border:0;margin:0;border-top:2px solid var(--border-rule);border-bottom:1px solid var(--border-rule)}
+.rule-cut{height:0;border:0;border-top:1px solid var(--border-rule);margin:0}
+.kicker{display:block;font-size:13px;line-height:var(--leading-page-half);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-label);font-feature-settings:"tnum" 1}

@@ -1,0 +1,20 @@
+/* Base type and page resets — plain HTML inherits the theme. */
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: var(--color-bg); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-body-size); line-height: var(--leading-body); font-weight: 400; }
+h1, h2, h3, h4, h5, h6 { font-family: var(--font-heading); font-weight: var(--font-heading-weight); line-height: var(--leading-heading); letter-spacing: var(--tracking-heading); margin: 0 0 var(--space-2); }
+h1 { font-size: var(--text-h1); }
+h2 { font-size: var(--text-h2); }
+h3 { font-size: var(--text-h3); }
+h4 { font-size: var(--text-h4); }
+h5 { font-size: var(--text-h5); }
+h6 { font-size: var(--text-h6); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+p { margin: 0 0 var(--space-3); }
+a { color: var(--color-accent); text-underline-offset: 3px; }
+a:hover { color: var(--color-accent-600); }
+img { display: block; max-width: 100%; }
+figure { margin: 0; }
+figcaption { font-size: var(--text-caption); margin-top: var(--space-1); color: var(--text-muted); }
+.text-muted { color: var(--text-muted); }
+:focus { outline: none; }
+:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+::selection { background: var(--selection); }

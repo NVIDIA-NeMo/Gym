@@ -1,0 +1,65 @@
+/* Broadsheet color — paper, ink and two process spot colors. Ramps generated in OKLCH on one shared lightness scale. */
+:root {
+  --color-bg: #f3f2f2;
+  --color-surface: #eae9e9;
+  --color-text: #201e1d;
+  --color-accent: #0088b0;
+  --color-accent-2: #d6006c;
+  --color-divider: color-mix(in srgb, #201e1d 16%, transparent);
+
+  --color-neutral-100: #f8f4f4;
+  --color-neutral-200: #eae7e7;
+  --color-neutral-300: #d7d3d3;
+  --color-neutral-400: #bab6b6;
+  --color-neutral-500: #9b9797;
+  --color-neutral-600: #7d7979;
+  --color-neutral-700: #605d5d;
+  --color-neutral-800: #444141;
+  --color-neutral-900: #2d2b2b;
+
+  --color-accent-100: #e9f8ff;
+  --color-accent-200: #cbeeff;
+  --color-accent-300: #99e0ff;
+  --color-accent-400: #62c5ee;
+  --color-accent-500: #38a6cf;
+  --color-accent-600: #1186ac;
+  --color-accent-700: #006786;
+  --color-accent-800: #004961;
+  --color-accent-900: #0a303e;
+
+  --color-accent-2-100: #fff1f4;
+  --color-accent-2-200: #ffdee6;
+  --color-accent-2-300: #ffc0d0;
+  --color-accent-2-400: #ff90b1;
+  --color-accent-2-500: #ff458e;
+  --color-accent-2-600: #d82071;
+  --color-accent-2-700: #aa0b56;
+  --color-accent-2-800: #790e3d;
+  --color-accent-2-900: #4b1528;
+
+  /* The third process ink — print treatments only (CMYK separations, plate numerals). Never chrome or copy. */
+  --color-process-yellow: #edbb00;
+
+  /* Semantic aliases */
+  --surface-page: var(--color-bg);
+  --surface-card: var(--color-surface);
+  --surface-input: var(--color-surface);
+  --surface-scrim: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
+  --text-body: var(--color-text);
+  --text-secondary: color-mix(in srgb, var(--color-text) 78%, transparent);
+  --text-muted: color-mix(in srgb, var(--color-text) 55%, transparent);
+  --text-label: color-mix(in srgb, var(--color-text) 70%, transparent);
+  --text-on-accent: var(--color-bg);
+  --text-accent-small: var(--color-accent-700); /* accent at paragraph size: the 700 step reaches 4.5:1 */
+  --border-divider: var(--color-divider);
+  --border-rule: var(--color-text); /* head furniture prints full-strength ink */
+  --interactive: var(--color-accent);
+  --interactive-hover: var(--color-accent-600);
+  --interactive-active: var(--color-accent-700);
+  --interactive-tint: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  --interactive-tint-strong: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  --hover-ink: color-mix(in srgb, var(--color-text) 7%, transparent);
+  --active-ink: color-mix(in srgb, var(--color-text) 14%, transparent);
+  --focus-ring: 2px solid var(--color-accent);
+  --selection: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}

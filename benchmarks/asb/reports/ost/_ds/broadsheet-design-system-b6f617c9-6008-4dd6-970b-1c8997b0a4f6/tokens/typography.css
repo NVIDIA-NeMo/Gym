@@ -1,0 +1,32 @@
+/* Broadsheet type — Source Serif 4 for everything; the serif is the chrome. */
+:root {
+  --font-heading: "Source Serif 4", system-ui, sans-serif;
+  --font-heading-weight: 600;
+  --font-body: "Source Serif 4", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-h1: 42px;
+  --text-h2: 32px;
+  --text-h3: 25px;
+  --text-h4: 20px;
+  --text-h5: 16px;
+  --text-h6: 13px;
+  --text-p1: 17px;
+  --text-body-size: 15px;
+  --text-p3: 13px;
+  --text-caption: 11px;
+  --text-kicker: 10px;
+  --text-control: 14px;
+
+  --leading-heading: 1.12;
+  --leading-body: 1.55;
+  --leading-page: 28px; /* the landing's rhythm unit: 17px body at ~1.65 */
+  --leading-page-half: 14px;
+
+  --tracking-heading: -0.015em;
+  --tracking-display: -0.02em;
+  --tracking-caps: 0.08em;
+  --tracking-kicker: 0.1em;
+
+  --measure: 58ch;
+}
