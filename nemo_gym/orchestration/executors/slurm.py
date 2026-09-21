@@ -24,6 +24,14 @@ from nemo_gym import __version__
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
+from nemo_gym.orchestration.executors.observability import (
+    COLLECTOR_CONFIG_NAME,
+    COLLECTOR_DIR,
+    observability_active,
+    render_collector_config,
+    resolve_token,
+    validate_destination,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
@@ -147,6 +155,13 @@ class SlurmExecutor(BaseExecutor):
         cluster = next(iter(config.compute))
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
+        # Before anything is rendered or staged, and on a dry run too: a missing destination or
+        # token is a configuration error of this submit, not something to discover after the jobs
+        # are queued.
+        token = None
+        if observability_active(config):
+            validate_destination(config)
+            token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
@@ -160,8 +175,14 @@ class SlurmExecutor(BaseExecutor):
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
                 conn.copy(staging, remote_run_dir)
+                # The token reaches the job through sbatch's environment export, so it lives in
+                # this one shell and in the job's environment, never in a file under the run dir.
+                token_export = (
+                    [f"export {config.observability.token_env}={shlex.quote(token)}"] if token is not None else []
+                )
                 output = conn.run(
-                    [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
+                    token_export
+                    + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
                 # Inside the connection, because that is the transport persist()
@@ -217,6 +238,11 @@ class SlurmExecutor(BaseExecutor):
             print(f"[dry-run] sbatch script for benchmark: {name}")
             print(f"{'=' * 60}")
             print(script)
+            if observability_active(config):
+                print(f"\n{'=' * 60}")
+                print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
+                print(f"{'=' * 60}")
+                print(render_collector_config(config, name, remote_run_dir / name))
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
         for name, benchmark in config.driver.benchmarks.items():
@@ -226,4 +252,9 @@ class SlurmExecutor(BaseExecutor):
             (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             (bench_dir / "job.sh").write_text(script)
+            if observability_active(config):
+                (bench_dir / COLLECTOR_DIR).mkdir()
+                (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
+                    render_collector_config(config, name, remote_run_dir / name)
+                )
         return staging

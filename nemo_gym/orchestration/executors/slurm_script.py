@@ -29,6 +29,14 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors.observability import (
+    COLLECTOR_HEALTH_PORT,
+    COLLECTOR_SERVICE_NAME,
+    FINAL_SCRAPE_GRACE_SECONDS,
+    SHUTDOWN_WAIT_SECONDS,
+    collector_config_path,
+    observability_active,
+)
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -323,6 +331,42 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
+def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> str:
+    """The collector's srun step. Started before the model services so the scrape covers their
+    startup; the job directory is mounted for its config and its local `otel/*.jsonl` output."""
+    obs = config.observability
+    command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
+    return _render_service_command(
+        COLLECTOR_SERVICE_NAME,
+        obs.container,
+        command,
+        env={
+            obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}",
+            "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
+        },
+        mounts=[f"{remote_bench_dir}:{remote_bench_dir}"],
+    )
+
+
+def _render_collector_health_check(config: SubmitConfig) -> str:
+    return render_health_check(
+        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.observability.health_check_timeout_seconds
+    )
+
+
+def _render_collector_shutdown() -> str:
+    """Run after the driver: one more scrape interval so the final counters are seen, then SIGTERM
+    (which srun forwards to the collector) for a graceful flush, keeping the driver's exit code."""
+    pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
+    return (
+        "DRIVER_RC=$?\n"
+        f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
+        f"kill -TERM {pid} 2>/dev/null || true\n"
+        f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
+        "exit $DRIVER_RC"
+    )
+
+
 def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
     total_ntasks = sum(pool.nodes * pool.ntasks_per_node for pool in compute.node_pools.values())
@@ -365,29 +409,37 @@ def build_sbatch_script(
         else ""
     )
 
+    observed = observability_active(config)
+
     service_commands = "\n\n".join(
-        _render_service_command(
-            name,
-            service.container,
-            _build_service_command(service, total_nodes, gpus_per_node_values),
-            service.env or None,
-            service.mounts or None,
-            # Only services that actually span multiple nodes need the whole allocation's --nodes/
-            # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
-            # on a single node regardless of how many nodes the overall job spans).
-            nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-            ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-            pre_command=service.pre_command,
-        )
-        for name, service in config.services.items()
+        ([_render_collector_service(config, remote_bench_dir)] if observed else [])
+        + [
+            _render_service_command(
+                name,
+                service.container,
+                _build_service_command(service, total_nodes, gpus_per_node_values),
+                service.env or None,
+                service.mounts or None,
+                # Only services that actually span multiple nodes need the whole allocation's --nodes/
+                # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
+                # on a single node regardless of how many nodes the overall job spans).
+                nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+                ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+                pre_command=service.pre_command,
+            )
+            for name, service in config.services.items()
+        ]
     )
 
     health_checks = "\n\n".join(
-        render_health_check(
-            name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
-        )
-        for name, service in config.services.items()
-        if service.health_check
+        ([_render_collector_health_check(config)] if observed else [])
+        + [
+            render_health_check(
+                name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
+            )
+            for name, service in config.services.items()
+            if service.health_check
+        ]
     )
 
     gi = config.driver.gym_install
@@ -432,6 +484,8 @@ def build_sbatch_script(
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
+    if observed:
+        driver_command += "\n" + _render_collector_shutdown()
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
