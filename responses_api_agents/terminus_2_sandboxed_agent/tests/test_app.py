@@ -184,8 +184,9 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
 @pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("interleaved_thinking", [False, True])
 @pytest.mark.parametrize("recover_stalled_interrupts", [False, True])
+@pytest.mark.parametrize("terminal_hidden_mounts", [[], ["/mnt/s3-data", "/mnt/.s3-gate"]])
 async def test_execute_runs_terminus_in_seeded_sandbox(
-    monkeypatch, dump_trajectory, debug, interleaved_thinking, recover_stalled_interrupts
+    monkeypatch, dump_trajectory, debug, interleaved_thinking, recover_stalled_interrupts, terminal_hidden_mounts
 ):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
@@ -205,6 +206,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
         model_output_limit=4_000,
         interleaved_thinking=interleaved_thinking,
         recover_stalled_interrupts=recover_stalled_interrupts,
+        terminal_hidden_mounts=terminal_hidden_mounts,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -244,6 +246,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             assert self.kwargs["interleaved_thinking"] is interleaved_thinking
             assert self.kwargs["recover_stalled_interrupts"] is recover_stalled_interrupts
+            assert self.kwargs["terminal_hidden_mounts"] == terminal_hidden_mounts
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             self.kwargs["llm"]._num_compactions = 2

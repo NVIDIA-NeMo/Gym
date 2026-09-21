@@ -24,6 +24,9 @@ terminus_2_sandboxed_agent:
       interleaved_thinking: false
       # Experimental: drain queued terminal input after an exact C-c request.
       recover_stalled_interrupts: false
+      # Opt-in mount points to hide from terminal sessions. Requires Linux root,
+      # tmux installed before setup, and user/mount namespace support.
+      terminal_hidden_mounts: []
 
       sandbox_provider: sandbox
       sandbox_timeout: 10800  # 3 hrs

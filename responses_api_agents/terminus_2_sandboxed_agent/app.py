@@ -59,6 +59,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
+from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import private_terminal_bootstrap
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -76,6 +77,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     model_output_limit: int | None
     interleaved_thinking: bool
     recover_stalled_interrupts: bool = False
+    terminal_hidden_mounts: list[str] = Field(default_factory=list)
 
     llm_request_timeout: int
 
@@ -340,11 +342,15 @@ class NeMoGymTerminus2(Terminus2):
         llm: NeMoGymLLM,
         dump_trajectory: bool,
         recover_stalled_interrupts: bool = False,
+        terminal_hidden_mounts: list[str] | None = None,
         **kwargs: Any,
     ):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
         self._recover_stalled_interrupts = recover_stalled_interrupts
+        self._terminal_mount_bootstrap = (
+            private_terminal_bootstrap(terminal_hidden_mounts) if terminal_hidden_mounts else None
+        )
         self._terminal_interrupt_drains = 0
         self._terminal_interrupt_drain_errors = 0
         self._times_spent = []
@@ -355,6 +361,29 @@ class NeMoGymTerminus2(Terminus2):
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
+
+    async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
+        if self._terminal_mount_bootstrap is None:
+            return await super().setup(environment)
+
+        # Starting tmux here makes Harbor's subsequent sessions inherit the private
+        # mounts. Direct sandbox execution (including grading) keeps its original view.
+        result = await environment.exec(self._terminal_mount_bootstrap, user="root", timeout_sec=25)
+        if result.return_code != 0:
+            raise RuntimeError(f"Private terminal mount bootstrap failed: {result.stdout}\n{result.stderr}")
+        setup_succeeded = False
+        try:
+            await super().setup(environment)
+            setup_succeeded = True
+        finally:
+            try:
+                result = await environment.exec("tmux kill-session -t gym-internal-mount-bootstrap", user="root")
+                if result.return_code != 0:
+                    raise RuntimeError(f"Private terminal mount bootstrap cleanup failed: {result.stderr}")
+            except Exception:
+                if setup_succeeded:
+                    raise
+                self.logger.warning("Private terminal bootstrap cleanup failed after setup failure", exc_info=True)
 
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
@@ -563,6 +592,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
                 recover_stalled_interrupts=self.config.recover_stalled_interrupts,
+                terminal_hidden_mounts=self.config.terminal_hidden_mounts,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")

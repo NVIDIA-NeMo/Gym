@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# For services exposing these unrelated volumes; both paths must be mount points.
+# Install/copy tmux before agent setup (e.g. using remote_tmux_binary_path).
+# The terminal uses a private user/mount namespace; task files remain shared.
+config_paths:
+  - benchmarks/terminal_bench_2_1/terminus_2.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      terminal_hidden_mounts:
+        - /mnt/s3-data
+        - /mnt/.s3-gate
