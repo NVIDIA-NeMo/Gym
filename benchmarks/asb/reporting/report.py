@@ -159,7 +159,7 @@ def render_markdown(models: dict[str, dict[str, ConditionStats]]) -> str:
     lines.append(
         "Cells are the mean of per-attack-type rates, matching the paper. Rows whose plan "
         "never parsed are excluded from ASR and utility and reported separately; see "
-        "`benchmarks/asb/METRICS.md` for denominators and the four disclosed deviations.\n"
+        "`benchmarks/asb/METRICS.md` for denominators and the five disclosed deviations.\n"
     )
 
     lines.append("\n## Agent Attack\n")
@@ -200,28 +200,46 @@ def render_markdown(models: dict[str, dict[str, ConditionStats]]) -> str:
             lines.append(f"| **{model}** | " + " | ".join(pct(cells.get(label)) for label in labels) + " |")
 
     lines.append("\n## Coverage and failure accounting\n")
-    lines.append("| Model | Rows | Scored | Workflow failure | Judge sidecar | Plan salvage |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append(
+        "`Landed` is rows that reached the rollouts file; `missing` never did. A model scored "
+        "on 10,777 of 10,800 rows is not the same measurement as one scored on 10,800, and "
+        "that difference disappears if only the landed count is published -- so the expected "
+        "count is stated rather than left to be inferred.\n"
+    )
+    lines.append("| Model | Expected | Landed | Missing | Scored | Workflow failure | Judge sidecar | Plan salvage |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for model, stats in models.items():
         rows = sum(entry.n_rows for entry in stats.values())
         scored = sum(entry.n_scored for entry in stats.values())
         failures = sum(entry.n_workflow_failure for entry in stats.values())
         sidecar = sum(entry.n_sidecar for entry in stats.values())
         salvage = fmean([entry.salvage_rate for entry in stats.values()]) if stats else 0.0
+        expected = len(stats) * spec.PUBLISHED_ROWS_PER_CONDITION
+        missing = expected - rows
+        missing_cell = "0" if missing <= 0 else f"**{missing}** ({missing / expected * 100:.2f}%)"
         lines.append(
-            f"| **{model}** | {rows} | {scored} | {failures} ({failures / rows * 100:.1f}%) | "
-            f"{sidecar} | {salvage * 100:.1f}% |"
+            f"| **{model}** | {expected} | {rows} | {missing_cell} | {scored} | "
+            f"{failures} ({failures / rows * 100:.1f}%) | {sidecar} | {salvage * 100:.1f}% |"
         )
 
     lines.append("\n## Per-condition detail\n")
-    lines.append("| Model | Condition | n | scored | ASR | RR | Utility | Workflow failure |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append(
+        f"Every condition expects {spec.PUBLISHED_ROWS_PER_CONDITION} rows. A short `n` is "
+        "flagged, because a denominator below that is a coverage gap rather than a design "
+        "choice -- and where the refusal judge caused it, a *biased* gap concentrated in the "
+        "most adversarial rows. See METRICS.md.\n"
+    )
+    lines.append("| Model | Condition | n | short by | scored | ASR | RR | Utility | Workflow failure |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for model, stats in models.items():
         for name in sorted(stats):
             entry = stats[name]
+            short = spec.PUBLISHED_ROWS_PER_CONDITION - entry.n_rows
+            short_cell = "-" if short <= 0 else f"**-{short}**"
             lines.append(
-                f"| {model} | `{name}` | {entry.n_rows} | {entry.n_scored} | {pct(entry.asr)} | "
-                f"{pct(entry.rr)} | {pct(entry.utility)} | {entry.n_workflow_failure} |"
+                f"| {model} | `{name}` | {entry.n_rows} | {short_cell} | {entry.n_scored} | "
+                f"{pct(entry.asr)} | {pct(entry.rr)} | {pct(entry.utility)} | "
+                f"{entry.n_workflow_failure} |"
             )
     return "\n".join(lines) + "\n"
 
@@ -255,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
                     "conditions": {
                         name: {
                             "n_rows": entry.n_rows,
+                            "n_expected": spec.PUBLISHED_ROWS_PER_CONDITION,
+                            "n_missing": spec.PUBLISHED_ROWS_PER_CONDITION - entry.n_rows,
                             "n_scored": entry.n_scored,
                             "asr": entry.asr,
                             "rr": entry.rr,

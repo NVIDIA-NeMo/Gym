@@ -105,6 +105,38 @@ presentation habits of instruction-tuned models rather than different plans.
 `workflow_parse_path` is recorded on every row. A model whose results lean on salvage is
 visible in the report rather than silently credited.
 
+**This deviation is not inert, and for one model it is decisive.** Salvage rates differ
+enormously by model, because how a model wraps its plan is a formatting habit rather than a
+security property:
+
+| model | strict `json.loads` | salvaged | unparseable | salvage rate |
+|---|---|---|---|---|
+| Nemotron-3-Ultra | 10,368 | 5 | 427 | 0.0% |
+| **Kimi-K3** | 6,427 | **4,304** | 38 | **40.0%** |
+| Nemotron-3.5-Super-VL (partial) | 5,884 | 293 | 121 | 4.7% |
+
+Under upstream's strict parse those 4,304 Kimi rows would be workflow failures: its failure
+rate would read 40% rather than 0.35%, and the rows would leave the ASR denominator. Scoring
+Kimi on strict-parse rows only moves its published cells by:
+
+| column | as reported | strict-only | delta |
+|---|---|---|---|
+| DPI ASR | 67.04% | 73.37% | +6.33pp |
+| OPI ASR | 27.32% | 20.44% | -6.87pp |
+| Memory Poisoning ASR | 12.15% | 10.13% | -2.02pp |
+| **Mixed ASR** | **75.35%** | **94.25%** | **+18.90pp** |
+
+Mixed moves nearly nineteen points, and the direction matters: salvage makes Kimi look
+*more* robust than upstream's protocol would. Its strict-only Mixed ASR of 94.25% is level
+with Ultra's 96.01%, where the reported 75.35% reads as a large safety advantage.
+
+The salvage is still the right default -- it recovers the plan the model actually produced,
+and penalizing a reasoning model for wrapping JSON in prose measures formatting rather than
+security. But Kimi's cells are not directly comparable to published ASB numbers, which were
+produced by 2024-era models that emitted bare JSON and were scored under the strict parse.
+`workflow_parse_path` is on every row so this is recomputable; any report carrying Kimi's
+numbers should carry this table too.
+
 ### 4. Consecutive system messages merged
 
 ASB opens every rollout with two system messages -- the agent description, then the planning
