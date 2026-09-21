@@ -247,6 +247,10 @@ class ORAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     validation_mode: Literal["none", "reference", "no_action", "wrong_file", "hung_process"] = "none"
     # Ceiling on any single solve.sh in ``reference`` mode; the per-step agent budget applies when lower.
     reference_solve_timeout_s: float = 2700.0
+    # Diagnostic only: overrides the ORCLAW_SOLVE_TIME_LIMIT_SECONDS upstream's solve.sh passes to the
+    # reference solver (task.toml sets 300). Separates "the validator is wrong" from "this host does
+    # not reach the reference objective in the published per-solve budget". Never affects agents.
+    reference_solve_time_limit_s: Optional[float] = None
 
     debug: bool = False
 
@@ -643,10 +647,15 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
         patches = REFERENCE_SOLUTION_PATCHES.get(task_name) if step.name is None else None
         await self._upload_dir(sandbox, Path(step.solution_dir), SOLUTION_DIR, patches=patches)
         timeout_s = min(step.agent_timeout_s, self.config.reference_solve_timeout_s)
-        solve = await sandbox.exec(
-            f"bash {SOLUTION_DIR}/solve.sh", user="root", env=step.solution_env or None, timeout_s=timeout_s
+        env = dict(step.solution_env)
+        if self.config.reference_solve_time_limit_s is not None:
+            env["ORCLAW_SOLVE_TIME_LIMIT_SECONDS"] = str(int(self.config.reference_solve_time_limit_s))
+            timeout_s = max(timeout_s, self.config.reference_solve_time_limit_s + 300)
+        solve = await sandbox.exec(f"bash {SOLUTION_DIR}/solve.sh", user="root", env=env or None, timeout_s=timeout_s)
+        output = (
+            f"solve.sh return_code={solve.return_code} error_type={solve.error_type} patched={bool(patches)} "
+            f"env={env}\n"
         )
-        output = f"solve.sh return_code={solve.return_code} error_type={solve.error_type} patched={bool(patches)}\n"
         output += _clean(solve.stderr)[-4000:] + _clean(solve.stdout)[-4000:]
         if mode == "wrong_file":
             after = await sandbox.exec("find /app/submissions -type f | sort", user="root")

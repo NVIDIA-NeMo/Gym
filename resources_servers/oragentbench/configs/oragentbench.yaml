@@ -27,6 +27,7 @@ oragentbench:
       # Model-free validation modes: none | reference | no_action | wrong_file | hung_process.
       validation_mode: none
       reference_solve_timeout_s: 2700.0
+      reference_solve_time_limit_s: null
       debug: false
 
 # Agent: Gym's sandboxed Terminus 2 loop, run once per Harbor step.

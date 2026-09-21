@@ -265,6 +265,24 @@ class TestModelFreeVerify:
         with pytest.raises(RuntimeError, match="did not match exactly once"):
             self.post(server, verify_body())
 
+    def test_reference_time_limit_override_reaches_the_solver_env_only_in_reference_mode(self, monkeypatch):
+        seen = {}
+
+        class RecordingSandbox(FakeSandbox):
+            async def exec(self, command, **kwargs):
+                if command.startswith("bash /solution/solve.sh"):
+                    seen.update(kwargs)
+                return await super().exec(command, **kwargs)
+
+        sandbox = RecordingSandbox(verifier=scored(True, 2.0))
+        server = make_server(sandbox, monkeypatch, validation_mode="reference", reference_solve_time_limit_s=1800)
+        self.post(server, verify_body())
+        assert seen["env"]["ORCLAW_SOLVE_TIME_LIMIT_SECONDS"] == "1800" and seen["timeout_s"] >= 1800
+        seen.clear()
+        default = make_server(RecordingSandbox(verifier=scored(True, 2.0)), monkeypatch, validation_mode="reference")
+        self.post(default, verify_body())
+        assert seen["env"]["ORCLAW_SOLVE_TIME_LIMIT_SECONDS"] == "10" and seen["timeout_s"] == 120
+
     def test_upstream_reference_patches_target_real_files(self):
         for task, files in app_module.REFERENCE_SOLUTION_PATCHES.items():
             assert task.startswith("oragentbench/")
@@ -548,7 +566,7 @@ class TestShippedConfig:
         config = yaml.safe_load(CONFIG_PATH.read_text())
         server = config["oragentbench"]["resources_servers"]["oragentbench"]
         defaults = ORAgentBenchResourcesServerConfig.model_fields
-        for knob in ("validation_mode", "reference_solve_timeout_s", "debug"):
+        for knob in ("validation_mode", "reference_solve_timeout_s", "reference_solve_time_limit_s", "debug"):
             assert server[knob] == defaults[knob].default, knob
         # Upstream task.toml: cpus = 4, memory_mb = 8192; the benchmark runs without internet.
         assert server["sandbox_config"]["resources"] == {"cpu": 4, "memory_mib": 8192, "disk_gib": 20}
