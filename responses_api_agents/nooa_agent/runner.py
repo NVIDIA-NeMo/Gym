@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -96,7 +97,7 @@ class EmbeddedNOOARunner:
             dispatcher=dispatcher,
             tools=list(request.responses_create_params.tools),
         )
-        agent = agent_class(llm=llm, **self._invocation.init_kwargs)
+        agent = agent_class(llm=llm, **copy.deepcopy(self._invocation.init_kwargs))
         validate_agent_resource_method_bindings(agent)
 
         return_value = await self._invocation_adapter(agent, request.responses_create_params)
