@@ -118,6 +118,14 @@ apt-get update"""
 
 
 TEST_SH_PATCHES = {
+    # Agent installs without recommends can leave curl present but its CA bundle
+    # absent. Install the verifier's HTTPS dependency explicitly at grading time.
+    "terminal-bench/compile-compcert": [
+        ("apt-get install -y curl binutils", "apt-get install -y curl ca-certificates binutils"),
+    ],
+    "terminal-bench/extract-moves-from-video": [
+        ("apt-get install -y curl", "apt-get install -y curl ca-certificates"),
+    ],
     "terminal-bench/qemu-startup": [
         ("apt-get update", QEMU_VERIFIER_APT_UPDATE),
     ],
