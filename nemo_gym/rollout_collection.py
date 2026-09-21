@@ -278,6 +278,75 @@ def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_native_episode_response(result: Any) -> bool:
+    """True for a ``BaseEpisodeResponse`` reply: identity plus exactly one of ``result`` or ``failure``."""
+    return (
+        isinstance(result, Mapping)
+        and "episode_id" in result
+        and "task_id" in result
+        and ("result" in result or "failure" in result)
+    )
+
+
+def _project_native_episode_response(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Give a native environment-server reply the keys the collector's readers expect.
+
+    A handled ``failure`` becomes a failures-sidecar row in the same shape the legacy single-agent
+    adapter emits, so resume retries a non-terminal one and never a terminal one. A ``result`` keeps
+    the native record and gains the top-level ``reward`` (and mask flag) that progress accounting and
+    the health check read off every line. The verifier's own fields stay under ``result.verification``.
+    """
+    failure = result.get("failure")
+    if failure is not None:
+        projected: Dict[str, Any] = {
+            "episode_id": result.get("episode_id"),
+            "task_id": result.get("task_id"),
+            NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+            NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
+            "_ng_failure_message": failure.get("message"),
+        }
+        if failure.get("stage") is not None:
+            projected["_ng_failure_stage"] = failure["stage"]
+        if failure.get("partial_response") is not None:
+            projected["_ng_failure_partial_response"] = failure["partial_response"]
+        return projected
+    native_result = result.get("result")
+    verification = native_result.get("verification") if isinstance(native_result, Mapping) else None
+    if isinstance(verification, Mapping):
+        if "reward" not in result and "reward" in verification:
+            result["reward"] = verification["reward"]
+        if MASK_SAMPLE_KEY not in result and MASK_SAMPLE_KEY in verification:
+            result[MASK_SAMPLE_KEY] = verification[MASK_SAMPLE_KEY]
+    return result
+
+
+_AGGREGATION_ROW_KEYS = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    AGENT_REF_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+    NG_ENVIRONMENT_SERVER_KEY,
+    NG_TASKSET_KEY,
+    MASK_SAMPLE_KEY,
+)
+
+
+def _verify_response_for_aggregation(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the verify response ``/aggregate_metrics`` scores: the record itself for a legacy
+    reply, the unwrapped ``result.verification`` plus the row keys for a native one."""
+    native_result = result.get("result") if _is_native_episode_response(result) else None
+    verification = native_result.get("verification") if isinstance(native_result, Mapping) else None
+    if not isinstance(verification, Mapping):
+        return result
+    entry = dict(verification)
+    for key in _AGGREGATION_ROW_KEYS:
+        if key in result:
+            entry[key] = result[key]
+    return entry
+
+
 @dataclass(frozen=True)
 class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
@@ -1429,7 +1498,13 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
-        environment_server_client = self.setup_server_client() if config.environment_routing_mode != "agent" else None
+        # Any run that stamps environment servers on rows (a non-default routing mode, or routes for
+        # materialized tasksets) needs the merged config to resolve those servers below.
+        environment_server_client = (
+            self.setup_server_client()
+            if config.environment_routing_mode != "agent" or config.environment_server_routes
+            else None
+        )
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -1591,6 +1666,10 @@ class RolloutCollectionHelper(BaseModel):
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
+            if _is_native_episode_response(result):
+                # A native environment-server reply: a handled failure becomes a sidecar row (and a
+                # retry candidate), a result gains the top-level reward every reader below expects.
+                result = _project_native_episode_response(result)
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1881,25 +1960,38 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         rows: List[Dict],
         output_fpath: Path,
     ) -> Optional[Path]:
-        """Call /aggregate_metrics on each agent's environment server after rollouts complete.
+        """Call /aggregate_metrics on the environment server each rollout ran through.
 
-        Writes a single _aggregate_metrics.json with one entry per agent (same shape
-        as the old _agent_metrics.json). Returns the file path.
+        Rows are grouped by the environment server stamped on them at preprocessing
+        (``_ng_environment_server``); a row without the stamp is grouped by the environment server
+        that fronts its agent, as before, so the identity decided at dispatch is the one aggregation
+        uses, across shards and resumed runs alike. Writes a single _aggregate_metrics.json with one
+        entry per environment server (same shape as the old _agent_metrics.json, plus the server
+        name). Returns the file path.
         """
         if not results:
             return None
 
-        # Group results by agent name
-        agent_results: Dict[str, List[Dict]] = {}
+        server_client = self.setup_server_client()
+        global_config_dict = server_client.global_config_dict
+
+        # Group results by the environment server they ran through.
+        server_results: Dict[str, List[Dict]] = {}
+        server_agents: Dict[str, Optional[str]] = {}
         for row, result in zip(rows, results):
             agent_name = (row.get(AGENT_REF_KEY_NAME) or result.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if not agent_name:
-                continue
-            agent_results.setdefault(agent_name, []).append(result)
+            server_name = row.get(NG_ENVIRONMENT_SERVER_KEY) or result.get(NG_ENVIRONMENT_SERVER_KEY)
+            if not isinstance(server_name, str):
+                if not agent_name:
+                    continue
+                server_name = _environment_server_for_agent(agent_name, global_config_dict)
+            server_results.setdefault(server_name, []).append(_verify_response_for_aggregation(result))
+            if agent_name is None:
+                # A native row names no agent; the environment server's own binding does.
+                agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
+            server_agents.setdefault(server_name, agent_name)
 
-        server_client = self.setup_server_client()
-
-        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+        async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
@@ -1929,7 +2021,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=_environment_server_for_agent(agent_name, server_client.global_config_dict),
+                server_name=server_name,
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -1938,6 +2030,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
+                NG_ENVIRONMENT_SERVER_KEY: server_name,
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
@@ -1948,7 +2041,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
-        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        tasks = [
+            # The label stays the agent where one is known, so metric names and the entry's
+            # `agent_ref` keep today's shape; a server that fronts no agent is labelled by its name.
+            _fetch_agent_metrics(server_name, server_agents[server_name] or server_name, results_list)
+            for server_name, results_list in server_results.items()
+        ]
         for coro in asyncio.as_completed(tasks):
             agent_entry = await coro
             all_agent_metrics.append(agent_entry)
@@ -2476,7 +2574,8 @@ class RolloutAggregationHelper(BaseModel):
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
 
-        # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
+        # `_call_aggregate_metrics` groups by the `_ng_environment_server` stamp, falling back to
+        # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.
         helper = RolloutCollectionHelper()
         scored = results + counted
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)

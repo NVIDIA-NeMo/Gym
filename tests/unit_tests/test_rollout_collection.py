@@ -4764,3 +4764,209 @@ class TestEnvironmentServerRouting:
 
         with pytest.raises(ValueError, match="environment_routing_mode=agent to mix"):
             RolloutCollectionHelper._preprocess_raw_rows([(0, orjson.dumps(flat).decode(), flat)], config)
+
+    # -- Identity through native failures, retries and aggregation --------------------------------
+
+    @staticmethod
+    def _native_identity(task: str, attempt: int = 0) -> dict:
+        return {
+            "episode_id": {"rollout_id": f"0-{task}", "attempt": attempt},
+            "task_id": {"taskset": "swe_pro", "task_id": task, "revision": "demo-v1"},
+        }
+
+    def test_native_failure_reply_is_projected_to_a_sidecar_row(self) -> None:
+        reply = self._native_identity("a") | {
+            "result": None,
+            "failure": {
+                "message": "agent unavailable",
+                "terminal": False,
+                "stage": "agent",
+                "partial_response": {"id": "partial"},
+            },
+        }
+        assert nemo_gym.rollout_collection._is_native_episode_response(reply)
+
+        projected = nemo_gym.rollout_collection._project_native_episode_response(reply)
+
+        assert projected[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert projected[NG_TERMINAL_KEY] is False
+        assert projected["_ng_failure_message"] == "agent unavailable"
+        assert projected["_ng_failure_stage"] == "agent"
+        assert projected["_ng_failure_partial_response"] == {"id": "partial"}
+        assert projected["task_id"]["task_id"] == "a"
+        assert "reward" not in projected
+
+        terminal = nemo_gym.rollout_collection._project_native_episode_response(
+            self._native_identity("a") | {"failure": {"message": "bad task", "terminal": True}}
+        )
+        assert terminal[NG_TERMINAL_KEY] is True
+
+    def test_native_result_reply_gains_top_level_reward_and_unwraps_for_aggregation(self) -> None:
+        reply = self._native_identity("a") | {
+            "failure": None,
+            "result": {
+                "verification": {"reward": 1.0, "response": {"usage": {"tokens": 3}}, "mask_sample": False},
+                "agent_observations": None,
+            },
+        }
+
+        projected = nemo_gym.rollout_collection._project_native_episode_response(reply)
+
+        assert projected is reply
+        assert projected["reward"] == 1.0
+        assert projected["mask_sample"] is False
+        assert projected["result"]["verification"]["reward"] == 1.0
+
+        projected[TASK_INDEX_KEY_NAME] = 0
+        projected[NG_ENVIRONMENT_SERVER_KEY] = "environment"
+        entry = nemo_gym.rollout_collection._verify_response_for_aggregation(projected)
+        assert entry == {
+            "reward": 1.0,
+            "response": {"usage": {"tokens": 3}},
+            "mask_sample": False,
+            TASK_INDEX_KEY_NAME: 0,
+            NG_ENVIRONMENT_SERVER_KEY: "environment",
+        }
+
+        legacy = {TASK_INDEX_KEY_NAME: 0, "reward": 0.5}
+        assert nemo_gym.rollout_collection._verify_response_for_aggregation(legacy) is legacy
+
+    async def test_call_aggregate_metrics_groups_by_environment_server(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Native rows aggregate on the server stamped at dispatch; legacy rows keep their agent's server."""
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
+        posts: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            assert url_path == "/aggregate_metrics"
+            posts[server_name] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, agg.model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = self._mixed_batch_config()
+
+        native_result = self._native_identity("a") | {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_ENVIRONMENT_SERVER_KEY: "environment",
+            "reward": 1.0,
+            "result": {"verification": {"reward": 1.0, "response": {"usage": {"tokens": 3}}}},
+        }
+        legacy_result = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+            "reward": 0.0,
+        }
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}},
+        ]
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            [native_result, legacy_result], rows, tmp_path / "output.jsonl"
+        )
+
+        assert set(posts) == {"environment", "legacy_environment"}
+        # The native group is scored on the unwrapped verify response, keyed by the row's indices.
+        assert posts["environment"] == [
+            {
+                "reward": 1.0,
+                "response": {"usage": {"tokens": 3}},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_ENVIRONMENT_SERVER_KEY: "environment",
+            }
+        ]
+        assert posts["legacy_environment"][0][TASK_INDEX_KEY_NAME] == 1
+        written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
+        assert set(written) == {"environment", "legacy_environment"}
+        # The native group is labelled by the agent its environment server binds.
+        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+
+    async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Identity persists: the stamped server is on the result, the sidecar row, and the retry."""
+        global_config = self._mixed_batch_config()
+        empty_global_config.return_value = global_config
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(self._materialized_row() | {"task_id": {"taskset": "swe_pro", "task_id": task}}) + b"\n"
+                for task in ("a", "b")
+            )
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        dispatched: list[tuple[str, dict]] = []
+        failed_once: set[str] = set()
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                dispatched.append((server_name, json))
+                task = json["task"]["task_id"]["task_id"]
+                identity = {"episode_id": json["episode_id"], "task_id": json["task"]["task_id"]}
+                if task == "a" and task not in failed_once:
+                    failed_once.add(task)
+                    return FakeResponse(
+                        200,
+                        identity | {"result": None, "failure": {"message": "agent unavailable", "terminal": False}},
+                    )
+                return FakeResponse(
+                    200,
+                    identity
+                    | {
+                        "failure": None,
+                        "result": {"verification": {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}}},
+                    },
+                )
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = global_config
+
+        def config(resume: bool) -> RolloutCollectionConfig:
+            return RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                environment_server_routes={"swe_pro": "environment"},
+                resume_from_cache=resume,
+                disable_health_check=True,
+            )
+
+        await RolloutCollectionHelper().run_from_config(config(resume=False))
+
+        assert [server for server, _ in dispatched] == ["environment", "environment"]
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [r["task_id"]["task_id"] for r in persisted] == ["b"]
+        assert persisted[0]["reward"] == 1.0
+        assert persisted[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert persisted[0][nemo_gym.rollout_collection.NG_TASKSET_KEY] == "swe_pro"
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert len(failures) == 1
+        assert failures[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert failures[0][NG_TERMINAL_KEY] is False
+        assert failures[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert failures[0]["task_id"]["task_id"] == "a"
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        entries = orjson.loads(metrics_fpath.read_bytes())
+        assert [entry[NG_ENVIRONMENT_SERVER_KEY] for entry in entries] == ["environment"]
+        assert entries[0]["key_metrics"]["mean/reward"] == 1.0
+
+        # Resume: only the failed episode is re-dispatched, to the same server, as attempt 1.
+        dispatched.clear()
+        await RolloutCollectionHelper().run_from_config(config(resume=True))
+
+        assert len(dispatched) == 1
+        server_name, body = dispatched[0]
+        assert server_name == "environment"
+        assert body["task"]["task_id"]["task_id"] == "a"
+        assert body["episode_id"]["attempt"] == 1
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert sorted(r["task_id"]["task_id"] for r in persisted) == ["a", "b"]
+        assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
