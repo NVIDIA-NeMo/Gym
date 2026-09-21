@@ -227,11 +227,95 @@ def paired_upstream(server, rows, model_key: str, predictions: dict) -> dict:
     }
 
 
+def raw_log_parity(server, rows, model_key: str, raw_log_paths: list[str], predictions: dict) -> dict:
+    """Score upstream's *raw model text* through ``verify()`` and compare, per output, with the
+    hit rank upstream's formulas give on the list upstream published for that same output.
+
+    This is the per-output scorer-agreement check: the same 3 x 105 generations, upstream's
+    extraction (as reflected in ``combined_predictions_105_final.json``) versus ours on the text.
+    """
+    by_id = {rec["compound_id"]: rec for group in predictions.values() for rec in group.values()}
+    row_by_id = {row["verifier_metadata"]["compound_id"]: row for row in rows}
+    counts = {
+        "both_hit_same_rank": 0,
+        "both_miss": 0,
+        "ours_only_hit": 0,
+        "upstream_only_hit": 0,
+        "both_hit_different_rank": 0,
+    }
+    tanimoto_denominator = {"same": 0, "ours_only_defined": 0, "upstream_only_defined": 0}
+    discordances = []
+    n = 0
+    for run, path in enumerate(raw_log_paths):
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            d = json.loads(line)
+            if d.get("model_key") != model_key:
+                continue
+            n += 1
+            rec = by_id[d["compound_id"]]
+            row = row_by_id[d["compound_id"]]
+            up_list = rec[model_key][run]
+            truth = canonical(rec["smiles"])
+            up_rank = next((i + 1 for i, s in enumerate(up_list) if canonical(s) == truth), None)
+            up_tani_defined = bool(up_list) and tanimoto(rec["smiles"], up_list[0]) is not None
+            ours = verify_text(server, row, d.get("response_text") or "")
+            our_rank = ours["hit_rank"]
+            if our_rank == up_rank:
+                counts["both_hit_same_rank" if up_rank is not None else "both_miss"] += 1
+            elif up_rank is None:
+                counts["ours_only_hit"] += 1
+            elif our_rank is None:
+                counts["upstream_only_hit"] += 1
+            else:
+                counts["both_hit_different_rank"] += 1
+            ours_defined = ours["tanimoto_top1"] is not None
+            if ours_defined == up_tani_defined:
+                tanimoto_denominator["same"] += 1
+            elif ours_defined:
+                tanimoto_denominator["ours_only_defined"] += 1
+            else:
+                tanimoto_denominator["upstream_only_defined"] += 1
+            if (
+                our_rank != up_rank
+                or ours_defined != up_tani_defined
+                or ours["candidates"] != [canonical(s) for s in up_list[:10]]
+            ):
+                discordances.append(
+                    {
+                        "run": run + 1,
+                        "compound_id": d["compound_id"],
+                        "finish_reason": d.get("finish_reason"),
+                        "upstream_status": d.get("status"),
+                        "upstream_rank": up_rank,
+                        "our_rank": our_rank,
+                        "our_status": ours["status"],
+                        "our_salvaged": ours["salvaged"],
+                        "n_upstream_list": len(up_list),
+                        "n_ours": len(ours["candidates"]),
+                        "first_upstream_in_text": bool(up_list) and up_list[0] in (d.get("response_text") or ""),
+                        "first_upstream_in_reasoning": bool(up_list) and up_list[0] in (d.get("reasoning_text") or ""),
+                    }
+                )
+    return {
+        "model": model_key,
+        "n_outputs": n,
+        "hit_rank_agreement": counts,
+        "tanimoto_denominator": tanimoto_denominator,
+        "list_level_discordances": discordances,
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", required=True, help="Prepared benchmark JSONL")
     parser.add_argument("--upstream-model", default="gemini", choices=sorted(README_TABLE))
     parser.add_argument("--predictions", default=None, help="Local copy of combined_predictions_105_final.json")
+    parser.add_argument(
+        "--upstream-raw-log",
+        action="append",
+        default=[],
+        help="Upstream results/LLM_results/llm_rep{1,2,3}_raw.jsonl in run order; enables per-output parity",
+    )
     parser.add_argument("--output", required=True, help="Where to write the JSON summary")
     args = parser.parse_args(argv)
 
@@ -324,7 +408,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         with urllib.request.urlopen(PREDICTIONS_URL, timeout=120) as response:
             raw = response.read()
     report["upstream_predictions_sha256"] = hashlib.sha256(raw).hexdigest()
-    report["upstream_parity"] = paired_upstream(lenient, rows, args.upstream_model, json.loads(raw))
+    predictions = json.loads(raw)
+    report["upstream_parity"] = paired_upstream(lenient, rows, args.upstream_model, predictions)
+    if args.upstream_raw_log:
+        report["raw_log_parity"] = raw_log_parity(
+            lenient, rows, args.upstream_model, args.upstream_raw_log, predictions
+        )
 
     Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({k: v for k, v in report.items() if k != "controls"}, indent=2)[:4000])
