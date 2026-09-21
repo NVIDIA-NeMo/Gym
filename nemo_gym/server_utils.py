@@ -86,11 +86,14 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ATTEMPT_INDEX_HEADER,
+    LOGICAL_CALL_ID_HEADER,
     PARENT_MODEL_CALL_ID_HEADER,
+    REQUEST_ATTEMPT_ID_HEADER,
     ROLLOUT_ID_HEADER,
     SOURCE_CAPTURE_KEY_HEADER,
     current_attempt_index,
     current_logical_rollout_id,
+    current_model_request_correlation,
     current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
@@ -368,17 +371,41 @@ async def _request_with_retries(
     retry_start = time.monotonic()
     while True:
         try:
-            return await client.request(method=method, url=url, **kwargs)
+            response = await client.request(method=method, url=url, **kwargs)
+            if retries:
+                _log_connection_retry(
+                    "request_connection_retry_recovered",
+                    method=method,
+                    url=url,
+                    error=None,
+                    retries=retries,
+                    retry_start=retry_start,
+                    internal=_internal,
+                    max_connection_retries=_max_connection_retries,
+                )
+            return response
         except ServerDisconnectedError:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
+            if (
+                retries in {1, 10}
+                or retries % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0
+                or _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0
+            ):
+                _log_connection_retry(
+                    "request_connection_retry",
+                    method=method,
+                    url=url,
+                    error="ServerDisconnectedError",
+                    retries=retries,
+                    global_errors=_NUM_SERVER_DISCONNECTED_ERROR,
+                    retry_start=retry_start,
+                    internal=_internal,
+                    max_connection_retries=_max_connection_retries,
                 )
+            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                print(DISCONNECTED_CLIENT_OS_HELP_TEXT, flush=True)
 
             # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
             if _max_connection_retries is not None and retries >= _max_connection_retries:
@@ -389,12 +416,24 @@ async def _request_with_retries(
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
+            if (
+                retries in {1, 10}
+                or retries % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0
+                or _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0
+            ):
+                _log_connection_retry(
+                    "request_connection_retry",
+                    method=method,
+                    url=url,
+                    error="ClientOSError",
+                    retries=retries,
+                    global_errors=_NUM_CLIENT_OS_ERROR,
+                    retry_start=retry_start,
+                    internal=_internal,
+                    max_connection_retries=_max_connection_retries,
                 )
+            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                print(DISCONNECTED_CLIENT_OS_HELP_TEXT, flush=True)
 
             if _max_connection_retries is not None and retries >= _max_connection_retries:
                 raise
@@ -419,9 +458,45 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
+def _log_connection_retry(
+    event: str,
+    *,
+    method: str,
+    url: str,
+    error: Optional[str],
+    retries: int,
+    retry_start: float,
+    internal: bool,
+    max_connection_retries: Optional[int],
+    global_errors: Optional[int] = None,
+) -> None:
+    print(
+        f"[{event}] "
+        + json.dumps(
+            {
+                "rollout_id": current_rollout_id(),
+                "attempt_index": current_attempt_index(),
+                "method": method.upper(),
+                "url": _redacted_url(url),
+                "error": error,
+                "retries": retries,
+                "global_errors": global_errors,
+                "elapsed_s": round(time.monotonic() - retry_start, 3),
+                "internal": internal,
+                "max_connection_retries": max_connection_retries,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
-        content = await response.content.read()
+        # ClientResponse.read() caches the payload.  Callers such as checkpoint
+        # refusal classification may already have inspected the body; reading
+        # the raw stream again would then replace the useful error with b"".
+        content = await response.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
@@ -571,6 +646,16 @@ class ServerClient(BaseModel):
             and "responses_api_agents" in server_entry
             and request_path.endswith("/v1/responses")
         )
+        logical_call_id, request_attempt_id = current_model_request_correlation()
+        if is_policy_generation and logical_call_id is not None and request_attempt_id is not None:
+            headers = dict(kwargs.get("headers") or {})
+            if headers.get(LOGICAL_CALL_ID_HEADER, logical_call_id) != logical_call_id:
+                raise ValueError("caller-supplied logical call ID disagrees with the active model request")
+            if headers.get(REQUEST_ATTEMPT_ID_HEADER, request_attempt_id) != request_attempt_id:
+                raise ValueError("caller-supplied request attempt ID disagrees with the active model request")
+            headers[LOGICAL_CALL_ID_HEADER] = logical_call_id
+            headers[REQUEST_ATTEMPT_ID_HEADER] = request_attempt_id
+            kwargs["headers"] = headers
         source_capture_key, parent_model_call_id = (
             take_checkpoint_parent() if is_policy_generation or is_agent_parent_relay else (None, None)
         )

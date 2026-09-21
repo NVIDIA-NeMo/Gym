@@ -35,6 +35,8 @@ from nemo_gym.global_config import (
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _LOGICAL_ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_logical_rollout_id", default=None)
 _ATTEMPT_INDEX: ContextVar[Optional[int]] = ContextVar("nemo_gym_attempt_index", default=None)
+_LOGICAL_CALL_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_logical_call_id", default=None)
+_REQUEST_ATTEMPT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_request_attempt_id", default=None)
 
 
 @dataclass
@@ -56,6 +58,8 @@ ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
 ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
 MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
 MODEL_CALL_CAPTURE_OUTCOME_HEADER = "x-nemo-gym-model-call-capture-outcome"
+LOGICAL_CALL_ID_HEADER = "x-nemo-gym-logical-call-id"
+REQUEST_ATTEMPT_ID_HEADER = "x-nemo-gym-request-attempt-id"
 SOURCE_CAPTURE_KEY_HEADER = "x-nemo-gym-source-capture-key"
 PARENT_MODEL_CALL_ID_HEADER = "x-nemo-gym-parent-model-call-id"
 
@@ -238,6 +242,27 @@ def current_execution_identity() -> tuple[Optional[str], Optional[int]]:
     if rollout_id is None:
         return _LOGICAL_ROLLOUT_ID.get(), _ATTEMPT_INDEX.get()
     return current_logical_rollout_id(), current_attempt_index()
+
+
+def current_model_request_correlation() -> tuple[Optional[str], Optional[str]]:
+    """Return the logical call and physical HTTP-attempt IDs for a model request."""
+    return _LOGICAL_CALL_ID.get(), _REQUEST_ATTEMPT_ID.get()
+
+
+@contextmanager
+def model_request_correlation(logical_call_id: str, request_attempt_id: str) -> Iterator[None]:
+    """Propagate one logical model call and one physical HTTP attempt."""
+    if not logical_call_id or "\r" in logical_call_id or "\n" in logical_call_id:
+        raise ValueError("invalid logical call ID")
+    if not request_attempt_id or "\r" in request_attempt_id or "\n" in request_attempt_id:
+        raise ValueError("invalid request attempt ID")
+    logical_token = _LOGICAL_CALL_ID.set(logical_call_id)
+    attempt_token = _REQUEST_ATTEMPT_ID.set(request_attempt_id)
+    try:
+        yield
+    finally:
+        _REQUEST_ATTEMPT_ID.reset(attempt_token)
+        _LOGICAL_CALL_ID.reset(logical_token)
 
 
 def take_checkpoint_parent() -> tuple[Optional[str], Optional[str]]:

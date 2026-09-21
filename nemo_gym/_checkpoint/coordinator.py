@@ -33,7 +33,7 @@ service's. The coordinator fixes this by owning the service-level truth:
   reject close, and registrations remain closed until resume so replacement
   processes cannot substitute for frozen membership.
 
-The message protocol is newline-delimited JSON, chosen for debuggability:
+The message protocol uses length-prefixed, size-bounded JSON frames:
 ``register``, ``ack``, ``counters`` upstream; ``state`` downstream. The
 transport is a Unix-domain socket because the coordinator and its workers
 are one service on one host; nothing here crosses machines.
@@ -41,9 +41,11 @@ are one service on one host; nothing here crosses machines.
 
 import asyncio
 import json
+import logging
+import struct
 import threading
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Optional
 
 from fastapi import FastAPI, Header, Query
 
@@ -112,6 +114,19 @@ class RestoredCutConsumedError(ControlError):
 
 
 CHECKPOINT_COORDINATOR_SOCKET_ENV = "NG_CHECKPOINT_COORDINATOR_SOCKET"
+
+_LOG = logging.getLogger(__name__)
+_FRAME_HEADER = struct.Struct("!I")
+# A scale checkpoint may report thousands of lineage identities and frozen
+# generation tickets in one worker acknowledgement. Keep ample headroom above
+# those expected multi-megabyte messages while rejecting corrupt lengths before
+# allocating or buffering an unbounded payload.
+_MAX_COORDINATOR_PAYLOAD_BYTES = 32 * 1024 * 1024
+
+
+class _CoordinatorProtocolError(ValueError):
+    """A coordinator socket frame is malformed or exceeds its size bound."""
+
 
 _LEASE_MUTATING_SERVICE_OPERATIONS = frozenset(
     {
@@ -430,8 +445,10 @@ class AdmissionCoordinator:
                     if lease_mutating:
                         record.lease_tasks.add(task)
                         task.add_done_callback(record.lease_tasks.discard)
-        except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError):
+        except (BrokenPipeError, ConnectionResetError):
             pass
+        except _CoordinatorProtocolError as error:
+            _LOG.warning("closing checkpoint coordinator worker connection after protocol error: %s", error)
         finally:
             if record is not None:
                 record.connected = False
@@ -813,13 +830,18 @@ class WorkerAdmissionAgent:
         self._writer = writer
         self.limiter.add_listener(self._on_limiter_change)
         await self._write({"type": "register", "worker_id": self.worker_id, "pid": self.pid})
-        line = await reader.readline()
-        if not line:
+        try:
+            first_message = await _read_message(reader)
+        except _CoordinatorProtocolError as error:
+            self.limiter.remove_listener(self._on_limiter_change)
+            self._writer = None
+            writer.close()
+            raise WorkerRegistrationError(f"invalid checkpoint coordinator registration response: {error}") from error
+        if first_message is None:
             self.limiter.remove_listener(self._on_limiter_change)
             self._writer = None
             writer.close()
             raise WorkerRegistrationError("coordinator closed the worker registration connection")
-        first_message = json.loads(line)
         if first_message.get("type") == "registration_rejected":
             self._checkpoint_id = first_message.get("checkpoint_id")
             self.limiter.close(self._checkpoint_id)
@@ -862,6 +884,10 @@ class WorkerAdmissionAgent:
                     self._complete_service_request(message)
                 else:
                     await self._apply_state_message(message)
+        except _CoordinatorProtocolError as error:
+            _LOG.warning("checkpoint coordinator worker received an invalid frame: %s", error)
+            if self._writer is not None:
+                self._writer.close()
         finally:
             for future in tuple(self._service_requests.values()):
                 if not future.done():
@@ -1241,15 +1267,51 @@ def build_coordinator_control_app(
 
 
 async def _write_message(writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
-    writer.write(json.dumps(message).encode() + b"\n")
+    payload = json.dumps(message, separators=(",", ":")).encode()
+    payload_size = len(payload)
+    if payload_size == 0 or payload_size > _MAX_COORDINATOR_PAYLOAD_BYTES:
+        raise _CoordinatorProtocolError(
+            "checkpoint coordinator payload size "
+            f"{payload_size} is outside the allowed range 1..{_MAX_COORDINATOR_PAYLOAD_BYTES}"
+        )
+    writer.write(_FRAME_HEADER.pack(payload_size) + payload)
     await writer.drain()
 
 
-async def _read_messages(reader: asyncio.StreamReader):
+async def _read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+    try:
+        header = await reader.readexactly(_FRAME_HEADER.size)
+    except asyncio.IncompleteReadError as error:
+        if not error.partial:
+            return None
+        raise _CoordinatorProtocolError(
+            f"truncated checkpoint coordinator frame header: received {len(error.partial)} of {_FRAME_HEADER.size} bytes"
+        ) from error
+
+    (payload_size,) = _FRAME_HEADER.unpack(header)
+    if payload_size == 0 or payload_size > _MAX_COORDINATOR_PAYLOAD_BYTES:
+        raise _CoordinatorProtocolError(
+            "checkpoint coordinator payload size "
+            f"{payload_size} is outside the allowed range 1..{_MAX_COORDINATOR_PAYLOAD_BYTES}"
+        )
+    try:
+        payload = await reader.readexactly(payload_size)
+    except asyncio.IncompleteReadError as error:
+        raise _CoordinatorProtocolError(
+            f"truncated checkpoint coordinator payload: received {len(error.partial)} of {payload_size} bytes"
+        ) from error
+    try:
+        message = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise _CoordinatorProtocolError("checkpoint coordinator payload is not valid UTF-8 JSON") from error
+    if not isinstance(message, dict):
+        raise _CoordinatorProtocolError("checkpoint coordinator payload must be a JSON object")
+    return message
+
+
+async def _read_messages(reader: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
     while True:
-        line = await reader.readline()
-        if not line:
+        message = await _read_message(reader)
+        if message is None:
             return
-        line = line.strip()
-        if line:
-            yield json.loads(line)
+        yield message

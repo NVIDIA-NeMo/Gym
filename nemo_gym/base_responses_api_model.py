@@ -53,6 +53,7 @@ from nemo_gym._checkpoint.admission import (
     AdmissionLimiter,
     AdmissionMiddleware,
     bind_current_model_call,
+    log_current_request_lifecycle,
     mark_current_generation_started,
 )
 from nemo_gym._checkpoint.artifacts import (
@@ -561,20 +562,27 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             request_messages = _request_messages(params)
+            log_current_request_lifecycle("parent_resolution_started")
             await resolve_parent(request_messages)
+            log_current_request_lifecycle("parent_resolution_completed")
             await register_call_intent()
+            log_current_request_lifecycle("call_intent_registered")
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
             mark_current_generation_started()
+            log_current_request_lifecycle("backend_request_sent")
             completion = await self.chat_completions(request=request, body=params)
         else:
             mark_current_generation_started()
+            log_current_request_lifecycle("backend_request_sent")
             completion = await self.chat_completions(body=params)
+        log_current_request_lifecycle("backend_request_completed")
         await capture_tokens(
             completion,
             request_messages=request_messages,
         )
+        log_current_request_lifecycle("terminal_capture_completed")
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -608,16 +616,22 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             request_messages = _request_messages(params)
+            log_current_request_lifecycle("parent_resolution_started")
             await resolve_parent(request_messages)
+            log_current_request_lifecycle("parent_resolution_completed")
             await register_call_intent()
+            log_current_request_lifecycle("call_intent_registered")
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
             mark_current_generation_started()
+            log_current_request_lifecycle("backend_request_sent")
             response = await self.responses(request=request, body=params)
         else:
             mark_current_generation_started()
+            log_current_request_lifecycle("backend_request_sent")
             response = await self.responses(body=params)
+        log_current_request_lifecycle("backend_request_completed")
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
@@ -625,6 +639,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response,
             request_messages=request_messages,
         )
+        log_current_request_lifecycle("terminal_capture_completed")
         return response
 
 

@@ -17,7 +17,9 @@ from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from functools import wraps
+from time import monotonic
 from typing import Any, ClassVar, Optional
+from uuid import uuid4
 from warnings import warn
 
 import orjson
@@ -68,6 +70,7 @@ from nemo_gym.rollout_correlation import (
     current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
+    model_request_correlation,
     rollout_context,
 )
 from nemo_gym.server_utils import (
@@ -270,23 +273,154 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         checkpointable_model_wait: bool = False,
     ) -> Any:
         execution = self.checkpoint_execution(request)
+        refusal_count = 0
+        logical_call_id = uuid4().hex if checkpointable_model_wait else None
+        request_attempt_number = 0
         while True:
             checkpoint_resumed_during_model_wait = False
+            request_attempt_number += 1
+            request_attempt_id = uuid4().hex if logical_call_id is not None else None
+            request_started: Optional[float] = None
+
+            def log_request_started() -> None:
+                nonlocal request_started
+                if logical_call_id is None or request_attempt_id is None:
+                    return
+                request_started = monotonic()
+                print(
+                    "[agent_model_request_lifecycle] "
+                    + orjson.dumps(
+                        {
+                            "stage": "agent_http_request_started",
+                            "participant": (
+                                self._checkpoint_participant.instance_name
+                                if self._checkpoint_participant is not None
+                                else None
+                            ),
+                            "rollout_id": execution.rollout_id if execution is not None else None,
+                            "attempt_index": execution.attempt_index if execution is not None else None,
+                            "logical_call_id": logical_call_id,
+                            "request_attempt_id": request_attempt_id,
+                            "request_attempt_number": request_attempt_number,
+                        }
+                    ).decode(),
+                    flush=True,
+                )
+
+            correlation_context = (
+                model_request_correlation(logical_call_id, request_attempt_id)
+                if logical_call_id is not None and request_attempt_id is not None
+                else nullcontext()
+            )
             if checkpointable_model_wait and execution is not None and self._checkpoint_participant is not None:
                 await self._checkpoint_participant.begin_model_wait(execution)
                 try:
-                    response = await operation()
+                    log_request_started()
+                    with correlation_context:
+                        response = await operation()
                 finally:
                     checkpoint_resumed_during_model_wait = await self._checkpoint_participant.end_model_wait(execution)
             else:
-                response = await operation()
-            if await _checkpoint_refusal_code(response) is None:
+                log_request_started()
+                with correlation_context:
+                    response = await operation()
+            if logical_call_id is not None and request_attempt_id is not None:
+                response_status = getattr(response, "status", None)
+                if not isinstance(response_status, int):
+                    response_status = None
+                print(
+                    "[agent_model_request_lifecycle] "
+                    + orjson.dumps(
+                        {
+                            "stage": "agent_http_response_received",
+                            "participant": (
+                                self._checkpoint_participant.instance_name
+                                if self._checkpoint_participant is not None
+                                else None
+                            ),
+                            "rollout_id": execution.rollout_id if execution is not None else None,
+                            "attempt_index": execution.attempt_index if execution is not None else None,
+                            "logical_call_id": logical_call_id,
+                            "request_attempt_id": request_attempt_id,
+                            "request_attempt_number": request_attempt_number,
+                            "status": response_status,
+                            "elapsed_s": (
+                                round(monotonic() - request_started, 3) if request_started is not None else None
+                            ),
+                        }
+                    ).decode(),
+                    flush=True,
+                )
+            refusal_code, refusal_reason = await _checkpoint_refusal(response)
+            if refusal_code is None:
                 return response
             if execution is None or self._checkpoint_participant is None:
                 return response
-            if checkpoint_resumed_during_model_wait:
-                continue
-            await self._checkpoint_participant.park(execution)
+            refusal_count += 1
+            boundary = execution.boundary
+            print(
+                "[agent_checkpoint_refusal] "
+                + orjson.dumps(
+                    {
+                        "rollout_id": execution.rollout_id,
+                        "attempt_index": execution.attempt_index,
+                        "generation": execution.generation,
+                        "refusal_code": refusal_code,
+                        "refusal_reason": refusal_reason,
+                        "refusal_count": refusal_count,
+                        "logical_call_id": logical_call_id,
+                        "request_attempt_id": request_attempt_id,
+                        "request_attempt_number": request_attempt_number,
+                        "state": execution.state.value,
+                        "boundary_index": boundary.boundary_index if boundary is not None else None,
+                        "model_wait_depth": execution.model_wait_depth,
+                    }
+                ).decode(),
+                flush=True,
+            )
+            if refusal_count == 3 or refusal_count % 10 == 0:
+                last_reached_stage = {
+                    "admission_already_closed": "policy_request_received",
+                    "checkpoint_closed_before_generation_started": "pre_generation_setup",
+                    "resources_admission_closed": "resources_request_received",
+                }.get(refusal_reason, "unknown")
+                print(
+                    "[checkpoint_starvation_suspected] "
+                    + orjson.dumps(
+                        {
+                            "participant": self._checkpoint_participant.instance_name,
+                            "rollout_id": execution.rollout_id,
+                            "attempt_index": execution.attempt_index,
+                            "logical_call_id": logical_call_id,
+                            "request_attempt_id": request_attempt_id,
+                            "refusals": refusal_count,
+                            "reason": refusal_reason,
+                            "last_reached_stage": last_reached_stage,
+                        }
+                    ).decode(),
+                    flush=True,
+                )
+            retry_mode = "checkpoint_resumed"
+            if not checkpoint_resumed_during_model_wait:
+                await self._checkpoint_participant.park(execution)
+                retry_mode = "park_resume"
+            print(
+                "[agent_checkpoint_refusal_retry] "
+                + orjson.dumps(
+                    {
+                        "rollout_id": execution.rollout_id,
+                        "attempt_index": execution.attempt_index,
+                        "generation": execution.generation,
+                        "refusal_count": refusal_count,
+                        "logical_call_id": logical_call_id,
+                        "previous_request_attempt_id": request_attempt_id,
+                        "next_request_attempt_number": request_attempt_number + 1,
+                        "retry_mode": retry_mode,
+                        "state": execution.state.value,
+                    }
+                ).decode(),
+                flush=True,
+            )
 
     async def checkpointable_external_wait(
         self,
@@ -438,16 +572,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
 
-async def _checkpoint_refusal_code(response: Any) -> Optional[str]:
+async def _checkpoint_refusal(response: Any) -> tuple[Optional[str], Optional[str]]:
     status = getattr(response, "status", None)
     if not isinstance(status, int) or status != 409:
-        return None
+        return None, None
     try:
         payload = orjson.loads(await response.read())
     except (TypeError, ValueError):
-        return None
+        return None, None
     error = payload.get("error") if isinstance(payload, Mapping) else None
     code = error.get("code") if isinstance(error, Mapping) else None
-    if code in {"checkpoint_parked", "resources_admission_closed"}:
-        return code
-    return None
+    if code not in {"checkpoint_parked", "resources_admission_closed"}:
+        return None, None
+    detail = error.get("detail") if isinstance(error, Mapping) else None
+    if code == "resources_admission_closed":
+        reason = "resources_admission_closed"
+    elif isinstance(detail, str) and "admitted before checkpoint close" in detail:
+        reason = "checkpoint_closed_before_generation_started"
+    elif isinstance(detail, str) and "admission is" in detail:
+        reason = "admission_already_closed"
+    else:
+        reason = "checkpoint_parked"
+    return code, reason

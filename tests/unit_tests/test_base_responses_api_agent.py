@@ -207,3 +207,53 @@ class TestBaseResponsesAPIAgent:
         finally:
             participant.unbind(token)
             await participant.finish(execution, outcome="failed")
+
+    async def test_checkpoint_prepare_before_model_wait_blocks_http_dispatch(self, capsys) -> None:
+        agent = self._agent({})
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        operation_started = asyncio.Event()
+
+        class _Response:
+            status = 200
+
+            async def read(self) -> bytes:
+                return b"{}"
+
+        async def operation() -> _Response:
+            operation_started.set()
+            return _Response()
+
+        token = participant.bind(execution)
+        try:
+            prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            request = asyncio.create_task(
+                agent.retry_checkpoint_refusal(
+                    operation,
+                    checkpointable_model_wait=True,
+                )
+            )
+
+            assert (await prepare)["ready_to_commit"] is True
+            assert not operation_started.is_set()
+            assert '"stage":"agent_http_request_started"' not in capsys.readouterr().out
+
+            await participant.resume()
+            response = await asyncio.wait_for(request, timeout=1)
+
+            assert response.status == 200
+            assert operation_started.is_set()
+            assert '"stage":"agent_http_request_started"' in capsys.readouterr().out
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")

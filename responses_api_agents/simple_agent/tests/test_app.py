@@ -45,7 +45,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_correlation import current_model_request_correlation, rollout_context
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import (
@@ -1562,6 +1562,53 @@ class TestApp:
         }
         assert model_cookies == {"model": "updated"}
         assert resource_cookies == {"resource": "updated"}
+
+    async def test_model_refusals_keep_logical_call_and_rotate_physical_attempt(self, capsys) -> None:
+        server, _client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        correlations = []
+        responses = [
+            _mock_response(
+                {
+                    "error": {
+                        "code": "checkpoint_parked",
+                        "detail": "admission is paused for a checkpoint",
+                    }
+                },
+                status=409,
+            )
+            for _ in range(3)
+        ] + [_mock_response({"ok": True})]
+
+        async def operation() -> MagicMock:
+            correlations.append(current_model_request_correlation())
+            return responses.pop(0)
+
+        token = participant.bind(execution)
+        task = asyncio.create_task(
+            server.retry_checkpoint_refusal(
+                operation,
+                checkpointable_model_wait=True,
+            )
+        )
+        participant.unbind(token)
+        for expected_calls in range(1, 4):
+            while len(correlations) < expected_calls or participant.status()["parked"] != 1:
+                await asyncio.sleep(0)
+            await participant.resume()
+        await task
+
+        logical_call_ids = {logical_call_id for logical_call_id, _request_attempt_id in correlations}
+        request_attempt_ids = {request_attempt_id for _logical_call_id, request_attempt_id in correlations}
+        assert len(logical_call_ids) == 1
+        assert None not in logical_call_ids
+        assert len(request_attempt_ids) == 4
+        assert None not in request_attempt_ids
+        output = capsys.readouterr().out
+        assert "[checkpoint_starvation_suspected]" in output
+        assert '"reason":"admission_already_closed"' in output
+        assert '"refusals":3' in output
 
     async def test_refused_tool_call_parks_and_retries_without_entering_history(self) -> None:
         server, client = _make_agent(observability_enabled=False)

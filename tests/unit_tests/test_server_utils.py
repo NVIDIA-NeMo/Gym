@@ -100,7 +100,7 @@ class TestServerUtils:
         )
         response = MagicMock()
         response.ok = False
-        response.content.read = AsyncMock(return_value=b'{"detail":"backend unavailable"}')
+        response.read = AsyncMock(return_value=b'{"detail":"backend unavailable"}')
         response.request_info = request_info
         response.raise_for_status.side_effect = original_error
 

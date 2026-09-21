@@ -38,7 +38,12 @@ from nemo_gym._checkpoint import (
 )
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import ATTEMPT_INDEX_HEADER, ROLLOUT_ID_HEADER
+from nemo_gym.rollout_correlation import (
+    ATTEMPT_INDEX_HEADER,
+    LOGICAL_CALL_ID_HEADER,
+    REQUEST_ATTEMPT_ID_HEADER,
+    ROLLOUT_ID_HEADER,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -49,6 +54,13 @@ def _identity_headers(rollout_id: str, attempt_index: int = 0) -> dict[str, str]
     return {
         ROLLOUT_ID_HEADER: rollout_id,
         ATTEMPT_INDEX_HEADER: str(attempt_index),
+    }
+
+
+def _correlation_headers(logical_call_id: str, request_attempt_id: str) -> dict[str, str]:
+    return {
+        LOGICAL_CALL_ID_HEADER: logical_call_id,
+        REQUEST_ATTEMPT_ID_HEADER: request_attempt_id,
     }
 
 
@@ -304,6 +316,54 @@ def test_middleware_parks_new_calls_when_closed() -> None:
     assert response.headers["retry-after"] == "1"
 
 
+def test_middleware_logs_correlated_closed_admission_reason(capsys, monkeypatch) -> None:
+    monkeypatch.delenv("NEMO_GYM_CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING", raising=False)
+    limiter = AdmissionLimiter()
+    client = _gated_app(limiter)
+    limiter.close()
+    response = client.post(
+        "/v1/responses",
+        headers={
+            **_identity_headers("4-2"),
+            **_correlation_headers("logical-call-1", "physical-attempt-3"),
+        },
+    )
+
+    assert response.status_code == 409
+    output = capsys.readouterr().out
+    assert '"logical_call_id": "logical-call-1"' in output
+    assert '"request_attempt_id": "physical-attempt-3"' in output
+    assert '"stage": "policy_request_received"' not in output
+    assert '"stage": "policy_admission_refused"' in output
+    assert '"reason": "admission_already_closed"' in output
+
+
+def test_middleware_verbose_logging_includes_normal_lifecycle(capsys, monkeypatch) -> None:
+    monkeypatch.setenv("NEMO_GYM_CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING", "1")
+    response = _gated_app(AdmissionLimiter()).post(
+        "/v1/responses",
+        headers={
+            **_identity_headers("4-2"),
+            **_correlation_headers("logical-call-1", "physical-attempt-3"),
+        },
+    )
+
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    assert '"stage": "policy_request_received"' in output
+    assert '"stage": "policy_ticket_admitted"' in output
+
+
+def test_middleware_rejects_partial_request_correlation() -> None:
+    response = _gated_app(AdmissionLimiter()).post(
+        "/v1/responses",
+        headers={**_identity_headers("4-2"), LOGICAL_CALL_ID_HEADER: "logical-call-1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "request_correlation_mismatch"
+
+
 def test_middleware_rejects_stale_attempt() -> None:
     limiter = AdmissionLimiter()
     client = _gated_app(limiter)
@@ -444,6 +504,32 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
         json={"checkpoint_id": "ckpt-3", "deadline_ts": 4e9},
         headers=AUTH_HEADERS,
     ).json()["state"] in {"paused", "draining"}
+
+
+def test_policy_model_logs_correlated_generation_lifecycle(capsys, monkeypatch) -> None:
+    monkeypatch.setenv("NEMO_GYM_CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING", "1")
+    response = TestClient(_model_server("policy").setup_webserver()).post(
+        "/v1/responses",
+        json={"input": "hi"},
+        headers={
+            **_identity_headers("4-2"),
+            **_correlation_headers("logical-call-1", "physical-attempt-1"),
+        },
+    )
+
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    for stage in (
+        "policy_request_received",
+        "policy_ticket_admitted",
+        "generation_started",
+        "backend_request_sent",
+        "backend_request_completed",
+        "terminal_capture_completed",
+        "policy_response_sent",
+        "policy_request_finished",
+    ):
+        assert f'"stage": "{stage}"' in output
 
 
 def test_policy_model_resume_is_idempotent_when_prepare_never_paused() -> None:

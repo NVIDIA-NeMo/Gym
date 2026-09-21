@@ -52,6 +52,17 @@ from nemo_gym.token_id_capture.config import token_id_capture_config
 CONTROL_URL_PREFIX = "/ng-control/v1"
 CONTROL_SCHEMA_VERSION = 1
 CHECKPOINT_CONTROL_TOKEN_ENV = "NEMO_GYM_CHECKPOINT_CONTROL_TOKEN"
+CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING_ENV = "NEMO_GYM_CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING"
+
+
+def checkpoint_verbose_lifecycle_logging_enabled() -> bool:
+    """Return whether high-volume per-request checkpoint tracing is enabled."""
+    return os.environ.get(CHECKPOINT_VERBOSE_LIFECYCLE_LOGGING_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class AdmissionState(str, Enum):

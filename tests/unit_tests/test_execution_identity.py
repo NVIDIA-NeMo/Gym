@@ -37,12 +37,15 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
     ATTEMPT_INDEX_HEADER,
+    LOGICAL_CALL_ID_HEADER,
+    REQUEST_ATTEMPT_ID_HEADER,
     ROLLOUT_ID_HEADER,
     RolloutContextMiddleware,
     current_attempt_index,
     current_execution_identity,
     current_rollout_id,
     execution_identity_from_run_body,
+    model_request_correlation,
     rollout_context,
     split_transport_rollout_id,
 )
@@ -262,6 +265,21 @@ async def test_server_client_sends_explicit_attempt_index(monkeypatch) -> None:
     (call,) = dispatch.calls
     assert call["headers"][ROLLOUT_ID_HEADER] == "run-a1"
     assert call["headers"][ATTEMPT_INDEX_HEADER] == "0"
+
+
+@pytest.mark.asyncio
+async def test_server_client_attaches_model_request_correlation(monkeypatch) -> None:
+    dispatch = _CapturingDispatch()
+    monkeypatch.setattr(nemo_gym.server_utils, "request", dispatch)
+
+    client = _server_client()
+    with rollout_context("run-1", attempt_index=0, logical_rollout_id="run-1"):
+        with model_request_correlation("logical-call-1", "physical-attempt-2"):
+            await client.post(server_name="policy", url_path="/v1/responses", json={})
+
+    (call,) = dispatch.calls
+    assert call["headers"][LOGICAL_CALL_ID_HEADER] == "logical-call-1"
+    assert call["headers"][REQUEST_ATTEMPT_ID_HEADER] == "physical-attempt-2"
 
 
 @pytest.mark.asyncio

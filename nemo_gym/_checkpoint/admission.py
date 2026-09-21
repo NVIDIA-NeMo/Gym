@@ -31,6 +31,7 @@ exit.
 
 import asyncio
 import contextvars
+import json
 import re
 import time
 from typing import Any, Callable, Literal, Optional
@@ -38,7 +39,11 @@ from uuid import uuid4
 
 from starlette.responses import JSONResponse
 
-from nemo_gym._checkpoint.control import AdmissionState, ControlError
+from nemo_gym._checkpoint.control import (
+    AdmissionState,
+    ControlError,
+    checkpoint_verbose_lifecycle_logging_enabled,
+)
 from nemo_gym._checkpoint.model_control_contracts import (
     GenerationCutBackend,
     GenerationCutFrozenTicket,
@@ -50,6 +55,8 @@ from nemo_gym._checkpoint.model_control_contracts import (
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.rollout_correlation import (
     ATTEMPT_INDEX_HEADER,
+    LOGICAL_CALL_ID_HEADER,
+    REQUEST_ATTEMPT_ID_HEADER,
     ROLLOUT_ID_HEADER,
     ROLLOUT_ID_PATTERN,
     capture_key_for,
@@ -95,6 +102,8 @@ class AdmissionTicket:
         "started_ts",
         "task",
         "model_call_id",
+        "logical_call_id",
+        "request_attempt_id",
         "generation_started",
         "prepare_safe",
         "prepare_safe_reason",
@@ -112,6 +121,8 @@ class AdmissionTicket:
         attempt_index: Optional[int],
         plane: Optional[str],
         task: Optional[asyncio.Task],
+        logical_call_id: Optional[str] = None,
+        request_attempt_id: Optional[str] = None,
     ) -> None:
         self.ticket_id = uuid4().hex
         self.rollout_id = rollout_id
@@ -120,6 +131,8 @@ class AdmissionTicket:
         self.started_ts = time.time()
         self.task = task
         self.model_call_id: Optional[str] = None
+        self.logical_call_id = logical_call_id
+        self.request_attempt_id = request_attempt_id
         self.generation_started = False
         self.prepare_safe = False
         self.prepare_safe_reason: Optional[str] = None
@@ -134,6 +147,7 @@ class AdmissionTicket:
 
     def bind_model_call(self, model_call_id: str) -> None:
         self.model_call_id = model_call_id
+        _log_policy_request_lifecycle("model_call_bound", ticket=self)
 
     def mark_generation_started(self) -> None:
         if (
@@ -142,11 +156,17 @@ class AdmissionTicket:
             and self._limiter.state != AdmissionState.ACCEPTING
         ):
             self.mark_no_generation()
+            _log_policy_request_lifecycle(
+                "generation_refused",
+                ticket=self,
+                reason="checkpoint_closed_before_generation_started",
+            )
             raise AdmissionParkedError(
                 "the request was admitted before checkpoint close but had not started generation; "
                 "park and re-issue it after the checkpoint completes"
             )
         self.generation_started = True
+        _log_policy_request_lifecycle("generation_started", ticket=self)
 
     def mark_no_generation(self) -> None:
         self._limiter.mark_prepare_safe(self, "no_generation")
@@ -164,6 +184,55 @@ class AdmissionTicket:
         self._limiter.mark_prepare_safe(self, "excluded")
 
 
+def _log_policy_request_lifecycle(
+    stage: str,
+    *,
+    ticket: AdmissionTicket | None = None,
+    logical_call_id: str | None = None,
+    request_attempt_id: str | None = None,
+    rollout_id: str | None = None,
+    attempt_index: int | None = None,
+    admission_state: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Emit one correlation-safe policy request lifecycle event."""
+    if stage not in {"generation_refused", "policy_admission_refused"} and not (
+        checkpoint_verbose_lifecycle_logging_enabled()
+    ):
+        return
+    if ticket is not None:
+        logical_call_id = ticket.logical_call_id
+        request_attempt_id = ticket.request_attempt_id
+        rollout_id = ticket.rollout_id
+        attempt_index = ticket.attempt_index
+        admission_state = ticket._limiter.state.value
+    if logical_call_id is None or request_attempt_id is None:
+        return
+    print(
+        "[policy_request_lifecycle] "
+        + json.dumps(
+            {
+                "stage": stage,
+                "logical_call_id": logical_call_id,
+                "request_attempt_id": request_attempt_id,
+                "rollout_id": rollout_id,
+                "attempt_index": attempt_index,
+                "ticket_id": ticket.ticket_id if ticket is not None else None,
+                "model_call_id": ticket.model_call_id if ticket is not None else None,
+                "generation_started": ticket.generation_started if ticket is not None else False,
+                "response_started": ticket.response_started if ticket is not None else False,
+                "prepare_safe": ticket.prepare_safe if ticket is not None else False,
+                "prepare_safe_reason": ticket.prepare_safe_reason if ticket is not None else None,
+                "ticket_age_s": round(time.time() - ticket.started_ts, 3) if ticket is not None else None,
+                "admission_state": admission_state,
+                "reason": reason,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 _ADMISSION_TICKET: contextvars.ContextVar[AdmissionTicket | None] = contextvars.ContextVar(
     "nemo_gym_admission_ticket", default=None
 )
@@ -179,6 +248,13 @@ def bind_current_model_call(model_call_id: str) -> None:
     ticket = current_admission_ticket()
     if ticket is not None:
         ticket.bind_model_call(model_call_id)
+
+
+def log_current_request_lifecycle(stage: str) -> None:
+    """Emit a lifecycle stage for the currently admitted model request."""
+    ticket = current_admission_ticket()
+    if ticket is not None:
+        _log_policy_request_lifecycle(stage, ticket=ticket)
 
 
 def mark_current_generation_started() -> None:
@@ -250,6 +326,8 @@ class AdmissionLimiter:
         attempt_index: Optional[int] = None,
         plane: Optional[str] = None,
         task: Optional[asyncio.Task] = None,
+        logical_call_id: Optional[str] = None,
+        request_attempt_id: Optional[str] = None,
     ) -> AdmissionTicket:
         if (rollout_id is None) != (attempt_index is None):
             raise ValueError("rollout_id and attempt_index must be provided together")
@@ -272,6 +350,8 @@ class AdmissionLimiter:
             attempt_index=attempt_index,
             plane=plane,
             task=task,
+            logical_call_id=logical_call_id,
+            request_attempt_id=request_attempt_id,
         )
         # Kept private and intentionally absent from the public inventory.
         ticket._limiter = self
@@ -587,7 +667,13 @@ class AdmissionMiddleware:
 
     @staticmethod
     def _headers(scope: dict[str, Any]) -> dict[str, str]:
-        wanted = {ROLLOUT_ID_HEADER, ATTEMPT_INDEX_HEADER, PLANE_HEADER}
+        wanted = {
+            ROLLOUT_ID_HEADER,
+            ATTEMPT_INDEX_HEADER,
+            LOGICAL_CALL_ID_HEADER,
+            REQUEST_ATTEMPT_ID_HEADER,
+            PLANE_HEADER,
+        }
         found: dict[str, str] = {}
         for name, value in scope.get("headers") or ():
             key = name.decode("latin-1").lower()
@@ -642,14 +728,48 @@ class AdmissionMiddleware:
             await response(scope, receive, send)
             return
 
+        logical_call_id = headers.get(LOGICAL_CALL_ID_HEADER)
+        request_attempt_id = headers.get(REQUEST_ATTEMPT_ID_HEADER)
+        if (logical_call_id is None) != (request_attempt_id is None):
+            response = JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "request_correlation_mismatch",
+                        "detail": "logical call ID and request attempt ID must be sent together",
+                    }
+                },
+            )
+            await response(scope, receive, send)
+            return
+        _log_policy_request_lifecycle(
+            "policy_request_received",
+            logical_call_id=logical_call_id,
+            request_attempt_id=request_attempt_id,
+            rollout_id=rollout_id,
+            attempt_index=attempt_index,
+            admission_state=self._limiter.state.value,
+        )
+
         try:
             ticket = self._limiter.admit(
                 rollout_id=rollout_id,
                 attempt_index=attempt_index,
                 plane=headers.get(PLANE_HEADER),
                 task=asyncio.current_task(),
+                logical_call_id=logical_call_id,
+                request_attempt_id=request_attempt_id,
             )
         except ControlError as e:
+            _log_policy_request_lifecycle(
+                "policy_admission_refused",
+                logical_call_id=logical_call_id,
+                request_attempt_id=request_attempt_id,
+                rollout_id=rollout_id,
+                attempt_index=attempt_index,
+                admission_state=self._limiter.state.value,
+                reason=("admission_already_closed" if isinstance(e, AdmissionParkedError) else e.code),
+            )
             response = JSONResponse(
                 status_code=e.status_code,
                 content={"error": {"code": e.code, "detail": e.detail}},
@@ -657,6 +777,7 @@ class AdmissionMiddleware:
             )
             await response(scope, receive, send)
             return
+        _log_policy_request_lifecycle("policy_ticket_admitted", ticket=ticket)
 
         response_started = False
         context_token = _ADMISSION_TICKET.set(ticket)
@@ -667,6 +788,7 @@ class AdmissionMiddleware:
                 await self._limiter.wait_for_response_egress(ticket)
                 ticket.response_started = True
                 response_started = True
+                _log_policy_request_lifecycle("policy_response_started", ticket=ticket)
             await send(message)
             if (
                 message.get("type") == "http.response.body"
@@ -674,6 +796,7 @@ class AdmissionMiddleware:
                 and ticket.response_started
             ):
                 self._limiter.mark_response_egress_completed(ticket)
+                _log_policy_request_lifecycle("policy_response_sent", ticket=ticket)
 
         try:
             await self._app(scope, receive, tracked_send)
@@ -715,5 +838,6 @@ class AdmissionMiddleware:
                     ticket,
                     response_egress_completed=ticket.response_egress_completed,
                 )
+                _log_policy_request_lifecycle("policy_request_finished", ticket=ticket)
             finally:
                 _ADMISSION_TICKET.reset(context_token)

@@ -41,6 +41,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+import nemo_gym._checkpoint.coordinator as coordinator_module
 from nemo_gym._checkpoint import (
     MODEL_ADMISSION_URL_PREFIX,
     AdmissionCoordinator,
@@ -128,6 +129,71 @@ async def _stop_pool(pool: _Pool) -> None:
     for _, agent in pool.workers:
         await agent.stop()
     await pool.coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_large_checkpoint_identity_ack_round_trips_over_coordinator_transport(sock_dir) -> None:
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    await coordinator.start()
+    limiter = AdmissionLimiter()
+    for index in range(2_000):
+        ticket = limiter.admit(
+            rollout_id=f"scale-rollout-{index:05d}-{'x' * 40}",
+            attempt_index=0,
+        )
+        limiter.release(ticket)
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "w0", limiter, pid=1000)
+    await agent.start()
+    pool = _Pool(coordinator, [(limiter, agent)])
+
+    try:
+        async with pool.client() as client:
+            response = await pool.pause(client)
+        assert response.status_code == 200
+        assert response.json()["state"] == "paused"
+        assert len(coordinator.seen_attempts()) == 2_000
+    finally:
+        await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_transport_rejects_oversized_frame_before_reading_payload() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(coordinator_module._FRAME_HEADER.pack(coordinator_module._MAX_COORDINATOR_PAYLOAD_BYTES + 1))
+    reader.feed_eof()
+
+    with pytest.raises(ValueError, match="outside the allowed range"):
+        await anext(coordinator_module._read_messages(reader))
+
+
+@pytest.mark.asyncio
+async def test_coordinator_transport_rejects_truncated_payload() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(coordinator_module._FRAME_HEADER.pack(10) + b"{}")
+    reader.feed_eof()
+
+    with pytest.raises(ValueError, match="truncated checkpoint coordinator payload"):
+        await anext(coordinator_module._read_messages(reader))
+
+
+@pytest.mark.asyncio
+async def test_coordinator_transport_rejects_oversized_outbound_payload(monkeypatch) -> None:
+    class Writer:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.writes.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+    monkeypatch.setattr(coordinator_module, "_MAX_COORDINATOR_PAYLOAD_BYTES", 8)
+    writer = Writer()
+
+    with pytest.raises(ValueError, match="outside the allowed range"):
+        await coordinator_module._write_message(writer, {"payload": "too large"})
+    assert writer.writes == []
 
 
 def test_restored_cut_registry_leases_one_replacement_to_one_worker() -> None:
