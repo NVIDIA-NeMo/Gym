@@ -1,0 +1,23 @@
+The files in this directory are reproduced from the NMRArena repository
+(https://github.com/odanchem/NMRArena, default branch `release`) at commit
+8b4ca8a8953185c00f0c4d7fa3c16c23aa616326 (2026-09-17) and are the work of its
+authors (Fedor Kliuev, Ivan Smirnov, Mikhail A. Losev, Oleg I. Afanasyev and
+Denis Chusov; "Can AI Help Chemists To Solve NMR?", ChemRxiv,
+doi:10.26434/chemrxiv.15006195/v1). They are licensed under the MIT License,
+reproduced alongside in `LICENSE` ("Copyright (c) 2026 OdanChem").
+
+- `system_prompt.txt` is the `_SYSTEM_TEMPLATE` string from
+  `dataset/llm_track.ipynb` (code cell 9), byte for byte, including the trailing
+  space on its first line. It is a Python `str.format` template with the
+  placeholders `{n}` and `{min_slots}`; the literal braces of the JSON example
+  are doubled as in the source.
+  SHA-256: 9cedddc7fdd9269f40146d3b718e2d49c9b9b7b1b91f52824842883e7deb8cff
+- `LICENSE` is the repository's `LICENSE` file.
+  SHA-256: 7546512862305e3dce266818bfaff4a4ecc4ca18469208b9c3c3ae9d4a4c779b
+
+The Apache-2.0 headers on the Python files in this resources server cover the
+NVIDIA-authored code around these files, not the files themselves. The user
+prompt template, NMR-string normalisation, candidate-extraction rules and metric
+definitions reimplemented in `prompting.py` and `scoring.py` follow the same
+notebook and `analysis/data_analysis.ipynb`; where their text is quoted it is
+attributed in place.

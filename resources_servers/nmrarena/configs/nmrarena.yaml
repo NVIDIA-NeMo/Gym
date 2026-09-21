@@ -1,0 +1,32 @@
+nmrarena:
+  resources_servers:
+    nmrarena:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: NMRArena NMR structure elucidation, ranked SMILES scored by exact RDKit structure match
+      value: Evaluate organic structure elucidation from 1H/13C NMR peak lists with the NMRArena benchmark
+      num_candidates: 10
+      max_smiles_chars: 500
+      strict_candidates: false
+      salvage_truncated_json: true
+
+nmrarena_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: nmrarena
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/nmrarena/data/example.jsonl
+        license: MIT
+      - name: nmrarena_105
+        type: validation
+        jsonl_fpath: resources_servers/nmrarena/data/nmrarena_105.jsonl
+        license: MIT
