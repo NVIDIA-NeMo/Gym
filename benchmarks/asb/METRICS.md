@@ -112,10 +112,10 @@ security property:
 | model | strict `json.loads` | salvaged | unparseable | salvage rate |
 |---|---|---|---|---|
 | Nemotron-3-Ultra | 10,368 | 5 | 427 | 0.0% |
-| **Kimi-K3** | 6,427 | **4,304** | 38 | **40.0%** |
+| **Kimi-K3** | 6,427 | **4,312** | 38 | **40.2%** |
 | Nemotron-3.5-Super-VL (partial) | 5,884 | 293 | 121 | 4.7% |
 
-Under upstream's strict parse those 4,304 Kimi rows would be workflow failures: its failure
+Under upstream's strict parse those 4,312 Kimi rows would be workflow failures: its failure
 rate would read 40% rather than 0.35%, and the rows would leave the ASR denominator. Scoring
 Kimi on strict-parse rows only moves its published cells by:
 
