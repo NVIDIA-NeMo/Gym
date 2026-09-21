@@ -58,7 +58,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
-from resources_servers.finance_sec_search.local_edgar_search import (
+from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
 )
@@ -170,7 +170,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     local_edgar_metadata_path: Optional[str] = Field(
         default=None,
         description="Metadata sidecar for the local EDGAR index, built by "
-        "scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
+        "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
         "'.metadata' when that file exists. Searches are far slower without it.",
     )
     max_end_date: Optional[str] = Field(

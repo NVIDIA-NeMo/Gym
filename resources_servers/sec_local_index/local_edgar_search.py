@@ -332,7 +332,7 @@ class LocalEdgarSearch:
             raise ValueError(
                 f"Metadata sidecar {candidate} has schema version {version!r}, "
                 f"expected {SIDECAR_SCHEMA_VERSION}. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
 
         connection = self._connect()
@@ -346,12 +346,12 @@ class LocalEdgarSearch:
             raise ValueError(
                 f"Metadata sidecar {candidate} covers {recorded.get('document_count')} documents "
                 f"but the index holds {documents}. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
         if recorded.get("source_fingerprint") != fingerprint:
             raise ValueError(
                 f"Metadata sidecar {candidate} was built from a different index. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -415,7 +415,7 @@ class LocalEdgarSearch:
         raise ValueError(
             f"Local EDGAR index {self.index_path} stores filing text in documents and has no "
             f"metadata sidecar, so every search would read filing text to return metadata. "
-            f"Build one with 'python resources_servers/finance_sec_search/scripts/"
+            f"Build one with 'python resources_servers/sec_local_index/scripts/"
             f"build_local_edgar_metadata.py --index {self.index_path}', or point "
             f"local_edgar_metadata_path at it if it is stored elsewhere."
         )

@@ -66,11 +66,11 @@ its metadata sidecar once per index, which is what keeps common queries under a
 second instead of tens of seconds:
 
 ```bash
-python resources_servers/finance_sec_search/scripts/build_local_edgar_metadata.py \
+python resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py \
   --index /path/to/sap500_sec_fts.sqlite
 ```
 
-See [docs/local-edgar-index.md](docs/local-edgar-index.md) for the schema an
+See [local-edgar-index.md](../sec_local_index/docs/local-edgar-index.md) for the schema an
 index must have, the column formats that matter, and how to obtain one.
 
 ## Cache Management

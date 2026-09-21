@@ -23,25 +23,25 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
-from resources_servers.finance_sec_search import local_edgar_search
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
 )
-from resources_servers.finance_sec_search.local_edgar_search import (
+from resources_servers.finance_sec_search.scripts.convert_questions import (
+    EDGAR_SEARCH_TOOL,
+    PROMPT,
+    convert_entry,
+)
+from resources_servers.sec_local_index import local_edgar_search
+from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
     default_sidecar_path,
     normalize_request,
     translate_query,
 )
-from resources_servers.finance_sec_search.scripts.build_local_edgar_metadata import build
-from resources_servers.finance_sec_search.scripts.convert_questions import (
-    EDGAR_SEARCH_TOOL,
-    PROMPT,
-    convert_entry,
-)
+from resources_servers.sec_local_index.scripts.build_local_edgar_metadata import build
 
 
 # Indexed paths are container-absolute; only the part below data/ is portable.
