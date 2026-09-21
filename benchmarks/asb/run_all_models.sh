@@ -14,6 +14,10 @@
 #
 # Usage:  bash benchmarks/asb/run_all_models.sh [model_key ...]
 set -uo pipefail
+# Job control on, so each backgrounded stack leads its own process group. Without it a
+# non-interactive shell hands background children the SCRIPT's group, and a group kill
+# aimed at a stack takes the runner with it.
+set -m
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -40,8 +44,8 @@ set -a; source "${ENV_FILE:-/Users/kruge/Documents/ChatGPT/NVIDIA/.env}"; set +a
 MODELS=(
 "ultra|nemotron-3-ultra-550b|https://snorkelai-fdr--ep-nvidia-nemotron-3-ultra-550b-a55b-nvfp-63eebc.us-west.modal.direct/v1|nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4|MODAL_PROXY_TOKEN|64"
 "kimi|kimi-k3|https://snorkelai-fdr--ep-kimi-k3-server.us-west.modal.direct/v1|moonshotai/Kimi-K3|MODAL_PROXY_TOKEN|96"
-"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|160"
-"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|160"
+"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|48"
+"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|48"
 )
 
 write_env_yaml() {
@@ -104,7 +108,15 @@ YAML
 # campaigns that are still working.
 stop_servers() {
     local pid port
-    if [ -n "${GYM_PGID:-}" ] && [ "$GYM_PGID" != "$$" ]; then
+    # Compare against our own PGID, not $$.
+    #
+    # $$ is the script's PID and a script is not reliably its own process-group leader:
+    # measured here, pid 82286 against pgid 82282. Guarding on $$ then compares a group id
+    # to a pid, they differ, the guard passes, and the group kill lands on the runner's own
+    # group. With `set -m` above the stack has its own group and this comparison is the
+    # backstop for shells where it does not.
+    own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "${GYM_PGID:-}" ] && [ -n "$own_pgid" ] && [ "$GYM_PGID" != "$own_pgid" ]; then
         kill -9 -"$GYM_PGID" 2>/dev/null
     fi
     for pid in $(pgrep -f "gym env start.*${ENV_YAML}" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
