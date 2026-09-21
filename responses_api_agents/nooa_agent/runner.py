@@ -108,6 +108,7 @@ class EmbeddedNOOARunner:
         episode = trace.project(
             create_params=request.responses_create_params,
             state=state,
+            default_model=self._model_server_name,
         )
         return NOOARunResult(
             episode=episode,
