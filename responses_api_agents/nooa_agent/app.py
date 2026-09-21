@@ -154,6 +154,23 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         super().model_post_init(context)
 
+    @staticmethod
+    def _set_response_lifecycle(response: NeMoGymResponse, reason: str | None, error: str | None) -> NeMoGymResponse:
+        if reason is None:
+            return response.model_copy(update={"status": "completed", "error": None})
+        status = (
+            "incomplete" if reason in {"timeout", "cancelled", "agent_run_timeout", "timeout_exceeded"} else "failed"
+        )
+        return response.model_copy(
+            update={
+                "status": status,
+                "error": {
+                    "code": f"nooa_{reason}",
+                    "message": error or f"NOOA execution terminated with {reason}.",
+                },
+            }
+        )
+
     def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
         verify_response, verify_gaps = ensure_verifier_final_message(
             run_result.episode.response, run_result.return_value
@@ -164,7 +181,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             termination_reason=run_result.termination_reason,
             termination_error=run_result.termination_error,
         )
-        return verify_response, observations
+        return self._set_response_lifecycle(
+            verify_response, run_result.termination_reason, run_result.termination_error
+        ), observations
 
     async def responses(
         self,
@@ -320,12 +339,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         if terminal:
             routing[NG_TERMINAL_KEY] = True
         if partial is not None:
-            response = partial.episode.response
+            response = self._set_response_lifecycle(partial.episode.response, failure_class, error)
             observations = finalize_observation_gaps(
                 partial.episode.observations, termination_reason=failure_class, termination_error=error
             )
             routing.update(_evidence(partial, observations))
             routing["_response_cookies"] = _merge_downstream_cookies(partial.model_cookies, partial.resource_cookies)
+        else:
+            response = self._set_response_lifecycle(response, failure_class, error)
         return NOOAAgentVerifyResponse.model_validate(
             record | {"response": response.model_dump(mode="json"), "reward": 0.0} | routing
         )
