@@ -23,7 +23,6 @@ def materialize_row(
     row: dict[str, Any],
     *,
     taskset: str,
-    revision: str,
 ) -> dict[str, Any]:
     responses_create_params = row.get("responses_create_params")
     if not isinstance(responses_create_params, dict):
@@ -37,7 +36,6 @@ def materialize_row(
         "task_id": {
             "taskset": taskset,
             "task_id": _task_id(row),
-            "revision": revision,
         },
         "task_input": {
             "responses_create_params": responses_create_params,
@@ -50,8 +48,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--taskset", default="swebench_pro_smoke")
-    parser.add_argument("--revision", default="smoke-v1")
+    parser.add_argument("--taskset", default="swebench_pro:smoke")
     args = parser.parse_args()
 
     with args.input.open() as source, args.output.open("w") as target:
@@ -62,7 +59,6 @@ def main() -> None:
                     materialize_row(
                         row,
                         taskset=args.taskset,
-                        revision=args.revision,
                     )
                 )
                 + "\n"

@@ -6,10 +6,10 @@ config_paths:
 environment_routing_mode: legacy
 environment_server_name: swebench_pro_hermes_environment_server
 tasksets:
-  swebench_pro_smoke:
+  "swebench_pro:smoke":
     task_input_contract: nemo_gym.single_agent.v1
 environment_server_routes:
-  swebench_pro_smoke: swebench_pro_hermes_environment_server
+  "swebench_pro:smoke": swebench_pro_hermes_environment_server
 
 swebench_pro_hermes_resources_server:
   _inherit_from: swebench_pro_resources_server

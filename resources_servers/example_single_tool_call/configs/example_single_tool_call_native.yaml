@@ -1,9 +1,9 @@
 environment_routing_mode: taskset
 tasksets:
-  example_single_tool_call_native:
+  "example_single_tool_call:native":
     task_input_contract: nemo_gym.single_agent.v1
 environment_server_routes:
-  example_single_tool_call_native: example_single_tool_call_native_environment_server
+  "example_single_tool_call:native": example_single_tool_call_native_environment_server
 
 example_single_tool_call_native:
   resources_servers:
