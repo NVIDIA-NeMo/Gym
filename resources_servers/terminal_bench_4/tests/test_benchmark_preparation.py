@@ -97,3 +97,17 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     assert harness.step_limit == steps
     assert harness.step_timeout_sec == timeout
     assert agent.datasets[0].num_repeats == 1
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, "results/terminal_bench_4/agent"),
+        ({"tb4_jobs_dir": "/run/resources"}, "/run/resources/agent"),
+        ({"tb4_agent_artifacts_dir": "/run/agent"}, "/run/agent"),
+        ({"tb4_jobs_dir": "/run/resources", "tb4_agent_artifacts_dir": "/run/agent"}, "/run/agent"),
+    ],
+)
+def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
+    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"), overrides)
+    assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected

@@ -23,7 +23,9 @@ budget and the configured cap. The benchmark retains the `tb4_max_steps`,
 `tb4_step_timeout_sec`, and `tb4_agent_max_timeout_sec` overrides; custom nested
 overrides must now target `terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent`.
 Agent trajectories default to `results/terminal_bench_4/agent/<session_id>/` and can
-be relocated with `tb4_agent_artifacts_dir` or a run's `artifact_directory`.
+be relocated with `tb4_agent_artifacts_dir` or a run's `artifact_directory`. When
+`tb4_jobs_dir` is set, agent artifacts default to its `agent/` subdirectory so the
+configured run directory captures artifacts from both servers.
 
 The adapter loads system and instance prompts from the pinned package's `mini.yaml`
 and exposes mini-SWE's native `bash` tool through Gym's Responses API. The version

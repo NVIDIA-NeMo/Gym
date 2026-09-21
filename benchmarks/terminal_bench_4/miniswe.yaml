@@ -22,4 +22,4 @@ terminal_bench_4_miniswe:
         step_limit: ${oc.select:tb4_max_steps,500}
         step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
       agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
-      artifacts_dir: ${oc.select:tb4_agent_artifacts_dir,results/terminal_bench_4/agent}
+      artifacts_dir: ${oc.select:tb4_agent_artifacts_dir,${oc.select:tb4_jobs_dir,results/terminal_bench_4}/agent}
