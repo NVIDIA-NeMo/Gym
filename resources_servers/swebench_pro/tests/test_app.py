@@ -386,8 +386,9 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
 
 
 @pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
+@pytest.mark.parametrize("agent_status", ["completed", "failed"])
 def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
-    monkeypatch: MonkeyPatch, verdict: str
+    monkeypatch: MonkeyPatch, verdict: str, agent_status: str
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
     events: list[str] = []
@@ -448,6 +449,9 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
     task_data = request_body()
     responses_create_params = task_data.pop("responses_create_params")
     agent_response = task_data.pop("response")
+    agent_response["status"] = agent_status
+    if agent_status == "failed":
+        agent_response["error"] = {"code": "server_error", "message": "Model generated invalid tool call: finish"}
     episode_id = {"rollout_id": "rollout", "attempt": 1}
     task_id = {"taskset": "swebench_pro", "task_id": "instance_example"}
 
