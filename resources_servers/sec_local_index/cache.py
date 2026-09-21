@@ -12,20 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Disk-backed cache for the Finance Agent v2 tools.
+"""Disk-backed cache shared by the finance tool servers.
 
 ``ToolCache`` is a dependency-free key/value store on disk. It is deliberately dumb:
 atomic reads and writes, no knowledge of pricing/SEC semantics — key derivation and
-merge logic live in ``cached_tools.py``.
+merge logic belong to the caller.
 
 It is either on (read and write) or off (tools run live). It stores the raw upstream
 response and lets the untouched upstream serializer render it, so a hit is
 byte-identical to a live call.
 
-Cache namespaces live as subdirectories under the root:
-  - ``pricing/``        per-(endpoint, ticker) master records (Tiingo)
-  - ``edgar_search/``   raw sec-api.io search result lists
-  - ``sec_filings/``    parsed sec.gov filing documents
+Callers namespace their own entries as subdirectories under the root, so two
+servers pointed at one root can share the entries they agree on.
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ class ToolCache:
     """Namespaced, atomic disk cache with an on/off switch.
 
     ``cache_dir`` roots the cache (relative paths resolve from the CWD); when unset
-    and enabled, it defaults under ``~/.cache/nemo_gym/finance_agent_v2``.
+    and enabled, it defaults under ``~/.cache/nemo_gym/<app_name>``.
     """
 
     #: A single path component: no separator, and a leading alphanumeric so the
@@ -59,6 +57,8 @@ class ToolCache:
         self,
         cache_dir: Optional[str | os.PathLike[str]],
         use_cache: bool = True,
+        *,
+        app_name: str = "sec_local_index",
     ) -> None:
         self.root: Optional[Path] = None
         if not use_cache:
@@ -69,7 +69,7 @@ class ToolCache:
             if not root.is_absolute():
                 root = Path.cwd() / root
         else:
-            root = Path.home() / ".cache" / "nemo_gym" / "finance_agent_v2"
+            root = Path.home() / ".cache" / "nemo_gym" / app_name
             logger.warning(
                 "use_cache is on but cache_dir is not set; defaulting to %s. "
                 "This path is ephemeral in containers and not shared across jobs. "

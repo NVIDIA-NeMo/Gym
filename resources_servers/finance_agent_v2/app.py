@@ -74,13 +74,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.sec_local_index.cache import ToolCache
 
 
-# Local cache layer. Support both package import (tests:
-# resources_servers.finance_agent_v2.app) and flat script execution (the nemo-gym
-# entrypoint runs app.py directly, so relative imports would fail).
+# Support both package import (tests: resources_servers.finance_agent_v2.app) and flat
+# script execution (the nemo-gym entrypoint runs app.py directly, so relative imports
+# would fail).
 try:
-    from .cache import ToolCache
     from .cached_tools import (
         CachedEDGARSearch,
         CachedParseHtmlPage,
@@ -92,8 +92,6 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
         CachedParseHtmlPage,
         CachedPriceHistory,
     )
-
-    from cache import ToolCache
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +393,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         self._session_start_times: Dict[str, float] = {}
 
         # Shared disk cache for pricing / edgar / SEC docs (disabled when use_cache is False).
-        self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache)
+        self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache, app_name="finance_agent_v2")
         if self._cache.enabled:
             logger.info("Tool response cache enabled at %s", self._cache.root)
 

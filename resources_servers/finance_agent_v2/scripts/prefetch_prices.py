@@ -45,15 +45,14 @@ if str(_PKG_ROOT.parent.parent) not in sys.path:
 
 from finance_agent.tools import MAX_END_DATE  # noqa: E402
 
+from resources_servers.sec_local_index.cache import ToolCache  # noqa: E402
+
 
 try:
-    from resources_servers.finance_agent_v2.cache import ToolCache
     from resources_servers.finance_agent_v2.cached_tools import CachedPriceHistory
 except ImportError:  # pragma: no cover - flat execution fallback
     sys.path.insert(0, str(_PKG_ROOT))
     from cached_tools import CachedPriceHistory  # type: ignore
-
-    from cache import ToolCache  # type: ignore
 
 
 def _parse_ticker_line(line: str, default_asset_class: str) -> tuple[str, str] | None:

@@ -42,14 +42,8 @@ from finance_agent.tools import (
     _validate_date_format,
 )
 
+from resources_servers.sec_local_index.cache import ToolCache
 
-# Support both package import (tests: resources_servers.finance_agent_v2.cached_tools)
-# and flat script execution (the nemo-gym entrypoint runs app.py directly, so app.py
-# imports this module flat as `cached_tools`, and a relative import would fail here).
-try:
-    from .cache import ToolCache
-except ImportError:  # pragma: no cover - exercised only under flat entrypoint execution
-    from cache import ToolCache
 
 logger = logging.getLogger(__name__)
 
