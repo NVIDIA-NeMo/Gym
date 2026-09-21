@@ -246,10 +246,13 @@ class ObservabilityConfig(_StrictModel):
     deployment's own config (a cluster fragment, typically) and are required while enabled."""
 
     enabled: bool = True
-    # Image the collector step runs in; cluster fragments may point this at a pre-staged .sqsh.
-    container: str = "otel/opentelemetry-collector-contrib:0.152.1"
-    # Absolute path inside `container`: the upstream image is distroless, there is no PATH lookup.
-    binary: str = "/otelcol-contrib"
+    # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
+    # on shared storage) when `container` is unset, else a path inside `container`.
+    binary: str = "otelcol-contrib"
+    # Optional image for the collector step. Unset runs the binary directly on the node, which is
+    # what enroot-based clusters need: the upstream collector image is distroless, and enroot
+    # cannot start a container without /bin/sh.
+    container: str | None = None
     # OTLP/HTTP ingest base URL (`/v1/metrics` etc. are appended by the exporter).
     endpoint: str | None = None
     # Env var holding the ingest bearer token on the machine running `gym eval submit`. Read at
