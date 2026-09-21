@@ -45,11 +45,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, SandboxObservation
+from nemo_gym.rollout_observability import AgentObservationBundle, SandboxObservation, TrajectoryRecord
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 
 
 LOG = logging.getLogger(__name__)
@@ -159,6 +160,7 @@ class HarnessAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     harness_failed: bool = False
     ng_agent_observations: AgentObservationBundle | None = None
+    ng_trajectory: TrajectoryRecord | None = None
 
 
 class HarnessAgent(SimpleResponsesAPIAgent):
@@ -300,6 +302,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     run_context["mcp"] = await self._seed_tool_servers(body, cookies)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
+                raw_trajectory = agent_resp_json.pop("_ng_trajectory", None)
+                trajectory = (
+                    scope_opencode_trajectory(
+                        TrajectoryRecord.model_validate(raw_trajectory), body, run_context["rollout_id"]
+                    )
+                    if isinstance(raw_trajectory, dict)
+                    else None
+                )
                 observations = run_context.get("observations")
                 failed = run_context.get("harness_failed", False)
                 if failed and self.config.execution_failure_reward_zero:
@@ -311,6 +321,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                             "reward": 0.0,
                             "harness_failed": True,
                             "ng_agent_observations": observations,
+                            "ng_trajectory": trajectory,
                         }
                     )
                 verify_resp = await self.server_client.post(
@@ -322,7 +333,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(verify_resp)
                 return HarnessAgentVerifyResponse.model_validate(
                     await get_response_json(verify_resp)
-                    | {"harness_failed": failed, "ng_agent_observations": observations}
+                    | {"harness_failed": failed, "ng_agent_observations": observations, "ng_trajectory": trajectory}
                 )
             except BaseException:
                 await self._close_run_sandbox(run_context)

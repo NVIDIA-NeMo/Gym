@@ -762,6 +762,82 @@ async def test_completed_harness_failure_skips_judge():
 
 
 @pytest.mark.parametrize("failed", [False, True])
+def test_native_trajectory_survives_harness_run_and_export(failed):
+    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollout_observability import (
+        AgentInvocation,
+        AgentObservationBundle,
+        TrajectoryRecord,
+        TrajectoryTurn,
+    )
+
+    agent = _make_agent(execution_failure_reward_zero=True)
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    handle = MagicMock(provider_name="opensandbox", sandbox_id="box-test")
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("RUNNER_DONE", "", 0))
+    agent._provider.close = AsyncMock()
+    native = TrajectoryRecord(
+        task_id="unknown",
+        rollout_id="native-session",
+        turns=[
+            TrajectoryTurn(
+                task_id="unknown",
+                rollout_id="native-session",
+                invocation_id="native-session",
+                turn_no=1,
+                timestamp=1.0,
+                answer="42",
+                step_count=1,
+            )
+        ],
+    )
+    response = _response() | {
+        "_ng_trajectory": native.model_dump(mode="json"),
+        "_ng_agent_observations": AgentObservationBundle(
+            source="opencode",
+            records=[AgentInvocation(invocation_id="native-session", status="failed" if failed else "completed")],
+        ).model_dump(mode="json"),
+    }
+    agent._download_json = AsyncMock(return_value=response)
+
+    async def response_json(_):
+        call = agent.server_client.post.await_args.kwargs
+        return {} if call["url_path"] == "/seed_session" else call["json"] | {"reward": 1.0}
+
+    with (
+        patch.object(agent, "_sandbox_model_url", return_value="https://gym-proxy.example"),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=response_json),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        # Repeated requests must each get their own scope, including retries.
+        for task_index in (3, 4):
+            row = {"_ng_task_index": task_index, "_ng_rollout_index": 0, "_ng_attempt_index": 1}
+            result = client.post("/run", json=row | {"responses_create_params": {"input": "hello"}})
+            assert result.status_code == 200, result.text
+            payload = result.json()
+            assert "_ng_trajectory" not in payload["response"]
+            trajectory = TrajectoryRecord.model_validate(payload["ng_trajectory"])
+            assert trajectory.task_id == str(task_index)
+            assert trajectory.rollout_id == f"{task_index}-0-a1"
+            assert trajectory.turns[0].task_id == trajectory.task_id
+            assert trajectory.turns[0].rollout_id == trajectory.rollout_id
+            canonical = _build_trajectory_record(row, payload)
+            assert len(canonical.turns) == 1
+            assert canonical.turns[0].answer == "42"
+            assert not {"turns_unavailable", "producer_trajectory_identity_mismatch"} & {
+                gap.code for gap in canonical.gaps
+            }
+            assert payload["reward"] == (0.0 if failed else 1.0)
+    assert native.task_id == "unknown"
+    assert native.turns[0].rollout_id == "native-session"
+    if not failed:
+        assert "_ng_trajectory" not in agent.server_client.post.await_args.kwargs["json"]["response"]
+
+
+@pytest.mark.parametrize("failed", [False, True])
 def test_run_http_preserves_harness_failure_and_observations(failed):
     from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
 
