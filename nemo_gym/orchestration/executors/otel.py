@@ -188,8 +188,20 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     # dashboards match it as a label string.
     resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
 
+    # Spans become latency/count series too, so operations that only exist as spans (Gym's
+    # sandbox start/exec, model calls) get dashboard panels without a metric of their own. The
+    # display identity is kept as a dimension because `service.name` is the routing name by then.
+    span_metrics = {
+        "histogram": {
+            "explicit": {"buckets": ["250ms", "1s", "2s", "5s", "10s", "30s", "60s", "120s", "300s", "600s", "1800s"]}
+        },
+        "dimensions": [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}],
+        "metrics_flush_interval": f"{obs.scrape_interval_seconds}s",
+    }
+
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
+        "connectors": {"spanmetrics": span_metrics},
         "receivers": {
             "prometheus": {"config": {"scrape_configs": scrape_configs}},
             "otlp": {
@@ -218,14 +230,14 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "telemetry": {"logs": {"level": "debug"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": ["prometheus", "otlp"],
+                    "receivers": ["prometheus", "otlp", "spanmetrics"],
                     "processors": ["transform/metric_names", "transform/identity", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/metrics"],
                 },
                 "traces": {
                     "receivers": ["otlp"],
                     "processors": ["transform/identity", "resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/traces"],
+                    "exporters": ["otlp_http/managed", "file/traces", "spanmetrics"],
                 },
                 "logs": {
                     "receivers": ["otlp"],

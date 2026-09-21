@@ -218,7 +218,19 @@ def test_collector_keeps_each_producers_own_name_as_display_identity():
 
 
 def test_collector_metrics_pipeline_also_accepts_otlp_metrics():
-    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp"]
+    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp", "spanmetrics"]
+
+
+def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_provider():
+    doc = _rendered()
+    connector = doc["connectors"]["spanmetrics"]
+    assert connector["dimensions"] == [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}]
+    assert connector["metrics_flush_interval"] == "15s"
+    assert "spanmetrics" in doc["service"]["pipelines"]["traces"]["exporters"]
+    # The traces pipeline has already applied identity + resource stamping when the connector runs,
+    # so the derived series carry run_id/user like everything else.
+    traces = doc["service"]["pipelines"]["traces"]["processors"]
+    assert traces.index("transform/identity") < traces.index("resource")
 
 
 def test_collector_renames_colon_metrics_to_underscores_before_export():
