@@ -25,6 +25,8 @@ from uuid import uuid4
 
 from fastapi import Request
 
+from nemo_gym.base_responses_api_agent import Body
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseInputTokensDetails,
@@ -131,6 +133,19 @@ class Terminus2MultiStepAgent(Terminus2Agent):
         result = await get_response_json(verification)
         result.update(combined)
         return Terminus2AgentVerifyResponse.model_validate(result)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy to the resources server so its per-benchmark metric selection is the headline.
+
+        ``gym eval run`` calls the agent's endpoint; the base implementation would aggregate with
+        the default selection and silently drop the resources server's ``compute_metrics`` and
+        ``get_key_metrics`` overrides (e.g. per-stratum pass rates).
+        """
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 def _sum_usage(usages: List[NeMoGymResponseUsage]) -> NeMoGymResponseUsage:

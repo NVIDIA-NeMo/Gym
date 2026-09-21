@@ -287,6 +287,21 @@ class TestStepLoop:
         harness.sandbox.stop.assert_awaited_once()
 
 
+async def test_aggregate_metrics_is_proxied_to_the_resources_server(monkeypatch):
+    from nemo_gym.config_types import AggregateMetricsRequest
+
+    harness = Harness(TWO_STEPS)
+
+    async def post(server_name, url_path, json, cookies=None):
+        assert (server_name, url_path) == ("oragentbench", "/aggregate_metrics")
+        return FakeHTTPResponse({"key_metrics": {"pass_rate/easy": 0.5}, "agent_metrics": {}})
+
+    agent = make_agent(harness, monkeypatch)
+    agent.server_client.post = AsyncMock(side_effect=post)
+    result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[{"reward": 1.0}]))
+    assert result.key_metrics == {"pass_rate/easy": 0.5}
+
+
 def test_combine_step_metrics_sums_and_keeps_per_step_detail():
     combined = _combine_step_metrics(
         [step_metrics(0), step_metrics(1) | {"terminus2_completed": False}], total_time=20.0
