@@ -350,7 +350,7 @@ async def test_cancelled_cut_claim_is_released_when_cancelled_during_send(
 
 
 @pytest.mark.asyncio
-async def test_policy_service_pause_omits_status_only_missing_workers(
+async def test_policy_service_pause_and_status_use_distinct_wire_contracts(
     sock_dir: Path,
 ) -> None:
     coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
@@ -383,7 +383,13 @@ async def test_policy_service_pause_omits_status_only_missing_workers(
             "model_admission_status",
             {"checkpoint_id": "checkpoint-1"},
         )
+        assert status["workers"] == {
+            "acknowledged": 1,
+            "expected": 1,
+            "live": 1,
+        }
         assert status["missing_workers"] == 0
+        assert status["per_worker"]["worker-1"]["connected"] is True
     finally:
         await agent.stop()
         await coordinator.stop()
@@ -1099,8 +1105,16 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
                     "timeout_s": 5.0,
                 },
             )
-            assert status.json()["state"] == "paused"
-            assert status.json()["inflight_total"] == 0
+            status_body = status.json()
+            assert status_body["state"] == "paused"
+            assert status_body["workers"] == {
+                "acknowledged": 2,
+                "expected": 2,
+                "live": 2,
+            }
+            assert status_body["missing_workers"] == 0
+            assert len(status_body["per_worker"]) == 2
+            assert status_body["inflight_total"] == 0
             resumed = await control.post(
                 f"{MODEL_ADMISSION_URL_PREFIX}/resume",
                 json={"checkpoint_id": "ckpt-real-workers", "deadline_ts": 4e9},

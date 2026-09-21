@@ -1263,10 +1263,14 @@ class PolicyModelCheckpointCoordinatorService:
         return result
 
     def _status_payload(self, status: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **self._pause_payload(status),
-            "missing_workers": status["missing_workers"],
+        result = self._pause_payload(status)
+        result["workers"] = {
+            **result["workers"],
+            "live": status["workers"]["live"],
         }
+        result["missing_workers"] = status["missing_workers"]
+        result["per_worker"] = status["per_worker"]
+        return result
 
     async def _pause(self, body: ModelAdmissionPauseRequest) -> dict[str, Any]:
         async def run() -> dict[str, Any]:
