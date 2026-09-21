@@ -574,20 +574,6 @@ def test_vllm_text_call_has_no_extras() -> None:
     assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
 
 
-def test_vllm_rejects_a_stale_media_summary_payload() -> None:
-    """Version skew: a worker still sending the summary must fail closed."""
-    payload = {"choices": [{"message": {}}], "media": {"modality": "image", "imgs_sizes": [[2, 2]]}}
-    with pytest.raises(ValueError, match="attachments"):
-        VLLMCaptureAdapter().extract_extras(payload)
-    capture, sink = _capture(adapter=VLLMCaptureAdapter())
-    coords = capture.complete_call_from_response(
-        capture.begin_call(_root()),
-        {"prompt_token_ids": [10], **payload},
-    )
-    assert coords.disposition == "capture_failed"
-    assert sink.events == []
-
-
 def test_vllm_rejects_malformed_media_spans() -> None:
     with pytest.raises(ValueError):
         VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}], "media_spans": "bad"})

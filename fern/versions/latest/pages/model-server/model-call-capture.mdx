@@ -308,9 +308,7 @@ attached tensors, their storage layout, and read-back belong to the framework.
 `VLLMCaptureAdapter` preserves optional `routed_experts` extras and passes through
 `media_spans`, small metadata that the RL vLLM worker uses to remap image/video
 placeholders when reusing a captured prefix. vLLM uses expanded token IDs and does not
-emit a separate compact token delta. The adapter rejects a response payload that still
-carries the former `media` geometry summary, so a stale worker fails closed as
-`capture_failed` instead of publishing a row whose pixels were dropped.
+emit a separate compact token delta.
 
 This replaces both the experimental tensor-attachment sink extension and the
 digest-covered `media` summary. Deploy the paired RL changes with this adapter; rows and
