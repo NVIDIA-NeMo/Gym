@@ -50,7 +50,6 @@ import sys
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel
 
@@ -71,65 +70,54 @@ MANIFEST_NAME = "gym-job.json"
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
 
 
-def installed_gym_commit() -> str | None:
-    """Return the git commit of the installed nemo-gym, or None when the install does not record one.
+# The nemo_gym package directory of the code that is running, however it got
+# onto sys.path: an install, an editable checkout, or a plain source tree.
+_PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
-    An editable checkout reports its HEAD, suffixed ``-dirty`` when it has uncommitted changes.
+
+def installed_gym_commit() -> str | None:
+    """Return the git commit of the nemo-gym that is running, or None when it cannot be determined.
+
+    A git install (``pip install git+...``) records its commit in the distribution
+    metadata. Otherwise the running package's own source tree is asked: a git
+    checkout reports its HEAD, suffixed ``-dirty`` when it has uncommitted changes.
     """
-    direct_url = _installed_gym_direct_url()
-    if direct_url is None:
-        return None
-    commit = _git_install_commit(direct_url)
+    commit = _git_install_commit()
     if commit is not None:
         return commit
-    checkout = _editable_checkout(direct_url)
-    if checkout is None:
-        return _unknown_commit(
-            "nemo-gym is neither a git install nor an editable checkout (url=%r).", direct_url.get("url")
-        )
-    return _checkout_commit(checkout)
+    return _source_checkout_commit(_PACKAGE_DIR)
 
 
-def _installed_gym_direct_url() -> dict | None:
-    """The PEP 610 ``direct_url.json`` of the installed nemo-gym; None for an index install."""
+def _git_install_commit() -> str | None:
+    """The commit recorded in the distribution's PEP 610 ``direct_url.json``, or None."""
     try:
         raw = distribution("nemo-gym").read_text("direct_url.json")
     except PackageNotFoundError:
-        return _unknown_commit("no nemo-gym distribution is installed.")
+        return None
     if raw is None:
-        return _unknown_commit("nemo-gym was installed from a package index (no direct_url.json).")
-    return json.loads(raw)
-
-
-def _git_install_commit(direct_url: dict) -> str | None:
-    """The commit a ``pip install git+...`` recorded, or None for any other install."""
-    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
+        return None
+    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
     return str(commit) if commit else None
 
 
-def _editable_checkout(direct_url: dict) -> Path | None:
-    """The directory a ``pip install -e`` points at, or None for any other install."""
-    url = direct_url.get("url", "")
-    if (direct_url.get("dir_info") or {}).get("editable") and url.startswith("file://"):
-        return Path(unquote(urlparse(url).path))
-    return None
-
-
-def _checkout_commit(checkout: Path) -> str | None:
-    """The checkout's HEAD, suffixed ``-dirty`` when it has uncommitted changes."""
+def _source_checkout_commit(package_dir: Path) -> str | None:
+    """HEAD of the git checkout ``package_dir`` is tracked in, ``-dirty`` when it has uncommitted changes."""
     try:
-        head = _git(checkout, "rev-parse", "HEAD")
-        status = _git(checkout, "status", "--porcelain")
+        tracked = _git(package_dir, "ls-files", "--error-unmatch", "__init__.py")
     except FileNotFoundError:
-        return _unknown_commit("git is not available to inspect %s.", checkout)
+        return _unknown_commit("git is not available to inspect %s.", package_dir)
+    if tracked.returncode != 0:
+        return _unknown_commit("nemo-gym is not a git install and %s is not tracked in a git checkout.", package_dir)
+    head = _git(package_dir, "rev-parse", "HEAD")
+    status = _git(package_dir, "status", "--porcelain")
     if head.returncode != 0 or status.returncode != 0:
-        return _unknown_commit("%s is not a git checkout: %s", checkout, (head.stderr or status.stderr).strip())
+        return _unknown_commit("git failed in %s: %s", package_dir, (head.stderr or status.stderr).strip())
     commit = head.stdout.strip()
     return f"{commit}-dirty" if status.stdout.strip() else commit
 
 
-def _git(checkout: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True)
+def _git(directory: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(directory), *args], capture_output=True, text=True)
 
 
 def _unknown_commit(reason: str, *args: object) -> None:

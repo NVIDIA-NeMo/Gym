@@ -287,27 +287,20 @@ class _Distribution:
 
 
 def _install(monkeypatch: MonkeyPatch, direct_url: dict | None) -> None:
+    """What the distribution metadata says about the install; None for an index wheel."""
     monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", lambda name: _Distribution(direct_url))
 
 
-def test_installed_gym_commit_reads_a_git_install(monkeypatch: MonkeyPatch):
-    """`pip install git+...@<sha>` records the sha in PEP 610 direct_url.json."""
-    _install(
-        monkeypatch,
-        {
-            "url": "https://github.com/NVIDIA-NeMo/gym.git",
-            "vcs_info": {"vcs": "git", "commit_id": "c" * 40, "requested_revision": "main"},
-        },
-    )
-    assert installed_gym_commit() == "c" * 40
+def _not_installed(monkeypatch: MonkeyPatch) -> None:
+    def missing(name: str):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", missing)
 
 
-def test_installed_gym_commit_is_none_for_an_index_wheel(monkeypatch: MonkeyPatch, caplog):
-    """A wheel from an index has no direct_url.json; None, not a guess."""
-    _install(monkeypatch, None)
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
-        assert installed_gym_commit() is None
-    assert "installed from a package index" in caplog.text
+def _running_from(monkeypatch: MonkeyPatch, package_dir: Path) -> None:
+    """Where the running nemo_gym package lives on disk."""
+    monkeypatch.setattr("nemo_gym.orchestration.jobs._PACKAGE_DIR", package_dir)
 
 
 _GIT_IDENTITY = {
@@ -318,41 +311,81 @@ _GIT_IDENTITY = {
 }
 
 
-def _checkout(tmp_path: Path) -> str:
-    """A one-commit git checkout; returns its HEAD."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    (tmp_path / "f").write_text("x")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "f"], check=True)
+def _checkout(repo: Path) -> tuple[Path, str]:
+    """A one-commit checkout tracking `nemo_gym/__init__.py`; returns (package dir, HEAD)."""
+    package_dir = repo / "nemo_gym"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "nemo_gym/__init__.py"], check=True)
     subprocess.run(
-        ["git", "-C", str(tmp_path), "commit", "-q", "-m", "seed"], check=True, env={**os.environ, **_GIT_IDENTITY}
+        ["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True, env={**os.environ, **_GIT_IDENTITY}
     )
-    return subprocess.run(
-        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
     ).stdout.strip()
+    return package_dir, head
 
 
-def test_installed_gym_commit_reads_a_clean_editable_checkouts_head(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """`pip install -e .` records only the checkout path; a clean checkout's HEAD is what ran."""
-    head = _checkout(tmp_path)
+def test_installed_gym_commit_reads_a_git_install(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """`pip install git+...@<sha>` records the sha in PEP 610 direct_url.json; the source is not consulted."""
+    _install(
+        monkeypatch,
+        {
+            "url": "https://github.com/NVIDIA-NeMo/gym.git",
+            "vcs_info": {"vcs": "git", "commit_id": "c" * 40, "requested_revision": "main"},
+        },
+    )
+    _running_from(monkeypatch, tmp_path / "site-packages" / "nemo_gym")
+    assert installed_gym_commit() == "c" * 40
+
+
+def test_installed_gym_commit_reads_a_clean_checkouts_head(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """An editable install records no commit; the running package's checkout is asked instead."""
+    package_dir, head = _checkout(tmp_path)
     _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    _running_from(monkeypatch, package_dir)
     assert installed_gym_commit() == head
 
 
-def test_installed_gym_commit_marks_a_dirty_editable_checkout(tmp_path: Path, monkeypatch: MonkeyPatch):
+def test_installed_gym_commit_marks_a_dirty_checkout(tmp_path: Path, monkeypatch: MonkeyPatch):
     """Uncommitted edits ran too, so the HEAD alone must not read as the Gym that ran."""
-    head = _checkout(tmp_path)
-    (tmp_path / "f").write_text("edited")
+    package_dir, head = _checkout(tmp_path)
+    (package_dir / "__init__.py").write_text("edited")
     _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    _running_from(monkeypatch, package_dir)
     assert installed_gym_commit() == f"{head}-dirty"
 
 
-def test_installed_gym_commit_is_none_for_an_editable_install_outside_git(
-    tmp_path: Path, monkeypatch: MonkeyPatch, caplog
-):
-    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+def test_installed_gym_commit_needs_no_distribution_metadata(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """A source tree on sys.path without any install (no dist-info) still names its checkout."""
+    package_dir, head = _checkout(tmp_path)
+    _not_installed(monkeypatch)
+    _running_from(monkeypatch, package_dir)
+    assert installed_gym_commit() == head
+
+
+def test_installed_gym_commit_is_none_for_an_index_wheel(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
+    """A wheel from an index records no commit and lives in site-packages, tracked by no checkout."""
+    site = tmp_path / "site-packages" / "nemo_gym"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("")
+    _install(monkeypatch, None)
+    _running_from(monkeypatch, site)
     with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
         assert installed_gym_commit() is None
-    assert "is not a git checkout" in caplog.text
+    assert "not tracked in a git checkout" in caplog.text
+
+
+def test_installed_gym_commit_ignores_a_checkout_the_venv_merely_sits_in(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """A `.venv` inside a Gym clone must not report the clone's HEAD for a wheel installed into it."""
+    _checkout(tmp_path)
+    site = tmp_path / ".venv" / "site-packages" / "nemo_gym"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("")
+    _install(monkeypatch, None)
+    _running_from(monkeypatch, site)
+    assert installed_gym_commit() is None
 
 
 def test_installed_gym_commit_is_none_without_git(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
@@ -360,27 +393,11 @@ def test_installed_gym_commit_is_none_without_git(tmp_path: Path, monkeypatch: M
         raise FileNotFoundError("git")
 
     monkeypatch.setattr("nemo_gym.orchestration.jobs.subprocess.run", no_git)
-    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    _install(monkeypatch, None)
+    _running_from(monkeypatch, tmp_path)
     with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
         assert installed_gym_commit() is None
     assert "git is not available" in caplog.text
-
-
-def test_installed_gym_commit_is_none_for_a_local_archive(monkeypatch: MonkeyPatch, caplog):
-    _install(monkeypatch, {"url": "file:///somewhere/nemo_gym.whl", "archive_info": {}})
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
-        assert installed_gym_commit() is None
-    assert "neither a git install nor an editable checkout" in caplog.text
-
-
-def test_installed_gym_commit_is_none_when_the_package_is_not_installed(monkeypatch: MonkeyPatch, caplog):
-    def missing(name: str):
-        raise PackageNotFoundError(name)
-
-    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", missing)
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
-        assert installed_gym_commit() is None
-    assert "no nemo-gym distribution is installed" in caplog.text
 
 
 def test_a_record_written_before_gym_commit_still_loads():
