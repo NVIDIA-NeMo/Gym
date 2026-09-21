@@ -13,13 +13,12 @@ def test_materialize_swe_pro_row_separates_identity_input_and_task_data() -> Non
         "task_source": "legacy-source",
     }
 
-    materialized = materialize_row(row, taskset="swebench_pro_smoke", revision="demo-v1")
+    materialized = materialize_row(row, taskset="swebench_pro:test")
 
     assert materialized == {
         "task_id": {
-            "taskset": "swebench_pro_smoke",
+            "taskset": "swebench_pro:test",
             "task_id": "instance-1",
-            "revision": "demo-v1",
         },
         "task_input": {
             "responses_create_params": {"input": "fix it"},
