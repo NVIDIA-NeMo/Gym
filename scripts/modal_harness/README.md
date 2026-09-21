@@ -105,7 +105,12 @@ Collected rows are safe — the publisher writes under the no-shrink rule every 
 cancel loses at most that interval and the next launch resumes.
 
 `--force` is for a cell with no recorded call id (any run started before that was added).
-It clears the slug's status entry so the idempotency guard respawns it. The stuck container
+It writes a tombstone, which does three things: the wedged container's publisher sees it,
+publishes once more and exits (freeing the container), the guard treats the slug as
+spawnable regardless of its `running` label, and the replacement clears the tombstone so it
+cannot respawn in a loop. Deleting the entry instead loses a race -- the old publisher
+recreates it on its next 45s tick and the guard then correctly skips a slug that looks
+live, which fails silently as a skip line that reads like success. The stuck container
 keeps its slot until its own timeout but cannot affect the rows: publishing floors against
 the volume's current count, and `landed` is monotonic per slug. Use it only on a genuinely
 stuck cell — on a slow one it just spawns a redundant second container.

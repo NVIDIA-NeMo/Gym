@@ -317,6 +317,8 @@ def run_campaign(
         namespace,
         slug,
         state="running",
+        # Clear any tombstone: this container postdates it, so the stop is satisfied.
+        force_stopped_at=None,
         # Recorded so one cell can be cancelled without stopping the app. `modal app stop`
         # is the only other lever and it takes every cell down, including other people's.
         function_call_id=modal.current_function_call_id(),
@@ -377,6 +379,7 @@ def run_campaign(
             "log": log_path,
             "published_log": published_log,
             "last_progress_at": time.time(),
+            "started_at": time.time(),
         }
         publisher = threading.Thread(
             target=_progress_publisher,
@@ -493,6 +496,11 @@ def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: 
     while not state["stop"]:
         time.sleep(45)
         try:
+            tomb = _read_status(namespace, slug).get("force_stopped_at")
+            if tomb and float(tomb) > state["started_at"]:
+                print(f"[{slug}] force-stopped externally; publishing and exiting", flush=True)
+                _publish(work_path, output_path, state["high_water"])
+                os._exit(0)
             published = _publish(work_path, output_path, state["high_water"])
             if published > state["high_water"]:
                 state["high_water"] = published
@@ -518,6 +526,16 @@ def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: 
 
 def _status_path(namespace: str, slug: str) -> str:
     return os.path.join(RESULTS_ROOT, namespace, f"{slug}.status.json")
+
+
+def _read_status(namespace: str, slug: str) -> dict[str, Any]:
+    """Current status for a slug, reloading the volume so another writer is visible."""
+    try:
+        RESULTS_VOLUME.reload()
+        with open(_status_path(namespace, slug), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
 
 
 def write_status(namespace: str, slug: str, **fields: Any) -> None:
@@ -611,6 +629,8 @@ def campaign_state(namespace: str) -> dict[str, dict[str, Any]]:
             "expected": status.get("expected", 0),
             "state": status.get("state", "unknown"),
             "updated_at": status.get("updated_at", 0.0),
+            "started_at": status.get("started_at", 0.0),
+            "force_stopped_at": status.get("force_stopped_at") or 0.0,
         }
     return out
 
@@ -637,6 +657,12 @@ def skip_reason(
     if entry["expected"] and entry["landed"] >= entry["expected"] - tolerance:
         if entry["state"] in {"complete", "settled_short"}:
             return f"settled ({entry['landed']}/{entry['expected']})"
+    # A tombstone newer than the running container's start means a force-stop is pending:
+    # spawnable regardless of the `running` label, which is what makes --force
+    # deterministic rather than a race against the old publisher's next tick.
+    tomb = float(entry.get("force_stopped_at") or 0)
+    if tomb and tomb > float(entry.get("started_at") or 0):
+        return None
     age = time.time() - float(entry.get("updated_at") or 0)
     if entry["state"] == "running" and age < live_within_seconds:
         return f"already running ({entry['landed']} rows, {age:.0f}s ago)"
@@ -667,14 +693,18 @@ def stop_cell(namespace: str, slug: str, force: bool = False) -> dict[str, Any]:
         # and writing nothing -- which is why it is being stopped -- and it cannot damage
         # the rows: `_publish` floors against the volume's current count, and `landed` is
         # monotonic, so a woken straggler can no longer overwrite a newer container's work.
-        os.remove(path)
-        RESULTS_VOLUME.commit()
+        write_status(
+            namespace,
+            slug,
+            state="force_stopped",
+            force_stopped_at=time.time(),
+        )
         return {
             "slug": slug,
             "stopped": True,
             "forced": True,
             "landed": status.get("landed"),
-            "reason": "status cleared; guard will respawn and resume",
+            "reason": "tombstoned; the old publisher will exit and the guard will respawn",
         }
     try:
         modal.FunctionCall.from_id(call_id).cancel()
