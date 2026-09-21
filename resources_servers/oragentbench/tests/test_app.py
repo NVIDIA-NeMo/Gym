@@ -266,6 +266,15 @@ class TestModelFreeVerify:
         assert any(cmd.startswith("nohup sleep") for cmd in sandbox.commands)
         assert result["reward"] == 0.0 and result["harness_failure"] == 0.0 and sandbox.stopped
 
+    def test_row_may_select_the_control_only_when_the_server_is_in_a_validation_mode(self, monkeypatch):
+        sandbox = FakeSandbox(verifier=scored(True, 2.0))
+        server = make_server(sandbox, monkeypatch, validation_mode="reference")
+        self.post(server, verify_body() | {"validation_mode": "no_action"})
+        assert not any("solve.sh" in cmd for cmd in sandbox.commands)
+        live = make_server(FakeSandbox(), monkeypatch)
+        result = self.post(live, verify_body() | {"validation_mode": "reference"})
+        assert result["status"] == Status.NO_SESSION.value
+
     @pytest.mark.parametrize("quality_raw,expected_reward", [(0.8, 0.0), (0.81, 1.0)])
     def test_feasible_but_low_quality_fails_the_pass_gate(self, monkeypatch, quality_raw, expected_reward):
         sandbox = FakeSandbox(verifier=scored(True, quality_raw))

@@ -277,6 +277,9 @@ class ORAgentBenchVerifyRequest(BaseVerifyRequest):
     task_folder: str
     # Provenance label: a wrong type costs the label, not the row.
     difficulty: Any = None
+    # Model-free sweeps only: overrides the server's validation_mode for this row, and is ignored
+    # unless the server was started in a validation mode (a rollout row cannot switch a live server).
+    validation_mode: Optional[Literal["reference", "no_action", "wrong_file", "hung_process"]] = None
 
 
 class ORAgentBenchVerifyResponse(BaseVerifyResponse):
@@ -559,7 +562,7 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
 
     async def _run_model_free(self, body: ORAgentBenchVerifyRequest) -> Optional[_Session]:
         """Drive the whole task without a model: reference solution or a negative control per step."""
-        mode = self.config.validation_mode
+        mode = body.validation_mode or self.config.validation_mode
         try:
             task = load_task(self._resolve_task_folder(body.task_folder))
         except BaseException:
