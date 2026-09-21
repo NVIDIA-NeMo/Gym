@@ -84,12 +84,16 @@ class ResourceToolDispatcher:
         except ValidationError as error:
             output: Any = {"error": f"Invalid arguments for {name}: {error.message}"}
         else:
-            response = await self._server_client.post(
-                server_name=self._resources_server_name,
-                url_path=f"/{name}",
-                json=arguments,
-                cookies=self._cookies,
-            )
+            try:
+                response = await self._server_client.post(
+                    server_name=self._resources_server_name,
+                    url_path=f"/{name}",
+                    json=arguments,
+                    cookies=self._cookies,
+                )
+            except TypeError as error:
+                output = {"error": f"Could not serialize arguments for {name}: {error}"}
+                return output
             self._cookies.update({key: morsel.value for key, morsel in response.cookies.items()})
             body = (await response.content.read()).decode(errors="replace")
             try:
@@ -123,9 +127,11 @@ def _make_method(
         if parameter_name in required:
             default = inspect.Parameter.empty
         else:
-            default = parameter_schema.get("default")
             if "default" in parameter_schema:
+                default = parameter_schema["default"]
                 explicit_defaults[parameter_name] = default
+            else:
+                default = inspect.Parameter.empty
         parameters.append(
             inspect.Parameter(
                 parameter_name,
@@ -192,7 +198,11 @@ def create_agent_class_with_resource_methods(
         methods[name] = method
 
     methods["__gym_resource_method_names__"] = tuple(name for name in methods if name != "__module__")
-    return type(f"{agent_class.__name__}WithResources", (agent_class,), methods)
+    metaclass = type(agent_class)
+    execution = getattr(agent_class, "_execution_config", None)
+    if execution is None:
+        return metaclass(f"{agent_class.__name__}WithResources", (agent_class,), methods)
+    return metaclass(f"{agent_class.__name__}WithResources", (agent_class,), methods, execution=execution)
 
 
 def validate_agent_resource_method_bindings(agent: Any) -> None:

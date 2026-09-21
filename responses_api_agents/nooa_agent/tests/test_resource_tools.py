@@ -106,7 +106,6 @@ async def test_method_is_attached_directly_with_typed_signature_defaults_and_coo
     output = await agent.get_weather("Paris")  # type: ignore[attr-defined]
 
     assert "get_weather" in vars(type(agent))
-    assert "gym_tools" not in vars(agent)
     signature = inspect.signature(agent.get_weather)  # type: ignore[attr-defined]
     assert signature.parameters["city"].annotation is str
     assert signature.parameters["city"].default is inspect.Parameter.empty

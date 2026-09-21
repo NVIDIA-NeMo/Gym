@@ -15,9 +15,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Literal
 
+import aiohttp
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
@@ -85,17 +87,32 @@ def _responses_input(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any
 
 
 def _responses_tool_schema(tool: Tool) -> dict[str, Any]:
-    schema = tool.get_parameter_schema()
+    schema = tool.get_parameter_schema(strict=True)
     return {
         "type": "function",
         "name": tool.name,
         "description": tool.description,
         "parameters": schema,
-        "strict": (
-            schema.get("additionalProperties") is False
-            and set(schema.get("required", [])) == set(schema.get("properties", {}))
-        ),
+        "strict": _schema_is_strict(schema),
     }
+
+
+def _schema_is_strict(value: Any, root: dict[str, Any] | None = None) -> bool:
+    if not isinstance(value, dict):
+        return True
+    root = root or value
+    reference = value.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        definition = root.get("$defs", {}).get(reference.removeprefix("#/$defs/"))
+        return _schema_is_strict(definition, root) if isinstance(definition, dict) else False
+    if value.get("type") == "object":
+        properties = value.get("properties", {})
+        if value.get("additionalProperties") is not False or set(value.get("required", [])) != set(properties):
+            return False
+        return all(_schema_is_strict(child, root) for child in properties.values())
+    if value.get("type") == "array":
+        return _schema_is_strict(value.get("items", {}), root)
+    return all(_schema_is_strict(child, root) for child in value.values() if isinstance(child, dict))
 
 
 def _output_text(response: NeMoGymResponse) -> str:
@@ -136,6 +153,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_call_collector = model_call_collector
         self._cookies = cookies
         self._calls = 0
+        self._lock = asyncio.Lock()
 
     @property
     def calls(self) -> int:
@@ -157,6 +175,16 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        async with self._lock:
+            return await self._acall(messages, tools, output_model, **kwargs)
+
+    async def _acall(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
         if self._calls >= self._max_policy_calls:
             raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_policy_calls} calls")
         self._calls += 1
@@ -170,12 +198,13 @@ class GymResponsesLLM(UnifiedLLM):
             "tools": [_responses_tool_schema(tool) for tool in tools or []],
         }
         if output_model is not None:
+            output_schema = output_model.model_json_schema()
             request["text"] = {
                 "format": {
                     "type": "json_schema",
                     "name": output_model.__name__,
-                    "schema": output_model.model_json_schema(),
-                    "strict": True,
+                    "schema": output_schema,
+                    "strict": _schema_is_strict(output_schema),
                 }
             }
 
@@ -193,7 +222,16 @@ class GymResponsesLLM(UnifiedLLM):
             json=body,
             cookies=self._cookies,
         )
-        await raise_for_status(http_response)
+        try:
+            await raise_for_status(http_response)
+        except aiohttp.ClientResponseError as error:
+            # Expose the response body for NOOA context-overflow detection.
+            content = getattr(error, "response_content", b"")
+            if content:
+                if isinstance(content, bytes):
+                    content = content.decode(errors="replace")
+                error.message = f"{error.message}: {content}"
+            raise
         raw = await get_response_json(http_response)
         response = NeMoGymResponse.model_validate(raw)
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
