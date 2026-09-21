@@ -1923,6 +1923,250 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
     assert calls["n"] == 3  # operations.retries + 1 submissions, then typed failure
 
 
+def _sandbox_ended_api_error(
+    message: str = "Sandbox sb-1 has ended (OOMKilled): PodFailed: container sandbox was OOMKilled",
+) -> Any:
+    """Build the SDK exception the server's 410 SANDBOX::ENDED answer produces."""
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+    from opensandbox.exceptions.sandbox import SandboxError  # noqa: PLC0415
+
+    error = SandboxApiException(
+        message=f"Command run failed: {message}",
+        status_code=410,
+        error=SandboxError(code="SANDBOX::ENDED", message=message),
+    )
+    return error
+
+
+def _error_carrier(error: Any) -> Exception:
+    carrier = Exception("opaque")
+    carrier.error = error  # type: ignore[attr-defined]
+    return carrier
+
+
+def test_sandbox_ended_errors_are_never_retryable() -> None:
+    """410 SANDBOX::ENDED is terminal even though its message matches a retryable marker."""
+    ended = _sandbox_ended_api_error()
+
+    # The message says "PodFailed", which the marker heuristic reads as retryable;
+    # the sandbox-ended guard has to win over it.
+    assert opensandbox_provider._has_retryable_error_marker(ended) is True
+    assert opensandbox_provider._is_sandbox_ended_error(ended) is True
+    assert opensandbox_provider._is_retryable_create_error(ended) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(ended) is False
+
+    wrapped = RuntimeError("command run failed")
+    wrapped.__cause__ = ended
+    assert opensandbox_provider._is_sandbox_ended_error(wrapped) is True
+    assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is False
+
+    # Each signal recognises the answer on its own: status code, SDK error code, message.
+    class StatusOnly(Exception):
+        status_code = 410
+
+    assert opensandbox_provider._is_sandbox_ended_error(StatusOnly("gone")) is True
+    code_only = SimpleNamespace(code="sandbox::ended")
+    assert opensandbox_provider._is_sandbox_ended_error(_error_carrier(code_only)) is True
+    assert opensandbox_provider._is_sandbox_ended_error(RuntimeError("[SANDBOX::ENDED] gone")) is True
+
+    # A dead backend is still a backend problem, not an ended sandbox.
+    unreachable = opensandbox_provider.SandboxBackendUnreachableError("proxy 502: no TCP connection to execd")
+    assert opensandbox_provider._is_sandbox_ended_error(unreachable) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(unreachable) is False
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    assert opensandbox_provider._is_sandbox_ended_error(Backend502Error("HTTP 502")) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(Backend502Error("HTTP 502")) is True
+
+
+def test_sandbox_ended_reason_prefers_the_server_header() -> None:
+    """The reason comes from the response header when the SDK kept it, else from the message."""
+    from_message = _sandbox_ended_api_error()
+    assert opensandbox_provider._sandbox_ended_reason(from_message) == "OOMKilled"
+
+    with_header = _sandbox_ended_api_error()
+    with_header.response = SimpleNamespace(  # type: ignore[attr-defined]
+        headers=httpx.Headers({"OpenSandbox-Sandbox-Ended-Reason": "Evicted"})
+    )
+    assert opensandbox_provider._sandbox_ended_reason(with_header) == "Evicted"
+
+    assert opensandbox_provider._sandbox_ended_reason(RuntimeError("[SANDBOX::ENDED] no reason here")) is None
+
+    restated = opensandbox_provider._as_sandbox_ended_error(from_message, operation="command run", sandbox_id="sb-1")
+    assert restated.reason == "OOMKilled"
+    assert restated.sandbox_id == "sb-1"
+    assert restated.status_code == 410
+    assert "OOMKilled" in str(restated)
+    assert opensandbox_provider._as_sandbox_ended_error(restated, operation="op", sandbox_id="sb-1") is restated
+
+
+@pytest.mark.asyncio
+async def test_exec_raises_sandbox_ended_on_first_410(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 410 ends the command at once: no resubmission, no death probe, reason attached."""
+
+    calls = {"run": 0, "info": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            calls["run"] += 1
+            raise _sandbox_ended_api_error()
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            calls["info"] += 1
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="FAILED", message="OOMKilled"))
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 3, "command_retries": 2},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-ended", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxEndedError) as exc_info:
+        await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert exc_info.value.reason == "OOMKilled"
+    assert exc_info.value.sandbox_id == "sb-ended"
+    assert exc_info.value.status_code == 410
+    assert "OOMKilled" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, Exception)
+    assert calls["run"] == 1  # neither command_retries nor the 502 submission loop re-ran it
+    assert calls["info"] == 0  # the server already said why; no status poll
+
+
+@pytest.mark.asyncio
+async def test_exec_background_reports_sandbox_ended_mid_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sandbox that ends mid-command ends the poll with the terminal typed error."""
+
+    calls = {"status": 0, "info": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-ended")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            calls["status"] += 1
+            if calls["status"] == 1:
+                return SimpleNamespace(running=True, exit_code=None, error=None)
+            ended = _sandbox_ended_api_error("Sandbox sb-bg has ended (Evicted): PodFailed: node pressure")
+            raise ended
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            raise AssertionError("logs must not be read after the sandbox ended")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            calls["info"] += 1
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="Evicted", message="PodFailed"))
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 2},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-bg", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxEndedError) as exc_info:
+        await provider.exec(handle, "sleep 60", timeout_s=30)
+
+    assert exc_info.value.reason == "Evicted"
+    assert exc_info.value.sandbox_id == "sb-bg"
+    assert calls["status"] == 2  # polled once while running, then stopped on the 410
+    assert calls["info"] == 0
+
+
+@pytest.mark.asyncio
+async def test_create_probe_fails_fast_when_the_sandbox_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 410 during the create probe fails the create instead of polling out its deadline."""
+
+    calls = {"run": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            calls["run"] += 1
+            raise _sandbox_ended_api_error()
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": "printf ready", "expected_stdout": "ready", "timeout_s": 5, "deadline_s": 60},
+        operations={"retries": 3},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sb-probe", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
+    )
+
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError) as exc_info:
+        await provider._verify_created_handle(handle)
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, opensandbox_provider.SandboxEndedError)
+    assert cause.reason == "OOMKilled"
+    assert calls["run"] == 1  # one probe attempt, not a deadline's worth
+    # The create itself must not be retried against a sandbox the server has buried.
+    assert opensandbox_provider._is_retryable_create_error(exc_info.value) is False
+
+
+@pytest.mark.asyncio
+async def test_connect_after_create_fails_fast_when_the_sandbox_ends(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 410 while reconnecting after create is terminal, not a connect-poll retry."""
+
+    calls = {"connect": 0}
+
+    class EndedConnectSandbox(FakeSandbox):
+        @classmethod
+        async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+            del args, kwargs
+            calls["connect"] += 1
+            raise _sandbox_ended_api_error("Sandbox sb-connect has ended (Error): PodFailed")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (EndedConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"connect_attempt_timeout_s": 0.01, "connect_poll_s": 0.01},
+        probe={"command": None},
+    )
+
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError) as exc_info:
+        await provider._connect_after_create(
+            opensandbox_provider.SandboxHandle(sandbox_id="sb-connect", provider_name="opensandbox", raw=None),
+            SandboxSpec(image="image:tag"),
+        )
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, opensandbox_provider.SandboxEndedError)
+    assert cause.reason == "Error"
+    assert calls["connect"] == 1
+    assert not isinstance(exc_info.value, opensandbox_provider.OpenSandboxCreateTimeoutError)
+
+
 @pytest.mark.parametrize(
     ("operations_overrides", "expected_status_timeout_s"),
     [
