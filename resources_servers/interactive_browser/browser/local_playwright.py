@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
+from ._chromium import ensure_chromium
 from .page import PlaywrightConnectedBackend
 
 
@@ -35,6 +37,10 @@ class LocalPlaywrightBackend(PlaywrightConnectedBackend):
         self._headless = headless
 
     async def _connect(self, playwright):
+        # The wheel ships the driver but not the browser, so a fresh environment
+        # gets here and fails with an executable-not-found. Install on first use
+        # rather than surfacing that deep inside a rollout.
+        await asyncio.to_thread(ensure_chromium)
         # One browser process can host many isolated contexts; here we keep it
         # simple and own a context per backend instance.
         browser = await playwright.chromium.launch(headless=self._headless)

@@ -24,6 +24,13 @@ import urllib.request
 import pytest
 
 
+def pytest_configure(config):
+    """Install the browser once, before any test tries to launch or spawn one."""
+    from browser._chromium import ensure_chromium
+
+    ensure_chromium()
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

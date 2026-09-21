@@ -4,7 +4,10 @@
 
 # Drives the page for both shipped backends (a local Chromium, or one reached
 # over CDP). The only browser dependency this environment has.
-playwright>=1.40
+# Pinned to a minor: `playwright install` fetches a browser build tied to the
+# driver version, so an unpinned upgrade can leave a cached browser the new
+# driver will not talk to.
+playwright>=1.62,<1.63
 
 # Session providers for `backend: remote_cdp` bring their own SDKs, if any, and
 # are installed by the operator — deliberately not hard dependencies, so the
