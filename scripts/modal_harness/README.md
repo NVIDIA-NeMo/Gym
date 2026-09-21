@@ -74,6 +74,16 @@ modal volume put nemo-gym-campaign-results --env=FDR \
   results/mybench/my-model.jsonl /mybench/my-model.jsonl --force
 ```
 
+**Seeding a missing sidecar.** Where a benchmark's materialized inputs are identical
+across models, a sidecar copied from any sibling cell is correct for all of them — verified
+true for ASB (`sha256 88dee0d9af6b302a` across models) and for AgentDyn (identical across
+all 36 cells, rows carrying `defense: None`, because the treatment is server config). That
+makes recovery from a missing sidecar a copy rather than a recollect.
+
+Check before seeding, not after: if the rows carry the treatment or any per-cell id,
+seeding makes resume match the wrong selectors — silently, because the indices still
+resolve. This is deliberately not automated for that reason.
+
 **Upload the sidecars too.** Resume matches output rows against
 `<output>_materialized_inputs.jsonl` and reads prior attempts from
 `<output>_failures.jsonl`. Without them resume has nothing to match against and silently
