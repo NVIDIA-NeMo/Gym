@@ -118,7 +118,9 @@ class CombibenchVerifyRequest(CombibenchRunRequest, BaseVerifyRequest):
     pass
 
 
-class CombibenchVerifyResponse(BaseVerifyResponse):
+class CombibenchVerifyResponse(CombibenchRunRequest, BaseVerifyResponse):
+    """Echoes the task fields so per-family metrics and post-hoc analysis can key on them."""
+
     status: str
     # 1.0 when the outcome is a harness fault, so the rate is a metric line.
     harness_failure: float
