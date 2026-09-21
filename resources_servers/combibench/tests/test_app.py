@@ -255,17 +255,28 @@ class TestHttpBoundary:
 
 
 class TestMetrics:
-    RESPONSES = [
-        {"tag": "hackmath", "reward": 1.0, "harness_failure": 0.0, "_ng_task_index": 0, "_ng_rollout_index": 0},
-        {"tag": "imo", "reward": 0.0, "harness_failure": 0.0, "_ng_task_index": 1, "_ng_rollout_index": 0},
-        {"tag": "imo", "reward": 0.0, "harness_failure": 1.0, "_ng_task_index": 2, "_ng_rollout_index": 0},
-    ]
+    """Built from real verify() output: a response that dropped ``tag`` would silently lose the per-family keys."""
+
+    def _responses(self) -> list[dict]:
+        server = _make_server()
+        ok = asyncio.run(server.verify(_request(_fenced(SOLUTION), tag="hackmath")))
+        bad = asyncio.run(server.verify(_request("no code here", tag="imo")))
+        fault = asyncio.run(server.verify(_request(_fenced(SOLUTION), tag="imo", formal_statement=None)))
+        responses = []
+        for index, response in enumerate((ok, bad, fault)):
+            responses.append({**response.model_dump(), "_ng_task_index": index, "_ng_rollout_index": 0})
+        return responses
 
     def _aggregate(self):
         server = _make_server()
         return compute_aggregate_metrics(
-            self.RESPONSES, compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
+            self._responses(), compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
         )
+
+    def test_task_fields_are_echoed(self) -> None:
+        response = self._responses()[0]
+        assert response["tag"] == "hackmath" and response["theorem_name"] == "synthetic_choose_1"
+        assert response["answers"] == ["10"] and response["split"] == "test"
 
     def test_pooled_reward_stays_the_headline(self) -> None:
         """Upstream reports one pooled figure, so pooling is the right headline here."""
