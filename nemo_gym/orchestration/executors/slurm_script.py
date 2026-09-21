@@ -364,15 +364,22 @@ def _render_collector_health_check(config: SubmitConfig) -> str:
     )
 
 
-def _render_collector_shutdown() -> str:
-    """Run after the driver: one more scrape interval so the final counters are seen, then SIGTERM
-    (which srun forwards to the collector) for a graceful flush, keeping the driver's exit code."""
+def _render_collector_shutdown(remote_bench_dir: Path) -> str:
+    """Run after the driver: one more scrape interval so the final counters are seen, then a
+    graceful stop, keeping the driver's exit code.
+
+    The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
+    `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
+    interrupt; neither reaches the collector, so its final batch would be lost.
+    """
     pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
+    pattern = shlex.quote(f"--config {collector_config_path(remote_bench_dir)}")
     return (
         "DRIVER_RC=$?\n"
         f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
-        f"kill -TERM {pid} 2>/dev/null || true\n"
+        f'pkill -TERM -u "$USER" -f -- {pattern} || true\n'
         f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
+        f"kill -TERM {pid} 2>/dev/null || true\n"
         "exit $DRIVER_RC"
     )
 
@@ -495,7 +502,7 @@ def build_sbatch_script(
         f"--output=logs/driver.log {entrypoint}"
     )
     if observed:
-        driver_command += "\n" + _render_collector_shutdown()
+        driver_command += "\n" + _render_collector_shutdown(remote_bench_dir)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
