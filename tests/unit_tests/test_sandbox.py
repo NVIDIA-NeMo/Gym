@@ -870,6 +870,12 @@ async def _assert_opensandbox_connect_after_create_preserves_request_timeout(mon
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
+        def with_transport_if_missing(self) -> "FakeConnectionConfig":
+            return self
+
+        async def close_transport_if_owned(self) -> None:
+            return None
+
     class FakeSDKSandbox:
         connect_calls: list[dict[str, Any]] = []
 
@@ -1355,6 +1361,12 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
     class FakeConnectionConfig:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
+
+        def with_transport_if_missing(self) -> "FakeConnectionConfig":
+            return self
+
+        async def close_transport_if_owned(self) -> None:
+            return None
 
     class FakeSDKSandbox:
         connect_calls: list[dict[str, Any]] = []

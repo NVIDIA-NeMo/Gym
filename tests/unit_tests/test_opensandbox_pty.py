@@ -999,8 +999,8 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
 
     assert target_session.closed
     assert target_client.closed
-    # Processes and PTYs do not survive pause; the new runtime never had this
-    # session, so a delete request would only be a spurious call.
+    # No delete request either way: on the Kubernetes backend the session is
+    # gone with the old runtime, on the Docker backend it must stay re-attachable.
     assert target_client.delete_calls == [], "pause must drop the local client without a delete request"
     assert not other_session.closed
     assert not other_client.closed

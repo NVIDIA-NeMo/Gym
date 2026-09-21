@@ -182,6 +182,12 @@ class FakeConnectionConfig:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
 
+    def with_transport_if_missing(self) -> "FakeConnectionConfig":
+        return self
+
+    async def close_transport_if_owned(self) -> None:
+        return None
+
 
 @dataclass(frozen=True)
 class FakeVolume:
@@ -2038,6 +2044,55 @@ async def test_resume_timeout_bounds_the_full_lifecycle(monkeypatch: pytest.Monk
     assert resume_started.is_set()
     assert handle.raw is raw
     raw.close.assert_not_awaited()
+
+
+async def test_resume_timeout_closes_an_sdk_owned_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout cancels the SDK call with CancelledError, which the SDK's own cleanup never sees."""
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from opensandbox.config import ConnectionConfig
+
+    transport_close = AsyncMock()
+
+    async def stalled_resume(_sandbox_id: str, *, connection_config: Any, **_kwargs: Any) -> Any:
+        assert connection_config.transport is not None and connection_config._owns_transport
+        monkeypatch.setattr(connection_config.transport, "aclose", transport_close)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SimpleNamespace(resume=stalled_resume), ConnectionConfig, object, FakePlatformSpec, FakeVolume),
+    )
+    # The only configuration that leaves the SDK to build its own transport.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "keepalive_expiry_s": None,
+            "transport_backend": "httpx",
+            "tls_verify": True,
+        },
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", SimpleNamespace(close=AsyncMock()))
+
+    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s"):
+        await asyncio.wait_for(provider.resume(handle), timeout=1)
+
+    transport_close.assert_awaited_once_with()
+
+
+async def test_resume_installs_the_new_handle_before_closing_the_old_one(fake_opensandbox_sdk: None) -> None:
+    """A cancellation during the best-effort close of the old handle must not lose a successful resume."""
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    raw = SimpleNamespace(close=AsyncMock(side_effect=asyncio.Event().wait))
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.resume(handle), timeout=0.05)
+
+    assert isinstance(handle.raw, FakeSandbox)
+    assert handle.raw.id == "sandbox-paused"
+    raw.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

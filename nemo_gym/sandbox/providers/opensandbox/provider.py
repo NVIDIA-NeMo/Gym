@@ -1056,12 +1056,15 @@ class OpenSandboxProvider:
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
+        # Held for the same reason as in resume(): a cancelled SDK call skips
+        # its own transport cleanup.
+        config = self._connection_config(request_timeout_s=timeout_s).with_transport_if_missing()
         sandbox = None
         try:
             async with asyncio.timeout(timeout_s):
                 sandbox = await Sandbox.connect(
                     sandbox_id,
-                    connection_config=self._connection_config(request_timeout_s=timeout_s),
+                    connection_config=config,
                     connect_timeout=timedelta(seconds=timeout_s),
                     skip_health_check=True,
                 )
@@ -1072,8 +1075,10 @@ class OpenSandboxProvider:
                         timedelta(seconds=self._create.connect_poll_s),
                     )
                 return handle
-        except Exception:
-            if sandbox is not None:
+        except BaseException:
+            if sandbox is None:
+                await config.close_transport_if_owned()
+            else:
                 try:
                     await asyncio.wait_for(
                         sandbox.close(),
@@ -1100,10 +1105,12 @@ class OpenSandboxProvider:
                     timeout_s=self._connection.request_timeout_s,
                 )
 
-                # Pause commits the root filesystem and replaces the runtime;
-                # processes and their PTY sessions do not survive it. Drop our
-                # local clients without sending a delete for sessions the new
-                # runtime never had. Callers open a fresh PTY after resume.
+                # Pause invalidates the PTY WebSockets. Drop the local clients
+                # without deleting the server sessions: the Kubernetes backend
+                # commits the rootfs and replaces the runtime, so sessions and
+                # processes are gone and callers open a new PTY after resume;
+                # the Docker backend freezes the container, so sessions survive
+                # and can be re-attached by id with attach_pty() after resume.
                 for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
                     try:
                         session._owned = False
@@ -1139,38 +1146,46 @@ class OpenSandboxProvider:
         One ``pause_resume_timeout_s`` deadline covers the resume request, the
         endpoint rebuild and the readiness check. On timeout the server-side
         state is unknown: reconnect and inspect ``status()`` before retrying.
-        Processes and PTY sessions do not survive pause; open a new PTY after.
+        PTY sessions were detached by ``pause()``; see there for which backends
+        allow re-attaching them and which need a new session.
         """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         timeout_s = self._operations.pause_resume_timeout_s
+        # Hold the config: the timeout cancels the SDK call with CancelledError,
+        # which the SDK's own `except Exception` cleanup never sees, so a default
+        # SDK-owned transport would leak. Closing is a no-op for our shared one.
+        config = self._connection_config().with_transport_if_missing()
         lifecycle_timeout = asyncio.timeout(timeout_s)
         try:
             async with lifecycle_timeout:
                 resumed = await Sandbox.resume(
                     handle.sandbox_id,
-                    connection_config=self._connection_config(),
+                    connection_config=config,
                     resume_timeout=timedelta(seconds=timeout_s),
                     health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
                     skip_health_check=self._create.skip_health_check,
                 )
-        except TimeoutError as e:
-            if not lifecycle_timeout.expired():
-                raise
-            raise TimeoutError(
-                f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to resume after {timeout_s:g}s; "
-                "reconnect and check status() before retrying"
-            ) from e
+        except BaseException as e:
+            await config.close_transport_if_owned()
+            if isinstance(e, TimeoutError) and lifecycle_timeout.expired():
+                raise TimeoutError(
+                    f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to resume after {timeout_s:g}s; "
+                    "reconnect and check status() before retrying"
+                ) from e
+            raise
 
+        # Install the new handle first: a cancellation during the best-effort
+        # close below must not lose an already successful resume.
+        old_raw, handle.raw = handle.raw, resumed
         try:
             await self._await_sdk_call(
-                handle.raw.close(),
+                old_raw.close(),
                 operation="close_pre_resume_handle",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
         except Exception as e:
             LOGGER.warning("Failed to close pre-resume OpenSandbox handle %r: %r", handle.sandbox_id, e)
-        handle.raw = resumed
 
     async def _await_sdk_call(
         self,

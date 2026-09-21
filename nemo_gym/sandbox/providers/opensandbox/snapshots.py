@@ -56,6 +56,9 @@ async def cleanup_snapshots(
     reap: bool,
 ) -> int:
     """List matching snapshots (and paused sandboxes) and optionally delete them."""
+    if snapshot_ids and kill_paused:
+        # Snapshot ids carry no sandbox scope, so this would select every paused sandbox.
+        raise ValueError("kill_paused cannot be combined with snapshot_ids; scope it with sandbox_id instead")
     base_url = domain.strip().rstrip("/")
     if "://" not in base_url:
         base_url = f"{protocol}://{base_url}"

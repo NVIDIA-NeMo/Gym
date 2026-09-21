@@ -543,10 +543,11 @@ class AsyncSandbox:
         return resolved
 
     async def pause(self) -> None:
-        """Pause this sandbox, preserving its filesystem state.
+        """Pause this sandbox while preserving its state.
 
-        Running processes and open PTY sessions do not survive a pause; open a
-        new PTY after ``resume()``.
+        Open PTY sessions are detached. Whether running processes survive and
+        whether those sessions can be re-attached after ``resume()`` depends on
+        the provider and its backend; see the provider's ``pause()`` docs.
         """
         handle = self._require_handle()
         provider = self._provider

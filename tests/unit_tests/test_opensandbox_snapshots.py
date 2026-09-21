@@ -241,6 +241,16 @@ def test_explicit_snapshot_ids_skip_listing_and_404_is_idempotent(
     assert "snapshot gone was already gone" in out
 
 
+def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct callers bypass the CLI check; the function must not fall back to every paused sandbox.
+    _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
+
+    with pytest.raises(ValueError, match="kill_paused cannot be combined with snapshot_ids"):
+        run_cleanup(snapshot_ids=["snap-a"], kill_paused=True)
+
+    assert session_calls == [], "no request may be made before the scope check fails"
+
+
 def test_delete_failures_are_reported_and_do_not_stop_the_sweep(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

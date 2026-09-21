@@ -312,12 +312,12 @@ class SupportsSandboxEndpoint(Protocol):
 class SupportsSandboxPauseResume(Protocol):
     """Optional provider capability for preserving and restoring a sandbox.
 
-    Pause preserves the filesystem, not running processes or PTY sessions;
-    callers open a new PTY after ``resume()``.
+    What survives a pause beyond the filesystem (running processes, PTY
+    sessions) is provider- and backend-specific; see the provider's docs.
     """
 
     async def pause(self, handle: SandboxHandle) -> None:
-        """Pause a sandbox while preserving its filesystem state."""
+        """Pause a sandbox while preserving its state."""
         ...
 
     async def resume(self, handle: SandboxHandle) -> None:
