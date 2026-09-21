@@ -38,6 +38,7 @@ instead of being dropped quietly.
 import asyncio
 import logging
 import math
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -47,12 +48,13 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
+from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_sdk
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,6 +65,9 @@ T = TypeVar("T")
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
 _DIRECT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# How a deployment publishes sandbox ports. See ``E2BProvider.endpoint``.
+_PORT_ROUTING_MODES = ("auto", "hostname", "gateway")
 
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
@@ -148,9 +153,22 @@ class E2BConnectionConfig:
     api_headers: dict[str, str] | None = None
     proxy: str | None = None
     request_timeout_s: float | None = None
+    # How ``endpoint()`` publishes a sandbox port. "auto" resolves to "gateway"
+    # when a sandbox URL is configured and "hostname" otherwise, mirroring the
+    # SDK's own rule for whether one origin fronts every sandbox.
+    port_routing: str = "auto"
+    # Scheme for "hostname" routing. None mirrors the SDK (http in debug mode,
+    # https otherwise); set it for a deployment that serves wildcard DNS over
+    # plain HTTP. Ignored by "gateway" routing, which takes the scheme from the
+    # gateway URL itself.
+    port_scheme: str | None = None
 
     def __post_init__(self) -> None:
         _validate_optional_number("connection.request_timeout_s", self.request_timeout_s, positive=False)
+        if self.port_routing not in _PORT_ROUTING_MODES:
+            raise ValueError(f"connection.port_routing must be one of {', '.join(_PORT_ROUTING_MODES)}")
+        if self.port_scheme is not None and self.port_scheme not in {"http", "https"}:
+            raise ValueError("connection.port_scheme must be 'http' or 'https'")
 
 
 @dataclass(frozen=True)
@@ -455,6 +473,63 @@ class E2BProvider:
             operation="connect",
         )
         return SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint.
+
+        E2B deployments publish sandbox ports in one of two shapes, and the
+        endpoint differs accordingly:
+
+        ``hostname``
+            One DNS name per port, ``{port}-{sandbox_id}.{domain}``. The caller
+            dials it directly, so no headers are needed.
+        ``gateway``
+            A single origin fronts every sandbox and every port, and the proxy
+            picks the target from request headers. A self-hosted deployment
+            without wildcard DNS for sandbox subdomains uses this, and points
+            ``sandbox_url`` at that origin. The SDK mints ``X-Access-Token``
+            and ``E2b-Sandbox-Id`` per sandbox and sets ``E2b-Sandbox-Port`` to
+            envd's own port, so the target port must be re-pointed here.
+
+        ``auto`` selects ``gateway`` exactly when a sandbox URL is configured,
+        which is the same signal the SDK uses to decide that one origin serves
+        every sandbox.
+
+        The returned headers are the caller's to send verbatim. ``X-Access-Token``
+        is minted per sandbox and is not the deployment's API key.
+        """
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise ValueError(f"Invalid sandbox TCP port: {port!r}")
+        if port < 1 or port > 65535:
+            raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
+
+        sandbox = self._sandbox(handle)
+        connection_config = getattr(sandbox, "connection_config", None)
+        if connection_config is None:
+            raise RuntimeError(f"Sandbox {handle.sandbox_id} exposes no e2b connection config")
+
+        mode = self._connection.port_routing
+        if mode == "auto":
+            # Mirror ConnectionConfig's own resolution order rather than reading
+            # its private attribute: an explicit config value, else the SDK env var.
+            configured_sandbox_url = self._connection.sandbox_url or os.environ.get("E2B_SANDBOX_URL")
+            mode = "gateway" if configured_sandbox_url else "hostname"
+
+        if mode == "hostname":
+            scheme = self._connection.port_scheme or ("http" if connection_config.debug else "https")
+            return SandboxEndpoint(endpoint=f"{scheme}://{sandbox.get_host(port)}")
+
+        base_url = connection_config.get_sandbox_url(sandbox.sandbox_id, sandbox.sandbox_domain)
+        try:
+            headers = dict(connection_config.sandbox_headers)
+        except AttributeError as exc:
+            raise RuntimeError(
+                "Gateway port routing needs ConnectionConfig.sandbox_headers, which this "
+                f"e2b SDK does not expose. Install '{E2B_SDK_CONSTRAINT}' at 2.46 or newer, "
+                "or set connection.port_routing to 'hostname'."
+            ) from exc
+        headers["E2b-Sandbox-Port"] = str(port)
+        return SandboxEndpoint(endpoint=base_url, headers=headers)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()

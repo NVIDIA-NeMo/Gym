@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
 from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
@@ -263,11 +264,21 @@ async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: 
     assert configured_transports == [True]
 
 
-async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
+    monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
     import httpx
     from httpx_aiohttp import AiohttpTransport
 
+    from nemo_gym import server_utils
     from nemo_gym.server_utils import get_global_aiohttp_client
+
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    if configured:
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    else:
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
     sdk_module = _fake_sdk_module()
     sdk_module.__path__ = []
@@ -278,6 +289,8 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     client_async_module.connection_retries = 2
     client_async_module.get_transport = lambda config, http2=True: object()
     client_async_module.get_envd_transport = lambda config, http2=True: object()
+    original_control_transport = client_async_module.get_transport
+    original_envd_transport = client_async_module.get_envd_transport
     sandbox_async_module = types.ModuleType("e2b.sandbox_async")
     sandbox_async_module.__path__ = []
     sandbox_main_module = types.ModuleType("e2b.sandbox_async.main")
@@ -298,6 +311,10 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
 
     e2b_sdk.require_e2b_sdk("Testing the e2b provider")
+    if not configured:
+        assert client_async_module.get_transport is original_control_transport
+        assert sandbox_main_module.get_transport is original_envd_transport
+        return
     config = types.SimpleNamespace(proxy=None)
     control_transport = client_async_module.get_transport(config)
     envd_transport = sandbox_main_module.get_transport(config)
@@ -317,13 +334,16 @@ def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) ->
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
-async def test_real_sdk_user_agent_and_call_shapes() -> None:
+async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
     e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
     from e2b.api import client_async
     from e2b.sandbox_async import main as sandbox_async
     from httpx_aiohttp import AiohttpTransport
 
     from nemo_gym.server_utils import get_global_aiohttp_client
+
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
 
     installed_match = re.match(r"^(\d+)\.(\d+)", version("e2b"))
     assert installed_match is not None
