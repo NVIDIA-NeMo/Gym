@@ -1,0 +1,40 @@
+verisoftbench:
+  resources_servers:
+    verisoftbench:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: VeriSoftBench Lean 4 verifier with upstream's error-feedback repair loop over 23 pinned repository toolchains
+      value: Evaluate repository-scale formal verification in Lean 4 with the VeriSoftBench benchmark
+      # Pinned utopia-group/VeriSoftBench checkout; scripts/prepare_verisoftbench.py creates it.
+      upstream_dir: ${oc.env:VERISOFTBENCH_UPSTREAM_DIR,cache/verisoftbench/VeriSoftBench-d066523}
+      # Running container of the image built by docker/build_image.sh.
+      docker_container: ${oc.env:VERISOFTBENCH_CONTAINER,verisoftbench-lean}
+      # Upstream's protocol: 3 repair rounds per failed candidate, 8 compile workers.
+      max_repair_rounds: 3
+      max_concurrent_compilations: 8
+      conflict_attempts_initial: 1
+      conflict_attempts_repair: 10
+      require_container_at_startup: true
+
+verisoftbench_agent:
+  responses_api_agents:
+    verisoftbench_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: verisoftbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Must equal the resources server's max_repair_rounds (tested).
+      max_repair_rounds: 3
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/verisoftbench/data/example.jsonl
+        license: MIT
+      - name: verisoftbench_full
+        type: validation
+        jsonl_fpath: resources_servers/verisoftbench/data/verisoftbench_full.jsonl
+        license: MIT

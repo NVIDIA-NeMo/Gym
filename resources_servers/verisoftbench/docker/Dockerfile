@@ -1,0 +1,82 @@
+# VeriSoftBench Lean proof environment for NeMo Gym.
+#
+# Derived from utopia-group/VeriSoftBench `Dockerfile` at commit
+# d066523f2b087f28b793c05eacb29bf2e42c0504 (MIT; see THIRD_PARTY_NOTICES.txt in the
+# build context for the licences of the 23 Lean repositories the image contains).
+# Two changes, both to the build tooling and neither to what gets built:
+#   1. One RUN layer per repository instead of a single layer for all 23, so a
+#      failure late in the ~1 h build does not discard the repositories already built.
+#   2. `scripts/build_repo.sh` is the patched copy from this directory, which
+#      pre-seeds Lake packages by SHA (see the comment in that file).
+# Build with `build_image.sh`, which assembles the context from a pinned upstream
+# checkout and overlays the patched script.
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ca-certificates python3 g++ make \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+ENV PATH="/root/.elan/bin:${PATH}"
+
+WORKDIR /workspace
+
+COPY repos.json /workspace/repos.json
+COPY scripts/build_repo.sh /workspace/scripts/build_repo.sh
+RUN chmod +x /workspace/scripts/build_repo.sh
+COPY build_config/ /workspace/build_config/
+COPY THIRD_PARTY_NOTICES.txt /workspace/THIRD_PARTY_NOTICES.txt
+
+ENV B=/workspace/scripts/build_repo.sh CFG=/workspace/build_config OUT=/workspace/lean_repos
+
+# Non-mathlib repos
+RUN $B IntroEffects --clone $CFG $OUT
+RUN $B iris-lean --clone $CFG $OUT
+RUN $B lean-hoare --clone $CFG $OUT
+RUN $B LeanExprEvaluator --clone $CFG $OUT
+RUN $B Lentil --clone $CFG $OUT
+RUN $B LeroyCompilerVerificationCourse --clone $CFG $OUT
+RUN $B verified-compiler --clone $CFG $OUT
+
+# Mathlib-dependent repos (the `|| echo WARNING` cases are upstream's own)
+RUN $B CvxLean --clone $CFG $OUT
+RUN $B pcf-lean --clone $CFG $OUT
+RUN $B lean-formal-reasoning-program --clone $CFG $OUT
+RUN $B wadray_verification --clone $CFG $OUT
+RUN $B formal-snarks-project --clone $CFG $OUT || echo "WARNING: formal-snarks-project build failed (known issues)"
+RUN $B splean --clone $CFG $OUT
+RUN $B TTBFL --clone $CFG $OUT
+RUN $B FVIntmax --clone $CFG $OUT
+RUN $B juvix-lean --clone $CFG $OUT
+RUN $B capless-lean --clone $CFG $OUT
+RUN $B ArkLib --clone $CFG $OUT
+RUN $B loom --clone $CFG $OUT || echo "WARNING: loom build had partial failures (known issue)"
+RUN $B clean --clone $CFG $OUT || echo "WARNING: clean build had partial failures"
+RUN $B veil --clone $CFG $OUT || echo "WARNING: veil build had partial failures"
+RUN $B VCV-io --clone $CFG $OUT || echo "WARNING: VCV-io build had partial failures"
+RUN $B lean-mlir --clone $CFG $OUT || echo "WARNING: lean-mlir build had partial failures"
+
+RUN mkdir -p /workspace/THIRD_PARTY_LICENSES; \
+    for repo_dir in $OUT/*/; do \
+        repo_name=$(basename "$repo_dir"); \
+        for lf in LICENSE LICENSE.md LICENSE.txt COPYING COPYING.md; do \
+            if [ -f "$repo_dir/$lf" ]; then \
+                cp "$repo_dir/$lf" "/workspace/THIRD_PARTY_LICENSES/${repo_name}_${lf}"; \
+            fi; \
+        done; \
+    done
+
+COPY scripts/docker_repo_patches.sh /workspace/scripts/docker_repo_patches.sh
+RUN chmod +x /workspace/scripts/docker_repo_patches.sh && \
+    /workspace/scripts/docker_repo_patches.sh --repos-dir /workspace/lean_repos --config-dir /workspace/build_config
+
+COPY scripts/generate_repo_index.py /workspace/scripts/generate_repo_index.py
+COPY scripts/chunking/ /workspace/scripts/chunking/
+RUN python3 /workspace/scripts/generate_repo_index.py --repos-dir /workspace/lean_repos --output-dir /workspace/repo_index
+
+WORKDIR /workspace/lean_repos
+CMD ["sleep", "infinity"]
