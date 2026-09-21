@@ -266,6 +266,8 @@ class ObservabilityConfig(_StrictModel):
     # per rollout and the rollout duration metric; `verify` adds the verify duration and success
     # metrics, which are gated on that group.
     gym_span_groups: str = "default,verify"
+    # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
+    gym_logs: bool = True
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
 

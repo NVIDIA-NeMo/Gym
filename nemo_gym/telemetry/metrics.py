@@ -56,12 +56,18 @@ papered over, so this module takes an explicit position on each of the five:
     whichever process wrote last. The exported value is one process's current holdings,
     so the fleet-wide number is ``sum(gym.sandbox.active)``.
 
+``gym.rollout.failures`` (counter, Gym-owned)
+    Used, from the driver's collection loop: one increment per rollout dropped from the score,
+    dimensioned by Gym's failure class and, when it is a bare identifier, the exception name.
+    :func:`record_rollout_failure`.
+
 Every function here is a no-op unless telemetry is initialised *and* exporting, so call
 sites do not need their own guards for correctness — though they should still sit under a
 span-group gate to stay free when disabled.
 """
 
 import logging
+import re
 import threading
 
 
@@ -70,6 +76,8 @@ logger = logging.getLogger(__name__)
 #: Cumulative verification tally backing ``gym.verify.success_rate``. Process-local: each
 #: server process reports its own fraction, which is the correct scope given the gauge
 #: carries no attribute to distinguish them.
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,79}")
+
 _VERIFY_LOCK = threading.Lock()
 _VERIFY_TOTAL = 0
 _VERIFY_SUCCEEDED = 0
@@ -81,6 +89,12 @@ SANDBOX_PROVIDER_ATTRIBUTE = "nemo.gym.sandbox.provider"
 #: of one bound to a dead provider.
 _SANDBOX_ACTIVE_LOCK = threading.Lock()
 _SANDBOX_ACTIVE: tuple[object, object] | None = None
+
+ROLLOUT_FAILURES_INSTRUMENT = "gym.rollout.failures"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_REASON_ATTRIBUTE = "nemo.gym.failure_reason"
+_ROLLOUT_FAILURES_LOCK = threading.Lock()
+_ROLLOUT_FAILURES: tuple[object, object] | None = None
 
 
 def _record(**kwargs) -> None:
@@ -158,6 +172,41 @@ def record_sandbox_active(delta: int, *, provider: str) -> None:
         _sandbox_active_counter(telemetry.meter).add(delta, {SANDBOX_PROVIDER_ATTRIBUTE: provider})
     except Exception:
         logger.debug("nemo-lens: failed to record %s", SANDBOX_ACTIVE_INSTRUMENT, exc_info=True)
+
+
+def _rollout_failures_counter(meter):
+    """The process's ``gym.rollout.failures`` instrument on ``meter``, created once per meter."""
+    global _ROLLOUT_FAILURES
+    with _ROLLOUT_FAILURES_LOCK:
+        if _ROLLOUT_FAILURES is None or _ROLLOUT_FAILURES[0] is not meter:
+            counter = meter.create_counter(
+                ROLLOUT_FAILURES_INSTRUMENT,
+                unit="{rollout}",
+                description="Rollouts dropped from the score, by failure class and reason.",
+            )
+            _ROLLOUT_FAILURES = (meter, counter)
+        return _ROLLOUT_FAILURES[1]
+
+
+def record_rollout_failure(failure_class: str, reason: str | None = None) -> None:
+    """Count one rollout dropped from the score in ``gym.rollout.failures``.
+
+    ``failure_class`` is Gym's own classification (``infrastructure_error``, ``judge_failed``,
+    ...). ``reason`` is kept only when it is a bare identifier such as an exception class name,
+    so a free-text error message can never fan the series out.
+    """
+    from nemo_gym.telemetry.setup import get_telemetry
+
+    telemetry = get_telemetry()
+    if telemetry is None or not telemetry.is_exporting:
+        return
+    attributes = {FAILURE_CLASS_ATTRIBUTE: failure_class}
+    if reason and _IDENTIFIER.fullmatch(reason):
+        attributes[FAILURE_REASON_ATTRIBUTE] = reason
+    try:
+        _rollout_failures_counter(telemetry.meter).add(1, attributes)
+    except Exception:
+        logger.debug("nemo-lens: failed to record %s", ROLLOUT_FAILURES_INSTRUMENT, exc_info=True)
 
 
 def _reset_verify_tally_for_testing() -> None:

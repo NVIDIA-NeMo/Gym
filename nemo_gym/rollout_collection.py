@@ -85,6 +85,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.metrics import record_rollout_failure
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -1473,6 +1474,7 @@ class RolloutCollectionHelper(BaseModel):
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
                 failure_counts[failure_class] += 1
+                record_rollout_failure(failure_class, result.get("failure_reason"))
                 # Every dropped rollout says so as it happens, whichever layer classified it.
                 # tqdm.write keeps the line off the progress bar it would otherwise collide with.
                 detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
