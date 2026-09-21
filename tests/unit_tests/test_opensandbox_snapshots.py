@@ -251,6 +251,53 @@ def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monke
     assert session_calls == [], "no request may be made before the scope check fails"
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sandbox_id": ""},
+        {"sandbox_id": " "},
+        {"states": ["Ready", ""]},
+        {"snapshot_ids": [" "]},
+        {"snapshot_ids": [None]},
+    ],
+)
+def test_blank_selectors_are_rejected_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
+) -> None:
+    # Direct callers bypass the CLI validation; a blank selector must never widen the scope to everything.
+    _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
+
+    with pytest.raises(ValueError, match="must contain non-empty strings"):
+        run_cleanup(**kwargs)
+
+    assert session_calls == []
+
+
+def test_selectors_are_stripped_before_filtering(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]))
+    install_session(monkeypatch, session)
+
+    assert run_cleanup(sandbox_id=" sb-1 ", states=[" Ready "], reap=False) == 0
+
+    filters = [("sandboxId", "sb-1"), ("state", "Ready")]
+    assert session.requests == [
+        ("GET", f"{BASE}/snapshots", {"allow_redirects": False, "params": [*filters, *PAGE_PARAMS]}),
+    ]
+
+
+def test_an_empty_snapshot_id_list_names_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An empty list is an exact (empty) selection, not "list everything".
+    session = Session()
+    install_session(monkeypatch, session)
+
+    assert run_cleanup(snapshot_ids=[]) == 0
+
+    assert session.requests == []
+    assert "Deleting 0 OpenSandbox snapshot(s) and 0 paused sandbox(es)" in capsys.readouterr().out
+
+
 def test_delete_failures_are_reported_and_do_not_stop_the_sweep(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

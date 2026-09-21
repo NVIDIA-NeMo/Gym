@@ -55,8 +55,22 @@ async def cleanup_snapshots(
     kill_paused: bool,
     reap: bool,
 ) -> int:
-    """List matching snapshots (and paused sandboxes) and optionally delete them."""
-    if snapshot_ids and kill_paused:
+    """List matching snapshots (and paused sandboxes) and optionally delete them.
+
+    ``snapshot_ids=None`` lists snapshots; a list, even an empty one, names them
+    exactly. A blank selector never widens the scope: it is rejected instead.
+    """
+    for name, values in (
+        ("sandbox_id", [] if sandbox_id is None else [sandbox_id]),
+        ("states", states or []),
+        ("snapshot_ids", snapshot_ids or []),
+    ):
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError(f"{name} must contain non-empty strings, got {values!r}")
+    sandbox_id = None if sandbox_id is None else sandbox_id.strip()
+    states = [state.strip() for state in states or []]
+    snapshot_ids = None if snapshot_ids is None else [snapshot_id.strip() for snapshot_id in snapshot_ids]
+    if snapshot_ids is not None and kill_paused:
         # Snapshot ids carry no sandbox scope, so this would select every paused sandbox.
         raise ValueError("kill_paused cannot be combined with snapshot_ids; scope it with sandbox_id instead")
     base_url = domain.strip().rstrip("/")
@@ -107,11 +121,11 @@ async def cleanup_snapshots(
                 page += 1
 
         async def list_matches() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-            if snapshot_ids:
+            if snapshot_ids is not None:
                 snapshots = [{"id": snapshot_id} for snapshot_id in snapshot_ids]
             else:
-                params = [("sandboxId", sandbox_id)] if sandbox_id else []
-                snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states or [])])
+                params = [] if sandbox_id is None else [("sandboxId", sandbox_id)]
+                snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states)])
             paused: list[dict[str, Any]] = []
             if kill_paused:
                 # Servers disagree on state casing, so match paused sandboxes client-side.
@@ -167,7 +181,7 @@ async def cleanup_snapshots(
             # this order keeps every snapshot delete a real delete rather than a 404.
             failures = sum(await asyncio.gather(*(delete("snapshots", "snapshot", s["id"]) for s in snapshots)))
             failures += sum(await asyncio.gather(*(delete("sandboxes", "paused sandbox", p["id"]) for p in paused)))
-            if snapshot_ids:
+            if snapshot_ids is not None:
                 # Exact ids: a 404 already counts as gone, so there is nothing to re-list.
                 return 1 if failures else 0
             if failures == len(snapshots) + len(paused):

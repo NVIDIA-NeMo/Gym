@@ -1093,7 +1093,35 @@ class OpenSandboxProvider:
             raise
 
     async def pause(self, handle: SandboxHandle) -> None:
-        """Pause a sandbox and wait until its snapshot-backed state is ready."""
+        """Pause a sandbox and wait until its snapshot-backed state is ready.
+
+        Local PTY clients are detached first, while execd can still answer the
+        close handshake; the server sessions are never deleted. If the pause
+        request then fails the sandbox keeps running and they can be
+        re-attached by id. After a resume, the Kubernetes backend has replaced
+        the runtime (open a new PTY) while the Docker backend thawed the frozen
+        one (sessions stay re-attachable with ``attach_pty()``).
+        """
+        # Each detach is bounded on its own and kept off the lifecycle deadline,
+        # so a hung WebSocket close cannot turn a completed pause into a timeout.
+        for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
+            try:
+                session._owned = False
+                await self._await_sdk_call(
+                    session.close(),
+                    operation="detach_pty",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._operations.close_timeout_s,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Failed to detach PTY session %r before pausing sandbox %r",
+                    getattr(session, "session_id", "?"),
+                    handle.sandbox_id,
+                    exc_info=True,
+                )
+            self._pty_sessions.discard(session)
+
         timeout_s = self._operations.pause_resume_timeout_s
         lifecycle_timeout = asyncio.timeout(timeout_s)
         try:
@@ -1104,26 +1132,6 @@ class OpenSandboxProvider:
                     sandbox_id=handle.sandbox_id,
                     timeout_s=self._connection.request_timeout_s,
                 )
-
-                # Pause invalidates the PTY WebSockets. Drop the local clients
-                # without deleting the server sessions: the Kubernetes backend
-                # commits the rootfs and replaces the runtime, so sessions and
-                # processes are gone and callers open a new PTY after resume;
-                # the Docker backend freezes the container, so sessions survive
-                # and can be re-attached by id with attach_pty() after resume.
-                for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
-                    try:
-                        session._owned = False
-                        await session.close()
-                    except Exception:
-                        LOGGER.warning(
-                            "Failed to detach PTY session %r while pausing sandbox %r",
-                            getattr(session, "session_id", "?"),
-                            handle.sandbox_id,
-                            exc_info=True,
-                        )
-                    self._pty_sessions.discard(session)
-
                 while True:
                     status = await self.status(handle)
                     if status == SandboxStatus.PAUSED:
