@@ -71,19 +71,30 @@ app = modal.App(APP_NAME)
 
 
 def _run(command: str, *, cwd: Optional[str] = None, check: bool = True) -> int:
-    """Run a shell command, streaming output so `modal app logs` is useful live."""
+    """Run a shell command, streaming its output live and keeping a tail for errors."""
     print(f"$ {command}", flush=True)
-    result = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
-    if result.stdout:
-        print(result.stdout[-8000:], flush=True)
-    if result.stderr:
-        print(result.stderr[-8000:], flush=True)
-    if check and result.returncode != 0:
-        # Include the tail of stderr: an exit code alone sends you reading container logs
-        # to learn something the exception could have carried.
-        tail = (result.stderr or result.stdout or "").strip().splitlines()[-5:]
-        raise RuntimeError(f"command failed ({result.returncode}): {command}\n" + "\n".join(tail))
-    return result.returncode
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tail: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line.rstrip(), flush=True)
+        tail.append(line.rstrip())
+        # Bounded: a long eval emits tens of thousands of progress lines, and only the
+        # last few are useful in an exception message.
+        if len(tail) > 40:
+            tail.pop(0)
+    returncode = process.wait()
+    if check and returncode != 0:
+        raise RuntimeError(f"command failed ({returncode}): {command}\n" + "\n".join(tail[-6:]))
+    return returncode
 
 
 def _write_env_yaml(
@@ -227,7 +238,8 @@ def run_campaign(
     env = os.environ.copy()
     env["NEMO_GYM_MAX_ROLLOUT_ATTEMPTS"] = str(max_attempts)
 
-    log_path = os.path.join(results_dir, f"{slug}.servers.log")
+    log_path = os.path.join("/tmp", f"{slug}.servers.log")
+    published_log = os.path.join(results_dir, f"{slug}.servers.log")
 
     # Never let `gym eval run` write straight to the canonical file.
     #
@@ -240,6 +252,15 @@ def run_campaign(
     work_path = os.path.join("/tmp", f"{slug}.jsonl")
     if os.path.exists(output_path):
         shutil.copyfile(output_path, work_path)
+    # Resume matches output rows against `<output>_materialized_inputs.jsonl` and reads
+    # prior attempts from `<output>_failures.jsonl`, both resolved next to the output file.
+    # Moving the output to /tmp without them leaves resume with nothing to match against,
+    # so it silently re-runs every row: the progress bar reads 10800 instead of the ~4500
+    # remaining, and the collected work is redone.
+    for suffix in ("_materialized_inputs.jsonl", "_failures.jsonl"):
+        source = os.path.join(results_dir, f"{slug}{suffix}")
+        if os.path.exists(source):
+            shutil.copyfile(source, os.path.join("/tmp", f"{slug}{suffix}"))
     high_water = _count_rows(work_path)
     rows_before = high_water
     write_status(
@@ -254,7 +275,7 @@ def run_campaign(
         started_at=time.time(),
         attempt=0,
         output=output_path,
-        log=log_path,
+        log=published_log,
     )
     for attempt in range(1, 7):
         print(f"[{slug}] attempt {attempt} (concurrency {concurrency}), rows={rows_before}", flush=True)
@@ -264,8 +285,28 @@ def run_campaign(
             cwd=WORKSPACE,
             check=False,
         )
-        _run("sleep 45", check=False)
-        pub_state: dict[str, Any] = {"stop": False, "high_water": high_water}
+        ready = False
+        for _ in range(40):
+            _run("sleep 5", check=False)
+            probe = _run("curl -s -m 3 http://127.0.0.1:11000/ >/dev/null 2>&1", check=False)
+            if probe == 0:
+                ready = True
+                break
+        print(f"[{slug}] servers ready={ready}", flush=True)
+        if not ready:
+            # Publish the startup log before giving up, so the failure is diagnosable
+            # from the dashboard rather than only from container logs that expire.
+            if os.path.exists(log_path):
+                shutil.copyfile(log_path, published_log)
+            write_status(namespace, slug, state="servers_failed")
+            RESULTS_VOLUME.commit()
+
+        pub_state: dict[str, Any] = {
+            "stop": False,
+            "high_water": high_water,
+            "log": log_path,
+            "published_log": published_log,
+        }
         publisher = threading.Thread(
             target=_progress_publisher,
             args=(work_path, output_path, namespace, slug, pub_state),
@@ -374,7 +415,15 @@ def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: 
             published = _publish(work_path, output_path, state["high_water"])
             if published > state["high_water"]:
                 state["high_water"] = published
-                write_status(namespace, slug, landed=published, state="running")
+            # Written every cycle, including when nothing moved: an unchanging `landed`
+            # with a fresh `updated_at` means "running but not producing", which is a
+            # different diagnosis from "publisher died" and needs a different fix.
+            write_status(namespace, slug, landed=state["high_water"], state="running")
+            if os.path.exists(state["log"]):
+                try:
+                    shutil.copyfile(state["log"], state["published_log"])
+                except OSError:
+                    pass
         except OSError:
             pass
 
