@@ -243,6 +243,8 @@ class FakeSandbox:
 def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeSandbox.connected_state = "RUNNING"
     FakeSandbox.ready_calls = 0
+    FakeSandbox.resumed_args = ()
+    FakeSandbox.resumed_kwargs = {}
 
     def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
         return FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
@@ -1973,8 +1975,6 @@ async def test_pause_preserves_a_shorter_request_timeout() -> None:
 
 
 async def test_resume_rebuilds_the_sdk_handle_after_readiness(fake_opensandbox_sdk: None) -> None:
-    FakeSandbox.resumed_args = ()
-    FakeSandbox.resumed_kwargs = {}
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
         create={

@@ -987,7 +987,6 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
     detached_before_pause: list[bool] = []
 
     async def pause() -> None:
-        # The freeze must come after the detach, while execd can still answer the close handshake.
         detached_before_pause.append(target_session.closed)
 
     target_raw = SimpleNamespace(
@@ -1006,8 +1005,7 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
     assert detached_before_pause == [True]
     assert target_session.closed
     assert target_client.closed
-    # No delete request either way: on the Kubernetes backend the session is
-    # gone with the old runtime, on the Docker backend it must stay re-attachable.
+    # The server session is never deleted; on Docker it stays re-attachable.
     assert target_client.delete_calls == [], "pause must drop the local client without a delete request"
     assert not other_session.closed
     assert not other_client.closed

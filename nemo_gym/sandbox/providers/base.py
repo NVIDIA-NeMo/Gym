@@ -310,10 +310,9 @@ class SupportsSandboxEndpoint(Protocol):
 
 @runtime_checkable
 class SupportsSandboxPauseResume(Protocol):
-    """Optional provider capability for preserving and restoring a sandbox.
+    """Optional provider capability to pause and resume a sandbox.
 
-    What survives a pause beyond the filesystem (running processes, PTY
-    sessions) is provider- and backend-specific; see the provider's docs.
+    What survives a pause beyond the filesystem is backend-specific.
     """
 
     async def pause(self, handle: SandboxHandle) -> None:

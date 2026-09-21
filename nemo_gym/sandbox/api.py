@@ -545,9 +545,8 @@ class AsyncSandbox:
     async def pause(self) -> None:
         """Pause this sandbox while preserving its state.
 
-        Open PTY sessions are detached. Whether running processes survive and
-        whether those sessions can be re-attached after ``resume()`` depends on
-        the provider and its backend; see the provider's ``pause()`` docs.
+        Open PTY sessions are detached; whether processes survive and sessions
+        can be re-attached after ``resume()`` depends on the provider backend.
         """
         handle = self._require_handle()
         provider = self._provider
@@ -559,8 +558,8 @@ class AsyncSandbox:
     async def resume(self) -> None:
         """Resume this sandbox and wait until it is ready.
 
-        A timeout leaves the server-side state unknown; reconnect and check
-        ``status()`` before retrying rather than calling ``resume()`` again blindly.
+        On timeout the server-side state is unknown: reconnect and check
+        ``status()`` before retrying.
         """
         handle = self._require_handle()
         provider = self._provider

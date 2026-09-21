@@ -58,7 +58,7 @@ async def cleanup_snapshots(
     """List matching snapshots (and paused sandboxes) and optionally delete them.
 
     ``snapshot_ids=None`` lists snapshots; a list, even an empty one, names them
-    exactly. A blank selector never widens the scope: it is rejected instead.
+    exactly. Blank selectors are rejected rather than widening the scope.
     """
     for name, values in (
         ("sandbox_id", [] if sandbox_id is None else [sandbox_id]),
@@ -71,7 +71,7 @@ async def cleanup_snapshots(
     states = [state.strip() for state in states or []]
     snapshot_ids = None if snapshot_ids is None else [snapshot_id.strip() for snapshot_id in snapshot_ids]
     if snapshot_ids is not None and kill_paused:
-        # Snapshot ids carry no sandbox scope, so this would select every paused sandbox.
+        # Snapshot ids carry no sandbox scope; this would select every paused sandbox.
         raise ValueError("kill_paused cannot be combined with snapshot_ids; scope it with sandbox_id instead")
     base_url = domain.strip().rstrip("/")
     if "://" not in base_url:
@@ -89,7 +89,7 @@ async def cleanup_snapshots(
     ) as session:
 
         async def list_all(resource: str, params: list[tuple[str, str]]) -> list[dict[str, Any]]:
-            """Collect every page before deleting anything: deletes shift page boundaries."""
+            """Collect every page up front; deletes would shift page boundaries."""
             items: list[dict[str, Any]] = []
             page = 1
             while True:
@@ -171,18 +171,16 @@ async def cleanup_snapshots(
                     print(f"Failed to delete {label} {item_id} -> {error}", file=sys.stderr)
                     return 1
 
-        # Numbered pages shift while another actor deletes: an item can move from
-        # page 2 to page 1 after page 1 was read and be skipped. Sweep until a
-        # fresh listing comes back empty, or a sweep stops progressing.
+        # Numbered pages shift under concurrent deletes, so re-list and sweep
+        # until a listing comes back empty or a sweep stops progressing.
         for _ in range(REAP_SWEEPS):
             if not snapshots and not paused:
                 return 0
-            # Snapshots first: deleting a paused sandbox releases its checkpoint, so
-            # this order keeps every snapshot delete a real delete rather than a 404.
+            # Snapshots first: deleting a paused sandbox releases its checkpoint.
             failures = sum(await asyncio.gather(*(delete("snapshots", "snapshot", s["id"]) for s in snapshots)))
             failures += sum(await asyncio.gather(*(delete("sandboxes", "paused sandbox", p["id"]) for p in paused)))
             if snapshot_ids is not None:
-                # Exact ids: a 404 already counts as gone, so there is nothing to re-list.
+                # Exact ids: nothing to re-list; 404 already counts as gone.
                 return 1 if failures else 0
             if failures == len(snapshots) + len(paused):
                 break
@@ -255,7 +253,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.snapshot_ids and (args.sandbox_id is not None or args.states):
         parser.error("--snapshot-id cannot be combined with --sandbox-id or --state")
     if args.snapshot_ids and args.kill_paused:
-        # Snapshot ids carry no sandbox scope, so this would select every paused sandbox.
         parser.error("--kill-paused cannot be combined with --snapshot-id; scope it with --sandbox-id instead")
     for name, values in (
         ("sandbox-id", [args.sandbox_id]),

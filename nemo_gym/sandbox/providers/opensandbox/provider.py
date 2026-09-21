@@ -1056,8 +1056,7 @@ class OpenSandboxProvider:
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
-        # Held for the same reason as in resume(): a cancelled SDK call skips
-        # its own transport cleanup.
+        # A cancelled SDK call skips its own transport cleanup; see resume().
         config = self._connection_config(request_timeout_s=timeout_s).with_transport_if_missing()
         sandbox = None
         try:
@@ -1080,30 +1079,26 @@ class OpenSandboxProvider:
                 await config.close_transport_if_owned()
             else:
                 try:
-                    await asyncio.wait_for(
+                    await self._await_sdk_call(
                         sandbox.close(),
-                        timeout=min(timeout_s, self._operations.close_timeout_s or timeout_s),
+                        operation="close_after_connect_failure",
+                        sandbox_id=sandbox_id,
+                        timeout_s=self._operations.close_timeout_s,
                     )
-                except Exception as cleanup_error:
-                    LOGGER.warning(
-                        "Failed to close OpenSandbox handle after connect failure; sandbox_id=%r: %r",
-                        sandbox_id,
-                        cleanup_error,
-                    )
+                except Exception as e:
+                    LOGGER.warning("Failed to close OpenSandbox handle after connect failure %r: %r", sandbox_id, e)
             raise
 
     async def pause(self, handle: SandboxHandle) -> None:
-        """Pause a sandbox and wait until its snapshot-backed state is ready.
+        """Pause a sandbox and wait until it reports paused.
 
         Local PTY clients are detached first, while execd can still answer the
-        close handshake; the server sessions are never deleted. If the pause
-        request then fails the sandbox keeps running and they can be
-        re-attached by id. After a resume, the Kubernetes backend has replaced
-        the runtime (open a new PTY) while the Docker backend thawed the frozen
-        one (sessions stay re-attachable with ``attach_pty()``).
+        close handshake; server sessions are never deleted, so they remain
+        attachable if the pause request fails. After resume, the Kubernetes
+        backend has replaced the runtime (open a new PTY); the Docker backend
+        thawed it (re-attach by id).
         """
-        # Each detach is bounded on its own and kept off the lifecycle deadline,
-        # so a hung WebSocket close cannot turn a completed pause into a timeout.
+        # Bounded per session and outside the pause deadline.
         for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
             try:
                 session._owned = False
@@ -1151,17 +1146,15 @@ class OpenSandboxProvider:
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume a paused sandbox and rebuild its SDK clients and endpoints.
 
-        One ``pause_resume_timeout_s`` deadline covers the resume request, the
-        endpoint rebuild and the readiness check. On timeout the server-side
-        state is unknown: reconnect and inspect ``status()`` before retrying.
-        PTY sessions were detached by ``pause()``; see there for which backends
-        allow re-attaching them and which need a new session.
+        One ``pause_resume_timeout_s`` deadline covers the request, endpoint
+        rebuild and readiness check. On timeout the server-side state is
+        unknown: reconnect and check ``status()`` before retrying. See
+        ``pause()`` for what happens to PTY sessions.
         """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         timeout_s = self._operations.pause_resume_timeout_s
-        # Hold the config: the timeout cancels the SDK call with CancelledError,
-        # which the SDK's own `except Exception` cleanup never sees, so a default
-        # SDK-owned transport would leak. Closing is a no-op for our shared one.
+        # Hold the config: cancellation skips the SDK's own cleanup, which would
+        # leak an SDK-owned default transport. Closing our shared one is a no-op.
         config = self._connection_config().with_transport_if_missing()
         lifecycle_timeout = asyncio.timeout(timeout_s)
         try:
@@ -1182,8 +1175,8 @@ class OpenSandboxProvider:
                 ) from e
             raise
 
-        # Install the new handle first: a cancellation during the best-effort
-        # close below must not lose an already successful resume.
+        # New handle first, so a cancellation during the best-effort close
+        # cannot lose a completed resume.
         old_raw, handle.raw = handle.raw, resumed
         try:
             await self._await_sdk_call(

@@ -242,7 +242,7 @@ def test_explicit_snapshot_ids_skip_listing_and_404_is_idempotent(
 
 
 def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Direct callers bypass the CLI check; the function must not fall back to every paused sandbox.
+    # Direct callers bypass the CLI check.
     _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
 
     with pytest.raises(ValueError, match="kill_paused cannot be combined with snapshot_ids"):
@@ -264,7 +264,7 @@ def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monke
 def test_blank_selectors_are_rejected_before_any_request(
     monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
 ) -> None:
-    # Direct callers bypass the CLI validation; a blank selector must never widen the scope to everything.
+    # A blank selector must not widen the scope.
     _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
 
     with pytest.raises(ValueError, match="must contain non-empty strings"):
@@ -327,8 +327,7 @@ def test_delete_failures_are_reported_and_do_not_stop_the_sweep(
 
 
 def test_reap_sweeps_catch_list_stragglers(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Numbered pages shift while another actor deletes, so an item can slip past
-    # the first listing; the re-list sweep must catch it.
+    # An item that slipped past the first listing is caught by the re-list sweep.
     session = Session(
         page([snapshot("first")]),
         page([snapshot("straggler")]),
@@ -348,7 +347,7 @@ def test_reap_sweeps_catch_list_stragglers(monkeypatch: pytest.MonkeyPatch) -> N
 def test_reap_gives_up_after_bounded_sweeps(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A listing that never empties, because something keeps creating snapshots, must not loop forever.
+    # A listing that never empties must not loop forever.
     lists = [page([snapshot(f"s{index}")]) for index in range(snapshots.REAP_SWEEPS + 1)]
     session = Session(
         *lists,
