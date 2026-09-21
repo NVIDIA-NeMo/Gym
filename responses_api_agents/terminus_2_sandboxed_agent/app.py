@@ -79,6 +79,9 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+    # Absolute container path Terminus 2 scans for Agent Skills (subdirectories with SKILL.md);
+    # None disables discovery. Harbor tasks declare this as ``[environment] skills_dir``.
+    skills_dir: Optional[str] = None
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -433,8 +436,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
+        timeout_s: Optional[float] = None,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
+        if timeout_s is None:
+            timeout_s = self.config.sandbox_timeout
         instruction = _instruction(body.input)
         run_body = await request.json()
         rollout_id = self.rollout_id_from_run(run_body)
@@ -484,6 +490,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
+                skills_dir=self.config.skills_dir,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
@@ -505,7 +512,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             await agent.setup(environment)
 
             try:
-                async with asyncio.timeout(self.config.sandbox_timeout):
+                async with asyncio.timeout(timeout_s):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
                 error = None
