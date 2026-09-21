@@ -130,6 +130,10 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     model = _policy_model_name(config)
     if model:
         attributes.append(("model", model, "upsert"))
+    resource_actions = [{"key": k, "value": v, "action": a} for k, v, a in attributes]
+    # `${env:SLURM_JOB_ID}` expands to a bare number, which the collector types as an int;
+    # dashboards match it as a label string.
+    resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
 
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
@@ -144,10 +148,10 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         },
         "processors": {
             "batch": {},
-            "resource": {"attributes": [{"key": k, "value": v, "action": a} for k, v, a in attributes]},
+            "resource": {"attributes": resource_actions},
         },
         "exporters": {
-            "otlphttp/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
+            "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
             "file/metrics": {"path": str(otel_dir / "metrics.jsonl")},
             "file/traces": {"path": str(otel_dir / "traces.jsonl")},
             "file/logs": {"path": str(otel_dir / "logs.jsonl")},
@@ -161,17 +165,17 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
                 "metrics": {
                     "receivers": ["prometheus"],
                     "processors": ["resource", "batch"],
-                    "exporters": ["otlphttp/managed", "file/metrics"],
+                    "exporters": ["otlp_http/managed", "file/metrics"],
                 },
                 "traces": {
                     "receivers": ["otlp"],
                     "processors": ["resource", "batch"],
-                    "exporters": ["otlphttp/managed", "file/traces"],
+                    "exporters": ["otlp_http/managed", "file/traces"],
                 },
                 "logs": {
                     "receivers": ["otlp"],
                     "processors": ["resource", "batch"],
-                    "exporters": ["otlphttp/managed", "file/logs"],
+                    "exporters": ["otlp_http/managed", "file/logs"],
                 },
             },
         },
