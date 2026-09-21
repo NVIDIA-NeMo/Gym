@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-nooa
+nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@051472343211914222e24ce36d8752f4e86bbe43
