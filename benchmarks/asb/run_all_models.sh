@@ -40,8 +40,8 @@ set -a; source "${ENV_FILE:-/Users/kruge/Documents/ChatGPT/NVIDIA/.env}"; set +a
 MODELS=(
 "ultra|nemotron-3-ultra-550b|https://snorkelai-fdr--ep-nvidia-nemotron-3-ultra-550b-a55b-nvfp-63eebc.us-west.modal.direct/v1|nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4|MODAL_PROXY_TOKEN|64"
 "kimi|kimi-k3|https://snorkelai-fdr--ep-kimi-k3-server.us-west.modal.direct/v1|moonshotai/Kimi-K3|MODAL_PROXY_TOKEN|96"
-"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|32"
-"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|32"
+"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|160"
+"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|160"
 )
 
 write_env_yaml() {
@@ -87,13 +87,26 @@ YAML
 # and a broad pkill would take down someone else's evaluation.
 # Kill only the processes belonging to THIS invocation.
 #
-# Selecting by worktree path does not work: the runner invokes `.venv/bin/gym` and
-# `bash benchmarks/asb/run_all_models.sh` relatively, so the absolute path never appears
-# in argv. A pattern that silently matches nothing is worse than no cleanup at all --
-# it leaves a previous runner alive, and the two then tear down each other's servers
-# mid-eval. Select by this invocation's own ports and env file instead.
+# Two things are required, and neither alone is sufficient:
+#
+# 1. Port scoping keeps this teardown off other campaigns' servers. Selecting by worktree
+#    path does NOT work -- the runner invokes `.venv/bin/gym` relatively, so the absolute
+#    path never appears in argv and the pattern silently matches nothing.
+# 2. A process-group kill is what actually stops Ray. `gym env start` spins up its own Ray
+#    cluster, and **Ray's processes do not listen on the pinned port block**, so a
+#    port-scoped teardown reaps the FastAPI servers and leaves the cluster running. Every
+#    restart then leaks a cluster: port scoping stops you killing your neighbours, it does
+#    not stop you leaking. `gym env start` is a process-group leader, so killing its pgid
+#    takes the servers and its Ray cluster together.
+#
+# GYM_PGID is captured per invocation. Never substitute this script's own pgid -- several
+# runners launched from one shell can share it, and a group kill there would take down
+# campaigns that are still working.
 stop_servers() {
     local pid port
+    if [ -n "${GYM_PGID:-}" ] && [ "$GYM_PGID" != "$$" ]; then
+        kill -9 -"$GYM_PGID" 2>/dev/null
+    fi
     for pid in $(pgrep -f "gym env start.*${ENV_YAML}" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
     for pid in $(lsof -nP -iTCP:"${HEAD_PORT}" -sTCP:LISTEN -t 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
     for port in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '{print $9}' | sed 's/.*://' \
@@ -104,6 +117,15 @@ stop_servers() {
             done
         fi
     done
+    # Belt and braces: a Ray head of ours that outlived its parent. Both conditions are
+    # required -- a cluster with a live parent is somebody's running work, possibly another
+    # campaign's, and ppid 1 alone would match theirs too.
+    for pid in $(pgrep -f gcs_server 2>/dev/null); do
+        if [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "1" ] \
+           && ps -o command= -p "$pid" 2>/dev/null | grep -q "$(basename "$ROOT_DIR")"; then
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
     sleep 5
 }
 
@@ -112,6 +134,8 @@ start_servers() {
     nohup .venv/bin/gym env start \
         --config resources_servers/asb/configs/asb.yaml --config "$ENV_YAML" \
         > "${LOG_DIR}/${slug}.servers.log" 2>&1 &
+    # Its own process group, so the teardown can take its Ray cluster with it.
+    GYM_PGID=$(ps -o pgid= -p $! 2>/dev/null | tr -d ' ')
     for i in $(seq 1 60); do
         sleep 5
         if grep -q "Head server finished unexpectedly" "${LOG_DIR}/${slug}.servers.log" 2>/dev/null; then
