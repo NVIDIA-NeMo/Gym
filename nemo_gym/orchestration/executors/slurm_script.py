@@ -131,11 +131,13 @@ def _render_service_command(
     nodes: int | None = None,
     ntasks: int | None = None,
     pre_command: str = "",
+    workdir: str | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
     node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
+    workdir_flag = f" --container-workdir={shlex.quote(workdir)}" if workdir else ""
     if pre_command:
         # Wrapped in one shell so export/unset statements in pre_command are
         # visible to the exec'd command; shlex.quote keeps the whole thing one
@@ -147,7 +149,7 @@ def _render_service_command(
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -345,6 +347,9 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> s
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
         mounts=[f"{remote_bench_dir}:{remote_bench_dir}"],
+        # The upstream image has no /root, and enroot's switchroot cds into $HOME when the image
+        # declares no workdir; the mounted job directory always exists.
+        workdir=str(remote_bench_dir),
     )
 
 

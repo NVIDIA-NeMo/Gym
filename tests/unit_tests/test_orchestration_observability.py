@@ -265,6 +265,7 @@ def test_script_runs_the_collector_in_its_container_with_the_job_dir_mounted():
     line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
     assert "--container-image=otel/opentelemetry-collector-contrib:0.152.1" in line
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
+    assert f"--container-workdir={BENCH_DIR}" in line
     assert f"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}" in line
     assert line.rstrip().endswith("&")
 
