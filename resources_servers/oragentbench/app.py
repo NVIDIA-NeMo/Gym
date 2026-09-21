@@ -55,6 +55,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 PASS_QUALITY_NORMALIZED_CUTOFF = 0.4
 QUALITY_RAW_MAX = 2.0
 DIFFICULTIES = ("easy", "medium", "hard")
+MAX_EVALUATION_ERRORS = 25
 
 # Container paths, matching Harbor's EnvironmentPaths so upstream scripts find what they expect.
 TESTS_DIR = "/tests"
@@ -231,6 +232,11 @@ class StepResult(BaseModel):
     verifier_time_taken: float = 0.0
     test_output: str = ""
     reward_details: Optional[Dict[str, Any]] = None
+    # Validator findings from /logs/verifier/evaluation.json: ``feasible`` and the first
+    # ``MAX_EVALUATION_ERRORS`` error strings, for failure taxonomy without re-running anything.
+    evaluation_feasible: Optional[bool] = None
+    evaluation_errors: Optional[List[str]] = None
+    evaluation_error_count: Optional[int] = None
     # Model-free validation only.
     control_output: Optional[str] = None
 
@@ -547,7 +553,13 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
         if exec_result.error_type == "timeout":
             result.status = Status.VERIFIER_TIMEOUT.value
         else:
-            reward, details = await self._download_rewards(sandbox)
+            reward, details, evaluation = await self._download_rewards(sandbox)
+            if isinstance(evaluation, dict):
+                result.evaluation_feasible = bool(evaluation.get("feasible"))
+                errors = evaluation.get("errors")
+                if isinstance(errors, list):
+                    result.evaluation_error_count = len(errors)
+                    result.evaluation_errors = [_clean(e)[:500] for e in errors[:MAX_EVALUATION_ERRORS]]
             if reward is None:
                 result.status = Status.VERIFIER_OUTPUT_MISSING.value
             else:
@@ -565,10 +577,11 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
             session.aborted = True
         return result
 
-    async def _download_rewards(self, sandbox: AsyncSandbox) -> tuple[Optional[Dict[str, Any]], Any]:
+    async def _download_rewards(self, sandbox: AsyncSandbox) -> tuple[Optional[Dict[str, Any]], Any, Any]:
         with TemporaryDirectory(prefix="nemo-gym-oragentbench-") as tmp:
             reward: Optional[Dict[str, Any]] = None
             details: Any = None
+            evaluation: Any = None
             try:
                 await sandbox.download(f"{VERIFIER_DIR}/reward.json", Path(tmp) / "reward.json")
                 loaded = _clean_json(json.loads((Path(tmp) / "reward.json").read_text()))
@@ -581,7 +594,12 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
                 details = _clean_json(json.loads((Path(tmp) / "reward_details.json").read_text()))
             except BaseException:
                 details = None
-            return reward, details
+            try:
+                await sandbox.download(f"{VERIFIER_DIR}/evaluation.json", Path(tmp) / "evaluation.json")
+                evaluation = _clean_json(json.loads((Path(tmp) / "evaluation.json").read_text()))
+            except BaseException:
+                evaluation = None
+            return reward, details, evaluation
 
     async def verify(self, request: Request, body: ORAgentBenchVerifyRequest) -> ORAgentBenchVerifyResponse:
         start = time()

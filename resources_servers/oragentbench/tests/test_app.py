@@ -106,10 +106,11 @@ class FakeSandbox:
         self.stopped = True
 
 
-def scored(feasible: bool, quality: float, status: str = "scored"):
+def scored(feasible: bool, quality: float, status: str = "scored", errors=None):
     return lambda sandbox: {
         "reward.json": {"feasibility": 1.0 if feasible else 0.0, "quality": quality},
         "reward_details.json": {"quality_status": status},
+        "evaluation.json": {"feasible": feasible, "errors": errors or [], "error_count": len(errors or [])},
     }
 
 
@@ -288,6 +289,15 @@ class TestModelFreeVerify:
             assert task.startswith("oragentbench/")
             for rel, pairs in files.items():
                 assert rel == "solve_reference.py" and all(old != new for old, new in pairs)
+
+    def test_validator_errors_are_captured_and_capped(self, monkeypatch):
+        errors = [f"row {i}: capacity exceeded by 1\udcff" for i in range(40)]
+        sandbox = FakeSandbox(verifier=scored(False, 0.0, status="infeasible", errors=errors))
+        server = make_server(sandbox, monkeypatch, validation_mode="no_action")
+        step = self.post(server, verify_body())["step_results"][0]
+        assert step["evaluation_feasible"] is False and step["evaluation_error_count"] == 40
+        assert len(step["evaluation_errors"]) == app_module.MAX_EVALUATION_ERRORS
+        assert step["evaluation_errors"][0] == "row 0: capacity exceeded by 1?"
 
     def test_wrong_file_control_renames_every_new_artifact(self, monkeypatch):
         sandbox = FakeSandbox(verifier=scored(False, 0.0, status="missing_solution"))
