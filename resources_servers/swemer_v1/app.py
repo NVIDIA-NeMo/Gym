@@ -52,6 +52,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swemer_v1.verification import (
     VerificationInputs,
     VerificationResult,
@@ -72,6 +73,7 @@ class SwemerV1ResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -189,6 +191,22 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to stop Swemer-v1 sandbox", format_exc(), file=sys.stderr)
 
+    async def _ensure_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
+        """Some images ship with no git history at all. Init one fresh, but only when missing, so
+        ``seed_session`` always has a real base commit to diff the agent's changes against without
+        disturbing the git history everywhere else.
+        """
+        precheck = await sandbox.exec(f"git -C {shlex.quote(workdir)} rev-parse --git-dir")
+        if precheck.return_code == 0:
+            return
+        result = await sandbox.exec(
+            f"cd {shlex.quote(workdir)} && git init -q "
+            f"&& git config user.email nemo-gym@nvidia.com && git config user.name nemo-gym "
+            f"&& git add -A && git commit -q -m 'nemo_gym: initial snapshot' --allow-empty"
+        )
+        if result.return_code != 0:
+            print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
+
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """List of files ``workdir`` holds untracked before the agent touches it."""
         try:
@@ -232,6 +250,9 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         # Mirror files here too, not just the verification sandbox: an agent building/testing its
         # own changes hits the same Maven Central rate limit otherwise.
         sandbox = await self._create_sandbox(body, files=mirror_files())
+        await self._ensure_git_repo(sandbox, body.workdir)
+        if self.config.apply_anti_cheating:
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
         self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()

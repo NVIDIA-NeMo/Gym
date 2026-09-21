@@ -17,6 +17,7 @@ denovo_swe_resources_server:
       # to Scale-SWE's Python-only sizing.
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
+      apply_anti_cheating: true
 
       sandbox_provider: sandbox
       sandbox_config:

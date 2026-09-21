@@ -56,6 +56,7 @@ from resources_servers.swe_rebench.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 
 
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
@@ -79,6 +80,7 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 1
     # Where the upstream log-parser repo is cloned. Empty uses the shared nemo_gym cache.
     log_parser_cache_dir: str = ""
+    apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -244,6 +246,8 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
         self._session_id_to_pristine_untracked.pop(session_id, None)
         sandbox = await self._create_sandbox(body)
+        if self.config.apply_anti_cheating:
+            await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, repo_directory(body.repo)
         )
