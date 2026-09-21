@@ -163,6 +163,7 @@ Code: Apache 2.0.
 ORAgentBench: code MIT (root `LICENSE`, (c) 2026 ORAgentBench); the upstream README states that
 benchmark documentation and data are CC BY 4.0. Task content derives from OR papers, IndustryOR
 seeds, public datasets and authored scenarios whose provenance upstream asserts but does not
-itemise. Tasks, validators and reference solutions are fetched at preparation time and not
-committed. `tests/fixtures/toy_assignment/tests/test.sh` is a verbatim copy of upstream's shared
+itemise, and a licence declaration is not a rights determination, so the benchmark dataset is
+declared `license: TBD` in the config until a rights decision is recorded. Tasks, validators and
+reference solutions are fetched at preparation time and not committed. `tests/fixtures/toy_assignment/tests/test.sh` is a verbatim copy of upstream's shared
 scoring script (MIT) with a provenance header; the fixture task around it is synthetic.

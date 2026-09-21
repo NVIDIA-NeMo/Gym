@@ -71,7 +71,9 @@ oragentbench_agent:
       - name: benchmark
         type: validation
         jsonl_fpath: resources_servers/oragentbench/data/benchmark.jsonl
-        license: Creative Commons Attribution 4.0 International
+        # Upstream declares CC BY 4.0 for data, but task content derives from OR papers and IndustryOR
+        # whose rights upstream asserts without itemising; recorded as TBD pending a rights decision.
+        license: TBD
 
 # Policy model. Only `reasoning.effort=high` is published upstream; nothing else is sent.
 policy_model:
