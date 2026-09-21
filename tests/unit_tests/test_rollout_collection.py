@@ -70,6 +70,7 @@ from nemo_gym.rollout_collection import (
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
     _rollout_for_export,
+    _rollout_order_key,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
@@ -1085,7 +1086,7 @@ class TestRolloutCollection:
         second.write_bytes(orjson.dumps(materialized(2)) + b"\n")
 
         # Task 0 was scored and task 2 appears in both shards, so neither may be counted twice.
-        rows = _missing_rollout_rows_counted_as_zero([first, second], {(0, 0)})
+        rows = _missing_rollout_rows_counted_as_zero([first, second], [], {(0, 0)})
         assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [1, 2]
         assert all(row["reward"] == 0.0 for row in rows)
 
@@ -1098,7 +1099,34 @@ class TestRolloutCollection:
             "reward": 0.0,
         }
 
-        assert _missing_rollout_rows_counted_as_zero([tmp_path / "absent.jsonl"], set()) == []
+        assert _missing_rollout_rows_counted_as_zero([tmp_path / "absent.jsonl"], [], set()) == []
+
+    def test_a_failure_the_caller_did_not_select_is_not_counted_as_missing(self, tmp_path: Path) -> None:
+        """Otherwise the selection becomes a no-op: what it excludes comes back as a zero."""
+        materialized = tmp_path / "shard0_materialized_inputs.jsonl"
+        failures = tmp_path / "shard0_failures.jsonl"
+
+        def row(task_index: int) -> dict:
+            return {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "agent_ref": {"name": "my_agent"},
+                "task_name": f"task-{task_index}",
+            }
+
+        materialized.write_bytes(b"\n".join(orjson.dumps(row(i)) for i in range(3)) + b"\n")
+        failures.write_bytes(orjson.dumps(row(1) | {NG_FAILURE_CLASS_KEY: "agent_request_failed"}) + b"\n")
+
+        # Task 0 scored, task 1 failed in a class the caller left out, task 2 produced nothing.
+        counted = _missing_rollout_rows_counted_as_zero([materialized], [failures], {(0, 0)})
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in counted] == [2]
+
+    def test_a_row_without_indices_does_not_break_the_ordering(self) -> None:
+        """A sort key of None against an int raises, and every row is ordered before aggregation."""
+        assert _rollout_order_key({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}) == (2, 3)
+        assert _rollout_order_key({}) == (0, 0)
+        assert _rollout_order_key({TASK_INDEX_KEY_NAME: None, ROLLOUT_INDEX_KEY_NAME: None}) == (0, 0)
 
     @pytest.mark.parametrize(
         ("count_missing", "expected_scored", "expected_mean"),
@@ -1295,6 +1323,55 @@ class TestRolloutCollection:
         await RolloutAggregationHelper().run_from_config(config)
 
         assert sorted(row["reward"] for row in aggregated["verify_responses"]) == [0.0, 1.0]
+
+    async def test_aggregate_hands_a_missing_early_repeat_to_metrics_in_its_own_place(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """pass@k reads a task's repeats positionally, so a zero appended at the end shifts them."""
+        shard_fpath = tmp_path / "rollouts-chunk0.jsonl"
+        shard_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 1,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    "reward": 1.0,
+                }
+            )
+            + b"\n"
+        )
+        materialized_path_for(shard_fpath).write_bytes(
+            b"\n".join(
+                orjson.dumps(
+                    {
+                        TASK_INDEX_KEY_NAME: 0,
+                        ROLLOUT_INDEX_KEY_NAME: rollout_index,
+                        AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    }
+                )
+                for rollout_index in range(2)
+            )
+            + b"\n"
+        )
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutAggregationConfig(
+            input_glob=str(shard_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            count_missing_rollouts_as_zero=True,
+            disable_health_check=True,
+        )
+        await RolloutAggregationHelper().run_from_config(config)
+
+        # The repeat that went missing is repeat 0, so it must arrive before the one that landed.
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in aggregated["verify_responses"]] == [0, 1]
+        assert [row["reward"] for row in aggregated["verify_responses"]] == [0.0, 1.0]
 
     async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

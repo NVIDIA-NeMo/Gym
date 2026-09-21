@@ -654,7 +654,11 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "Count a materialized rollout that produced no row at all as a zero in aggregate "
             "metrics. Covers what the failure classes cannot: a rollout killed mid-flight leaves "
             "nothing in either file, so without this it leaves the denominator too and the score "
-            "reads higher than the run earned. Scores the metrics only; no artifact is changed."
+            "reads higher than the run earned. Scores the metrics only; no artifact is changed. "
+            "Off by default. Needs the run's materialized inputs; a shard without them is warned "
+            "about and skipped. A rollout recorded in the failures sidecar is never counted here, "
+            "whatever its class, so this does not override count_failure_classes_as_zero. The "
+            "count is reported separately as coverage/imputed."
         ),
     )
 
@@ -955,7 +959,14 @@ def _failure_rows_counted_as_zero(
     return counted
 
 
-def _missing_rollout_rows_counted_as_zero(materialized_fpaths: List[Path], scored_keys: set) -> List[Dict[str, Any]]:
+def _rollout_order_key(row: Dict[str, Any]) -> tuple:
+    """Task then repeat: metrics that read a task's repeats positionally need that order."""
+    return (row.get(TASK_INDEX_KEY_NAME) or 0, row.get(ROLLOUT_INDEX_KEY_NAME) or 0)
+
+
+def _missing_rollout_rows_counted_as_zero(
+    materialized_fpaths: List[Path], failures_fpaths: List[Path], scored_keys: set
+) -> List[Dict[str, Any]]:
     """Materialized rollouts that produced no row anywhere, counted as zeros.
 
     The failure classes reach a rollout that failed and said so. This reaches the one that never
@@ -963,12 +974,22 @@ def _missing_rollout_rows_counted_as_zero(materialized_fpaths: List[Path], score
     rollouts jsonl and nothing in the sidecar. Without it such a rollout leaves the denominator as
     well as the numerator, so the score reads higher the more of the run went missing.
 
+    The sidecar is read here rather than trusted from the caller. A failure whose class the caller
+    left out of ``count_failure_classes_as_zero`` is absent from the scored keys, and counting it
+    here would score the very rollouts that selection excluded -- silently turning the selection
+    into a no-op.
+
     Only the identity of the rollout is carried over. The score enters the metric input and
     nothing else, the same way a counted failure row does.
     """
+    recorded_failures = set(_latest_failure_rows(failures_fpaths))
     counted = []
     for materialized_fpath in materialized_fpaths:
         if not materialized_fpath.exists():
+            # Without the inventory there is nothing to compare the rollouts against, so the
+            # option silently does nothing for this shard -- which is the very shape of run it
+            # exists to expose.
+            print(f"[WARNING] {materialized_fpath} is missing; rollouts owed by that shard cannot be counted")
             continue
         with open(materialized_fpath, "rb") as f:
             for line_no, line in enumerate(f, 1):
@@ -977,7 +998,7 @@ def _missing_rollout_rows_counted_as_zero(materialized_fpaths: List[Path], score
                     continue
                 row = loads_jsonl_line(line, materialized_fpath, line_no)
                 key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
-                if key in scored_keys:
+                if key in scored_keys or key in recorded_failures:
                     continue
                 scored_keys.add(key)
                 counted.append(
@@ -1707,13 +1728,21 @@ class RolloutCollectionHelper(BaseModel):
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
+            missing: List[Dict[str, Any]] = []
             if config.count_missing_rollouts_as_zero:
                 scored_keys |= {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in counted}
-                missing = _missing_rollout_rows_counted_as_zero([config.materialized_jsonl_fpath], scored_keys)
+                missing = _missing_rollout_rows_counted_as_zero(
+                    [config.materialized_jsonl_fpath], [failures_fpath], scored_keys
+                )
                 print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(missing)
+            # Appending leaves a missing early repeat behind the repeats that did land. The two
+            # lists are zipped positionally downstream, so they are reordered together.
+            scored_rows = persisted_results + counted
+            metadata_rows = persisted_rows + counted
+            order = sorted(range(len(scored_rows)), key=lambda i: _rollout_order_key(scored_rows[i]))
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                persisted_results + counted, persisted_rows + counted, output_fpath
+                [scored_rows[i] for i in order], [metadata_rows[i] for i in order], output_fpath
             )
 
         expected_rollouts = (
@@ -1729,6 +1758,7 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
+                    "coverage/imputed": len(missing),
                 }
             )
 
@@ -2157,7 +2187,8 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=False,
         description=(
             "Count a materialized rollout that produced no row at all as a zero, reading each "
-            "shard's own materialized inputs. Same contract as the collection-time flag."
+            "shard's own materialized inputs and its own failures sidecar. Same contract as the "
+            "collection-time flag, including that a recorded failure is never counted here."
         ),
     )
     disable_health_check: bool = Field(
@@ -2243,9 +2274,11 @@ class RolloutAggregationHelper(BaseModel):
         )
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+        missing: List[Dict[str, Any]] = []
         if config.count_missing_rollouts_as_zero:
             missing = _missing_rollout_rows_counted_as_zero(
                 [materialized_path_for(Path(path)) for path in input_paths],
+                failures_fpaths,
                 scored_keys | {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted},
             )
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
@@ -2253,7 +2286,7 @@ class RolloutAggregationHelper(BaseModel):
 
         # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
         helper = RolloutCollectionHelper()
-        scored = results + counted
+        scored = sorted(results + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
         # The shards' own sidecars say which rollouts never made it into the files just scored.
@@ -2276,6 +2309,7 @@ class RolloutAggregationHelper(BaseModel):
                     "coverage/expected": scored_rollouts + sum(dropped.values()),
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
+                    "coverage/imputed": len(missing),
                 }
             )
 
