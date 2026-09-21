@@ -577,3 +577,6 @@ class TestShippedConfig:
             "reasoning": {"effort": "high"}
         }
         assert list(config)[0] == "oragentbench"
+        # allowed_agents names agent *types* (implementation directories), which is what the
+        # pairing check in gym eval run compares against.
+        assert set(server["allowed_agents"]) == {"terminus_2_multi_step_sandboxed_agent", "terminus_2_sandboxed_agent"}

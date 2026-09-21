@@ -2,7 +2,7 @@
 oragentbench:
   resources_servers:
     oragentbench:
-      allowed_agents: [oragentbench_agent, terminus_2_sandboxed_agent]
+      allowed_agents: [terminus_2_multi_step_sandboxed_agent, terminus_2_sandboxed_agent]
       entrypoint: app.py
       domain: agent
       verified: false
