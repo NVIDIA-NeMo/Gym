@@ -978,7 +978,7 @@ class OpenSandboxProvider:
     def _build_transport(self) -> Any:
         """Use Gym's global HTTP pool, or the explicitly selected legacy backend."""
         if self._connection.transport_backend == "aiohttp":
-            from nemo_gym.sandbox.providers.opensandbox._http_transport import GymAiohttpTransport
+            from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
             return GymAiohttpTransport(verify=self._connection.tls_verify)
 
