@@ -192,6 +192,7 @@ class GymTraceHooks:
         *,
         create_params: NeMoGymResponseCreateParamsNonStreaming,
         state: RolloutLLMState,
+        default_model: str = "nooa",
     ) -> AgentEpisode:
         """Project captured facts without interpreting the invocation adapter."""
 
@@ -268,7 +269,7 @@ class GymTraceHooks:
             response=NeMoGymResponse(
                 id="nooa-embedded",
                 created_at=time(),
-                model=create_params.model or "nooa",
+                model=create_params.model or default_model,
                 object="response",
                 output=output,
                 tools=create_params.tools,
