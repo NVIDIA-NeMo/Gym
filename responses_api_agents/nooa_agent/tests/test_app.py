@@ -114,7 +114,10 @@ def config(**overrides: object) -> NOOAAgentConfig:
             "agent_class": "responses_api_agents.nooa_agent.example_agent:GymResourceAgent",
             "invocation_adapter": f"{__name__}:invoke",
         },
-        "run_timeout_secs": 1,
+        # The rewritten unifiedllm pays a one-time session-startup cost (litellm
+        # + OTel imports) on the first rollout; keep the episode budget above it.
+        # Timeout-specific tests override this explicitly.
+        "run_timeout_secs": 15,
     }
     values.update(overrides)
     return NOOAAgentConfig.model_validate(values)
