@@ -41,6 +41,7 @@ from nemo_gym.sandbox.providers import (
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.metrics import record_sandbox_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -392,6 +393,9 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
+        # was counted by the process that started it and must not be subtracted here.
+        self._counted_active = False
         self.pty = SandboxPty(self)
 
     def _telemetry_provider_name(self) -> str:
@@ -422,6 +426,8 @@ class AsyncSandbox:
                 **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
             ):
                 handle = await self._provider.create(requested_spec)
+            record_sandbox_active(1, provider=self._telemetry_provider_name())
+            self._counted_active = True
         else:
             handle = await self._provider.create(requested_spec)
         self._handle = handle
@@ -546,8 +552,13 @@ class AsyncSandbox:
             return
         try:
             if self._handle is not None and not self._stopped:
-                await self._provider.close(self._handle)
-                self._stopped = True
+                try:
+                    await self._provider.close(self._handle)
+                finally:
+                    self._stopped = True
+                    if self._counted_active:
+                        self._counted_active = False
+                        record_sandbox_active(-1, provider=self._telemetry_provider_name())
         finally:
             if self._owns_provider:
                 await self._provider.aclose()
