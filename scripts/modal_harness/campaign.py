@@ -376,6 +376,7 @@ def run_campaign(
             "high_water": high_water,
             "log": log_path,
             "published_log": published_log,
+            "last_progress_at": time.time(),
         }
         publisher = threading.Thread(
             target=_progress_publisher,
@@ -464,6 +465,10 @@ def _publish(work_path: str, output_path: str, high_water: int) -> int:
     rows = data.count(b"\n")
     if rows < high_water:
         return high_water
+    if rows == high_water:
+        # Nothing new. Returning without writing leaves the file's mtime as the time work
+        # last landed, which is what makes a stall visible from outside the container.
+        return high_water
     tmp = output_path + ".partial"
     with open(tmp, "wb") as handle:
         handle.write(data)
@@ -485,10 +490,17 @@ def _progress_publisher(work_path: str, output_path: str, namespace: str, slug: 
             published = _publish(work_path, output_path, state["high_water"])
             if published > state["high_water"]:
                 state["high_water"] = published
+                state["last_progress_at"] = time.time()
             # Written every cycle, including when nothing moved: an unchanging `landed`
             # with a fresh `updated_at` means "running but not producing", which is a
             # different diagnosis from "publisher died" and needs a different fix.
-            write_status(namespace, slug, landed=state["high_water"], state="running")
+            write_status(
+                namespace,
+                slug,
+                landed=state["high_water"],
+                state="running",
+                last_progress_at=state["last_progress_at"],
+            )
             if os.path.exists(state["log"]):
                 try:
                     shutil.copyfile(state["log"], state["published_log"])

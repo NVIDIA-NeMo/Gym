@@ -142,6 +142,15 @@ def _discover() -> list[dict[str, Any]]:
                     "updated_at": status.get("updated_at") or os.path.getmtime(path),
                     "git_ref": status.get("git_ref", ""),
                     "log": status.get("log", os.path.join(ns_dir, f"{slug}.servers.log")),
+                    # Seconds since rows last landed. Derived from the rollout file's mtime
+                    # rather than the status heartbeat: a hung rollout keeps the container
+                    # healthy and heartbeating, so "running" and a fresh timestamp say
+                    # nothing about whether work is happening. Only new rows do.
+                    "stalled_for": time.time()
+                    - max(
+                        float(status.get("last_progress_at") or 0),
+                        os.path.getmtime(path),
+                    ),
                 }
             )
     runs.sort(key=lambda r: r["updated_at"], reverse=True)
@@ -240,6 +249,16 @@ def dashboard():
         for run in runs:
             pct = (run["landed"] / run["expected"] * 100) if run["expected"] else 0
             missing = f"<span style='color:var(--bad)'>{run['missing']}</span>" if run["missing"] else "0"
+            # 15 minutes without a new row, on a run that claims to be running. Long enough
+            # that a slow benchmark does not trip it -- a DRIFT rollout is ~55 policy calls
+            # and a cold first row can take twenty minutes -- short enough to catch a hang
+            # in the session it happens. A hung rollout keeps the container healthy and
+            # heartbeating, so this is the only external signal that work has stopped.
+            stall = (
+                f"<span style='color:var(--warn)'>{int(run['stalled_for'] // 60)}m</span>"
+                if run["state"] == "running" and run["stalled_for"] > 900
+                else "-"
+            )
             rows.append(
                 f"<tr><td><a href='/run/{html.escape(run['namespace'])}/{html.escape(run['slug'])}'>"
                 f"{html.escape(run['slug'])}</a><div class='muted'>{html.escape(run['namespace'])}"
@@ -247,12 +266,12 @@ def dashboard():
                 f"<td><span class='pill s-{html.escape(run['state'])}'>{html.escape(run['state'])}</span></td>"
                 f"<td>{run['landed']:,}<span class='muted'> / {run['expected']:,}</span>"
                 f"<div class='bar'><i style='width:{min(100, pct):.1f}%'></i></div></td>"
-                f"<td>{missing}</td><td class='muted'>{_ago(run['updated_at'])}</td></tr>"
+                f"<td>{missing}</td><td>{stall}</td>"
+                f"<td class='muted'>{_ago(run['updated_at'])}</td></tr>"
             )
         table = (
-            "<table><tr><th>Run</th><th>State</th><th>Progress</th><th>Missing</th><th>Updated</th></tr>"
-            + "".join(rows)
-            + "</table>"
+            "<table><tr><th>Run</th><th>State</th><th>Progress</th><th>Missing</th>"
+            "<th>No rows for</th><th>Updated</th></tr>" + "".join(rows) + "</table>"
         )
         note = (
             "<div class='stub'>Stubbed for now: cost/GPU-hour accounting, alerting, and "
