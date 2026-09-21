@@ -45,21 +45,6 @@ kidbench_resources_server:
         max_output_tokens: 4096
       multi_turn_judge_name: deepseek-v4-flash
 
-      datasets:
-      - name: single_turn
-        type: validation
-        jsonl_fpath: resources_servers/kidbench/data/single_turn.jsonl
-        num_repeats: 1
-        # `TBD` is Gym's own entry for a dataset whose terms do not match a named licence,
-        # which is this one: upstream ships a bespoke research-use and child-safety notice.
-        # It is not a placeholder for an unknown licence. The terms are in
-        # benchmarks/kidbench/README.md and must travel with any redistribution.
-        license: TBD
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/kidbench/data/example.jsonl
-        num_repeats: 1
-
 # --- Single-turn track ------------------------------------------------------------
 # One prompt, one response. max_steps: 1 because the rubric judges a first reply to a
 # child; letting the model take another step would score something the child never saw.
