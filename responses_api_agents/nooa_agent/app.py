@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import aiohttp
 from fastapi import Body, Request, Response
+from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -164,10 +165,12 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         return response.model_copy(
             update={
                 "status": status,
-                "error": {
-                    "code": f"nooa_{reason}",
-                    "message": error or f"NOOA execution terminated with {reason}.",
-                },
+                "error": ResponseError(
+                    # Responses error codes are a closed OpenAI enum. Keep the
+                    # NOOA-specific reason in the message and rollout metadata.
+                    code="server_error",
+                    message=error or f"NOOA execution terminated with {reason}.",
+                ),
             }
         )
 
