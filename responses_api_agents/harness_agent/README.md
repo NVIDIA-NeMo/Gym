@@ -26,7 +26,7 @@ config_paths:
 ```
 
 Use `benchmarks/hle/harness.yaml` for HLE, or select `configs/pi.yaml` instead of
-`configs/opencode.yaml` to exercise Pi. Select one preset per configuration.
+`configs/opencode.yaml` to use Pi. Select one preset per configuration.
 Both benchmarks retain their existing preparation, grading and repeats. HLE
 uses its Explanation/Answer/Confidence instructions in the user message. The
 harness presets add brief guidance about network availability and preinstalled
@@ -59,9 +59,10 @@ for those missing rows before reporting full benchmark coverage.
 Both presets omit the per-request output cap for Gym's model provider, letting
 vLLM calculate the remaining context budget, and disable automatic compaction.
 The serving configuration must allow the intended context length and must not impose
-a smaller default output cap. OpenCode also sets 400 steps. Pi benchmark scores
-have not yet been compared. All enclosing benchmark rollout limits are four hours;
-individual tools retain native limits.
+a smaller default output cap. OpenCode also sets 400 steps. All enclosing benchmark
+rollout limits are four hours. The Pi preset caps each Bash call at 120 seconds,
+preserving shorter model-requested deadlines; a timeout returns a tool error so
+the agent can continue. Other tools retain their native limits.
 
 The `apex_shortlist/opencode` and `hle/opencode` benchmark entrypoints compose
 these presets. `hle/opencode_search` adds the existing Tavily resource with
