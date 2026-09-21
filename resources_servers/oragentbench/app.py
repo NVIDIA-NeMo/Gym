@@ -88,6 +88,28 @@ HARNESS_FAULTS = {
 }
 
 
+# Fixes to upstream *reference solutions* applied only when the model-free ``reference`` and
+# ``wrong_file`` modes upload ``solution/`` into the container. They never touch a validator, the
+# task data, or anything the agent sees; each entry documents a defect in upstream's own solver
+# at the pinned commit. Keyed by task name, then relative path inside ``solution/``.
+REFERENCE_SOLUTION_PATCHES: Dict[str, Dict[str, List[tuple[str, str]]]] = {
+    # solve_reference.py::build_improved_case_schedule references two names that do not exist
+    # (``env_dir_plan``, ``greedy_plan_eval``); the surrounding lines show the intended call.
+    "oragentbench/sterile_processing_robust_schedule": {
+        "solve_reference.py": [
+            (
+                'greedy_eval, _ = evaluate_case_plan(data, env_dir_plan, scratch_dir / "greedy_seed.csv")',
+                'greedy_eval, _ = evaluate_case_plan(data, env_dir, greedy_plan, scratch_dir / "greedy_seed.csv")',
+            ),
+            (
+                "initial_plan, initial_eval = greedy_plan_eval",
+                "initial_plan, initial_eval = greedy_plan, greedy_eval",
+            ),
+        ],
+    },
+}
+
+
 def _clean(text: Any) -> str:
     """Return ``text`` as a wire-safe string (lone surrogates replaced)."""
     return str(text if text is not None else "").encode("utf-8", "replace").decode("utf-8")
@@ -401,12 +423,29 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
         await sandbox.start_with_setup(spec, _setup)
         return sandbox
 
-    async def _upload_dir(self, sandbox: AsyncSandbox, local_dir: Path, target_dir: str) -> None:
+    async def _upload_dir(
+        self,
+        sandbox: AsyncSandbox,
+        local_dir: Path,
+        target_dir: str,
+        patches: Optional[Dict[str, List[tuple[str, str]]]] = None,
+    ) -> None:
         for rel in sorted(glob("**", root_dir=str(local_dir), recursive=True, include_hidden=True)):
             local_path = local_dir / rel
             if not local_path.is_file() or "__pycache__" in local_path.parts:
                 continue
             target = f"{target_dir}/{rel}"
+            if patches and rel in patches:
+                content = local_path.read_text()
+                for old, new in patches[rel]:
+                    if content.count(old) != 1:
+                        raise RuntimeError(f"reference patch for {rel} did not match exactly once: {old!r}")
+                    content = content.replace(old, new)
+                with TemporaryDirectory(prefix="nemo-gym-oragentbench-patch-") as tmp:
+                    patched = Path(tmp) / Path(rel).name
+                    patched.write_text(content)
+                    await sandbox.upload(local_path=patched, remote_path=target)
+                continue
             await sandbox.upload(local_path=local_path, remote_path=target)
 
     async def _stop(self, sandbox: Optional[AsyncSandbox]) -> None:
@@ -580,14 +619,14 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
             prepared = await self._prepare_step(session, index)
             if not prepared.setup_ok:
                 break
-            control_output = await self._apply_control(sandbox, step, mode)
+            control_output = await self._apply_control(sandbox, task.name, step, mode)
             result = await self._verify_step(session, index)
             result.control_output = control_output
             if session.aborted:
                 break
         return session
 
-    async def _apply_control(self, sandbox: AsyncSandbox, step: StepSpec, mode: str) -> str:
+    async def _apply_control(self, sandbox: AsyncSandbox, task_name: str, step: StepSpec, mode: str) -> str:
         if mode == "no_action":
             return ""
         if mode == "hung_process":
@@ -601,12 +640,13 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
             return "no solution/solve.sh for this step"
         before = await sandbox.exec("find /app/submissions -type f | sort", user="root")
         await sandbox.exec(f"rm -rf {SOLUTION_DIR} && mkdir -p {SOLUTION_DIR}", user="root")
-        await self._upload_dir(sandbox, Path(step.solution_dir), SOLUTION_DIR)
+        patches = REFERENCE_SOLUTION_PATCHES.get(task_name) if step.name is None else None
+        await self._upload_dir(sandbox, Path(step.solution_dir), SOLUTION_DIR, patches=patches)
         timeout_s = min(step.agent_timeout_s, self.config.reference_solve_timeout_s)
         solve = await sandbox.exec(
             f"bash {SOLUTION_DIR}/solve.sh", user="root", env=step.solution_env or None, timeout_s=timeout_s
         )
-        output = f"solve.sh return_code={solve.return_code} error_type={solve.error_type}\n"
+        output = f"solve.sh return_code={solve.return_code} error_type={solve.error_type} patched={bool(patches)}\n"
         output += _clean(solve.stderr)[-4000:] + _clean(solve.stdout)[-4000:]
         if mode == "wrong_file":
             after = await sandbox.exec("find /app/submissions -type f | sort", user="root")

@@ -240,6 +240,37 @@ class TestModelFreeVerify:
         assert "/tests/test.sh" in sandbox.uploads and "/solution/solve.sh" in sandbox.uploads
         assert sandbox.stopped
 
+    def test_reference_patch_applies_exactly_once_and_only_to_the_reference(self, monkeypatch):
+        sandbox = FakeSandbox(verifier=scored(True, 2.0))
+        server = make_server(sandbox, monkeypatch, validation_mode="reference")
+        monkeypatch.setitem(
+            app_module.REFERENCE_SOLUTION_PATCHES,
+            "synthetic/toy_assignment",
+            {"solve_reference.py": [("brute force; optimum is 12", "brute force; patched")]},
+        )
+        uploaded = {}
+
+        async def upload(local_path, remote_path):
+            uploaded[remote_path] = Path(local_path).read_text()
+
+        sandbox.upload = upload
+        self.post(server, verify_body())
+        assert "brute force; patched" in uploaded["/solution/solve_reference.py"]
+        assert all("patched" not in text for path, text in uploaded.items() if path.startswith("/tests/"))
+        monkeypatch.setitem(
+            app_module.REFERENCE_SOLUTION_PATCHES,
+            "synthetic/toy_assignment",
+            {"solve_reference.py": [("not in the file", "x")]},
+        )
+        with pytest.raises(RuntimeError, match="did not match exactly once"):
+            self.post(server, verify_body())
+
+    def test_upstream_reference_patches_target_real_files(self):
+        for task, files in app_module.REFERENCE_SOLUTION_PATCHES.items():
+            assert task.startswith("oragentbench/")
+            for rel, pairs in files.items():
+                assert rel == "solve_reference.py" and all(old != new for old, new in pairs)
+
     def test_wrong_file_control_renames_every_new_artifact(self, monkeypatch):
         sandbox = FakeSandbox(verifier=scored(False, 0.0, status="missing_solution"))
         server = make_server(sandbox, monkeypatch, validation_mode="wrong_file")
