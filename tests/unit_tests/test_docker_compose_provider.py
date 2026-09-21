@@ -143,29 +143,6 @@ async def test_forwarder_is_opt_in_unbounded_and_reports_exit(provider):
         await provider.forward_ports(handle(), "172.17.0.2", (8000,), ready_file="/tmp/ready")
 
 
-async def test_connect_recovers_execution_context_and_published_ports(provider):
-    info = {
-        "Config": {"Image": "test", "Labels": {module.SANDBOX_LABEL: "1"}, "Env": ["TOKEN=a=b", "EMPTY=", "bad"]},
-        "State": {"Running": True},
-        "NetworkSettings": {"Ports": {"8000/tcp": [{"HostPort": "49153"}], "9000/tcp": None}},
-    }
-    provider._run = AsyncMock(return_value=(0, json.dumps(info), ""))
-    descriptor = await provider.serialize_handle(handle())
-    attached = await provider.connect(descriptor)
-    assert attached.raw.env == {"TOKEN": "a=b", "EMPTY": ""}
-    assert attached.raw.published_ports == (8000,)
-    assert attached.raw.shell == "sh"
-    assert all(call.args[0][1] == "inspect" for call in provider._run.call_args_list)
-    info["State"]["Running"] = False
-    provider._run.return_value = (0, json.dumps(info), "")
-    with pytest.raises(ValueError, match="not running"):
-        await provider.connect(descriptor)
-    info["Config"]["Labels"] = {}
-    provider._run.return_value = (0, json.dumps(info), "")
-    with pytest.raises(ValueError, match="not a Gym"):
-        await provider.connect(descriptor)
-
-
 @pytest.mark.skipif(shutil.which("sleep") is None, reason="sleep not installed")
 async def test_cancelled_cli_is_reaped_and_unbounded_relay_does_not_block_exec(provider, monkeypatch):
     real_create = asyncio.create_subprocess_exec
@@ -240,6 +217,7 @@ async def test_live_docker_compose(tmp_path, monkeypatch):
                 "image": image,
                 "entrypoint": ["sleep", "infinity"],
                 "working_dir": "/data",
+                "environment": {"COMPOSE_GREETING": "hello"},
                 "volumes": [{"type": "volume", "source": "data", "target": "/data", "read_only": True}],
                 "depends_on": {"api": {"condition": "service_healthy"}},
             },
@@ -278,6 +256,7 @@ async def test_live_docker_compose(tmp_path, monkeypatch):
             try:
                 assert (await attached.services["main"].exec(command)).stdout.strip() == "shared-data"
                 assert (await attached.services["main"].exec("pwd")).stdout.strip() == "/data"
+                assert (await attached.services["main"].exec("printenv COMPOSE_GREETING")).stdout.strip() == "hello"
                 assert (await attached.services["api"].endpoint(8000)).endpoint == endpoint.endpoint
             finally:
                 await attached.stop()

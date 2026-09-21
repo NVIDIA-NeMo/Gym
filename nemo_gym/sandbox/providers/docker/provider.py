@@ -557,35 +557,6 @@ class DockerProvider(DockerComposeSupport):
         if code != 0:
             raise RuntimeError(f"docker cp download from {source_path!r} failed: {err.strip()}")
 
-    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
-        return {"sandbox_id": handle.sandbox_id}
-
-    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        name = str(descriptor["sandbox_id"])
-        info = await self._inspect_container(name)
-        config = info.get("Config") or {}
-        if (config.get("Labels") or {}).get(SANDBOX_LABEL) != "1":
-            raise ValueError("Docker container is not a Gym sandbox")
-        if not (info.get("State") or {}).get("Running"):
-            raise ValueError("Docker sandbox is not running")
-        ports = (info.get("NetworkSettings") or {}).get("Ports") or {}
-        env = dict(item.split("=", 1) for item in config.get("Env") or [] if "=" in item)
-        return SandboxHandle(
-            sandbox_id=name,
-            provider_name=self.name,
-            raw=_DockerContainer(
-                name=name,
-                image=config["Image"],
-                shell=await self._resolve_shell(name),
-                env=env,
-                published_ports=tuple(
-                    int(port.removesuffix("/tcp"))
-                    for port, bindings in ports.items()
-                    if port.endswith("/tcp") and bindings
-                ),
-            ),
-        )
-
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Container status via ``docker inspect`` (missing -> STOPPED; error/timeout -> UNKNOWN)."""
         inst = handle.raw
