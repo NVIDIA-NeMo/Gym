@@ -127,7 +127,9 @@ def test_scrape_targets_are_the_model_services():
 def test_inactive_without_a_model_service():
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
     assert not otel_active(_config(services={}, driver=driver))
-    assert not otel_active(_config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver))
+    assert not otel_active(
+        _config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver)
+    )
 
 
 def test_inactive_when_disabled():
@@ -194,10 +196,29 @@ def test_collector_scrapes_every_model_service_on_localhost():
     )
     scrapes = _rendered(config)["receivers"]["prometheus"]["config"]["scrape_configs"]
     by_job = {s["job_name"]: s for s in scrapes}
-    assert by_job["vllm-policy"]["static_configs"][0]["targets"] == ["localhost:8000"]
-    assert by_job["vllm-judge"]["static_configs"][0]["targets"] == ["localhost:8100"]
-    assert by_job["vllm-policy"]["static_configs"][0]["labels"] == {"gym_service": "policy"}
-    assert by_job["vllm-policy"]["scrape_interval"] == "15s"
+    assert by_job["gym-vllm/policy"]["static_configs"][0]["targets"] == ["localhost:8000"]
+    assert by_job["gym-vllm/judge"]["static_configs"][0]["targets"] == ["localhost:8100"]
+    assert by_job["gym-vllm/policy"]["static_configs"][0]["labels"] == {"gym_service": "policy"}
+    assert by_job["gym-vllm/policy"]["scrape_interval"] == "15s"
+
+
+def test_collector_keeps_each_producers_own_name_as_display_identity():
+    doc = _rendered()
+    identity = doc["processors"]["transform/identity"]
+    rule = (
+        'set(resource.attributes["service.name.override"], resource.attributes["service.name"]) '
+        'where resource.attributes["service.name.override"] == nil and resource.attributes["service.name"] != nil'
+    )
+    for signal in ("metric", "trace", "log"):
+        assert identity[f"{signal}_statements"] == [{"context": "resource", "statements": [rule]}]
+    for pipeline in doc["service"]["pipelines"].values():
+        processors = pipeline["processors"]
+        assert processors.index("transform/identity") < processors.index("resource")
+    assert "service.name.override" not in _attrs(doc)
+
+
+def test_collector_metrics_pipeline_also_accepts_otlp_metrics():
+    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp"]
 
 
 def test_collector_renames_colon_metrics_to_underscores_before_export():
@@ -242,7 +263,6 @@ def test_collector_routes_via_service_name_and_token_attribute():
     doc = _rendered()
     attrs = _attrs(doc)
     assert attrs["service.name"] == ("my-registered-service", "upsert")
-    assert attrs["service.name.override"] == ("gym-vllm", "insert")
     assert attrs["Authorization"] == ("${env:OTEL_TOKEN}", "upsert")
     exporter = doc["exporters"]["otlp_http/managed"]
     assert exporter["endpoint"] == "https://otlp.example.com"
@@ -367,6 +387,43 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     assert tail.index("sleep 20") < tail.index("pkill -TERM") < tail.index("kill -0 $OTEL_COLLECTOR_PID")
     # srun only gets TERM as a last resort, after the collector had its chance to flush.
     assert tail.index("kill -0 $OTEL_COLLECTOR_PID") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
+
+
+def _driver_line(script):
+    return next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+
+
+_DRIVER_WITH_INSTALL = {
+    "container": "gym:latest",
+    "policy_model": "policy",
+    "benchmarks": {"scicode": {}},
+    "gym_install": {"ref": "main"},
+}
+
+
+def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
+    script = _script(_config(driver=_DRIVER_WITH_INSTALL))
+    line = _driver_line(script)
+    assert "NEMO_GYM_OTEL_ENABLED=1" in line
+    assert "NEMO_GYM_OTEL_RUN_ID=gym-job-20260921T100000Z-abc123" in line
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
+    assert 'uv pip install -e ".[telemetry]"' in script
+
+
+def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
+    driver = {**_DRIVER_WITH_INSTALL, "env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "lit:http://elsewhere:4318"}}
+    line = _driver_line(_script(_config(driver=driver)))
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://elsewhere:4318" in line
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" not in line
+    assert "NEMO_GYM_OTEL_ENABLED=1" in line
+
+
+def test_script_leaves_the_driver_alone_when_disabled():
+    script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
+    assert "NEMO_GYM_OTEL" not in script
+    assert "uv pip install -e ." in script
+    assert "[telemetry]" not in script
 
 
 def test_script_has_no_collector_when_disabled():
