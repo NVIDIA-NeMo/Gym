@@ -1,0 +1,29 @@
+example_session_state_mgmt_nooa_resources:
+  resources_servers:
+    example_session_state_mgmt:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Session state management exercised through the generic NOOA agent
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/example_session_state_mgmt/data/example.jsonl
+          license: Apache 2.0
+
+example_session_state_mgmt_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: example_session_state_mgmt_nooa_resources
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: responses_api_agents.nooa_agent.task_agent:TaskAgent
+        invocation_adapter: responses_api_agents.nooa_agent.task_agent:invoke_solve_task
+        init_kwargs: {}
+      max_policy_calls: 8
+      run_timeout_secs: 600
