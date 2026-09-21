@@ -1246,14 +1246,13 @@ class PolicyModelCheckpointCoordinatorService:
             )
         return status
 
-    def _status_payload(self, status: dict[str, Any]) -> dict[str, Any]:
+    def _pause_payload(self, status: dict[str, Any]) -> dict[str, Any]:
         result = {
             "state": status["state"],
             "workers": {
                 "acknowledged": status["workers"]["acknowledged"],
                 "expected": self.coordinator.expected_workers,
             },
-            "missing_workers": status["missing_workers"],
             "inflight_total": status["inflight_total"],
             "response_inflight_total": status["response_inflight_total"],
             "generation_pending_total": status["generation_pending_total"],
@@ -1262,6 +1261,12 @@ class PolicyModelCheckpointCoordinatorService:
         if status["state"] == AdmissionState.PAUSED.value:
             result["generation_cut_proof"] = self.coordinator.generation_cut_proof().model_dump(mode="json")
         return result
+
+    def _status_payload(self, status: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **self._pause_payload(status),
+            "missing_workers": status["missing_workers"],
+        }
 
     async def _pause(self, body: ModelAdmissionPauseRequest) -> dict[str, Any]:
         async def run() -> dict[str, Any]:
@@ -1274,7 +1279,7 @@ class PolicyModelCheckpointCoordinatorService:
             except BaseException:
                 await self.coordinator.resume_admission()
                 raise
-            return self._status_payload(status)
+            return self._pause_payload(status)
 
         result = await self.fence.run_operation(
             body.checkpoint_id,

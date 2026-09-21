@@ -350,6 +350,46 @@ async def test_cancelled_cut_claim_is_released_when_cancelled_during_send(
 
 
 @pytest.mark.asyncio
+async def test_policy_service_pause_omits_status_only_missing_workers(
+    sock_dir: Path,
+) -> None:
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    service = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: None,
+        file_ledger_root_provider=lambda: None,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=False,
+    )
+    coordinator.service_handler = service
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    await agent.start()
+    try:
+        pause = await service(
+            "worker-1",
+            "model_admission_pause",
+            {
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 10.0,
+            },
+        )
+
+        assert "missing_workers" not in pause
+
+        status = await service(
+            "worker-1",
+            "model_admission_status",
+            {"checkpoint_id": "checkpoint-1"},
+        )
+        assert status["missing_workers"] == 0
+    finally:
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
 async def test_broken_pipe_during_pause_rolls_back_admission(
     sock_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
