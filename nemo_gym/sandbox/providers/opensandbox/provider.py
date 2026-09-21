@@ -426,15 +426,14 @@ def split_domain_scheme(domain: str) -> tuple[str, str | None]:
 class OpenSandboxConnectionConfig:
     """OpenSandbox server connection settings.
 
-    ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
-    timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
+    With the legacy httpx backend, ``keepalive_expiry_s`` must stay below the
+    server's own keep-alive idle timeout (uvicorn defaults to 5s), or sockets are reused after the
     server has closed them; null falls back to the SDK's default transport only
     when certificate verification is enabled and pooling is not disabled.
-    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
-    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
-    The pool is shared, so ``max_connections`` also caps in-flight sandbox
-    operations per process; null means no cap. ``tls_verify`` applies to every
-    connection the provider opens (SDK transport and PTY sockets) and is off by
+    ``transport_backend=aiohttp`` uses Gym's global client and connector limits;
+    provider-local pooling settings apply only to ``transport_backend=httpx``.
+    ``tls_verify`` applies to every connection the provider opens (SDK transport
+    and PTY sockets) and is off by
     default; set it for endpoints whose certificate the client can verify.
     ``domain`` may carry its scheme (``https://sandbox.example``). The scheme is
     moved into ``protocol`` and takes precedence over a configured ``protocol``,
@@ -459,7 +458,7 @@ class OpenSandboxConnectionConfig:
     max_keepalive_connections: int = 20
     max_connections: int | None = 100
     connect_retries: int = 2
-    transport_backend: str = "httpx"
+    transport_backend: str = "aiohttp"
     tls_verify: bool = False
 
     def __post_init__(self) -> None:
@@ -740,9 +739,8 @@ class OpenSandboxProvider:
         self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
         self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
         self._runtime_requirements = _coerce_config(runtime_requirements, OpenSandboxRuntimeRequirementsConfig)
-        # Shared injected transport. The SDK never closes transports it did not
-        # create, so the provider owns this one: built once, reused by every
-        # ConnectionConfig, closed in aclose().
+        # Reuse the adapter for this provider's SDK clients. The aiohttp adapter
+        # borrows Gym's global session; only the legacy httpx adapter owns a pool.
         self._transport: Any | None = None
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
@@ -963,7 +961,8 @@ class OpenSandboxProvider:
             if self._connection.api_key is not None:
                 kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if (
-            self._connection.keepalive_expiry_s is not None
+            self._connection.transport_backend == "aiohttp"
+            or self._connection.keepalive_expiry_s is not None
             or self._connection.disable_connection_pooling
             or not self._connection.tls_verify
         ):
@@ -977,7 +976,12 @@ class OpenSandboxProvider:
         return self._transport
 
     def _build_transport(self) -> Any:
-        """Build the SDK transport with the configured pool limits."""
+        """Use Gym's global HTTP pool, or the explicitly selected legacy backend."""
+        if self._connection.transport_backend == "aiohttp":
+            from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+            return GymAiohttpTransport(verify=self._connection.tls_verify)
+
         import httpx
 
         max_keepalive = (
@@ -989,16 +993,6 @@ class OpenSandboxProvider:
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
         verify = self._connection.tls_verify
-        if self._connection.transport_backend == "aiohttp":
-            try:
-                from httpx_aiohttp import AiohttpTransport
-
-                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
-            except ImportError:
-                LOGGER.warning(
-                    "connection.transport_backend=aiohttp requested but httpx-aiohttp "
-                    "is not installed; falling back to the httpx transport"
-                )
         return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:

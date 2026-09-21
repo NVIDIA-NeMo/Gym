@@ -16,7 +16,6 @@
 import asyncio
 import builtins
 import logging
-import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -722,11 +721,13 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
-def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default backend is httpx, with the configured keepalive expiry on the pool.
+def test_connection_transport_backends(fake_opensandbox_sdk: None) -> None:
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    # The default backend borrows Gym's global aiohttp client.
     provider = opensandbox_provider.OpenSandboxProvider()
     transport = provider._build_transport()
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert isinstance(transport, GymAiohttpTransport)
 
     # Custom pool settings still produce an httpx transport.
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -743,21 +744,16 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     # connect_retries reaches the pool rather than silently falling back.
     assert transport._pool._retries == 1
 
-    # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "httpx_aiohttp", None)
-        provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
-        transport = provider._build_transport()
-        assert isinstance(transport, httpx.AsyncHTTPTransport)
-
     # SDK transport defaults are sufficient when certificate verification is enabled.
-    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None, "tls_verify": True})
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "httpx", "keepalive_expiry_s": None, "tls_verify": True}
+    )
     config = provider._connection_config()
     assert "transport" not in config.kwargs
 
     # max_connections=null uncaps the pool; max_keepalive_connections=0 disables reuse.
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"max_connections": None, "max_keepalive_connections": 0}
+        connection={"transport_backend": "httpx", "max_connections": None, "max_keepalive_connections": 0}
     )
     transport = provider._build_transport()
     assert isinstance(transport, httpx.AsyncHTTPTransport)
@@ -801,8 +797,6 @@ async def test_connection_tls_is_independent_of_pool_settings(
 ) -> None:
     import ssl
 
-    if backend == "aiohttp":
-        pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "transport_backend": backend,
@@ -813,15 +807,18 @@ async def test_connection_tls_is_independent_of_pool_settings(
     )
     try:
         config = provider._connection_config()
-        if verify and keepalive_expiry_s is None and not disable_pooling:
+        if backend == "httpx" and verify and keepalive_expiry_s is None and not disable_pooling:
             # The SDK verifies certificates by default; no custom transport is needed.
             assert "transport" not in config.kwargs
             assert provider._transport is None
         else:
             transport = config.kwargs["transport"]
-            context = transport.ssl_context if backend == "aiohttp" else transport._pool._ssl_context
-            assert context.verify_mode == (ssl.CERT_REQUIRED if verify else ssl.CERT_NONE)
-            assert context.check_hostname is verify
+            if backend == "aiohttp":
+                assert transport.verify is verify
+            else:
+                context = transport._pool._ssl_context
+                assert context.verify_mode == (ssl.CERT_REQUIRED if verify else ssl.CERT_NONE)
+                assert context.check_hostname is verify
             assert provider._connection_config().kwargs["transport"] is transport
     finally:
         await provider.aclose()
@@ -829,16 +826,11 @@ async def test_connection_tls_is_independent_of_pool_settings(
 
 
 def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
-    # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
-    # declared dependency, so this coverage only runs where it is installed.
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
     provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
     transport = provider._build_transport()
-    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
-    assert transport.limits.keepalive_expiry == 3.0
-    # Both backends honor connect_retries; the bridge default is 0, so this
-    # would catch the option being dropped on the aiohttp path.
-    assert transport.retries == 2
+    assert isinstance(transport, GymAiohttpTransport)
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
@@ -852,14 +844,16 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
     import httpx
 
     # Default: a keepalive-bounded transport with connection reuse enabled.
-    pooled = opensandbox_provider.OpenSandboxProvider(connection={"domain": "sandbox.example"})
+    pooled = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "httpx", "domain": "sandbox.example"}
+    )
     pooled_transport = pooled._connection_config().kwargs["transport"]
     assert isinstance(pooled_transport, httpx.AsyncHTTPTransport)
     assert pooled_transport._pool._max_keepalive_connections > 0
 
     # disable_connection_pooling -> same transport plumbing, but no reuse.
     fresh = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "disable_connection_pooling": True}
+        connection={"transport_backend": "httpx", "domain": "sandbox.example", "disable_connection_pooling": True}
     )
     transport = fresh._connection_config().kwargs.get("transport")
     assert isinstance(transport, httpx.AsyncHTTPTransport)
@@ -2073,14 +2067,15 @@ def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:
     verified = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx", "tls_verify": True})
     assert verified._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_REQUIRED
 
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
     bridge = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})._build_transport()
-    assert isinstance(bridge, httpx_aiohttp.AiohttpTransport)
-    assert bridge.ssl_context.verify_mode == ssl.CERT_NONE
+    assert isinstance(bridge, GymAiohttpTransport)
+    assert bridge.verify is False
     bridge_verified = opensandbox_provider.OpenSandboxProvider(
         connection={"transport_backend": "aiohttp", "tls_verify": True}
     )._build_transport()
-    assert bridge_verified.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert bridge_verified.verify is True
 
 
 @pytest.mark.asyncio
