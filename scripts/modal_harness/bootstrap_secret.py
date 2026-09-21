@@ -37,6 +37,10 @@ WANTED = (
     "OPENROUTER_API_KEY_SNORKEL",
 )
 
+#: Forwarded when present, but not required. HF_TOKEN is needed only by benchmarks whose
+#: defenses load gated HuggingFace repos; demanding it would block everyone else.
+OPTIONAL = ("HF_TOKEN",)
+
 
 def read_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
@@ -46,7 +50,7 @@ def read_env_file(path: Path) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        if key in WANTED:
+        if key in WANTED or key in OPTIONAL:
             values[key] = value.strip().strip('"').strip("'")
     return values
 
@@ -101,8 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     # Key names and lengths only -- enough to confirm the right things were sent, and not
     # enough to reconstruct any of them.
     print(f"created secret {args.name!r} in environment {args.environment!r} with keys:")
-    for key in WANTED:
+    for key in sorted(values):
         print(f"  {key} ({len(values[key])} chars)")
+    for key in OPTIONAL:
+        if key not in values:
+            print(f"  {key}: absent from {args.env_file} (skipped)")
     return 0
 
 

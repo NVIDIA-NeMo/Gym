@@ -52,6 +52,13 @@ RESULTS_VOLUME = modal.Volume.from_name("nemo-gym-campaign-results", create_if_m
 #: file"). The cost is re-resolving dependencies on a cold start, which is a minute against
 #: a run measured in hours.
 
+#: HuggingFace weights, shared across containers. Detector-based defenses pull ~1GB per
+#: cold start otherwise, once per cell. Symlinks are disabled because the hub's default
+#: blob+symlink layout is the same pattern that makes a Volume reject uv's cache; with
+#: HF_HUB_DISABLE_SYMLINKS the hub copies instead and the volume is happy.
+HF_CACHE_VOLUME = modal.Volume.from_name("nemo-gym-hf-cache", create_if_missing=True)
+HF_CACHE = "/vol/hf-cache"
+
 RESULTS_ROOT = "/results"
 UV_CACHE = "/tmp/uv-cache"
 WORKSPACE = "/workspace/repo"
@@ -64,7 +71,7 @@ IMAGE = (
     modal.Image.debian_slim(python_version="3.13")
     .apt_install("git", "curl", "build-essential", "procps")
     .pip_install("uv>=0.9.30")
-    .env({"RAY_TMPDIR": "/tmp"})
+    .env({"RAY_TMPDIR": "/tmp", "HF_HOME": HF_CACHE, "HF_HUB_DISABLE_SYMLINKS": "1"})
 )
 
 app = modal.App(APP_NAME)
@@ -97,20 +104,50 @@ def _run(command: str, *, cwd: Optional[str] = None, check: bool = True) -> int:
     return returncode
 
 
+def _emit_yaml(data: Any, indent: int = 0) -> list[str]:
+    """Render a nested dict as YAML block lines.
+
+    Deliberately minimal -- scalars, nested mappings and flat lists. It exists so a caller
+    can push arbitrary config into the generated env file (a per-cell treatment, a
+    per-model role override) without this module knowing what those settings mean.
+    """
+    pad = "  " * indent
+    lines: list[str] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, (dict, list)):
+                lines.append(f"{pad}{key}:")
+                lines.extend(_emit_yaml(value, indent + 1))
+            else:
+                lines.append(f"{pad}{key}: {_scalar(value)}")
+    elif isinstance(data, list):
+        for item in data:
+            lines.append(f"{pad}- {_scalar(item)}")
+    return lines
+
+
+def _scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return str(value)
+
+
 def _write_env_yaml(
     *,
     path: str,
     policy_base_url: str,
     policy_model: str,
     policy_token_var: str,
-    judge_base_url: str,
-    judge_model: str,
-    judge_token_var: str,
-    judge_server_name: str,
+    judge_base_url: Optional[str],
+    judge_model: Optional[str],
+    judge_token_var: Optional[str],
+    judge_server_name: Optional[str],
     policy_server_name: str,
+    extra_config: Optional[dict[str, Any]],
     concurrency: int,
     uses_reasoning_parser: bool,
-    extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """Write the per-campaign model config.
 
@@ -130,19 +167,27 @@ def _write_env_yaml(
         f"      model: {policy_model}",
         f"      uses_reasoning_parser: {reasoning}",
         f"      num_concurrent_requests: {concurrency}",
-        "",
-        f"{judge_server_name}:",
-        "  responses_api_models:",
-        "    inference_provider:",
-        "      entrypoint: app.py",
-        f"      base_url: {judge_base_url}",
-        f'      api_key: ${{oc.env:{judge_token_var},""}}',
-        f"      model: {judge_model}",
-        "      uses_reasoning_parser: false",
-        "      num_concurrent_requests: 64",
     ]
-    if extra:
-        blocks.append(json.dumps(extra))
+    # Not every benchmark has a judge. AgentDyn's ASR and utility are deterministic checks
+    # against suite state, so its stack is two servers and its YAML defines no judge at
+    # all -- emitting one anyway fails the merged-config check with a dangling reference.
+    if judge_server_name:
+        blocks += [
+            "",
+            f"{judge_server_name}:",
+            "  responses_api_models:",
+            "    inference_provider:",
+            "      entrypoint: app.py",
+            f"      base_url: {judge_base_url}",
+            f'      api_key: ${{oc.env:{judge_token_var},""}}',
+            f"      model: {judge_model}",
+            "      uses_reasoning_parser: false",
+            "      num_concurrent_requests: 64",
+        ]
+    # Arbitrary overrides: a per-cell treatment, a per-model message-role quirk.
+    if extra_config:
+        blocks.append("")
+        blocks.extend(_emit_yaml(extra_config))
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(blocks) + "\n")
 
@@ -151,6 +196,7 @@ def _prepare_repo(repo_url: str, git_ref: str) -> None:
     # Set at runtime rather than in the image: an image-level UV_CACHE_DIR gets created
     # during the build, and a populated path cannot have a volume mounted over it.
     os.environ["UV_CACHE_DIR"] = UV_CACHE
+    os.makedirs(HF_CACHE, exist_ok=True)
     os.makedirs(UV_CACHE, exist_ok=True)
     os.makedirs(os.path.dirname(WORKSPACE), exist_ok=True)
     if not os.path.exists(os.path.join(WORKSPACE, ".git")):
@@ -166,7 +212,7 @@ def _prepare_repo(repo_url: str, git_ref: str) -> None:
 
 @app.function(
     image=IMAGE,
-    volumes={RESULTS_ROOT: RESULTS_VOLUME},
+    volumes={RESULTS_ROOT: RESULTS_VOLUME, HF_CACHE: HF_CACHE_VOLUME},
     secrets=[modal.Secret.from_name(SECRET_NAME, environment_name=ENVIRONMENT)],
     timeout=24 * 60 * 60,
     cpu=8.0,
@@ -185,10 +231,11 @@ def run_campaign(
     policy_token_var: str,
     expected_rows: int,
     concurrency: int = 64,
-    judge_base_url: str = "https://openrouter.ai/api/v1",
-    judge_model: str = "openai/gpt-4o-mini",
-    judge_token_var: str = "OPENROUTER_API_KEY_SNORKEL",
-    judge_server_name: str = "judge_model",
+    judge_base_url: Optional[str] = "https://openrouter.ai/api/v1",
+    judge_model: Optional[str] = "openai/gpt-4o-mini",
+    judge_token_var: Optional[str] = "OPENROUTER_API_KEY_SNORKEL",
+    judge_server_name: Optional[str] = "judge_model",
+    extra_config: Optional[dict[str, Any]] = None,
     policy_server_name: str = "policy_model",
     uses_reasoning_parser: bool = True,
     repo_url: str = "https://github.com/reinainblood/Gym.git",
@@ -224,6 +271,7 @@ def run_campaign(
         judge_token_var=judge_token_var,
         judge_server_name=judge_server_name,
         policy_server_name=policy_server_name,
+        extra_config=extra_config,
         concurrency=concurrency,
         uses_reasoning_parser=uses_reasoning_parser,
     )
