@@ -317,9 +317,11 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     script = _script(_config())
     tail = script[script.index("--output=logs/driver.log") :]
     assert "DRIVER_RC=$?" in tail
-    assert "kill -TERM $OTEL_COLLECTOR_PID" in tail
+    assert f"pkill -TERM -u \"$USER\" -f -- '--config {collector_config_path(BENCH_DIR)}'" in tail
     assert tail.rstrip().endswith("exit $DRIVER_RC")
-    assert tail.index("sleep 20") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
+    assert tail.index("sleep 20") < tail.index("pkill -TERM") < tail.index("kill -0 $OTEL_COLLECTOR_PID")
+    # srun only gets TERM as a last resort, after the collector had its chance to flush.
+    assert tail.index("kill -0 $OTEL_COLLECTOR_PID") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
 
 
 def test_script_has_no_collector_when_disabled():
