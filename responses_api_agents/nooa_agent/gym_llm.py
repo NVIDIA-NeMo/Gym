@@ -83,6 +83,7 @@ def _dump(value: Any) -> Any:
 
 
 def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
+    """Project a foreign LLMResponse onto the portable chat-shaped dict."""
     message: dict[str, Any] = {"role": "assistant", "content": response.content}
     if response.tool_calls:
         message["tool_calls"] = [
@@ -94,16 +95,35 @@ def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
 
 def _responses_input(
     messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+    gaps: list[ObservationGap] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     instructions: list[str] = []
     result: list[dict[str, Any]] = []
     for message in messages:
         if isinstance(message, CacheBoundary):
+            # Stable-prefix marker, never a model input.
             continue
         if isinstance(message, LLMResponse):
+            # The rewritten unifiedllm passes prior turns back as the stored
+            # LLMResponse object. This adapter's responses carry the full Gym
+            # output (including training token metadata) on raw_response.
             if isinstance(message.raw_response, NeMoGymResponse):
                 result.extend(_dump(item) for item in message.raw_response.output)
                 continue
+            # Foreign or detached turns (per-method model aliases, edited turns,
+            # snapshot-restored sessions) carry no Gym raw output; replay only
+            # their portable public fields and record the gap instead of guessing
+            # at training metadata.
+            if gaps is not None:
+                gaps.append(
+                    ObservationGap(
+                        code="foreign_turn_projected_portable",
+                        detail=(
+                            "A stored LLMResponse without a Gym raw_response was projected from its portable "
+                            "public fields; training metadata was not guessed."
+                        ),
+                    )
+                )
             message = _portable_assistant_message(message)
         if message.get("role") == "system":
             if content := message.get("content"):
@@ -243,7 +263,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._state.charge()
         self._calls += 1
 
-        input_items, instructions = _responses_input(messages)
+        input_items, instructions = _responses_input(messages, gaps=self._state.gaps)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,

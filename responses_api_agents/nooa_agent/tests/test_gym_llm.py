@@ -272,15 +272,16 @@ def test_cache_boundary_is_never_a_model_input() -> None:
     assert instructions is None
 
 
-def test_foreign_llm_response_projects_portable_fields() -> None:
+def test_foreign_llm_response_projects_portable_and_records_gap() -> None:
     foreign = LLMResponse(
         raw_response=None,
         content="",
         tool_calls=[ToolCall(id="call-9", name="weather", arguments='{"city":"Oslo"}')],
         finish_reason="tool_calls",
     )
+    gaps: list = []
 
-    replayed, _ = _responses_input([foreign])
+    replayed, _ = _responses_input([foreign], gaps=gaps)
 
     assert replayed == [
         {
@@ -290,6 +291,7 @@ def test_foreign_llm_response_projects_portable_fields() -> None:
             "arguments": '{"city":"Oslo"}',
         }
     ]
+    assert [gap.code for gap in gaps] == ["foreign_turn_projected_portable"]
 
 
 @pytest.mark.asyncio
