@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -104,9 +105,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     PermanentEndpointError,
+    ProviderResponseError,
     TokenIDLogProbMixin,
     _error_body_is_permanent_auth,
     _error_body_is_permanent_quota,
+    _finish_reason_error,
     accumulate_response_usage,
     training_variant_of,
 )
@@ -129,6 +132,31 @@ def _response_with_output(output: list) -> dict:
     }
 
 
+# The shape OpenRouter documents for a provider that failed mid-generation: HTTP 200, the choice
+# carries finish_reason="error" and the cause.
+_PROVIDER_ERROR = {
+    "code": 502,
+    "message": "Provider disconnected mid-stream",
+    "metadata": {"error_type": "provider_unavailable"},
+}
+
+
+def _chat_completion_body(finish_reason: str, error: Dict[str, Any] | None = None) -> bytes:
+    choice: Dict[str, Any] = {
+        "index": 0,
+        "message": {"role": "assistant", "content": ""},
+        "finish_reason": finish_reason,
+    }
+    if error is not None:
+        choice["error"] = error
+    return json.dumps({"id": "gen-1", "object": "chat.completion", "choices": [choice]}).encode()
+
+
+def _success_response(body: bytes = b"{}") -> SimpleNamespace:
+    """A 2xx reply as the retry loop sees it: status, ok, and a read() that returns the body."""
+    return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=body))
+
+
 class TestOpenAIUtils:
     def test_invalid_retry_configuration_rejected(self):
         with pytest.raises(ValidationError):
@@ -139,7 +167,7 @@ class TestOpenAIUtils:
 
     async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
-        request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
+        request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [_success_response()])
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
 
@@ -157,7 +185,7 @@ class TestOpenAIUtils:
     @pytest.mark.parametrize("status", [404, 408])
     async def test_retry_reuses_request_with_fixed_delay(self, monkeypatch, status):
         failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
-        success = SimpleNamespace(status=200)
+        success = _success_response()
         request = AsyncMock(side_effect=[failure, failure, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
@@ -175,7 +203,7 @@ class TestOpenAIUtils:
         assert sleep.await_args_list == [call(0.5), call(0.5)]
 
     async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch):
-        response = SimpleNamespace(status=400)
+        response = SimpleNamespace(status=400, ok=False)
         request = AsyncMock(return_value=response)
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
@@ -185,6 +213,78 @@ class TestOpenAIUtils:
         assert await client._request_with_retry() is response
         request.assert_awaited_once()
         sleep.assert_not_awaited()
+
+    async def test_provider_error_in_2xx_body_is_retried(self, monkeypatch):
+        failed = _success_response(_chat_completion_body("error", error=_PROVIDER_ERROR))
+        healthy = _success_response(_chat_completion_body("stop"))
+        request = AsyncMock(side_effect=[failed, healthy])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://openrouter.ai/api/v1")
+
+        result = await client._request_with_retry(url="https://openrouter.ai/api/v1/chat/completions")
+
+        assert result is healthy
+        assert request.await_count == 2
+        assert sleep.await_args_list == [call(0.5)]
+
+    async def test_provider_error_on_every_attempt_raises_after_the_last(self, monkeypatch, capsys):
+        failed = _success_response(_chat_completion_body("error", error=_PROVIDER_ERROR))
+        request = AsyncMock(side_effect=[failed] * MAX_NUM_TRIES + [_success_response(_chat_completion_body("stop"))])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://openrouter.ai/api/v1")
+
+        with pytest.raises(ProviderResponseError) as exc_info:
+            await client._request_with_retry(url="https://openrouter.ai/api/v1/chat/completions")
+
+        # The budget is the same one a 5xx spends, and the last body is kept for the failure record.
+        assert request.await_count == MAX_NUM_TRIES
+        assert sleep.await_args_list == [call(0.5)] * (MAX_NUM_TRIES - 1)
+        assert isinstance(exc_info.value, ClientResponseError)
+        assert exc_info.value.status == 200
+        assert exc_info.value.response_content == _chat_completion_body("error", error=_PROVIDER_ERROR)
+        assert "provider_unavailable" in str(exc_info.value)
+        # What an operator greps for: one retry line per spent attempt, then one stop line.
+        out = capsys.readouterr().out
+        assert out.count("[model_retry url=") == MAX_NUM_TRIES - 1
+        assert (
+            "[model_retry_stop url=https://openrouter.ai/api/v1/chat/completions status=200 kind=provider_error tries=3"
+            in out
+        )
+
+    async def test_internal_client_returns_2xx_body_without_inspecting_it(self, monkeypatch):
+        failed = _success_response(_chat_completion_body("error", error=_PROVIDER_ERROR))
+        request = AsyncMock(return_value=failed)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:1/v1", internal=True)
+
+        assert await client._request_with_retry(url="http://127.0.0.1:1/v1/chat/completions") is failed
+        request.assert_awaited_once()
+        failed.read.assert_not_awaited()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "body,expected",
+        [
+            (
+                b'{"choices":[{"finish_reason":"stop"},{"finish_reason":"error","error":{"code":502}}]}',
+                '{"code": 502}',
+            ),
+            (b'{"choices":[{"finish_reason": "error"}]}', 'finish_reason="error"'),
+            (b'{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"error"}}]}', None),
+            (b'{"object":"response","status":"completed","error":null,"output":[]}', None),
+            (b'{"object":"list","data":[]}', None),
+            (b"not json", None),
+            (b'"error" \xff\xfe', None),
+        ],
+    )
+    def test_finish_reason_error_detector(self, body, expected):
+        assert _finish_reason_error(body) == expected
 
     @pytest.mark.parametrize("status", [404, 408])
     @pytest.mark.parametrize("attempts", [1, 3, 5])
@@ -278,7 +378,7 @@ class TestOpenAIUtils:
                 read=AsyncMock(return_value=b"Quota exceeded for quota metric requests per minute.")
             ),
         )
-        success = SimpleNamespace(status=200)
+        success = _success_response()
         request = AsyncMock(side_effect=[failure, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
@@ -296,7 +396,7 @@ class TestOpenAIUtils:
             status=429,
             content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
         )
-        success = SimpleNamespace(status=200)
+        success = _success_response()
         request = AsyncMock(side_effect=[failure, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
@@ -337,7 +437,7 @@ class TestOpenAIUtils:
         assert seen["content"] == b'{"error":"rate_limit_exceeded"}'
         assert sleep.await_count == MAX_NUM_TRIES - 1
 
-        later = SimpleNamespace(status=200)
+        later = _success_response()
         request.side_effect = [later]
         assert await client._request_with_retry(url="https://example.com/v1/responses") is later
 

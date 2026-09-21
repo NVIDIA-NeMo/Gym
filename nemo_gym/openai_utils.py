@@ -1275,6 +1275,40 @@ class PermanentEndpointError(ClientResponseError):
     """The upstream key is spent or unauthorized; further calls on this client skip the wire."""
 
 
+class ProviderResponseError(ClientResponseError):
+    """The endpoint answered 2xx, but every attempt's body reported a failed generation."""
+
+    def __str__(self) -> str:
+        # The base class formats request_info.real_url; this error is raised without request_info.
+        return self.message
+
+
+def _finish_reason_error(content: bytes) -> Optional[str]:
+    """The provider failure a 2xx chat-completion body reports, or None for a usable body.
+
+    OpenRouter answers 200 with ``choices[i].finish_reason == "error"`` and the cause in
+    ``choices[i].error`` when the provider behind it fails mid-generation; its docs say to check
+    the body for an error even on a 200. Such a response holds no completion to grade, and a
+    status-only retry never sees it. Non-JSON and non-chat bodies (models list, tokenize,
+    Responses API) come back as None.
+    """
+    # request() is a hot path; a clean completion rarely carries the quoted token, so this gate
+    # keeps nearly every body from being parsed twice.
+    if b'"error"' not in content:
+        return None
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list):
+        return None
+    for choice in payload["choices"]:
+        if isinstance(choice, dict) and choice.get("finish_reason") == "error":
+            error = choice.get("error")
+            return json.dumps(error) if error is not None else 'finish_reason="error"'
+    return None
+
+
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
@@ -1330,6 +1364,29 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         )
         self._raise_permanent_error()
 
+    def _raise_provider_error(
+        self, response: ClientResponse, content: bytes, provider_error: str, tries: int, url: Any
+    ) -> None:
+        """Every attempt answered 2xx with a body reporting a failed generation. Raise it the way an
+        exhausted 5xx is raised, so callers see one shape of upstream failure."""
+        print(
+            f"[model_retry_stop url={url} status={response.status} kind=provider_error tries={tries} "
+            f"error_msg={provider_error[:200]}]",
+            flush=True,
+        )
+        error = ProviderResponseError(
+            request_info=None,
+            history=(),
+            status=response.status,
+            message=(
+                f'{url} answered HTTP {response.status} with finish_reason="error" on all {tries} attempts '
+                f"(error_msg={provider_error[:200]})"
+            ),
+            headers=None,
+        )
+        error.response_content = content
+        raise error
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
@@ -1363,7 +1420,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 return response
 
             if response.status not in RETRY_ERROR_CODES:
-                return response
+                if self.internal or not response.ok:
+                    return response
+                # A provider can fail inside a 2xx body as well: OpenRouter answers 200 with
+                # choices[i].finish_reason="error" and the cause in choices[i].error. Gym's own
+                # servers answer with a status code, so only external endpoints are inspected.
+                # read() caches the body, so a clean response stays readable by the caller.
+                content = await response.read()
+                provider_error = _finish_reason_error(content)
+                if provider_error is None:
+                    return response
+                if tries >= max_num_tries:
+                    self._raise_provider_error(response, content, provider_error, tries, request_kwargs.get("url"))
+                print(
+                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind=provider_error try={tries} max_tries={max_num_tries} error_msg={provider_error[:200]}]",
+                    flush=True,
+                )
+                await sleep(0.5)
+                continue
 
             content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
