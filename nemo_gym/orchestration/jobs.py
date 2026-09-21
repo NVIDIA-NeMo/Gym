@@ -76,48 +76,65 @@ def installed_gym_commit() -> str | None:
 
     An editable checkout reports its HEAD, suffixed ``-dirty`` when it has uncommitted changes.
     """
+    direct_url = _installed_gym_direct_url()
+    if direct_url is None:
+        return None
+    commit = _git_install_commit(direct_url)
+    if commit is not None:
+        return commit
+    checkout = _editable_checkout(direct_url)
+    if checkout is None:
+        return _unknown_commit(
+            "nemo-gym is neither a git install nor an editable checkout (url=%r).", direct_url.get("url")
+        )
+    return _checkout_commit(checkout)
+
+
+def _installed_gym_direct_url() -> dict | None:
+    """The PEP 610 ``direct_url.json`` of the installed nemo-gym; None for an index install."""
     try:
         raw = distribution("nemo-gym").read_text("direct_url.json")
     except PackageNotFoundError:
-        logger.warning("Cannot determine the installed Gym commit: no nemo-gym distribution is installed.")
-        return None
+        return _unknown_commit("no nemo-gym distribution is installed.")
     if raw is None:
-        logger.warning(
-            "Cannot determine the installed Gym commit: nemo-gym was installed from a package index "
-            "(no direct_url.json)."
-        )
-        return None
-    direct_url = json.loads(raw)
+        return _unknown_commit("nemo-gym was installed from a package index (no direct_url.json).")
+    return json.loads(raw)
+
+
+def _git_install_commit(direct_url: dict) -> str | None:
+    """The commit a ``pip install git+...`` recorded, or None for any other install."""
     commit = (direct_url.get("vcs_info") or {}).get("commit_id")
-    if commit:
-        return str(commit)
+    return str(commit) if commit else None
+
+
+def _editable_checkout(direct_url: dict) -> Path | None:
+    """The directory a ``pip install -e`` points at, or None for any other install."""
     url = direct_url.get("url", "")
-    if not ((direct_url.get("dir_info") or {}).get("editable") and url.startswith("file://")):
-        logger.warning(
-            "Cannot determine the installed Gym commit: nemo-gym is neither a git install nor an editable "
-            "checkout (url=%r).",
-            url,
-        )
-        return None
-    return _checkout_commit(Path(unquote(urlparse(url).path)))
+    if (direct_url.get("dir_info") or {}).get("editable") and url.startswith("file://"):
+        return Path(unquote(urlparse(url).path))
+    return None
 
 
 def _checkout_commit(checkout: Path) -> str | None:
+    """The checkout's HEAD, suffixed ``-dirty`` when it has uncommitted changes."""
     try:
-        head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True)
-        status = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"], capture_output=True, text=True)
+        head = _git(checkout, "rev-parse", "HEAD")
+        status = _git(checkout, "status", "--porcelain")
     except FileNotFoundError:
-        logger.warning("Cannot determine the installed Gym commit: git is not available to inspect %s.", checkout)
-        return None
+        return _unknown_commit("git is not available to inspect %s.", checkout)
     if head.returncode != 0 or status.returncode != 0:
-        logger.warning(
-            "Cannot determine the installed Gym commit: %s is not a git checkout: %s",
-            checkout,
-            (head.stderr or status.stderr).strip(),
-        )
-        return None
+        return _unknown_commit("%s is not a git checkout: %s", checkout, (head.stderr or status.stderr).strip())
     commit = head.stdout.strip()
     return f"{commit}-dirty" if status.stdout.strip() else commit
+
+
+def _git(checkout: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True)
+
+
+def _unknown_commit(reason: str, *args: object) -> None:
+    logger.warning("Cannot determine the installed Gym commit: " + reason, *args)
+    return None
 
 
 class BenchmarkJob(BaseModel):
