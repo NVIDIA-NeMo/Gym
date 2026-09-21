@@ -20,7 +20,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
-from asyncio import Semaphore
+from asyncio import Semaphore, to_thread
 from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
@@ -29,7 +29,7 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
@@ -169,6 +169,15 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        if self.config.execution_failure_reward_zero and self.config.agent not in {
+            "hermes",
+            "openclaw",
+            "opencode",
+            "pi",
+        }:
+            raise ValueError(
+                "execution_failure_reward_zero requires agent invocation observations (Hermes, OpenClaw, OpenCode or Pi)"
+            )
         if self.config.tool_servers and self.config.agent not in {"opencode", "pi"}:
             raise ValueError("Authenticated remote MCP tools currently require the OpenCode or Pi adapter")
         if self.config.network_access == "model_only" and self.config.tool_servers:
@@ -272,7 +281,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             for i, (target, content) in enumerate(files.items()):
                 local = Path(td) / str(i)
-                local.write_text(content)
+                await to_thread(local.write_text, content)
                 await self._provider.upload_file(handle, local, self._box_path(handle, target))
 
     async def run(self, request: Request, body: HarnessAgentRunRequest) -> HarnessAgentVerifyResponse:
@@ -478,7 +487,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            return json.loads(local.read_text())
+            return await to_thread(lambda: json.loads(local.read_text()))
 
     def _write_generation(self, rollout_id: str, record: dict[str, Any], *, failure: bool = False) -> Path | None:
         if not self.config.artifacts_dir:
@@ -500,6 +509,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
         runner_script, runner_config, runner_cmd = self._runner()
         context = _RUN_CONTEXT.get()
+        if context is None and self.config.tool_servers:
+            raise HTTPException(400, "Use /run with tool_servers so Gym can seed authenticated MCP sessions")
         if context is None:
             context = {}
         path_params = getattr(request, "path_params", None)
@@ -589,7 +600,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 )
             context["observations"] = observations
             context["harness_failed"] = failed
-            destination = self._write_generation(
+            destination = await to_thread(
+                self._write_generation,
                 runner_config["rollout_id"],
                 {
                     "response": resp.model_dump(mode="json"),
@@ -616,7 +628,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         except BaseException as exc:
             # Keep partial generation receipts if export or grading fails.
             if self.config.artifacts_dir:
-                self._write_generation(
+                await to_thread(
+                    self._write_generation,
                     runner_config["rollout_id"],
                     {
                         "error_type": type(exc).__name__,

@@ -312,6 +312,8 @@ class TestChatDispatchRoute:
             MagicMock(), {"stream": True, "messages": [], "stream_options": {"include_usage": True}}
         )
         stream = response.body_iterator
+        assert response.headers["Cache-Control"] == "no-cache"
+        assert response.headers["X-Accel-Buffering"] == "no"
         assert await asyncio.wait_for(anext(stream), 1) == b": keep-alive\n\n"
         assert await asyncio.wait_for(anext(stream), 1) == b": keep-alive\n\n"
         release.set()
@@ -469,6 +471,8 @@ class TestChatDispatchRoute:
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers["Cache-Control"] == "no-cache"
+        assert resp.headers["X-Accel-Buffering"] == "no"
         assert resp.text.endswith("data: [DONE]\n\n")
         # the server saw sanitized params (no stream flag reaches the strict model)
         assert server.last_params.stream is None

@@ -184,9 +184,13 @@ class URLExclusionPolicy:
 
     def __init__(self, path: Path):
         properties = [p for n in json.loads(path.read_text())["notices"] for p in n["properties"]]
-        self.domains = [
-            p["value"].encode("idna").decode().lower().rstrip(".") for p in properties if p["type"] == "domain"
-        ]
+        self.domains = []
+        for prop in properties:
+            if prop["type"] == "domain":
+                try:
+                    self.domains.append(prop["value"].encode("idna").decode().lower().rstrip("."))
+                except UnicodeError as exc:
+                    raise ValueError(f"Invalid exclusion domain in {path}: {prop['value']!r}") from exc
         self.substrings = [p["value"].lower() for p in properties if p["type"] == "url_substring"]
         unknown = {p["type"] for p in properties} - {"domain", "url_substring", "author_name", "publisher_name"}
         if unknown:
@@ -415,9 +419,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             else:
                 page_content = ""
 
-            if self.config.max_cached_page_chars is not None:
-                page_content = page_content[: self.config.max_cached_page_chars]
             if self.config.max_cached_pages:
+                if self.config.max_cached_page_chars is not None:
+                    page_content = page_content[: self.config.max_cached_page_chars]
                 self._page_cache[body.url] = page_content
                 self._page_cache.move_to_end(body.url)
                 while len(self._page_cache) > self.config.max_cached_pages:

@@ -73,7 +73,8 @@ Model and Tavily credentials stay in the host-side Gym services.
 - The OpenCode benchmark preset sets `interleaved_reasoning: false` to avoid a separate
   assistant `reasoning` request field that Gym's benchmark chat schema rejects.
   The standalone adapter retains its existing `interleaved: {field: reasoning}`
-  default and honors explicit model overrides.
+  default. Explicit native model overrides now take precedence; previously the
+  adapter overwrote a supplied `interleaved` value.
 - OpenCode configurations combining legacy `tools` with `permission` are rejected:
   move tool allow/deny rules to `permission` so legacy settings cannot override a deny.
 - Benchmark answer-format instructions are retained; HLE's instructions are placed
@@ -81,12 +82,21 @@ Model and Tavily credentials stay in the host-side Gym services.
 - With `execution_failure_reward_zero`, an explicitly failed or incomplete harness
   invocation gets reward zero without grading. A completed empty answer still goes
   to the verifier. Include failed and missing rows when reporting benchmark coverage.
+  This option requires invocation observations and is supported only for Hermes,
+  OpenClaw, OpenCode, and Pi; other adapters reject it at startup. It does not convert
+  setup, runner, export, or verifier exceptions into scored results.
+
+With `tool_servers` configured, call `/run` to initialize authenticated MCP sessions.
+Direct `/v1/responses` calls return HTTP 400 before creating a sandbox; they cannot
+initialize those sessions. Direct calls without `tool_servers` remain supported.
 
 Buffered chat streams send keepalive comments after 15 seconds of silence. Fast
 backend failures retain normal HTTP error handling. After headers have been sent,
 an HTTP status cannot change: late backend failures end with an SSE error, while
 serialization or capture-finalization failures abort the stream. Clients must treat
 either as failure, not a successful empty completion.
+Keepalives currently apply to chat-completions streams; Responses-API streams still
+wait silently for the backend response.
 
 ## The composed instance is renamed
 

@@ -103,6 +103,8 @@ def test_runner_passes_resolved_endpoint_and_rollout_identity(tmp_path, capture)
         "from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent\n"
         "from nemo_gym.config_types import ModelServerRef\n"
         "from nemo_gym.openai_utils import NeMoGymResponse\n"
+        "from omegaconf import OmegaConf\n"
+        "from nemo_gym.global_config import get_first_server_config_dict\n"
         "class Config(BaseResponsesAPIAgentConfig):\n"
         "    model_server: ModelServerRef\n"
         "class Agent(SimpleResponsesAPIAgent):\n"
@@ -110,6 +112,14 @@ def test_runner_passes_resolved_endpoint_and_rollout_identity(tmp_path, capture)
         "        raise NotImplementedError\n"
         "    async def responses(self, request, body):\n"
         "        rid = request.path_params['rollout_id']\n"
+        "        cfg = get_first_server_config_dict(self.server_client.global_config_dict, 'model')\n"
+        "        assert self.server_client._build_server_base_url(cfg) + '/v1' == self.resolved_model_base_url\n"
+        "        try:\n"
+        "            self.server_client._build_server_base_url(OmegaConf.create({'host': 'resource', 'port': 8001}))\n"
+        "        except ValueError:\n"
+        "            pass\n"
+        "        else:\n"
+        "            raise AssertionError('Resource URL silently routed to the model')\n"
         f"        response = {repr(_response())}\n"
         "        response['metadata'] = {'endpoint': self.resolve_model_base_url('model', rid), 'rollout_id': rid}\n"
         "        return NeMoGymResponse.model_validate(response)\n"
@@ -177,6 +187,23 @@ def test_registry_exposes_all_harness_agents():
 def test_unknown_agent_is_rejected():
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
         resolve_agent("unknown")
+
+
+def test_failure_reward_requires_observable_invocations():
+    with pytest.raises(ValueError, match="execution_failure_reward_zero requires"):
+        _make_agent(agent="codex", execution_failure_reward_zero=True)
+    # Other adapters retain their existing behavior without the opt-in shortcut.
+    _make_agent(agent="codex")
+
+
+def test_direct_responses_rejects_unseeded_mcp_before_provisioning():
+    agent = _make_agent(tool_servers=[{"type": "resources_servers", "name": "search"}])
+    agent._provision_box = AsyncMock()
+    with TestClient(agent.setup_webserver()) as client:
+        result = client.post("/v1/responses", json={"input": "hello"})
+    assert result.status_code == 400
+    assert "/run" in result.json()["detail"]
+    agent._provision_box.assert_not_awaited()
 
 
 def test_named_sandbox_provider_is_resolved_with_metadata():

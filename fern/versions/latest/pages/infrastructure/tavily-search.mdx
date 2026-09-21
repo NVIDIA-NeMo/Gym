@@ -124,6 +124,8 @@ These changes apply to existing Tavily configurations as well as HLE:
 - Requested and returned URLs, including reported extraction redirects, are checked
   against domain and `url_substring` exclusions. Author/publisher metadata is not
   enforced. A finite exclusion list cannot prevent all online answer exposure.
+  Invalid exclusion domains reject the policy at startup with the file and domain
+  identified; entries are never silently dropped.
 - Rate-limit retries are bounded rather than indefinite. `max_http_attempts` defaults
   to 3 total attempts; retryable HTTP failures use exponential delays starting at one
   second and rotate keys. `http_timeout_s` defaults to 60 seconds per attempt; a shorter
@@ -131,7 +133,9 @@ These changes apply to existing Tavily configurations as well as HLE:
   returning an empty search. Under sustained rate limits, reduce concurrency or
   explicitly increase the attempt budget.
 - The page cache is bounded by `max_cached_pages` (default 128); zero disables it.
-  `max_cached_page_chars` and `max_scroll_words` are optional output/resource caps.
+  `max_cached_page_chars` limits stored page content and applies only when caching
+  is enabled (including the initial response). `max_scroll_words` caps each response
+  independently of caching.
 
 The HLE search preset supplies the public HLE exclusion list. Deployments requiring
 an additional policy must supply their combined policy file through

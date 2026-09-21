@@ -33,6 +33,7 @@ assert nemo_gym.__file__.startswith(str(WORK_DIR / "gym_mount")), f"wrong nemo_g
 from omegaconf import OmegaConf  # noqa: E402
 
 from nemo_gym.config_types import BaseServerConfig  # noqa: E402
+from nemo_gym.global_config import get_first_server_config_dict  # noqa: E402
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
 from nemo_gym.server_utils import ServerClient  # noqa: E402
 
@@ -41,8 +42,14 @@ class SandboxServerClient(ServerClient):
     """Route legacy adapters that resolve server roots directly to the host proxy."""
 
     model_base_url: str
+    model_server_name: str
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        model_config = get_first_server_config_dict(self.global_config_dict, self.model_server_name)
+        if server_config_dict != model_config:
+            raise ValueError(
+                "The sandbox runner only resolves the model proxy; resource URLs must be supplied explicitly"
+            )
         return self.model_base_url
 
 
@@ -69,6 +76,7 @@ def main() -> None:
         head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
         global_config_dict=OmegaConf.create(global_config),
         model_base_url=model_url,
+        model_server_name=model_ref.get("name", ""),
     )
     agent = agent_class(config=cfg, server_client=sc, resolved_model_base_url=model_url.rstrip("/") + "/v1")
 

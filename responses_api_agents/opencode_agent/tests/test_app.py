@@ -563,6 +563,18 @@ def test_benchmark_preset_disables_interleaved_reasoning_without_changing_defaul
     assert "interleaved" not in config["provider"]["nemo"]["models"][agent.config.model]
 
 
+def test_explicit_native_interleaved_setting_takes_precedence():
+    for enabled in (False, True):
+        agent = _make_agent(
+            interleaved_reasoning=enabled,
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        agent.config.opencode_config = {"provider": {"nemo": {"models": {agent.config.model: {"interleaved": True}}}}}
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            config = agent._build_opencode_config()
+        assert config["provider"]["nemo"]["models"][agent.config.model]["interleaved"] is True
+
+
 class TestConfigYaml:
     def test_module_parses(self) -> None:
         app_path = Path(__file__).resolve().parent.parent / "app.py"

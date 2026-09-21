@@ -61,6 +61,9 @@ still raise; use Gym's failure sidecar to keep unrelated rows running, and accou
 for those missing rows before reporting full benchmark coverage.
 An empty answer from a completed harness is passed to the verifier, preserving
 its metrics and answer-validation behavior.
+The shortcut requires invocation observations (Hermes, OpenClaw, OpenCode or Pi);
+other adapters reject the option at startup. With `tool_servers` configured, use
+`/run` to seed authenticated MCP sessions; direct `/v1/responses` calls return HTTP 400.
 
 Both presets omit the per-request output cap for Gym's model provider, letting
 vLLM calculate the remaining context budget, and disable automatic compaction.

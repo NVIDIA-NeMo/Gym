@@ -199,7 +199,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             # SSE generators serialize lazily. Finish that work before recording success.
             events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
             await self._finalize_served_response(response)
-        return StreamingResponse(iter(events), media_type="text/event-stream")
+        return StreamingResponse(
+            iter(events),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
