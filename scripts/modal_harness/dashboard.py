@@ -166,6 +166,7 @@ def _discover() -> list[dict[str, Any]]:
                     "container_age": (
                         time.time() - float(status.get("started_at") or 0) if status.get("started_at") else 0.0
                     ),
+                    "heartbeat_age": time.time() - float(status.get("updated_at") or 0),
                     "stalled_for": time.time()
                     - max(
                         float(status.get("last_progress_at") or 0),
@@ -280,8 +281,16 @@ def dashboard():
             # first row legitimately takes twenty minutes.
             threshold = stall_threshold(run["namespace"])
             stuck = run["state"] == "running" and run["stalled_for"] > threshold and (age == 0 or age > threshold)
+            # Heartbeat age separates two failures that look identical in rows-landed and
+            # need opposite responses. The publisher is a 45s thread that survives a wedged
+            # eval, so a fresh heartbeat with no rows means the eval is stuck (wait, or
+            # --force) while a silent publisher means the container is gone (plain
+            # relaunch -- the guard respawns it once the entry goes stale).
+            beat = time.time() - float(run["updated_at"] or 0)
+            kind = "dead" if beat > 300 else "wedged"
+            colour = "var(--bad)" if kind == "dead" else "var(--warn)"
             stall = (
-                f"<span style='color:var(--warn)'>{int(run['stalled_for'] // 60)}m</span>"
+                f"<span style='color:{colour}'>{kind} {int(run['stalled_for'] // 60)}m</span>"
                 if stuck
                 else (
                     f"<span class='muted'>starting {int(age // 60)}m</span>"
