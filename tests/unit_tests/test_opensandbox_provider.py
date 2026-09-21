@@ -2123,8 +2123,9 @@ async def test_create_probe_fails_fast_when_the_sandbox_ends(monkeypatch: pytest
     assert isinstance(cause, opensandbox_provider.SandboxEndedError)
     assert cause.reason == "OOMKilled"
     assert calls["run"] == 1  # one probe attempt, not a deadline's worth
-    # The create itself must not be retried against a sandbox the server has buried.
-    assert opensandbox_provider._is_retryable_create_error(exc_info.value) is False
+    # The buried sandbox is never probed again, but the create may allocate a fresh one.
+    assert opensandbox_provider._is_retryable_create_error(cause) is False
+    assert opensandbox_provider._is_retryable_create_error(exc_info.value) is True
 
 
 @pytest.mark.asyncio
@@ -2165,6 +2166,70 @@ async def test_connect_after_create_fails_fast_when_the_sandbox_ends(
     assert cause.reason == "Error"
     assert calls["connect"] == 1
     assert not isinstance(exc_info.value, opensandbox_provider.OpenSandboxCreateTimeoutError)
+    assert opensandbox_provider._is_retryable_create_error(cause) is False
+    assert opensandbox_provider._is_retryable_create_error(exc_info.value) is True
+
+
+@pytest.mark.asyncio
+async def test_create_allocates_a_fresh_sandbox_after_one_ends(
+    clean_attribution_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandbox that ends at boot costs one create attempt, not the whole create."""
+
+    calls = {"create": 0, "connect": 0, "kill": 0, "close": 0}
+
+    class BootDeathSandbox:
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def create(cls, **kwargs: Any) -> "BootDeathSandbox":
+            del kwargs
+            calls["create"] += 1
+            return cls(f"sandbox-{calls['create']}")
+
+        @classmethod
+        async def connect(cls, sandbox_id: str, **kwargs: Any) -> "BootDeathSandbox":
+            del kwargs
+            calls["connect"] += 1
+            if calls["connect"] == 1:
+                raise _sandbox_ended_api_error("Sandbox sandbox-1 has ended (Evicted): PodFailed: node pressure")
+            return cls(sandbox_id)
+
+        async def kill(self) -> None:
+            calls["kill"] += 1
+
+        async def close(self) -> None:
+            calls["close"] += 1
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (BootDeathSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        # A 60s connect deadline: a sandbox-ended answer that was treated as
+        # transient would poll inside the attempt instead of starting a new one.
+        create={
+            "timeout_s": 60,
+            "retries": 1,
+            "retry_delay_s": 0.0,
+            "retry_max_delay_s": 0.0,
+            "skip_health_check": True,
+            "connect_attempt_timeout_s": 5,
+            "connect_poll_s": 0.01,
+        },
+        probe={"command": None},
+    )
+
+    handle = await provider.create(SandboxSpec(image="image:tag"))
+
+    assert handle.sandbox_id == "sandbox-2"  # the replacement, not the sandbox that ended
+    assert calls["create"] == 2
+    assert calls["connect"] == 2  # one connect per attempt; the dead one is not polled
+    assert calls["kill"] == 1  # the ended sandbox is cleaned up before the retry
 
 
 @pytest.mark.parametrize(

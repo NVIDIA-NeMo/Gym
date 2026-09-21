@@ -314,13 +314,16 @@ def _sdk_error_attributes(
 def _is_retryable_create_error(exception: BaseException) -> bool:
     """Return whether a sandbox create failure is likely transient.
 
-    An ended sandbox is checked first and is never transient: the server keeps
-    answering 410 for it, and its message routinely quotes the pod's
-    ``PodFailed`` state, which the marker heuristic below would otherwise read
-    as retryable.
+    An ended sandbox is checked first because its message routinely quotes the
+    pod's ``PodFailed`` state, which the marker heuristic below would read as
+    retryable. Reaching one is never transient on its own: the server answers
+    410 for that sandbox forever. A create reporting one is the exception -
+    that sandbox is finished, but a fresh pod can still boot, so the create
+    retries with a new sandbox. An eviction or node loss at boot recovers that
+    way; an image whose startup is OOM-killed just exhausts ``create.retries``.
     """
     if _is_sandbox_ended_error(exception):
-        return False
+        return isinstance(exception, SandboxCreateError)
     if isinstance(exception, SandboxCreateVerificationError):
         return True
     if isinstance(exception, SandboxCreateError):

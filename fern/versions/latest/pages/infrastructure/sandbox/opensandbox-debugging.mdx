@@ -107,8 +107,9 @@ polls, PTY, and endpoint lookups. The provider raises `SandboxEndedError` for it
 server's own end reason (`OOMKilled`, `Evicted`, `Error`, ...) in `SandboxEndedError.reason` and
 in the message. The error is terminal: nothing is retried, no further command is submitted, and no
 status poll is needed because the server already said why. A create whose probe or reconnect hits
-a `410` fails immediately with `OpenSandboxCreateError` chained from `SandboxEndedError` rather
-than polling until its startup deadline.
+a `410` ends that attempt immediately with `OpenSandboxCreateError` chained from
+`SandboxEndedError`, rather than polling the dead sandbox until its startup deadline, and then
+allocates a fresh sandbox within `create.retries`.
 
 ```python
 from nemo_gym.sandbox.providers.opensandbox.provider import SandboxEndedError
