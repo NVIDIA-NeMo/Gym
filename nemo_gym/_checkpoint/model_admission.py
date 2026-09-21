@@ -28,7 +28,7 @@ rollout attempt that cannot finish draining in time so the checkpoint can
 proceed and the restored run dispatches a replacement attempt.
 """
 
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, Header, Query
 
@@ -49,6 +49,10 @@ from nemo_gym._checkpoint.model_control_contracts import (
 from nemo_gym.token_id_capture.control_routes import require_control_auth
 
 
+if TYPE_CHECKING:
+    from nemo_gym._checkpoint.coordinator import CoordinatorServiceClient
+
+
 class NotPolicyInstanceError(ControlError):
     code = "not_a_policy_instance"
 
@@ -61,6 +65,7 @@ def install_model_admission(
     instance_role: Literal["policy", "auxiliary"],
     server_name: str = "policy",
     auth_token: str,
+    coordinator_client: Optional["CoordinatorServiceClient"] = None,
 ) -> None:
     """Register ``/ng-control/v1/model-admission`` on a model-server app.
 
@@ -87,6 +92,12 @@ def install_model_admission(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_admission_pause",
+                body.model_dump(mode="json"),
+                timeout_s=max(body.remaining(), 0.001),
+            )
 
         async def run() -> dict[str, Any]:
             limiter.close(body.checkpoint_id)
@@ -138,6 +149,17 @@ def install_model_admission(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_admission_status",
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "deadline_ts": deadline_ts,
+                    "wait_state": wait_state,
+                    "timeout_s": timeout_s,
+                },
+                timeout_s=max(timeout_s, 10.0),
+            )
         fence.require_phase(
             checkpoint_id,
             frozenset(
@@ -186,6 +208,12 @@ def install_model_admission(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_admission_resume",
+                body.model_dump(mode="json"),
+                timeout_s=10.0,
+            )
 
         async def run() -> dict[str, Any]:
             limiter.resume()
@@ -217,6 +245,12 @@ def install_model_admission(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
+        if coordinator_client is not None:
+            return await coordinator_client.request(
+                "model_admission_abort_inflight",
+                body.model_dump(mode="json"),
+                timeout_s=10.0,
+            )
 
         async def run() -> dict[str, Any]:
             aborted = limiter.abort_inflight(body.rollout_id, body.attempt_index)

@@ -33,6 +33,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
@@ -60,11 +62,22 @@ from nemo_gym._checkpoint.artifacts import (
 from nemo_gym._checkpoint.control import (
     AdmissionState,
     ControlCapabilities,
+    MultiProcessCapability,
 )
 from nemo_gym._checkpoint.control import (
     checkpoint_control_auth_token as resolve_checkpoint_control_auth_token,
 )
-from nemo_gym._checkpoint.ledger import install_model_checkpoint
+from nemo_gym._checkpoint.coordinator import (
+    CHECKPOINT_COORDINATOR_SOCKET_ENV,
+    AdmissionCoordinator,
+    AdmissionCoordinatorRunner,
+    CoordinatorServiceClient,
+    WorkerAdmissionAgent,
+)
+from nemo_gym._checkpoint.ledger import (
+    PolicyModelCheckpointCoordinatorService,
+    install_model_checkpoint,
+)
 from nemo_gym._checkpoint.model_admission import install_model_admission
 from nemo_gym._checkpoint.model_control_contracts import GenerationCutBackend
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -98,6 +111,7 @@ from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGa
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
+    ServerProcessCompanion,
     SimpleServer,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
@@ -221,9 +235,61 @@ class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
 
 
+class _PolicyCheckpointCoordinatorCompanion:
+    """Own policy checkpoint coordination beside the Uvicorn worker pool."""
+
+    def __init__(
+        self,
+        *,
+        instance_name: str,
+        expected_workers: int,
+        ledger: CaptureLedger | None,
+        supports_generation_cuts: bool,
+    ) -> None:
+        self._socket_directory = Path(tempfile.mkdtemp(prefix="ng-policy-checkpoint-", dir="/tmp"))
+        self._previous_socket = os.environ.get(CHECKPOINT_COORDINATOR_SOCKET_ENV)
+        self.coordinator = AdmissionCoordinator(
+            self._socket_directory / "coordinator.sock",
+            expected_workers=expected_workers,
+        )
+        self.coordinator.service_handler = PolicyModelCheckpointCoordinatorService(
+            self.coordinator,
+            ledger_provider=lambda: ledger,
+            file_ledger_root_provider=lambda: (
+                ledger.checkpoint_root if isinstance(ledger, FileLineageStore) else None
+            ),
+            instance_role="policy",
+            server_name=instance_name,
+            supports_generation_cuts=supports_generation_cuts,
+        )
+        self._runner = AdmissionCoordinatorRunner(self.coordinator)
+
+    def start(self) -> "_PolicyCheckpointCoordinatorCompanion":
+        try:
+            self._runner.start()
+        except BaseException:
+            shutil.rmtree(self._socket_directory, ignore_errors=True)
+            raise
+        os.environ[CHECKPOINT_COORDINATOR_SOCKET_ENV] = str(self.coordinator.socket_path)
+        return self
+
+    def stop(self) -> None:
+        try:
+            self._runner.stop()
+        finally:
+            if self._previous_socket is None:
+                os.environ.pop(CHECKPOINT_COORDINATOR_SOCKET_ENV, None)
+            else:
+                os.environ[CHECKPOINT_COORDINATOR_SOCKET_ENV] = self._previous_socket
+            shutil.rmtree(self._socket_directory, ignore_errors=True)
+
+
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     _CONTROL_COMPONENT = "responses_api_models"
     _admission_limiter: Optional[AdmissionLimiter] = PrivateAttr(default=None)
+    _checkpoint_capture_ledger: CaptureLedger | None = PrivateAttr(default=None)
+    _checkpoint_worker_agent: WorkerAdmissionAgent | None = PrivateAttr(default=None)
+    _checkpoint_coordinator_client: CoordinatorServiceClient | None = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -251,6 +317,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             num_workers=self.config.num_workers,
         )
         app.state.nemo_gym_capture_ledger = capture_ledger
+        self._checkpoint_capture_ledger = capture_ledger
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
         app.post("/v1/chat/completions")(
@@ -293,6 +360,22 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         auth_token = self.checkpoint_control_auth_token()
         if auth_token is None:
             return
+        coordinator_client = None
+        coordinator_socket = self._checkpoint_coordinator_socket()
+        if coordinator_socket is not None:
+            if self._checkpoint_worker_agent is not None:
+                raise RuntimeError("policy checkpoint worker is already configured")
+            worker_agent = WorkerAdmissionAgent(
+                coordinator_socket,
+                f"{self.config.name}:{os.getpid()}:{uuid4().hex}",
+                self.admission_limiter(),
+                pid=os.getpid(),
+                server_name=self.config.name,
+            )
+            self._checkpoint_worker_agent = worker_agent
+            coordinator_client = worker_agent.service_client()
+            self._checkpoint_coordinator_client = coordinator_client
+            self._install_checkpoint_worker_lifespan(app, worker_agent)
         install_model_admission(
             app,
             limiter=self.admission_limiter(),
@@ -300,6 +383,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             instance_role=self.config.instance_role,
             server_name=self.config.name,
             auth_token=auth_token,
+            coordinator_client=coordinator_client,
         )
         install_model_checkpoint(
             app,
@@ -314,6 +398,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             instance_role=self.config.instance_role,
             server_name=self.config.name,
             auth_token=auth_token,
+            coordinator_client=coordinator_client,
         )
         if self.config.instance_role == "policy":
             app.add_middleware(
@@ -322,6 +407,45 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 gated_suffixes=GATED_MODEL_ROUTE_SUFFIXES,
             )
 
+    def _install_checkpoint_worker_lifespan(
+        self,
+        app: FastAPI,
+        worker_agent: WorkerAdmissionAgent,
+    ) -> None:
+        main_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def checkpoint_worker_lifespan(app: FastAPI):
+            await worker_agent.start()
+            try:
+                async with main_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await worker_agent.stop()
+
+        app.router.lifespan_context = checkpoint_worker_lifespan
+
+    def _checkpoint_coordinator_socket(self) -> Path | None:
+        if (self.config.num_workers or 1) <= 1:
+            return None
+        raw_socket = os.environ.get(CHECKPOINT_COORDINATOR_SOCKET_ENV)
+        return Path(raw_socket) if raw_socket else None
+
+    def checkpoint_coordinator_client(self) -> CoordinatorServiceClient | None:
+        """Return this worker's shared policy-checkpoint service client."""
+        return self._checkpoint_coordinator_client
+
+    def start_process_companion(self) -> ServerProcessCompanion | None:
+        workers = self.config.num_workers or 1
+        if workers <= 1 or self.config.instance_role != "policy" or self.checkpoint_control_auth_token() is None:
+            return None
+        return _PolicyCheckpointCoordinatorCompanion(
+            instance_name=self.config.name,
+            expected_workers=workers,
+            ledger=self._checkpoint_capture_ledger,
+            supports_generation_cuts=self.generation_cut_backend() is not None,
+        ).start()
+
     def checkpoint_control_auth_token(self) -> Optional[str]:
         return resolve_checkpoint_control_auth_token(getattr(self.server_client, "global_config_dict", None))
 
@@ -329,6 +453,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         capabilities = super().control_capabilities()
         capabilities.instance_role = self.config.instance_role
         if self.config.instance_role == "policy" and self.checkpoint_control_auth_token() is not None:
+            workers = self.config.num_workers or 1
+            if workers > 1 and self._checkpoint_coordinator_socket() is not None:
+                capabilities.multi_process = MultiProcessCapability(
+                    mode="coordinator",
+                    num_workers=workers,
+                )
             capabilities.admission_states = [
                 AdmissionState.ACCEPTING,
                 AdmissionState.DRAINING,
