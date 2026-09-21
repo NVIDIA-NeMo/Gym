@@ -103,18 +103,19 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # When true (and workspace="per_session"), exa search asks for full text alongside
     # highlights, writes each result to pages/, and returns a [Saved to] path — the same
     # shape the tavily disk path returns, and the shape the `search` tool description and
-    # the system prompt already promise the model. On the exa path that promise was false:
-    # zero of 1,239 exa search outputs in a reference run contained "[Saved to]", so the
-    # workspace/bash_command affordance covered `browse` only.
-    # Default false: enabling it changes what is asked of the provider on EVERY query.
+    # the system prompt already promise the model.
+    # Default true so the harness honours that promise. While it defaulted false the exa
+    # path silently broke the contract: zero of 1,239 exa search outputs in a reference
+    # run contained "[Saved to]", so the workspace/bash_command affordance covered
+    # `browse` only, and a run had to know to opt in to get the documented behaviour.
     # MEASURED 2026-09-02, live against the exa API: this is NOT a dollar cost. Exa
     # reports costDollars per response and it is identical with and without text —
     # {"total": 0.007, "search": {"neural": 0.007}} either way, with no `contents` line
     # item, because exa bills per QUERY not per result. The real cost is latency and
     # response size: ~243k characters per 10-result query versus ~19k for highlights
     # alone. Full text is 2.9-12.9x the highlight text and is genuine extra page content,
-    # not the same snippet with markup left in.
-    exa_search_writes_pages: bool = False
+    # not the same snippet with markup left in. Set false to get the smaller response.
+    exa_search_writes_pages: bool = True
     # Exa /search "type". "auto" is the reference default. The deep variants run
     # Exa's multi-step research + synthesis path; see _EXA_DEEP_TYPES for what that
     # changes in the request/response. Validated at config load so a typo dies at

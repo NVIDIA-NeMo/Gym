@@ -19,6 +19,11 @@ from nemo_gym.atif_export import (
     export_rollouts_to_atif,
     gym_rollout_to_atif,
 )
+from nemo_gym.atif_reverification import (
+    index_materialized_inputs,
+    load_atif_manifest,
+    project_atif_manifest_entries,
+)
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.rollout_observability import TrajectoryRecord
 
@@ -1455,6 +1460,53 @@ def test_export_writes_hash_verified_files_and_ingress_compatible_manifest(tmp_p
     ]
     for manifest in manifests:
         AtifTrajectoryV1_7.model_validate_json((output / manifest["trajectory_path"]).read_text())
+
+    materialized_inputs = index_materialized_inputs(
+        [
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "Compare the two records."}],
+                    "instructions": "Use tools when needed.",
+                },
+                "_ng_task_index": row["_ng_task_index"],
+                "_ng_rollout_index": row["_ng_rollout_index"],
+                "agent_ref": row["agent_ref"],
+            }
+            for row in rows
+        ]
+    )
+    projected = project_atif_manifest_entries(
+        load_atif_manifest(result.manifest_fpath),
+        materialized_inputs,
+        manifest_directory=result.manifest_fpath.parent,
+    )
+
+    assert [(item.task_index, item.rollout_index) for item in projected] == [(3, 7), (4, 0)]
+    for item in projected:
+        response = item.payload["response"]
+        assert response["status"] == "completed"
+        assert response["usage"] == {
+            "input_tokens": 232,
+            "input_tokens_details": {"cached_tokens": 13},
+            "output_tokens": 24,
+            "output_tokens_details": {"reasoning_tokens": 10},
+            "total_tokens": 256,
+        }
+        assert [output["call_id"] for output in response["output"] if "call_id" in output] == [
+            "call-search",
+            "call-read",
+            "call-read",
+            "call-search",
+        ]
+        assert response["output"][-2]["summary"] == [{"text": "The records agree.", "type": "summary_text"}]
+        assert response["output"][-1]["content"] == [
+            {
+                "annotations": [],
+                "logprobs": None,
+                "text": "Both records contain the same value.",
+                "type": "output_text",
+            }
+        ]
 
 
 def test_export_validates_every_record_before_publishing_any_output(tmp_path: Path) -> None:

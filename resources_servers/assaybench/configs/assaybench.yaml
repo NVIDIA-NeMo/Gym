@@ -1,0 +1,31 @@
+assaybench:
+  resources_servers:
+    assaybench:
+      entrypoint: app.py
+      domain: knowledge
+      description: AssayBench -- rank the hit genes of a CRISPR screen from its plain-text description (arXiv:2605.10876)
+      value: Tests whether a model can link mechanistic biology to measured phenotypic outcomes, scored with the paper's adjusted nDCG
+      verified: false
+      # RankingMetrics settings from the authors' `assaybench` package, as used for the paper.
+      k_values: [5, 10, 20, 50, 100]
+      reward_metric: adjusted_ndcg@100
+      use_gene_mapper: true
+      # Upstream's quality gate (re-scan the raw reply below this many genes); 0 = off, as upstream.
+      min_expected_genes: 0
+      strip_think_blocks: true
+assaybench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: assaybench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        # Pre-materialized with benchmarks/prompts/eval/assaybench/paper.yaml; do not pass +prompt_config.
+        jsonl_fpath: resources_servers/assaybench/data/example.jsonl
+        license: MIT

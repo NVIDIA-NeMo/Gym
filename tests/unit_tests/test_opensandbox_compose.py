@@ -163,12 +163,19 @@ async def test_runtime_requirements_return_metadata_and_verify_without_remount(m
     provider = OpenSandboxProvider(
         runtime_requirements={
             "capability_probes": {"SYS_PTRACE": "gdb-probe"},
+            "capability_metadata": {"SYS_PTRACE": {"nemo.nvidia.com/ptrace": "true"}},
             "shm_size_metadata_key": "example.test/shm",
         }
     )
     assert provider.validate_runtime_requirements(cap_add=("SYS_PTRACE",), shm_size=1073741824) == {
-        "example.test/shm": "1073741824"
+        "example.test/shm": "1073741824",
+        "nemo.nvidia.com/ptrace": "true",
     }
+    assert provider.validate_runtime_requirements(cap_add=("SYS_PTRACE",), shm_size=None) == {
+        "nemo.nvidia.com/ptrace": "true"
+    }
+    assert provider.validate_runtime_requirements(cap_add=(), shm_size=1024) == {"example.test/shm": "1024"}
+    assert provider.validate_runtime_requirements(cap_add=(), shm_size=None) == {}
     execute = AsyncMock(return_value=SandboxExecResult("", "", 0))
     monkeypatch.setattr(provider, "exec", execute)
     await provider.configure_runtime(

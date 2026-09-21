@@ -26,7 +26,7 @@ from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
-from nemo_gym.cli.utils import did_you_mean
+from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
 
 
 logger = logging.getLogger(__name__)
@@ -564,20 +564,30 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
             )
 
 
+@exit_cleanly_on_config_error
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
-    from pathlib import Path
-
     import rich
+    import yaml
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
+    from pydantic import ValidationError
     from rich.markup import escape
 
+    from nemo_gym.config_types import ConfigError
     from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
     config_path = Path(args.config).resolve()
+    # Hydra composes by stem, so a missing path would surface from `compose` as a `MissingConfigException`
+    # traceback whose search-path dump never names the offending path. Check up front instead.
+    if not config_path.is_file():
+        what = "is a directory, not a file" if config_path.is_dir() else "was not found"
+        raise ConfigError(
+            f"Submit config '{config_path}' {what}. "
+            "Check the path is spelled correctly and is relative to your working directory."
+        )
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
         composed = compose(config_name=config_path.stem, overrides=overrides)
@@ -586,7 +596,27 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
-    config = SubmitConfig.model_validate({key: value for key, value in resolved.items() if key not in scratch_keys})
+    # SubmitConfig is an orchestration model: report schema errors against its YAML file
+    # rather than using the generic CLI handler's +key=<value> hint.
+    try:
+        config = SubmitConfig.model_validate(
+            {key: value for key, value in resolved.items() if key not in scratch_keys}
+        )
+    except ValidationError as e:
+        missing, invalid = _describe_validation_errors(e)
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing required configuration: {', '.join(missing)}")
+        if invalid:
+            parts.append(f"invalid configuration: {'; '.join(invalid)}")
+        raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
+
+    if args.resolve_only:
+        if args.json:
+            print(config.model_dump_json(indent=2))
+        else:
+            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+        return
 
     record = submit(config, dry_run=args.dry_run)
     if record is None:
@@ -1093,8 +1123,19 @@ COMMANDS = {
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,
+            _value_flag(
+                "input-format",
+                "input_format",
+                "Reverification input format.",
+                choices=("gym", "atif"),
+            ),
             _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
+            _value_flag(
+                "atif-manifest",
+                "atif_manifest_jsonl_fpath",
+                "Manifest joining ATIF trajectories to materialized Gym inputs.",
+            ),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("limit", "limit", "Maximum number of examples to re-verify."),
@@ -1154,7 +1195,17 @@ COMMANDS = {
             ),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Emit the submission record as JSON."
+                    "--resolve-only",
+                    action="store_true",
+                    help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
+                    "and stop before any job script is rendered or anything is submitted.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json",
+                    action="store_true",
+                    help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
         ),
@@ -1263,6 +1314,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _describe_validation_errors(exc) -> tuple[list[str], list[str]]:
+    """Split a pydantic `ValidationError` into dotted paths of missing fields and `path (reason)` strings for
+    every other failure, so each CLI error path renders schema mistakes the same way."""
+    missing: list[str] = []
+    invalid: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<config>"
+        if error["type"] == "missing":
+            missing.append(location)
+        else:
+            invalid.append(f"{location} ({error['msg']})")
+    return missing, invalid
+
+
 def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> None:
     # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
     # pydantic sets ValidationError.title to the validated
@@ -1282,14 +1347,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
         raise
 
     # For user's config validation, raise a descriptive error message
-    missing: list[str] = []
-    invalid: list[str] = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error["loc"]) or "<config>"
-        if error["type"] == "missing":
-            missing.append(location)
-        else:
-            invalid.append(f"{location} ({error['msg']})")
+    missing, invalid = _describe_validation_errors(exc)
 
     parts: list[str] = []
     if missing:
