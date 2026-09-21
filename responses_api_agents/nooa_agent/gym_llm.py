@@ -20,7 +20,7 @@ import json
 from typing import Any, Literal
 
 import aiohttp
-from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
@@ -42,19 +42,32 @@ def _dump(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True) if isinstance(value, BaseModel) else value
 
 
-def _responses_input(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": response.content}
+    if response.tool_calls:
+        message["tool_calls"] = [
+            {"id": call.id, "function": {"name": call.name, "arguments": call.arguments}}
+            for call in response.tool_calls
+        ]
+    return message
+
+
+def _responses_input(
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> tuple[list[dict[str, Any]], str | None]:
     instructions: list[str] = []
     result: list[dict[str, Any]] = []
     for message in messages:
+        if isinstance(message, CacheBoundary):
+            continue
+        if isinstance(message, LLMResponse):
+            if isinstance(message.raw_response, NeMoGymResponse):
+                result.extend(_dump(item) for item in message.raw_response.output)
+                continue
+            message = _portable_assistant_message(message)
         if message.get("role") == "system":
             if content := message.get("content"):
                 instructions.append(str(content))
-            continue
-        if "_batch" in message:
-            batch = message["_batch"]
-            if not isinstance(batch, list):
-                raise ValueError("NOOA assistant _batch must be a list of Responses items")
-            result.extend(_dump(item) for item in batch)
             continue
         if "type" in message:
             result.append(_dump(message))
@@ -161,7 +174,7 @@ class GymResponsesLLM(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -170,7 +183,7 @@ class GymResponsesLLM(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -180,7 +193,7 @@ class GymResponsesLLM(UnifiedLLM):
 
     async def _acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -242,7 +255,6 @@ class GymResponsesLLM(UnifiedLLM):
             )
         )
 
-        dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
         if function_calls:
@@ -253,7 +265,6 @@ class GymResponsesLLM(UnifiedLLM):
                     ToolCall(id=item.call_id, name=item.name, arguments=item.arguments) for item in function_calls
                 ],
                 finish_reason="tool_calls",
-                assistant_message={"_batch": dumped_output},
                 usage=usage,
             )
 
@@ -272,7 +283,6 @@ class GymResponsesLLM(UnifiedLLM):
             content=content,
             tool_calls=[],
             finish_reason=_finish_reason(response),
-            assistant_message={"role": "assistant", "content": _output_text(response)},
             reasoning=json.dumps(reasoning) if reasoning else None,
             usage=usage,
         )
