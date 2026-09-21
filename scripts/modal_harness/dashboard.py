@@ -146,6 +146,15 @@ def _discover() -> list[dict[str, Any]]:
                     # rather than the status heartbeat: a hung rollout keeps the container
                     # healthy and heartbeating, so "running" and a fresh timestamp say
                     # nothing about whether work is happening. Only new rows do.
+                    # How long THIS container has been alive. A slug outlives its
+                    # containers, so `stalled_for` alone cannot distinguish "stuck" from
+                    # "respawned and still starting" -- the latter inherits the whole
+                    # death-and-restart gap from its predecessor. The pair is unambiguous
+                    # where either alone is not.
+                    "started_at": status.get("started_at", 0.0),
+                    "container_age": (
+                        time.time() - float(status.get("started_at") or 0) if status.get("started_at") else 0.0
+                    ),
                     "stalled_for": time.time()
                     - max(
                         float(status.get("last_progress_at") or 0),
@@ -254,10 +263,20 @@ def dashboard():
             # and a cold first row can take twenty minutes -- short enough to catch a hang
             # in the session it happens. A hung rollout keeps the container healthy and
             # heartbeating, so this is the only external signal that work has stopped.
+            # Only flag when THIS container has itself been alive long enough to have
+            # produced a row. Without that clause a cell respawned 300s ago inherits its
+            # predecessor's silence and reads as stuck for an hour -- which produced two
+            # false alarms out of three the first time this column was used in anger.
+            age = run["container_age"]
+            stuck = run["state"] == "running" and run["stalled_for"] > 900 and (age == 0 or age > 900)
             stall = (
                 f"<span style='color:var(--warn)'>{int(run['stalled_for'] // 60)}m</span>"
-                if run["state"] == "running" and run["stalled_for"] > 900
-                else "-"
+                if stuck
+                else (
+                    f"<span class='muted'>starting {int(age // 60)}m</span>"
+                    if run["state"] == "running" and 0 < age <= 900
+                    else "-"
+                )
             )
             rows.append(
                 f"<tr><td><a href='/run/{html.escape(run['namespace'])}/{html.escape(run['slug'])}'>"
