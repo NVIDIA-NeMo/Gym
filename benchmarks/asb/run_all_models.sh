@@ -39,9 +39,9 @@ set -a; source "${ENV_FILE:-/Users/kruge/Documents/ChatGPT/NVIDIA/.env}"; set +a
 # key | slug | base_url | model id | token env var | concurrency
 MODELS=(
 "ultra|nemotron-3-ultra-550b|https://snorkelai-fdr--ep-nvidia-nemotron-3-ultra-550b-a55b-nvfp-63eebc.us-west.modal.direct/v1|nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4|MODAL_PROXY_TOKEN|64"
-"kimi|kimi-k3|https://snorkelai-fdr--ep-kimi-k3-server.us-west.modal.direct/v1|moonshotai/Kimi-K3|MODAL_PROXY_TOKEN|32"
-"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|64"
-"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|64"
+"kimi|kimi-k3|https://snorkelai-fdr--ep-kimi-k3-server.us-west.modal.direct/v1|moonshotai/Kimi-K3|MODAL_PROXY_TOKEN|96"
+"supervl|nemotron-3.5-super-vl|https://snorkelai-fdr--nemotron-3-5-super-vl-ea-nemotronvision.us-east.modal.direct/v1|nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16|SUPER_VL_MODAL_TOKEN|32"
+"qwen|qwen3.5-122b-a10b|https://snorkelai-fdr--ep-qwen3-5-122b-a10b-fp8-server.us-west.modal.direct/v1|Qwen/Qwen3.5-122B-A10B-FP8|MODAL_PROXY_TOKEN|32"
 )
 
 write_env_yaml() {
@@ -131,9 +131,11 @@ start_servers() {
 run_model() {
     local slug="$1" concurrency="$2"
     local out="${RESULTS_DIR}/${slug}.jsonl"
-    local attempt status rows
+    local attempt status rows rows_before
+    rows_before=$(wc -l < "$out" 2>/dev/null | tr -d ' ' || echo 0)
+    rows_before=${rows_before:-0}
 
-    for attempt in 1 2 3 4 5 6; do
+    for attempt in $(seq 1 "${MAX_ATTEMPTS:-40}"); do
         if ! curl -s -m 3 "http://127.0.0.1:${HEAD_PORT}/" >/dev/null 2>&1; then
             echo "  [$(date +%H:%M:%S)] ${slug} head server down; restarting stack"
             stop_servers
@@ -157,14 +159,25 @@ run_model() {
             return 0
         fi
 
-        # A 503 from an overloaded router means back off, not push harder.
-        concurrency=$(( concurrency / 2 ))
-        [ "$concurrency" -lt 4 ] && concurrency=4
-        echo "  [$(date +%H:%M:%S)] ${slug} backing off to concurrency ${concurrency}"
-        sleep 60
+        if [ "$rows" -ge "$((EXPECTED - ${MAX_UNSCORABLE:-60}))" ] && [ "$rows" -le "$rows_before" ]; then
+            echo "  [$(date +%H:%M:%S)] ${slug} complete with $((EXPECTED - rows)) unscorable rows (judge-failed; see *_failures.jsonl)"
+            return 0
+        fi
+
+        if [ "$rows" -gt "$rows_before" ]; then
+            echo "  [$(date +%H:%M:%S)] ${slug} advanced $((rows - rows_before)) rows; holding concurrency ${concurrency}"
+            sleep 10
+        else
+            # No progress: this one really does look like an overloaded router.
+            concurrency=$(( concurrency / 2 ))
+            [ "$concurrency" -lt 4 ] && concurrency=4
+            echo "  [$(date +%H:%M:%S)] ${slug} no progress, backing off to concurrency ${concurrency}"
+            sleep 60
+        fi
+        rows_before=$rows
     done
 
-    echo "  [$(date +%H:%M:%S)] ${slug} INCOMPLETE after 6 attempts (${rows}/${EXPECTED})"
+    echo "  [$(date +%H:%M:%S)] ${slug} INCOMPLETE after ${MAX_ATTEMPTS:-40} attempts (${rows}/${EXPECTED})"
     return 1
 }
 
