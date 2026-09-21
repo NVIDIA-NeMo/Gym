@@ -351,7 +351,27 @@ def _task_findings(
     return findings, coverage
 
 
-def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dict[str, Any]:
+def _run_coverage(scored: int, expected: int | None) -> dict[str, Any]:
+    """How much of the run the verdicts below were computed from.
+
+    The verdicts only see rollouts that survived scoring, so counting them against
+    themselves reports every run as fully covered. ``expected`` comes from the
+    materialized inputs instead; ``None`` when the caller cannot supply it, which is
+    reported as unknown rather than silently as complete.
+    """
+    if expected is None:
+        return {"expected": None, "scored": scored, "missing": None, "scored_fraction": None}
+    return {
+        "expected": expected,
+        "scored": scored,
+        "missing": expected - scored,
+        "scored_fraction": 1.0 if expected == 0 else scored / expected,
+    }
+
+
+def _reduce(
+    digests: list[RolloutDigest], ignored_checks: frozenset[str], expected_rollouts: int | None = None
+) -> dict[str, Any]:
     records_by_task: dict[int | str, list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
         records_by_task[digest.task_index].append(digest)
@@ -390,6 +410,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     return {
         "run": {
             "ignored_checks": sorted(ignored_checks),
+            "coverage": _run_coverage(len(digests), expected_rollouts),
             "artifacts": {
                 "records": len(digests),
                 "captures": sum(digest.capture_observed for digest in digests),
@@ -459,6 +480,7 @@ def run_health_checks(
     output_dir: Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    expected_rollouts: int | None = None,
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -513,7 +535,7 @@ def run_health_checks(
 
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
-    summary = _reduce(digests, ignored)
+    summary = _reduce(digests, ignored, expected_rollouts)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
@@ -539,9 +561,17 @@ def format_health_report(result: HealthCheckResult) -> str:
     checked = sum(verdicts.values())
     ignored = result.summary["run"].get("ignored_checks", [])
     ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
+    # Without this line a run that scored half its rollouts reads as a clean bill of health.
+    coverage = result.summary["run"].get("coverage") or {}
+    missing = coverage.get("missing") or 0
+    coverage_note = (
+        f"\nRollout coverage: {coverage['scored']} of {coverage['expected']} rollouts scored, {missing} never checked"
+        if missing > 0
+        else ""
+    )
     return (
         f"Rollout health: {checked} checked, {verdicts['healthy']} healthy, "
-        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}{coverage_note}\n"
         f"Quality summary: {result.summary_path}"
     )
 
