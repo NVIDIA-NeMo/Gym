@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 #
+# Derived from utopia-group/VeriSoftBench scripts/build_repo.sh at commit
+# d066523f2b087f28b793c05eacb29bf2e42c0504 (MIT License, Copyright (c) 2026 VeriSoftBench
+# Authors). NVIDIA modifications (Apache-2.0): the "Pre-seed lake packages" step below,
+# which fetches every Lake dependency at its pinned revision by SHA before `lake build`.
+# Everything else is upstream's, unchanged.
+#
 # build_repo.sh — Build a single Lean repository for VeriSoftBench evaluation.
 #
 # Usage (local source):
