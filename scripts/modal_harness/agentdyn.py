@@ -23,7 +23,7 @@ generic runner:
 
 from __future__ import annotations
 
-from scripts.modal_harness.campaign import app, run_campaign
+from scripts.modal_harness.campaign import app, campaign_state, run_campaign, skip_reason
 
 
 #: key -> (slug fragment, base_url, model id, token env var)
@@ -110,11 +110,21 @@ def main(
     if unknown:
         raise SystemExit(f"unknown defenses: {', '.join(unknown)}")
 
+    # Skip cells that are already complete or already running. A preempted launcher takes
+    # its un-spawned cells with it, and the obvious recovery -- rerun the same command --
+    # would otherwise spawn a second container for every cell that did start.
+    state = campaign_state.remote("agentdyn")
+
     handles = []
+    skipped = []
     for model_key in model_keys:
         fragment, base_url, model_id, token_var = MODELS[model_key]
         for defense in defense_keys:
             slug = f"{fragment}-{defense}"
+            reason = skip_reason(state, slug, EXPECTED_ROWS)
+            if reason:
+                skipped.append(f"{slug}: {reason}")
+                continue
             handles.append(
                 (
                     slug,
@@ -138,6 +148,8 @@ def main(
                 )
             )
 
+    for line in skipped:
+        print(f"  skip {line}")
     total = len(handles) * EXPECTED_ROWS
     print(f"\n{len(handles)} cells x {EXPECTED_ROWS} = {total:,} rollouts, running in parallel\n")
     for slug, handle in handles:

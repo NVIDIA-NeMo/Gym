@@ -547,3 +547,70 @@ def list_results(prefix: str = "") -> list[dict[str, Any]]:
             path = os.path.join(root, name)
             out.append({"path": path, "rows": _count_rows(path), "bytes": os.path.getsize(path)})
     return out
+
+
+@app.function(
+    image=IMAGE,
+    volumes={RESULTS_ROOT: RESULTS_VOLUME},
+    timeout=300,
+)
+def campaign_state(namespace: str) -> dict[str, dict[str, Any]]:
+    """What the volume knows about each slug in a namespace.
+
+    Launchers call this before spawning so they can skip work that is already done or
+    already running. Without it, relaunching to recover cells a preempted launcher never
+    reached will also re-spawn the ones it did, and two containers then race over one
+    volume path.
+    """
+    RESULTS_VOLUME.reload()
+    out: dict[str, dict[str, Any]] = {}
+    ns_dir = os.path.join(RESULTS_ROOT, namespace)
+    if not os.path.isdir(ns_dir):
+        return out
+    for name in sorted(os.listdir(ns_dir)):
+        if not name.endswith(".jsonl") or "_failures" in name or "_materialized_inputs" in name:
+            continue
+        slug = name[: -len(".jsonl")]
+        status_path = os.path.join(ns_dir, f"{slug}.status.json")
+        status: dict[str, Any] = {}
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, encoding="utf-8") as handle:
+                    status = json.load(handle)
+            except (OSError, ValueError):
+                status = {}
+        out[slug] = {
+            "landed": _count_rows(os.path.join(ns_dir, name)),
+            "expected": status.get("expected", 0),
+            "state": status.get("state", "unknown"),
+            "updated_at": status.get("updated_at", 0.0),
+        }
+    return out
+
+
+def skip_reason(
+    state: dict[str, dict[str, Any]],
+    slug: str,
+    expected_rows: int,
+    *,
+    live_within_seconds: float = 300.0,
+    tolerance: int = 60,
+) -> Optional[str]:
+    """Why this slug should not be spawned, or None to go ahead.
+
+    "Live" is judged on status freshness rather than on the `running` label alone: a
+    container that died leaves `running` behind forever, and treating that as live would
+    make a cell unrecoverable.
+    """
+    entry = state.get(slug)
+    if not entry:
+        return None
+    if entry["landed"] >= expected_rows:
+        return f"complete ({entry['landed']}/{expected_rows})"
+    if entry["expected"] and entry["landed"] >= entry["expected"] - tolerance:
+        if entry["state"] in {"complete", "settled_short"}:
+            return f"settled ({entry['landed']}/{entry['expected']})"
+    age = time.time() - float(entry.get("updated_at") or 0)
+    if entry["state"] == "running" and age < live_within_seconds:
+        return f"already running ({entry['landed']} rows, {age:.0f}s ago)"
+    return None

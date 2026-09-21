@@ -15,7 +15,7 @@ call: three deployments are us-west, Super-VL is us-east.
 
 from __future__ import annotations
 
-from scripts.modal_harness.campaign import app, run_campaign
+from scripts.modal_harness.campaign import app, campaign_state, run_campaign, skip_reason
 
 
 #: key -> (slug, base_url, model id, token env var, concurrency)
@@ -69,9 +69,15 @@ def main(models: str = "supervl,qwen", concurrency: int = 0, git_ref: str = GIT_
     if unknown:
         raise SystemExit(f"unknown model keys: {', '.join(unknown)} (have {', '.join(MODELS)})")
 
+    state = campaign_state.remote("asb")
+
     handles = []
     for key in keys:
         slug, base_url, model_id, token_var, default_concurrency = MODELS[key]
+        reason = skip_reason(state, slug, EXPECTED_ROWS)
+        if reason:
+            print(f"skip {key} -> {slug}: {reason}")
+            continue
         print(f"launching {key} -> {slug}")
         handles.append(
             run_campaign.spawn(
