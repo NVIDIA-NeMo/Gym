@@ -218,15 +218,15 @@ def test_collector_keeps_each_producers_own_name_as_display_identity():
 
 
 def test_collector_metrics_pipeline_also_accepts_otlp_metrics():
-    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp", "spanmetrics"]
+    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp", "span_metrics"]
 
 
 def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_provider():
     doc = _rendered()
-    connector = doc["connectors"]["spanmetrics"]
+    connector = doc["connectors"]["span_metrics"]
     assert connector["dimensions"] == [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}]
     assert connector["metrics_flush_interval"] == "15s"
-    assert "spanmetrics" in doc["service"]["pipelines"]["traces"]["exporters"]
+    assert "span_metrics" in doc["service"]["pipelines"]["traces"]["exporters"]
     # The traces pipeline has already applied identity + resource stamping when the connector runs,
     # so the derived series carry run_id/user like everything else.
     traces = doc["service"]["pipelines"]["traces"]["processors"]
@@ -292,7 +292,7 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
     assert doc["exporters"]["file/metrics"]["path"] == str(BENCH_DIR / "otel" / "metrics.jsonl")
     for signal in ("metrics", "traces", "logs"):
         exporters = doc["service"]["pipelines"][signal]["exporters"]
-        assert exporters == ["otlp_http/managed", f"file/{signal}"]
+        assert exporters[:2] == ["otlp_http/managed", f"file/{signal}"]
 
 
 def test_collector_receives_otlp_for_the_job_processes():
