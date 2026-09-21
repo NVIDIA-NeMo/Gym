@@ -139,7 +139,10 @@ gym eval run --no-serve \
 
 Regenerate the committed example artifacts. `example.jsonl` is five synthetic rows written for
 this repository against the fixture task under `tests/fixtures/toy_assignment`; upstream's task
-packets are third-party content and are not redistributed here.
+packets are third-party content and are not redistributed here. Two stages: the script writes
+preparer-schema rows (`agent_ref`), and `gym dataset collate` rewrites the file in place into the
+collated schema (`task_source`) and writes `example_metrics.json`. The tracked `example.jsonl`
+carries the collated schema.
 
 ```bash
 docker build -t oragentbench-fixture:toy_assignment resources_servers/oragentbench/tests/fixtures/toy_assignment/environment

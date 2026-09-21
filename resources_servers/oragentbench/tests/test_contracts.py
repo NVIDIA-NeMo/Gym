@@ -17,21 +17,17 @@ import make_example_data  # noqa: E402
 import prepare_oragentbench as prep  # noqa: E402
 
 
-def test_example_rows_are_five_synthetic_rows_in_the_preparer_schema():
+def test_example_rows_are_the_collated_form_of_the_five_synthetic_rows():
+    """The tracked file is the ``gym dataset collate`` output: ``agent_ref`` becomes ``task_source``."""
     rows = [json.loads(line) for line in (SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()]
-    assert len(rows) == 5 and rows == make_example_data.rows()
+    expected = []
+    for row in make_example_data.rows():
+        agent_ref = row.pop("agent_ref")
+        expected.append(row | {"task_source": agent_ref["name"]})
+    assert len(rows) == 5 and rows == expected
     for row in rows:
         TaskData.model_validate(row)
         assert row["task_name"].startswith("synthetic/") and row["docker_image"] != prep.BASE_IMAGE_TAG
-        assert set(row) == {
-            "responses_create_params",
-            "task_name",
-            "docker_image",
-            "task_folder",
-            "difficulty",
-            "num_steps",
-            "agent_ref",
-        }
     assert {row["difficulty"] for row in rows} == {"easy", "medium", "hard"}
 
 
