@@ -321,6 +321,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 )
                 observations = run_context.get("observations")
                 failed = run_context.get("harness_failed", False)
+                result_metadata = {
+                    "harness_failed": failed,
+                    "ng_agent_observations": observations,
+                    "ng_trajectory": trajectory,
+                }
                 if failed and self.config.execution_failure_reward_zero:
                     await self._close_run_sandbox(run_context)
                     return HarnessAgentVerifyResponse.model_validate(
@@ -328,10 +333,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                         | {
                             "response": agent_resp_json,
                             "reward": 0.0,
-                            "harness_failed": True,
-                            "ng_agent_observations": observations,
-                            "ng_trajectory": trajectory,
                         }
+                        | result_metadata
                     )
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -341,8 +344,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(verify_resp)
                 return HarnessAgentVerifyResponse.model_validate(
-                    await get_response_json(verify_resp)
-                    | {"harness_failed": failed, "ng_agent_observations": observations, "ng_trajectory": trajectory}
+                    await get_response_json(verify_resp) | result_metadata
                 )
             except BaseException:
                 await self._close_run_sandbox(run_context)
@@ -572,12 +574,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
                 )
 
-            resp = NeMoGymResponse.model_validate(
-                await self._download_json(handle, self._box_path(handle, "/work/response.json"))
-            )
-            raw_observations = getattr(resp, "_ng_agent_observations", None)
-            response_json = resp.model_dump(mode="json")
-            response_json.pop("_ng_agent_observations", None)
+            response_json = dict(await self._download_json(handle, self._box_path(handle, "/work/response.json")))
+            raw_observations = response_json.pop("_ng_agent_observations", None)
             resp = NeMoGymResponse.model_validate(response_json)
             observations = AgentObservationBundle.model_validate(raw_observations) if raw_observations else None
             failed = False

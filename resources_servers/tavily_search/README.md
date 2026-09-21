@@ -50,7 +50,8 @@ list cannot prevent all online answer leakage.
 Search defaults remain 10 results, advanced search, and 2,000-character snippets.
 `max_results`, `search_depth`, and `max_result_chars` make these configurable.
 The URL-keyed page cache evicts the least recently used page after `max_cached_pages`
-(default 128); zero disables caching. `max_cached_page_chars` and `max_scroll_words`
-are optional caps. Output formatting and tool schemas remain unchanged.
+(default 128); zero disables caching. `max_cached_page_chars` bounds stored content
+only when caching is enabled, including the first response. `max_scroll_words`
+bounds each response independently of caching. Output formatting and tool schemas remain unchanged.
 Tool transcripts and Gym observability provide the audit trail; there is no
 separate browser log format or per-rollout result-index state.
