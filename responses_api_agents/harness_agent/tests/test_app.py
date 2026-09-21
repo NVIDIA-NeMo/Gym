@@ -207,6 +207,20 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     assert url == "http://model-host:8000"
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"])
+def test_tool_server_url_rewrites_loopback_like_model_url(host):
+    agent = _make_agent()
+    agent.server_client._build_server_base_url = MagicMock(return_value=f"http://{host}:8000/proxy")
+    with (
+        patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}),
+        patch("responses_api_agents.harness_agent.app.socket.gethostbyname", return_value="10.0.0.8"),
+    ):
+        assert agent._tool_server_url(ResourcesServerRef(type="resources_servers", name="tools")) == (
+            "http://10.0.0.8:8000/proxy"
+        )
+        assert agent._sandbox_model_url(MagicMock()) == "http://10.0.0.8:8000/proxy"
+
+
 def test_sandbox_model_url_uses_gym_proxy_instead_of_backend():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client.global_config_dict = MagicMock()
@@ -668,8 +682,9 @@ async def test_restricted_network_rejects_provider_without_enforcement():
 
 @pytest.mark.parametrize("status,failed", [("completed", False), ("failed", True), ("incomplete", True)])
 @pytest.mark.parametrize("log_download_fails", [False, True])
+@pytest.mark.parametrize("answer", ["42", ""])
 async def test_generation_preserves_observations_and_receipt_before_judging(
-    tmp_path, status, failed, log_download_fails
+    tmp_path, status, failed, log_download_fails, answer
 ):
     from hashlib import sha256
 
@@ -689,7 +704,7 @@ async def test_generation_preserves_observations_and_receipt_before_judging(
                 "role": "assistant",
                 "status": "completed",
                 "id": "answer",
-                "content": [{"type": "output_text", "text": "42", "annotations": []}],
+                "content": [{"type": "output_text", "text": answer, "annotations": []}],
             }
         ]
     }

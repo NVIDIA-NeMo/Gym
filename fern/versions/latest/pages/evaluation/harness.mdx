@@ -28,6 +28,66 @@ Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Com
 A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
 [Swapping the agent](/reference/cli-commands#swapping-the-agent).
 
+## Offline scientific evaluation with OpenCode or Pi
+
+The shared `harness_agent` runs each task in a sandbox and sends its response to
+the benchmark's existing verifier. Compose one benchmark and one native harness
+preset in a config file:
+
+```yaml
+config_paths:
+  - benchmarks/apex_shortlist/harness.yaml
+  - responses_api_agents/harness_agent/configs/opencode.yaml
+use_absolute_ip: true
+```
+
+For HLE, use `benchmarks/hle/harness.yaml`. To run Pi, replace the OpenCode preset
+with `responses_api_agents/harness_agent/configs/pi.yaml`; select one preset.
+The `apex_shortlist/opencode`, `hle/opencode`, and `hle/opencode_search` benchmark
+entrypoints provide composed OpenCode configurations. Search uses Gym's Tavily
+MCP service and the [search exclusion policy](/main/infrastructure/tavily-search).
+
+Set `HARNESS_SANDBOX_IMAGE` to a compatible image digest and configure OpenSandbox
+access. The [runtime Dockerfiles and build instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harness_agent/image)
+include scientific Python, SageMath, Lean/Mathlib, and the native harness binaries.
+Each sandbox includes `/opt/science/README.md` with tool usage instructions.
+
+The sandbox must be able to reach the advertised Gym model and tool addresses.
+`use_absolute_ip: true` uses the Gym host's resolved IP; otherwise configure
+routable server `host` values. Model and tool URLs both rewrite local addresses
+to the host address, but this cannot create a network route or open a firewall.
+Use `sandbox_model_base_url` when a separate model proxy is required.
+
+The Python-only preset allows the model host; search also allows the configured
+tool hosts. Other direct internet access is denied by the OpenSandbox policy.
+Model and Tavily credentials stay in the host-side Gym services.
+
+### Preset behavior and compatibility
+
+- Both presets disable automatic compaction and omit the per-request output cap
+  so the inference server can use the remaining context. Configure the server's
+  context window and default generation limits accordingly.
+- Enclosing rollout budgets are four hours. OpenCode uses 400 steps and disables
+  background titles. Pi caps Bash calls at 120 seconds; shorter requested limits
+  are preserved. This cap is opt-in outside the benchmark preset.
+- The OpenCode benchmark preset sets `interleaved_reasoning: false` to avoid a separate
+  assistant `reasoning` request field that Gym's benchmark chat schema rejects.
+  The standalone adapter retains its existing `interleaved: {field: reasoning}`
+  default and honors explicit model overrides.
+- OpenCode configurations combining legacy `tools` with `permission` are rejected:
+  move tool allow/deny rules to `permission` so legacy settings cannot override a deny.
+- Benchmark answer-format instructions are retained; HLE's instructions are placed
+  in the user message. Harness prompts add brief network and installed-tool guidance.
+- With `execution_failure_reward_zero`, an explicitly failed or incomplete harness
+  invocation gets reward zero without grading. A completed empty answer still goes
+  to the verifier. Include failed and missing rows when reporting benchmark coverage.
+
+Buffered chat streams send keepalive comments after 15 seconds of silence. Fast
+backend failures retain normal HTTP error handling. After headers have been sent,
+an HTTP status cannot change: late backend failures end with an SSE error, while
+serialization or capture-finalization failures abort the stream. Clients must treat
+either as failure, not a successful empty completion.
+
 ## The composed instance is renamed
 
 Composition replaces the environment's agent and renames the server instance after the harness that

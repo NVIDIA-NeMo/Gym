@@ -848,6 +848,13 @@ class TestRolloutCorrelation:
         anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
         assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
 
+    @pytest.mark.parametrize("suffix", ["", "/training-token-capture"])
+    def test_sandbox_resolved_url_is_not_prefixed_again(self, tmp_path: Path, suffix: str) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        agent.resolved_model_base_url = f"http://model-server:9000/ng-rollout/task3-roll1{suffix}/v1"
+        base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
+        assert base_url == f"http://model-server:9000/ng-rollout/task3-roll1{suffix}"
+
     def test_training_capture_intent_reaches_the_cli_base_url(self, tmp_path: Path) -> None:
         agent = _make_agent(
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),

@@ -469,10 +469,6 @@ async def test_response_preparation_failure_does_not_commit(
         await _request(h.app, _path(dialect), _body(dialect), check_send)
         assert _events(sent)[-1]["type"] == "response.failed"
         assert all(event["type"] != "response.output_item.done" for event in _events(sent))
-    elif stream and dialect == "chat/completions":
-        await _request(h.app, _path(dialect), _body(dialect), check_send)
-        assert _events(sent)[-1]["error"]["type"] == "server_error"
-        assert all("choices" not in event for event in _events(sent))
     else:
         with pytest.raises(ValueError, match=f"injected {failure} failure"):
             await _request(h.app, _path(dialect), _body(dialect, stream), check_send)

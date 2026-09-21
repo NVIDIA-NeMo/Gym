@@ -41,7 +41,7 @@ from typing import Any, AsyncIterator, Iterable, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -320,8 +320,29 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
 
+        async def completed_stream(completion: Any) -> StreamingResponse:
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            return await self._stream_served_response(
+                completion_json,
+                synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            )
+
+        pending = asyncio.create_task(self._invoke_chat_completions(request, params))
+        try:
+            # StreamingResponse commits HTTP headers before iterating its body.
+            # Wait here so fast backend failures retain normal HTTP error handling.
+            done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+            if done:
+                return await completed_stream(await pending)
+        except BaseException:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+
         async def events() -> AsyncIterator[str | bytes]:
-            pending = asyncio.create_task(self._invoke_chat_completions(request, params))
             try:
                 # A long silent request can outlive the network's idle timeout even
                 # when both the client and backend allow hours for generation.
@@ -330,19 +351,23 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                     done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
                     if not done:
                         yield _SSE_KEEPALIVE
-                completion = await pending
-                completion_json = (
-                    completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-                )
-                response = await self._stream_served_response(
-                    completion_json,
-                    synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
-                )
+                try:
+                    completion = await pending
+                except Exception as exc:
+                    logger.exception("chat_completions() failed after streaming headers were sent")
+                    status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    error = {
+                        "message": exc.detail if isinstance(exc, HTTPException) else "Model request failed",
+                        "type": "server_error" if status >= 500 else "invalid_request_error",
+                        "code": status,
+                    }
+                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    return
+                # Capture finalization and serialization failures must propagate:
+                # treating them as backend SSE errors would hide an invalid capture.
+                response = await completed_stream(completion)
                 async for event in response.body_iterator:
                     yield event
-            except Exception:
-                logger.exception("chat_completions() failed while serving a streaming request")
-                yield 'event: error\ndata: {"error":{"message":"Model request failed","type":"server_error"}}\n\n'
             finally:
                 if not pending.done():
                     pending.cancel()

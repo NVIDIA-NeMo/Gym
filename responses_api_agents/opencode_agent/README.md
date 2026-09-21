@@ -70,6 +70,9 @@ key, and provider configuration are unchanged.
 - `command`: the OpenCode command, split on spaces so a multi-word launcher works (e.g. `npx opencode`)
 - `model`: `<provider>/<model-name>` (see Model id)
 - `model_server`: optional Gym model server used to generate the provider entry
+- `interleaved_reasoning`: add the generated model's `interleaved: {field: reasoning}`
+  default (true). Set false to omit it when the endpoint rejects a separate assistant
+  reasoning field; explicit `opencode_config` model options still take precedence.
 - `context_window`: context limit for a generated model entry
 - `max_output_tokens`: output limit for a generated model entry
 - `openai_api_key`: passed to the subprocess as `OPENAI_API_KEY`

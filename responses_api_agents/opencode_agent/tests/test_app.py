@@ -551,6 +551,18 @@ class TestRepoDir:
         assert not workspace.exists()
 
 
+def test_benchmark_preset_disables_interleaved_reasoning_without_changing_default():
+    from omegaconf import OmegaConf
+
+    preset = OmegaConf.to_container(OmegaConf.load(Path(__file__).parents[2] / "harness_agent/configs/opencode.yaml"))[
+        "harness_benchmark_agent"
+    ]["responses_api_agents"]["harness_agent"]["agent_kwargs"]
+    agent = _make_agent(**preset, model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config()
+    assert "interleaved" not in config["provider"]["nemo"]["models"][agent.config.model]
+
+
 class TestConfigYaml:
     def test_module_parses(self) -> None:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
@@ -582,8 +594,8 @@ def test_remaining_context_preserves_sampling_and_gym_route(tmp_path):
     assert config["provider"]["nemo"]["options"]["baseURL"] == "http://proxy/ng-rollout/run-1/v1"
     assert config["agent"]["build"] == {"temperature": 0.0, "top_p": 1.0}
     assert config["provider"]["nemo"]["models"][agent.config.model]["temperature"] is True
-    # Gym carries reasoning in assistant content, not an extra request field.
-    assert "interleaved" not in config["provider"]["nemo"]["models"][agent.config.model]
+    # Preserve the standalone adapter's existing reasoning default.
+    assert config["provider"]["nemo"]["models"][agent.config.model]["interleaved"] == {"field": "reasoning"}
     if not shutil.which("node"):
         pytest.skip("node required to execute the OpenCode plugin")
     plugin = tmp_path / "plugin.mjs"

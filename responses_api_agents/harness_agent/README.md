@@ -38,6 +38,10 @@ See [the runtime image](image/README.md). Sandbox access still uses the normal
 OpenSandbox provider configuration. The model server must advertise an address
 reachable from the sandbox; a workstation address is not necessarily routable
 from the assigned Kubernetes cell.
+Set `use_absolute_ip: true` when the sandbox can reach the Gym host's resolved IP,
+or set each model/tool server's `host` to a routable address. Local model and tool
+URLs use the same host-address rewrite; this does not create a route or change
+firewall rules. A separate model proxy can use `sandbox_model_base_url`.
 
 `network_access: model_only` enforces an OpenSandbox deny-by-default policy with
 only the Gym model-server host allowed. It overrides permissive network settings,
@@ -55,6 +59,8 @@ paths. `execution_failure_reward_zero` skips grading completed harness failures
 and records reward zero with `harness_failed=true`. Setup, export and judge errors
 still raise; use Gym's failure sidecar to keep unrelated rows running, and account
 for those missing rows before reporting full benchmark coverage.
+An empty answer from a completed harness is passed to the verifier, preserving
+its metrics and answer-validation behavior.
 
 Both presets omit the per-request output cap for Gym's model provider, letting
 vLLM calculate the remaining context budget, and disable automatic compaction.
@@ -63,6 +69,10 @@ a smaller default output cap. OpenCode also sets 400 steps. All enclosing benchm
 rollout limits are four hours. The Pi preset caps each Bash call at 120 seconds,
 preserving shorter model-requested deadlines; a timeout returns a tool error so
 the agent can continue. Other tools retain their native limits.
+The OpenCode preset sets `interleaved_reasoning: false` to omit the generated
+model's `interleaved` option because Gym's benchmark chat schema does not accept a separate assistant
+`reasoning` field on later tool turns. The standalone OpenCode adapter retains
+its existing `{"field": "reasoning"}` default; explicit model options take precedence.
 
 The `apex_shortlist/opencode` and `hle/opencode` benchmark entrypoints compose
 these presets. `hle/opencode_search` adds the existing Tavily resource with

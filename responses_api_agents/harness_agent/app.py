@@ -234,19 +234,23 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             base = base[0]
         base = re.sub(r"/v1/?$", "", str(base))
         if not self.config.sandbox_model_base_url:
-            parsed = urlsplit(base if "://" in base else f"http://{base}")
-            host = parsed.hostname or ""
-            if host in ("127.0.0.1", "localhost", "0.0.0.0"):
-                try:
-                    # loopback binds are unreachable from a sandbox
-                    host = socket.gethostbyname(socket.gethostname())
-                except OSError:
-                    pass
-            netloc = f"{host}:{parsed.port}" if parsed.port else host
-            base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
-            base = base_url
+            base = self._rewrite_loopback_url(base)
         prefix = (_RUN_CONTEXT.get() or {}).get("url_prefix") or self.url_path_for_request("", request)
         return f"{base.rstrip('/')}{prefix}"
+
+    @staticmethod
+    def _rewrite_loopback_url(base: str) -> str:
+        """Advertise the host address to sandboxes for local Gym services."""
+        parsed = urlsplit(base if "://" in base else f"http://{base}")
+        if parsed.hostname not in {"127.0.0.1", "localhost", "0.0.0.0", "::1", "::"}:
+            return base
+        try:
+            host = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return base
+        host = f"[{host}]" if ":" in host else host
+        netloc = f"{host}:{parsed.port}" if parsed.port else host
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -328,7 +332,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
     def _tool_server_url(self, server: ResourcesServerRef) -> str:
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, server.name)
-        return str(self.server_client._build_server_base_url(cfg)).rstrip("/")
+        return self._rewrite_loopback_url(str(self.server_client._build_server_base_url(cfg))).rstrip("/")
 
     async def _seed_tool_servers(self, body: HarnessAgentRunRequest, cookies: Mapping[str, str]) -> dict[str, Any]:
         entries = {}
@@ -561,11 +565,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     and getattr(record, "status", None) in {"failed", "incomplete", "cancelled"}
                     for record in observations.records
                     if getattr(record, "kind", None) == "agent_invocation"
-                )
-                failed = failed or not any(
-                    getattr(item, "role", None) == "assistant"
-                    and any(getattr(part, "text", "").strip() for part in getattr(item, "content", []))
-                    for item in resp.output
                 )
                 observations.gaps = [gap for gap in observations.gaps if gap.code != "no_sandbox_runtime"]
                 observations.records.append(

@@ -108,3 +108,31 @@ gym env start \
 
 Before scaling up, run a small [evaluation](/main/evaluation/benchmarks) and inspect
 the search response, policy exclusions, and judge result to validate the workflow.
+
+## Tool-service behavior and compatibility
+
+The same resource exposes `web_search`, `find_in_page`, and `scroll_page` to native
+harnesses when `expose_tools_over_mcp: true`. Credentials remain in the resource
+process. `tavily_api_key` accepts one key, a list, or a comma-separated pool;
+requests and retries rotate through the pool.
+
+These changes apply to existing Tavily configurations as well as HLE:
+
+- Search requests disable Tavily's aggregate answer, and returned aggregate answers
+  are discarded. The former `Search Answer` output section is removed because its
+  sources cannot be checked against the local policy; agents receive source results.
+- Requested and returned URLs, including reported extraction redirects, are checked
+  against domain and `url_substring` exclusions. Author/publisher metadata is not
+  enforced. A finite exclusion list cannot prevent all online answer exposure.
+- Rate-limit retries are bounded rather than indefinite. `max_http_attempts` defaults
+  to 3 total attempts; retryable HTTP failures use exponential delays starting at one
+  second and rotate keys. `http_timeout_s` defaults to 60 seconds per attempt; a shorter
+  SDK timeout takes precedence. Exhaustion raises a tool-service error instead of
+  returning an empty search. Under sustained rate limits, reduce concurrency or
+  explicitly increase the attempt budget.
+- The page cache is bounded by `max_cached_pages` (default 128); zero disables it.
+  `max_cached_page_chars` and `max_scroll_words` are optional output/resource caps.
+
+The HLE search preset supplies the public HLE exclusion list. Deployments requiring
+an additional policy must supply their combined policy file through
+`exclude_domains_file_path`; keep private policies outside the public repository.

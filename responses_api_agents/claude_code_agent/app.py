@@ -323,6 +323,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         Apply the prefix only for a configured Gym model server.
         A real Anthropic endpoint has no prefix-stripping middleware.
         """
+        if self.resolved_model_base_url is not None:
+            # The shared runner already scoped this endpoint; the CLI adds /v1/messages.
+            return self.resolved_model_base_url.rstrip("/").removesuffix("/v1")
         base_url = self._resolve_base_url()
         if base_url and self.config.model_server:
             base_url = apply_rollout_prefix(

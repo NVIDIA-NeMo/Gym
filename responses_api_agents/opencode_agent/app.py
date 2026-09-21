@@ -501,6 +501,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
+    interleaved_reasoning: bool = True
 
     @property
     def command_parts(self) -> list[str]:
@@ -577,6 +578,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            if self.config.interleaved_reasoning:
+                model.setdefault("interleaved", {"field": "reasoning"})
             self._deep_merge(
                 model,
                 {
