@@ -324,6 +324,11 @@ class MiniSWEHarness:
             actions = parse_toolcall_actions(
                 calls,
                 format_error_template=MINI_CONFIG["model"]["format_error_template"],
+                template_kwargs={
+                    "finish_reason": "length"
+                    if response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
+                    else "stop",
+                },
             )
             return {
                 "role": "assistant",

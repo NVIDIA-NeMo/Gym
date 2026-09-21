@@ -36,6 +36,9 @@ the caller bounds total execution time. The TB4 benchmark sets a 500-step limit 
 `++tb4_step_timeout_sec=...`. Commands receive the environment defaults from `mini.yaml`;
 system information in the prompt comes from the task sandbox.
 Every step persists the native mini-SWE trajectory, including observations.
+Output-limit truncation (`incomplete_details.reason=max_output_tokens`) is passed
+to mini-SWE as `finish_reason="length"`, enabling its native “Respond more concisely”
+reminder when tool calls are missing or malformed. Valid tool calls still execute.
 The adapter preserves Responses output items (including reasoning and tool calls)
 when replaying history and returns observations with their matching call IDs.
 
