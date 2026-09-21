@@ -507,7 +507,12 @@ def build_sbatch_script(
     # Gym's own Lens instrumentation is switched on through the driver's environment and pointed
     # at the collector; anything the config sets explicitly wins.
     driver_env = (
-        {**driver_telemetry_env(remote_bench_dir.parent.name), **config.driver.env} if observed else config.driver.env
+        {
+            **driver_telemetry_env(remote_bench_dir.parent.name, config.observability.gym_span_groups),
+            **config.driver.env,
+        }
+        if observed
+        else config.driver.env
     )
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""

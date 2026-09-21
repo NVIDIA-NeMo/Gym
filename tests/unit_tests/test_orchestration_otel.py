@@ -406,6 +406,7 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     line = _driver_line(script)
     assert "NEMO_GYM_OTEL_ENABLED=1" in line
     assert "NEMO_GYM_OTEL_RUN_ID=gym-job-20260921T100000Z-abc123" in line
+    assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
     assert 'uv pip install -e ".[telemetry]"' in script
@@ -417,6 +418,11 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://elsewhere:4318" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" not in line
     assert "NEMO_GYM_OTEL_ENABLED=1" in line
+
+
+def test_script_honours_configured_gym_span_groups():
+    config = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_span_groups": "per_rollout,sandbox"})
+    assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
 
 
 def test_script_leaves_the_driver_alone_when_disabled():
