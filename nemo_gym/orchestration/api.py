@@ -262,6 +262,10 @@ class ObservabilityConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
+    # Gym span groups to switch on (a preset or comma-separated names). `default` gives one trace
+    # per rollout and the rollout duration metric; `verify` adds the verify duration and success
+    # metrics, which are gated on that group.
+    gym_span_groups: str = "default,verify"
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
 
