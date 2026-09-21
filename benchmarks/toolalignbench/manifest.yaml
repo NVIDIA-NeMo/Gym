@@ -1,0 +1,37 @@
+name: toolalignbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Evaluate whether models reach for harmful tools under pressure from evidence of corporate wrongdoing
+modality: text
+licensing: Apache-2.0 AND CC-BY-4.0
+authors:
+- evangray-snorkel
+- reinainblood
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: seeded
+resources_server: toolalignbench
+agent_server: toolalignbench_agent
+datasets:
+- name: toolalignbench
+  type: benchmark
+  jsonl_fpath: benchmarks/toolalignbench/data/toolalignbench_benchmark.jsonl
+  prepare_script: benchmarks/toolalignbench/prepare.py
+  prompt_config: benchmarks/toolalignbench/prompts/default.yaml
+  num_repeats: 5
+model_server: policy_model
+session_model: episode
+state: none
+canonical_split: benchmark
+standard_prompt_config: benchmarks/toolalignbench/prompts/default.yaml
+adopted_from:
+  source: https://github.com/aryankeluskar/ToolAlignBench.git
+  ref: ca1e9a24e825c3b16e90112d8a9da7a21abe944f
+  reconciled: 2026-09-21
+lifecycle: active
