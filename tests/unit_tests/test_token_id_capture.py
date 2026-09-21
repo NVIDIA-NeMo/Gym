@@ -2065,6 +2065,20 @@ def test_multi_worker_file_capture_uses_process_shared_lineage(tmp_path):
     _server(_both_enabled(tmp_path), num_workers=2).setup_webserver()
 
 
+def test_multi_worker_policy_checkpoint_reports_coordinator_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_CHECKPOINT_CONTROL_TOKEN", "test-control-token")
+    monkeypatch.setenv("NG_CHECKPOINT_COORDINATOR_SOCKET", str(tmp_path / "control.sock"))
+    server = _server(_both_enabled(tmp_path), num_workers=2)
+
+    server.setup_webserver()
+
+    assert server.control_capabilities().multi_process.model_dump() == {
+        "mode": "coordinator",
+        "num_workers": 2,
+    }
+    assert server.checkpoint_coordinator_client() is not None
+
+
 def test_a_sink_given_kwargs_it_cannot_take_is_refused_at_startup():
     config = TokenIdCaptureConfig.model_validate(_block(sink=f"{__name__}:_KwargSink", sink_kwargs={"nope": 1}))
     with pytest.raises(ValueError, match="sink_kwargs"):

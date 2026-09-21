@@ -56,6 +56,7 @@ from nemo_gym.token_id_capture.records import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from nemo_gym._checkpoint.model_control_contracts import GenerationCutPrefixAck
     from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 
 # Wire field names between the Gym model server and a framework inference
@@ -121,6 +122,8 @@ class CaptureContext:
     # the exact representation the next request will echo.
     request_items: list[dict] | None = None
     generation_cut_key: tuple[str, int] | None = None
+    restored_generation_cut: GenerationCutPrefixAck | None = None
+    generation_cut_declined: bool = False
 
     @property
     def parent_call_id(self) -> str | None:

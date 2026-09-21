@@ -20,6 +20,7 @@ import io
 import json
 import shutil
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,12 @@ from nemo_gym._checkpoint import (
     read_jsonl_artifact,
 )
 from nemo_gym._checkpoint.artifacts import write_jsonl_artifact
+from nemo_gym._checkpoint.coordinator import (
+    AdmissionCoordinator,
+    CoordinatorServiceError,
+    WorkerAdmissionAgent,
+)
+from nemo_gym._checkpoint.ledger import PolicyModelCheckpointCoordinatorService
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 
 
@@ -819,6 +826,133 @@ def test_model_restore_loads_generation_cut_from_checkpointed_lineage(tmp_path) 
     assert restored.json()["generation_cuts_restored"] == 1
     assert len(restored_backend.restored) == 1
     assert restored_backend.restored[0][0].prefixes[0].model_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_multi_worker_restore_installs_one_shared_cut_lease(tmp_path) -> None:
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id="ticket-1",
+                rollout_id="rollout-a",
+                attempt_index=0,
+                model_call_id="source-call",
+                admitted_at=1.0,
+            )
+        ],
+    )
+    receipt = GenerationCutReceipt(
+        checkpoint_id="checkpoint-1",
+        cut_id="cut-1",
+        inventory_digest=inventory.inventory_digest,
+        inventory=inventory,
+        backend_snapshot_id="tq-cut-1",
+        prefixes=(
+            GenerationCutPrefixAck(
+                **inventory.active_prefixes[0].model_dump(mode="json"),
+                disposition="durable_prefix",
+                cut_kind="active_prefix",
+                frozen_buffer_id="active/checkpoint-1",
+                staging_keys=("__generation_cut__/checkpoint-1/rollout-a/source-call",),
+                prefix_token_count=2,
+                prefix_digest="a" * 64,
+                effective_output_limit=128,
+            ),
+        ),
+    )
+    source_root = tmp_path / "source"
+    source = FileLineageStore(source_root)
+    await source.record_generation_cut(receipt)
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source_root, server_name="policy").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=set(),
+        source_attempts={("rollout-a", 0)},
+        continuation_roots=[],
+        generation_cut_receipts=(receipt,),
+    )
+
+    restored = FileLineageStore(tmp_path / "restored")
+    socket_dir = Path(tempfile.mkdtemp(prefix="ngckpt-"))
+    coordinator = AdmissionCoordinator(socket_dir / "control.sock", expected_workers=2)
+    service = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: restored,
+        file_ledger_root_provider=lambda: restored.checkpoint_root,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=True,
+    )
+    coordinator.service_handler = service
+    await coordinator.start()
+    agents = [
+        WorkerAdmissionAgent(
+            coordinator.socket_path,
+            f"worker-{index}",
+            AdmissionLimiter(),
+        )
+        for index in range(2)
+    ]
+    try:
+        for agent in agents:
+            await agent.start()
+        result = (
+            await agents[0]
+            .service_client()
+            .request(
+                "model_checkpoint_restore",
+                {
+                    "checkpoint_id": "restore-1",
+                    "deadline_ts": 4e9,
+                    "checkpoint_dir": str(checkpoint),
+                },
+            )
+        )
+        assert result["generation_cuts_restored"] == 1
+        assert coordinator.restored_cuts.status() == {
+            "entries": 1,
+            "available": 1,
+            "leased": 0,
+            "consumed": 0,
+        }
+        assert all(agent.service_client().has_restored_cuts for agent in agents)
+
+        claimed = (
+            await agents[1]
+            .service_client()
+            .request(
+                "claim_generation_cut",
+                {
+                    "rollout_id": "rollout-a",
+                    "attempt_index": 1,
+                    "model_call_id": "replacement-call",
+                },
+            )
+        )
+        assert GenerationCutPrefixAck.model_validate(claimed) == receipt.prefixes[0]
+        assert coordinator.restored_cuts.status()["leased"] == 1
+        with pytest.raises(CoordinatorServiceError) as owned:
+            await (
+                agents[0]
+                .service_client()
+                .request(
+                    "claim_generation_cut",
+                    {
+                        "rollout_id": "rollout-a",
+                        "attempt_index": 1,
+                        "model_call_id": "duplicate-call",
+                    },
+                )
+            )
+        assert owned.value.code == "restored_cut_already_owned"
+    finally:
+        for agent in agents:
+            await agent.stop()
+        await coordinator.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> None:
