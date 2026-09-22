@@ -24,6 +24,7 @@ upstream checkout or a Lean container; those are covered by
 """
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -60,6 +61,7 @@ class FakeHarness:
     running = True
 
     def __init__(self, upstream_dir, docker_container):
+        assert Path(upstream_dir).is_absolute(), "server must hand the harness a root-resolved path"
         self.upstream_dir = upstream_dir
         self.docker_container = docker_container
         self.prepared: list[int] = []

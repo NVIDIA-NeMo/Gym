@@ -33,7 +33,6 @@ import logging
 import re
 import uuid
 from enum import Enum
-from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, ValidationError
@@ -42,6 +41,7 @@ from upstream import (
     Harness,
     UpstreamError,
     is_backend_fault,
+    resolve_upstream_dir,
 )
 
 from nemo_gym.base_resources_server import (
@@ -194,7 +194,7 @@ class VeriSoftBenchResourcesServer(SimpleResourcesServer):
         self._entry_locks: dict[int, asyncio.Lock] = {}
         self._compile_slots = asyncio.Semaphore(self.config.max_concurrent_compilations)
         try:
-            self._harness = Harness(Path(self.config.upstream_dir), self.config.docker_container)
+            self._harness = Harness(resolve_upstream_dir(self.config.upstream_dir), self.config.docker_container)
         except UpstreamError as e:
             # Kept as a status rather than a crash so that a misconfigured server reports
             # every rollout as a harness fault instead of taking the run down with a 500.

@@ -76,6 +76,19 @@ _PROVIDER_STUBS = (
 CONTEXT_MODE = "filtered_context"
 
 
+GYM_ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_upstream_dir(value: str | Path) -> Path:
+    """A relative ``upstream_dir`` is relative to the NeMo Gym repository root.
+
+    Servers are started with the server directory as working directory, so a config
+    value like ``cache/verisoftbench/...`` must not be resolved against the cwd.
+    """
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else GYM_ROOT / path
+
+
 class UpstreamError(RuntimeError):
     """The upstream checkout is missing, unpinned or unusable."""
 

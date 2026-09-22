@@ -186,3 +186,13 @@ class TestMain:
         prep.main(["--upstream-dir", str(root), "--output", str(out), "--limit", "7"])
         lines = out.read_text().splitlines()
         assert len(lines) == 7 and json.loads(lines[-1])["verifier_metadata"]["id"] == 7
+
+
+class TestResolveUpstreamDir:
+    def test_relative_is_against_the_gym_root_not_the_cwd(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert upstream.resolve_upstream_dir("cache/x") == upstream.GYM_ROOT / "cache/x"
+        assert (upstream.GYM_ROOT / "nemo_gym").is_dir()
+
+    def test_absolute_is_kept(self, tmp_path) -> None:
+        assert upstream.resolve_upstream_dir(tmp_path) == tmp_path
