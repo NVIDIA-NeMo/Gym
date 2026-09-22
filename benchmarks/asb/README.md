@@ -40,7 +40,9 @@ a source you have to trust. Run it before trusting any number.
 
 The frozen copy is
 [`theverifier/asb-selectors`](https://huggingface.co/datasets/theverifier/asb-selectors)
-(10,800 rows at upstream `1f561dccf92d`, content hash `6351e7ee6a94fd6a`). It is
+(10,800 rows at upstream `1f561dccf92d`, content hash `6351e7ee6a94fd6a`), pulled at a
+pinned commit rather than at `main`, and checked against the manifest that ships with it —
+a moved branch, a partial download or a substituted copy raises instead of scoring. It is
 third-party rather than NeMo-owned; point `ASB_HF_REPO` or `--repo-id` at your own mirror
 if you would rather not depend on it.
 

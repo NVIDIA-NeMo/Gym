@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from fractions import Fraction
 
@@ -214,3 +215,64 @@ def test_expansion_is_deterministic():
     first = [json.dumps(r, sort_keys=True) for r in prepare.expand_selectors(upstream_dir=UPSTREAM, **kwargs)]
     second = [json.dumps(r, sort_keys=True) for r in prepare.expand_selectors(upstream_dir=UPSTREAM, **kwargs)]
     assert first == second
+
+
+def test_pull_defaults_to_a_pinned_revision_not_a_branch(monkeypatch, tmp_path):
+    """A branch name is not a pin. The published repo's main already moved once.
+
+    Recorded here rather than left to review: the failure it prevents is silent, since a
+    moved branch still yields a working dataset and only shows up as an unexplained change
+    in a later run's numbers.
+    """
+    from benchmarks.asb import prepare
+
+    seen = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        (tmp_path / "all.jsonl").write_text("", encoding="utf-8")
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"content_hash": hashlib.sha256(b"").hexdigest(), "rows_total": 0}), encoding="utf-8"
+        )
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    prepare.pull_from_hub(prepare.PUBLISHED_HF_REPO, data_dir=tmp_path)
+    assert seen["revision"] == prepare.PUBLISHED_HF_REVISION
+    assert len(prepare.PUBLISHED_HF_REVISION) == 40, "a pin is a full commit sha, not a branch or short sha"
+
+
+def test_pull_rejects_rows_that_do_not_match_their_own_manifest(monkeypatch, tmp_path):
+    """Scoring against a substituted or truncated copy is worse than failing to pull one."""
+    from benchmarks.asb import prepare
+
+    def fake_download(**kwargs):
+        (tmp_path / "all.jsonl").write_text(json.dumps({"asb_id": "x"}) + "\n", encoding="utf-8")
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"content_hash": "0" * 64, "rows_total": 1}), encoding="utf-8"
+        )
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    with pytest.raises(ValueError, match="do not match the manifest"):
+        prepare.pull_from_hub(prepare.PUBLISHED_HF_REPO, data_dir=tmp_path)
+
+
+def test_pull_rejects_a_short_download(monkeypatch, tmp_path):
+    """A partial snapshot hashes differently, but state the row count too so the cause is obvious."""
+    from benchmarks.asb import prepare
+
+    rows = [{"asb_id": "a"}, {"asb_id": "b"}]
+    kept = rows[:1]
+
+    def fake_download(**kwargs):
+        (tmp_path / "all.jsonl").write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+        content = hashlib.sha256("".join(json.dumps(r, sort_keys=True) for r in kept).encode()).hexdigest()
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"content_hash": content, "rows_total": len(rows)}), encoding="utf-8"
+        )
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    with pytest.raises(ValueError, match="expected 2 rows, pulled 1"):
+        prepare.pull_from_hub(prepare.PUBLISHED_HF_REPO, data_dir=tmp_path)

@@ -55,6 +55,11 @@ DEFAULT_HF_REPO = os.environ.get("ASB_HF_REPO")
 #: NeMo-owned -- `verify` is what establishes that any pinned copy really is upstream's.
 PUBLISHED_HF_REPO = "theverifier/asb-selectors"
 
+#: The revision ``pull`` restores. A branch name is not a pin: the repo's ``main`` already
+#: moved once for a documentation edit, and a caller who pulled either side of that had no
+#: way to tell. Pinning the commit is what makes "frozen" true rather than advertised.
+PUBLISHED_HF_REVISION = "3188c21b9ea6135e397ace0b4d6b1798265dcbd0"
+
 
 # ---------------------------------------------------------------------------
 # Upstream checkout
@@ -584,17 +589,49 @@ def push_to_hub(repo_id: str, *, data_dir: Path = DATA_DIR, private: bool = True
 
 
 def pull_from_hub(repo_id: str, *, data_dir: Path = DATA_DIR, revision: str | None = None) -> Path:
-    """Restore pinned rows from the hub -- what a scheduled run should do."""
+    """Restore pinned rows from the hub -- what a scheduled run should do.
+
+    Pulls a fixed revision and checks what arrived against the manifest that came with it,
+    so a moved branch, a partial download or a substituted copy fails here rather than
+    surfacing as an unexplained change in next week's numbers.
+
+    ``revision`` defaults to the published pin. Pass one explicitly to restore a different
+    revision, or ``"main"`` to deliberately take whatever is current.
+    """
+    import hashlib
+
     from huggingface_hub import snapshot_download
 
-    path = snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision=revision,
-        token=os.environ.get("HF_TOKEN"),
-        local_dir=str(data_dir),
+    if revision is None and repo_id == PUBLISHED_HF_REPO:
+        revision = PUBLISHED_HF_REVISION
+
+    path = Path(
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            token=os.environ.get("HF_TOKEN"),
+            local_dir=str(data_dir),
+        )
     )
-    return Path(path)
+
+    manifest_path = path / "manifest.json"
+    rows_path = path / "all.jsonl"
+    if not manifest_path.exists() or not rows_path.exists():
+        raise FileNotFoundError(f"{repo_id}@{revision}: expected all.jsonl and manifest.json, got {path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = _read_jsonl(rows_path)
+    content_hash = hashlib.sha256("".join(json.dumps(row, sort_keys=True) for row in rows).encode()).hexdigest()
+    if content_hash != manifest["content_hash"]:
+        raise ValueError(
+            f"{repo_id}@{revision}: pulled rows do not match the manifest that came with them "
+            f"(expected {manifest['content_hash']}, got {content_hash}). "
+            "Re-derive with `prepare materialize` rather than scoring against this copy."
+        )
+    if len(rows) != manifest["rows_total"]:
+        raise ValueError(f"{repo_id}@{revision}: expected {manifest['rows_total']} rows, pulled {len(rows)}")
+    return path
 
 
 #: Where ``benchmarks/asb/config.yaml`` expects the built benchmark rows. ``gym eval
