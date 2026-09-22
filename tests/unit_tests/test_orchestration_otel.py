@@ -124,12 +124,24 @@ def test_scrape_targets_are_the_model_services():
     assert scrape_targets(config) == {"policy": 8000, "judge": 8100}
 
 
-def test_inactive_without_a_model_service():
+def test_active_without_a_model_service():
+    """Gym's own servers produce telemetry with or without a local model, so the collector runs."""
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
-    assert not otel_active(_config(services={}, driver=driver))
-    assert not otel_active(
-        _config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver)
+    assert otel_active(_config(services={}, driver=driver))
+    assert otel_active(_config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver))
+
+
+def test_collector_without_scrape_targets_has_no_prometheus_receiver():
+    driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
+    doc = _rendered(
+        _config(services={}, driver=driver, observability={"gpu_metrics_port": None, "node_metrics_port": None})
     )
+    assert "prometheus" not in doc["receivers"]
+    assert doc["service"]["pipelines"]["metrics"]["receivers"] == ["otlp", "span_metrics"]
+    # With the node exporters on, the scrape jobs alone justify the receiver.
+    doc = _rendered(_config(services={}, driver=driver))
+    assert [s["job_name"] for s in doc["receivers"]["prometheus"]["config"]["scrape_configs"]] == ["dcgm", "node"]
+    assert doc["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp", "span_metrics"]
 
 
 def test_inactive_when_disabled():
@@ -459,9 +471,11 @@ def test_script_has_no_collector_when_disabled():
     assert "DRIVER_RC" not in script
 
 
-def test_script_has_no_collector_without_a_model_service():
+def test_script_has_a_collector_without_a_model_service():
     config = _config(services={}, driver={"container": "gym:latest", "benchmarks": {"scicode": {}}})
-    assert "otel_collector" not in _script(config)
+    script = _script(config)
+    assert "otel_collector" in script
+    assert "NEMO_GYM_OTEL_ENABLED=1" in _driver_line(script)
 
 
 # ---------------------------------------------------------------------------

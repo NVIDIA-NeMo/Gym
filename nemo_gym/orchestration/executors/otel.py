@@ -79,8 +79,13 @@ def scrape_targets(config: SubmitConfig) -> dict[str, int]:
 
 
 def otel_active(config: SubmitConfig) -> bool:
-    """Whether a collector step is added to this job: enabled, and there is something to scrape."""
-    return config.otel.enabled and bool(scrape_targets(config))
+    """Whether a collector step is added to this job.
+
+    Enabled is enough: Gym's own servers push spans, metrics and logs through the collector whether
+    or not the job serves a model locally (a `type: api` policy, a CPU-only judge run), so a job
+    without anything to scrape still gets one.
+    """
+    return config.otel.enabled
 
 
 def validate_destination(config: SubmitConfig) -> None:
@@ -207,7 +212,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
         "connectors": {"span_metrics": span_metrics},
         "receivers": {
-            "prometheus": {"config": {"scrape_configs": scrape_configs}},
+            **({"prometheus": {"config": {"scrape_configs": scrape_configs}}} if scrape_configs else {}),
             "otlp": {
                 "protocols": {
                     "grpc": {"endpoint": f"0.0.0.0:{OTLP_GRPC_PORT}"},
@@ -234,7 +239,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "telemetry": {"logs": {"level": "debug"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": ["prometheus", "otlp", "span_metrics"],
+                    "receivers": (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"],
                     "processors": ["transform/metric_names", "transform/identity", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/metrics"],
                 },
