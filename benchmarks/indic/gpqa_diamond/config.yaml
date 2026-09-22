@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+num_repeats: 1
+responses_create_params:
+  max_output_tokens: 1000
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      chat_template_kwargs:
+        enable_thinking: false
+      sampling_overrides:
+        temperature: 0.0
+        top_p: 1.0
+        top_k: -1
+        seed: 0
+
+indic_gpqa_diamond_resources_server:
+  resources_servers:
+    gpqa_diamond:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      use_official_parser: true
+      description: Original GPQA answer extraction for canonically aligned Indic Diamond questions.
+
+indic_gpqa_diamond_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: indic_gpqa_diamond_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: indic_gpqa_diamond
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/gpqa_diamond/data/gpqa_diamond_benchmark.jsonl
+          prepare_script: benchmarks/indic/gpqa_diamond/prepare.py
+          prompt_config: benchmarks/indic/gpqa_diamond/prompts/default.yaml
+          num_repeats: 1
+          license: CC-BY-4.0

@@ -46,10 +46,26 @@ def extract_letter(text: str) -> Optional[str]:
     return None
 
 
+def extract_official_answer(text: str) -> Optional[str]:
+    """Apply the original GPQA baseline's ordered, case-sensitive parser."""
+    # Responses API reasoning is normally separate from output_text. Remove
+    # equivalent inline tags so hidden reasoning cannot supply the answer.
+    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.split(r"</(?:think|thinking)>", text, flags=re.IGNORECASE)[-1]
+    text = re.split(r"<(?:think|thinking)>", text, flags=re.IGNORECASE)[0]
+    patterns = [r"answer is \((.)\)", r"Answer: \((.)\)", r"answer: \((.)\)", r"answer \((.)\)", r"\((.)\)"]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match and match.group(1) in "ABCD":
+            return match.group(1)
+    return None
+
+
 class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
     # Reuses mcqa's MCQAResourcesServerConfig (STATELESS); pin back to the safe default so this
     # benchmark does not inherit reverify support until it is separately reviewed.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
+    use_official_parser: bool = False
 
 
 class GPQADiamondResourcesServer(MCQAResourcesServer):
@@ -64,16 +80,19 @@ class GPQADiamondResourcesServer(MCQAResourcesServer):
 
         pred: Optional[str] = None
 
-        if body.template_metadata and "output_regex" in body.template_metadata:
-            regex_pattern = body.template_metadata["output_regex"]
-            pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+        if self.config.use_official_parser:
+            pred = extract_official_answer(text)
+        else:
+            if body.template_metadata and "output_regex" in body.template_metadata:
+                regex_pattern = body.template_metadata["output_regex"]
+                pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
 
-        if pred is None:
-            pred = extract_letter(text)
-            if pred is not None:
-                pred = pred.upper()
-                if allowed_letters and pred not in allowed_letters:
-                    pred = None
+            if pred is None:
+                pred = extract_letter(text)
+                if pred is not None:
+                    pred = pred.upper()
+                    if allowed_letters and pred not in allowed_letters:
+                        pred = None
 
         gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
