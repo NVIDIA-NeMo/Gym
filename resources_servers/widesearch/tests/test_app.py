@@ -50,7 +50,13 @@ def response(text: str) -> NeMoGymResponse:
 def test_extract_markdown_table() -> None:
     frame = extract_dataframe("```markdown\n| Name | Rank |\n| --- | --- |\n| Alpha | 1 |\n```")
     assert frame is not None
-    assert frame.to_dict(orient="records") == [{"Name": "Alpha", "Rank": 1}]
+    assert frame.to_dict(orient="records") == [{"Name": "Alpha", "Rank": "1"}]
+
+
+def test_extract_markdown_table_preserves_string_formatting() -> None:
+    frame = extract_dataframe("```markdown\n| Code | Rank |\n| --- | --- |\n| 007 | 3.0 |\n```")
+    assert frame is not None
+    assert frame.to_dict(orient="records") == [{"Code": "007", "Rank": "3.0"}]
 
 
 def test_extract_markdown_table_ignores_earlier_placeholder() -> None:
@@ -65,7 +71,7 @@ def test_extract_markdown_table_ignores_earlier_placeholder() -> None:
 ```"""
     )
     assert frame is not None
-    assert frame.to_dict(orient="records") == [{"Name": "Alpha", "Rank": 1}]
+    assert frame.to_dict(orient="records") == [{"Name": "Alpha", "Rank": "1"}]
 
 
 def test_extract_malformed_markdown_table_returns_none() -> None:
