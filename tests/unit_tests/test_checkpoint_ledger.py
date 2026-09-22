@@ -678,50 +678,6 @@ def test_restore_validates_all_files_before_installing_any(tmp_path) -> None:
     assert not restored.exists()
 
 
-def test_generation_cut_receipt_is_bound_to_ledger_commit_and_restore(tmp_path) -> None:
-    source = tmp_path / "source"
-    _write_custody(source, "rollout-a")
-    checkpoint = tmp_path / "checkpoint"
-    inventory = GenerationCutInventory.build(
-        checkpoint_id="checkpoint-1",
-        server_name="policy",
-        active_prefixes=[],
-    )
-    receipt = GenerationCutReceipt(
-        checkpoint_id="checkpoint-1",
-        cut_id="cut-1",
-        inventory_digest=inventory.inventory_digest,
-        inventory=inventory,
-        backend_snapshot_id="snapshot-1",
-    )
-    checkpointer = CaptureLedgerCheckpointer(source)
-
-    committed = checkpointer.commit(
-        checkpoint,
-        checkpoint_id="checkpoint-1",
-        tombstones=[],
-        generation_cut_receipt=receipt,
-        continuation_roots=[_continuation_root("rollout-a")],
-    )
-    manifest = json.loads((checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).read_text())
-    assert manifest["schema_version"] == 3
-    assert "generation_cut_receipt" in manifest
-    assert "generation_cut_ack" not in manifest
-    assert committed["generation_cut_receipt"] == receipt.model_dump(mode="json")
-    restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
-    assert restored["generation_cut_receipt"] == receipt.model_dump(mode="json")
-
-    changed = receipt.model_copy(update={"cut_id": "cut-2"})
-    with pytest.raises(LedgerMismatchError, match="generation cut changed"):
-        checkpointer.commit(
-            checkpoint,
-            checkpoint_id="checkpoint-1",
-            tombstones=[],
-            generation_cut_receipt=changed,
-            continuation_roots=[_continuation_root("rollout-a")],
-        )
-
-
 def test_restore_rejects_legacy_generation_cut_ack_manifest_with_migration_guidance(tmp_path) -> None:
     checkpoint = tmp_path / "checkpoint"
     CaptureLedgerCheckpointer(tmp_path / "source").commit(
@@ -835,10 +791,12 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
                     model_call_id=frozen_ticket.model_call_id,
                     admitted_at=float(index),
                     disposition="durable_prefix",
+                    cut_kind="active_prefix",
                     frozen_buffer_id=f"buffer-{index}",
-                    staging_key=f"staging-{index}",
+                    staging_keys=(f"staging-{index}",),
                     prefix_token_count=1,
                     prefix_digest=f"{index}" * 64,
+                    effective_output_limit=128,
                 ),
             ),
         )
@@ -1077,10 +1035,12 @@ def test_generation_cut_receipt_is_final_before_ledger_commit(tmp_path) -> None:
                         model_call_id=prefix.model_call_id,
                         admitted_at=prefix.admitted_at,
                         disposition="durable_prefix",
+                        cut_kind="active_prefix",
                         frozen_buffer_id=f"buffer/{prefix.ticket_id}",
-                        staging_key=f"staging/{prefix.ticket_id}",
+                        staging_keys=(f"staging/{prefix.ticket_id}",),
                         prefix_token_count=2,
                         prefix_digest="d" * 64,
+                        effective_output_limit=128,
                     )
                     for prefix in inventory.active_prefixes
                 ),
@@ -1105,7 +1065,8 @@ def test_generation_cut_receipt_is_final_before_ledger_commit(tmp_path) -> None:
         headers=AUTH_HEADERS,
     )
     assert committed.status_code == 200
-    assert committed.json()["generation_cut_receipt"]["backend_snapshot_id"] == "snapshot-1"
+    assert committed.json()["generation_cut_records"] == 1
+    assert "generation_cut_receipt" not in committed.json()
     assert backend.checkpoint_calls == 1
     limiter.release(ticket)
 

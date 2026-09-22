@@ -1102,19 +1102,6 @@ def _validate_server_name(server_name: str) -> str:
     return server_name
 
 
-async def _restore_generation_cut(
-    backend: Any,
-    expected: GenerationCutReceipt | None,
-) -> None:
-    if expected is None:
-        return
-    if backend is None:
-        raise LedgerMismatchError("checkpoint contains a generation cut but no cut backend is configured")
-    restored = GenerationCutReceipt.model_validate(await backend.restore_generation_cut(expected))
-    if restored != expected:
-        raise LedgerMismatchError("restored generation cut does not match the model-ledger manifest")
-
-
 def _store_generation_cut_proof(directory: Path, proof: GenerationCutCoordinatorProof) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / GENERATION_CUT_COORDINATOR_PROOF_NAME
