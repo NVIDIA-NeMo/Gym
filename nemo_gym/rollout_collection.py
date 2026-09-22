@@ -279,11 +279,15 @@ def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _is_native_episode_response(result: Any) -> bool:
-    """True for a ``BaseEpisodeResponse`` reply: identity plus exactly one of ``result`` or ``failure``."""
+    """True for a ``BaseEpisodeResponse``-shaped reply: object identities plus a ``result`` or ``failure`` key.
+
+    The collector only projects such a reply for a row it dispatched as a native episode request
+    (``_materialized_taskset(row)``), so a legacy verify response that echoes identity fields is left alone.
+    """
     return (
         isinstance(result, Mapping)
-        and "episode_id" in result
-        and "task_id" in result
+        and isinstance(result.get("episode_id"), Mapping)
+        and isinstance(result.get("task_id"), Mapping)
         and ("result" in result or "failure" in result)
     )
 
@@ -294,10 +298,17 @@ def _project_native_episode_response(result: Dict[str, Any]) -> Dict[str, Any]:
     A handled ``failure`` becomes a failures-sidecar row in the same shape the legacy single-agent
     adapter emits, so resume retries a non-terminal one and never a terminal one. A ``result`` keeps
     the native record and gains the top-level ``reward`` (and mask flag) that progress accounting and
-    the health check read off every line. The verifier's own fields stay under ``result.verification``.
+    the aggregate request read off every line, plus ``ng_agent_observations`` so trajectory capture and
+    the health check see the agent's evidence as they do for legacy replies. The verifier's own fields
+    stay under ``result.verification``.
     """
     failure = result.get("failure")
     if failure is not None:
+        if not isinstance(failure, Mapping):
+            raise ValueError(
+                f"environment server reply for episode {result.get('episode_id')!r} carries a non-object "
+                f"failure: {failure!r}"
+            )
         projected: Dict[str, Any] = {
             "episode_id": result.get("episode_id"),
             "task_id": result.get("task_id"),
@@ -311,15 +322,21 @@ def _project_native_episode_response(result: Dict[str, Any]) -> Dict[str, Any]:
             projected["_ng_failure_partial_response"] = failure["partial_response"]
         return projected
     native_result = result.get("result")
-    verification = native_result.get("verification") if isinstance(native_result, Mapping) else None
+    if not isinstance(native_result, Mapping):
+        return result
+    verification = native_result.get("verification")
     if isinstance(verification, Mapping):
         if "reward" not in result and "reward" in verification:
             result["reward"] = verification["reward"]
         if MASK_SAMPLE_KEY not in result and MASK_SAMPLE_KEY in verification:
             result[MASK_SAMPLE_KEY] = verification[MASK_SAMPLE_KEY]
+    observations = native_result.get("agent_observations")
+    if isinstance(observations, Mapping) and "ng_agent_observations" not in result:
+        result["ng_agent_observations"] = observations
     return result
 
 
+# Collector-stamped per-rollout keys that travel with an unwrapped native record into `/aggregate_metrics`.
 _AGGREGATION_ROW_KEYS = (
     TASK_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -329,6 +346,7 @@ _AGGREGATION_ROW_KEYS = (
     TASK_SOURCE_KEY_NAME,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_TASKSET_KEY,
+    NG_PERF_KEY,
     MASK_SAMPLE_KEY,
 )
 
@@ -1666,9 +1684,10 @@ class RolloutCollectionHelper(BaseModel):
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-            if _is_native_episode_response(result):
-                # A native environment-server reply: a handled failure becomes a sidecar row (and a
-                # retry candidate), a result gains the top-level reward every reader below expects.
+            if _materialized_taskset(row) is not None and _is_native_episode_response(result):
+                # The row went out as a native episode request, so the reply is a BaseEpisodeResponse:
+                # a handled failure becomes a sidecar row (and a retry candidate), a result gains the
+                # top-level reward every reader below expects.
                 result = _project_native_episode_response(result)
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -1975,6 +1994,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         server_client = self.setup_server_client()
         global_config_dict = server_client.global_config_dict
 
+        available_servers = sorted(
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and ENVIRONMENT_SERVER_TYPE_KEY_NAME in block
+        )
+
         # Group results by the environment server they ran through.
         server_results: Dict[str, List[Dict]] = {}
         server_agents: Dict[str, Optional[str]] = {}
@@ -1985,11 +2010,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 if not agent_name:
                     continue
                 server_name = _environment_server_for_agent(agent_name, global_config_dict)
+            elif server_name not in available_servers:
+                # Shards aggregated under a config that no longer declares the server that produced them.
+                raise ValueError(
+                    f"Result rows are stamped with environment server {server_name!r}, which is not in the "
+                    f"running config (available: {available_servers}); aggregate with the config that produced them"
+                )
             server_results.setdefault(server_name, []).append(_verify_response_for_aggregation(result))
             if agent_name is None:
                 # A native row names no agent; the environment server's own binding does.
                 agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
             server_agents.setdefault(server_name, agent_name)
+
+        # One entry per environment server, labelled by the agent it binds so metric names and
+        # `agent_ref` keep today's shape. Two servers bound to one agent (a native server and its
+        # legacy_agent twin) would otherwise collide, so the second is labelled by its own name.
+        labels: Dict[str, str] = {}
+        for server_name, agent_name in server_agents.items():
+            label = agent_name if agent_name is not None and agent_name not in labels.values() else server_name
+            labels[server_name] = label
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
@@ -2042,9 +2081,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics: List[Dict] = []
         tasks = [
-            # The label stays the agent where one is known, so metric names and the entry's
-            # `agent_ref` keep today's shape; a server that fronts no agent is labelled by its name.
-            _fetch_agent_metrics(server_name, server_agents[server_name] or server_name, results_list)
+            _fetch_agent_metrics(server_name, labels[server_name], results_list)
             for server_name, results_list in server_results.items()
         ]
         for coro in asyncio.as_completed(tasks):

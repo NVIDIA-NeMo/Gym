@@ -4768,9 +4768,9 @@ class TestEnvironmentServerRouting:
     # -- Identity through native failures, retries and aggregation --------------------------------
 
     @staticmethod
-    def _native_identity(task: str, attempt: int = 0) -> dict:
+    def _native_identity(task: str) -> dict:
         return {
-            "episode_id": {"rollout_id": f"0-{task}", "attempt": attempt},
+            "episode_id": {"rollout_id": f"0-{task}", "attempt": 0},
             "task_id": {"taskset": "swe_pro", "task_id": task, "revision": "demo-v1"},
         }
 
@@ -4802,11 +4802,12 @@ class TestEnvironmentServerRouting:
         assert terminal[NG_TERMINAL_KEY] is True
 
     def test_native_result_reply_gains_top_level_reward_and_unwraps_for_aggregation(self) -> None:
+        observations = {"source": "hermes", "records": [], "gaps": []}
         reply = self._native_identity("a") | {
             "failure": None,
             "result": {
                 "verification": {"reward": 1.0, "response": {"usage": {"tokens": 3}}, "mask_sample": False},
-                "agent_observations": None,
+                "agent_observations": observations,
             },
         }
 
@@ -4816,9 +4817,12 @@ class TestEnvironmentServerRouting:
         assert projected["reward"] == 1.0
         assert projected["mask_sample"] is False
         assert projected["result"]["verification"]["reward"] == 1.0
+        # Lifted to the key trajectory capture and the health check read, as the legacy adapter does.
+        assert projected["ng_agent_observations"] is observations
 
         projected[TASK_INDEX_KEY_NAME] = 0
         projected[NG_ENVIRONMENT_SERVER_KEY] = "environment"
+        projected[nemo_gym.rollout_collection.NG_PERF_KEY] = {"total_latency_ms": 12.0}
         entry = nemo_gym.rollout_collection._verify_response_for_aggregation(projected)
         assert entry == {
             "reward": 1.0,
@@ -4826,10 +4830,42 @@ class TestEnvironmentServerRouting:
             "mask_sample": False,
             TASK_INDEX_KEY_NAME: 0,
             NG_ENVIRONMENT_SERVER_KEY: "environment",
+            nemo_gym.rollout_collection.NG_PERF_KEY: {"total_latency_ms": 12.0},
         }
 
         legacy = {TASK_INDEX_KEY_NAME: 0, "reward": 0.5}
         assert nemo_gym.rollout_collection._verify_response_for_aggregation(legacy) is legacy
+
+    def test_native_detection_needs_object_identities_and_an_object_failure(self) -> None:
+        """A legacy reply echoing identity fields as strings is not a native reply; a bad failure is an error."""
+        is_native = nemo_gym.rollout_collection._is_native_episode_response
+        assert is_native(self._native_identity("a") | {"failure": {"message": "x", "terminal": True}})
+        assert not is_native({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
+        assert not is_native(self._native_identity("a") | {"reward": 1.0})
+
+        with pytest.raises(ValueError, match="non-object failure: 'timeout'"):
+            nemo_gym.rollout_collection._project_native_episode_response(
+                self._native_identity("a") | {"result": None, "failure": "timeout"}
+            )
+
+    async def test_legacy_reply_echoing_identity_fields_is_not_projected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Projection is decided by the request the collector sent, not by sniffing the reply."""
+        echoed = {"episode_id": {"rollout_id": "0-0", "attempt": 0}, "task_id": {"taskset": "t", "task_id": "x"}}
+        post = AsyncMock(return_value=FakeResponse(200, echoed | {"reward": 1.0, "failure": {"reason": "echoed"}}))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = self._mixed_batch_config()
+        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}}
+        del flat[ATTEMPT_INDEX_KEY_NAME]
+        flat[TASK_INDEX_KEY_NAME] = 0
+        flat[ROLLOUT_INDEX_KEY_NAME] = 0
+
+        _, result = await next(RolloutCollectionHelper().run_examples([flat]))
+
+        assert result["reward"] == 1.0
+        assert NG_FAILURE_CLASS_KEY not in result
+        assert nemo_gym.rollout_collection._materialized_taskset(flat) is None
 
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -4886,12 +4922,61 @@ class TestEnvironmentServerRouting:
         assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
         assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
 
-    async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    async def test_call_aggregate_metrics_labels_two_servers_of_one_agent_distinctly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Identity persists: the stamped server is on the result, the sidecar row, and the retry."""
+        """A native server and its legacy_agent twin bind the same agent; `gym eval compare` needs distinct labels."""
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, agg.model_dump())))
+        config = _environment_server_config()
+        config["hermes_environment_server"] = {
+            "environment_servers": {
+                "legacy_agent": {"agent_server": {"type": "responses_api_agents", "name": "hermes"}}
+            }
+        }
+        client.global_config_dict = config
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"},
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "hermes"},
+                NG_ENVIRONMENT_SERVER_KEY: "hermes_environment_server",
+            },
+        ]
+        results = [dict(row, reward=1.0) for row in rows]
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            results, rows, tmp_path / "output.jsonl"
+        )
+
+        written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
+        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert written["hermes_environment_server"][AGENT_REF_KEY_NAME] == {"name": "hermes_environment_server"}
+
+    async def test_call_aggregate_metrics_names_a_stamped_server_missing_from_the_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        client = install_fake_server_client(monkeypatch, AsyncMock())
+        client.global_config_dict = _environment_server_config()
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "renamed_environment"}]
+
+        with pytest.raises(
+            ValueError, match="'renamed_environment', which is not in the running config .*'environment'"
+        ):
+            await RolloutCollectionHelper()._call_aggregate_metrics(
+                [dict(rows[0], reward=1.0)], rows, tmp_path / "output.jsonl"
+            )
+
+    async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Identity persists: the stamped server is on the result, the sidecar row, and the retry.
+
+        No global-config fallback is installed: a run with routes must read the merged config from the
+        environment-server client it sets up, so this test fails if that client is not created.
+        """
         global_config = self._mixed_batch_config()
-        empty_global_config.return_value = global_config
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_bytes(
             b"".join(
