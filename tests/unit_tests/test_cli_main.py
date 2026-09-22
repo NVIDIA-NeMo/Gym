@@ -264,6 +264,36 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestEvalExportFlags:
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            '+rollouts_jsonl_fpath="rollouts.jsonl"',
+            '+output_dirpath="atif"',
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
+        }
+
+
 class TestEnvTestResourceServerFlag:
     def test_no_target_refuses_instead_of_testing_every_server(self, monkeypatch: MonkeyPatch) -> None:
         with pytest.raises(SystemExit) as exc_info:
@@ -669,8 +699,10 @@ class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
+            (["--input-format", "atif"], "+input_format=atif"),
             (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),

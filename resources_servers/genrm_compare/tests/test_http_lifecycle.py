@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, Response
 from omegaconf import OmegaConf
 
 import nemo_gym.server_utils as http
+from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
@@ -183,6 +184,12 @@ def assert_judge_failure(status, body, reason):
     assert body["response"]["id"].startswith("policy-")
     assert body["response"]["output"][0]["content"][0]["text"] == "4"
     assert body["instance_config"]["mask_sample"] is True
+    assert body["mask_sample"] is True
+    assert body["failure_kind"] == "judge_failed"
+    assert body["failure_reason"] == body["_ng_failure_judge_error"]
+    assert len(body["failure_reason"]) <= 2000
+    validated = BaseVerifyResponse.model_validate(body)
+    assert validated.mask_sample is True and validated.failure_kind == "judge_failed"
     assert body["reward"] == 0  # Failsafe placeholder; never a scored result.
 
 
@@ -372,7 +379,7 @@ async def test_collector_can_repeat_legacy_task_on_same_live_server(services, tm
     assert services.policy_calls == services.judge_calls == 8
 
 
-async def test_collector_resumes_failed_legacy_group_on_live_server(services, tmp_path, monkeypatch):
+async def test_failed_legacy_collector_requires_fresh_explicit_group(services, tmp_path, monkeypatch):
     import nemo_gym.rollout_collection as collection
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
@@ -401,20 +408,42 @@ async def test_collector_resumes_failed_legacy_group_on_live_server(services, tm
     assert len(failures) == 4
     for row in failures:
         assert_judge_failure(200, row, "judge unavailable")
-    assert not services.resource._verify_cohorts
+    assert all(c.phase == "failed" for c in services.resource._verify_cohorts.values())
 
     services.judge_status = 200
+    judge_calls = services.judge_calls
     config.resume_from_cache = True
+    with pytest.raises(RuntimeError, match="produced a result"):
+        await collection.RolloutCollectionHelper().run_from_config(config)
+    assert not output_path.read_text().strip()
+    assert services.judge_calls == judge_calls
+    retried_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    assert all("fresh _ng_group_id" in row["_ng_failure_judge_error"] for row in retried_failures)
+
+    # Recovery is explicitly coordinated as a fresh complete group, not a legacy-key restart.
+    replacement_input = tmp_path / "replacement.jsonl"
+    replacement_input.write_text(
+        json.dumps(json.loads(input_path.read_text()) | {"_ng_group_id": "replacement", "_ng_group_attempt": 0}) + "\n"
+    )
+    output_path = tmp_path / "replacement-output.jsonl"
+    config = config.model_copy(
+        update={
+            "input_jsonl_fpath": str(replacement_input),
+            "output_jsonl_fpath": str(output_path),
+            "resume_from_cache": False,
+        }
+    )
     await collection.RolloutCollectionHelper().run_from_config(config)
     rows = [json.loads(line) for line in output_path.read_text().splitlines()]
     assert len(rows) == 4 and all(row["reward"] == 3.0 for row in rows)
     assert {r["response"]["id"] for r in rows}.isdisjoint(r["response"]["id"] for r in failures)
     assert all("_ng_failure_class" not in row for row in rows)
-    assert not services.resource._verify_cohorts
-    assert services.policy_calls == 8
+    assert all(row["_ng_group_id"] == "replacement" for row in rows)
+    assert services.policy_calls == 12
     judge_calls = services.judge_calls
+    config.resume_from_cache = True
     await collection.RolloutCollectionHelper().run_from_config(config)
-    assert services.policy_calls == 8 and services.judge_calls == judge_calls
+    assert services.policy_calls == 12 and services.judge_calls == judge_calls
     assert [json.loads(line) for line in output_path.read_text().splitlines()] == rows
 
 

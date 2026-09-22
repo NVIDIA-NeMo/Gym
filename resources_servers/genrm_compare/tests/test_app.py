@@ -852,7 +852,7 @@ class TestGenRMCompareResourcesServer:
             await asyncio.wait_for(waiter, timeout=1.0)
 
         assert error.value.status_code == 503
-        assert not server._verify_cohorts
+        assert server._verify_cohorts[cohort.key] is cohort
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
         assert all(member.body is None and not member.waiters for member in cohort.members.values())
@@ -893,7 +893,9 @@ class TestGenRMCompareResourcesServer:
             isinstance(result, HTTPException) and result.status_code == 503 and "judge failed" in str(result.detail)
             for result in results
         )
-        assert not server._verify_cohorts
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert cohort.phase == "failed"
+        assert all(member.body is None and not member.waiters for member in cohort.members.values())
 
     async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -919,7 +921,9 @@ class TestGenRMCompareResourcesServer:
             for result in results
         )
         run_compare.assert_not_awaited()
-        assert not server._verify_cohorts
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert cohort.phase == "failed"
+        assert all(member.body is None and not member.waiters for member in cohort.members.values())
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})

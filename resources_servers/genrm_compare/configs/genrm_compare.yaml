@@ -35,9 +35,9 @@ genrm_compare_resources_server:
       # starts only when all members are present. Increase for long tool rollouts.
       cohort_collection_timeout_s: 1800
       cohort_evaluation_timeout_s: 1800
-      # Includes connection retries for each judge call. Size for queue wait plus
-      # generation time: 16384 tokens at 40 tokens/s already exceeds 300 seconds.
-      judge_request_timeout_s: 300
+      # Includes connection retries and queue wait. A 24576-token judge answer
+      # takes about 614 seconds at 40 tokens/s; allow the full evaluation budget.
+      judge_request_timeout_s: 1800
 
       # Retain compact rewards/digests for idempotent late retries. The cache is also
       # bounded, so disabling the TTL does not make terminal state unbounded.

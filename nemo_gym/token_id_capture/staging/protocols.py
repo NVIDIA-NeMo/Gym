@@ -79,15 +79,19 @@ class CaptureAdapter(Protocol):
         """
         ...
 
-    def extract_prompt_ids(self, response_payload: dict[str, Any]) -> list[int]:
-        """Return the exact prompt token IDs used for generation."""
+    def extract_prompt_ids(self, response_payload: Any) -> list[int]:
+        """Return the exact prompt token IDs used for generation.
+
+        ``response_payload`` is engine-native: a chat completion dict for
+        vLLM, an offloaded payload object for Megatron Inference.
+        """
         ...
 
-    def extract_generation(self, response_payload: dict[str, Any]) -> tuple[list[int], list[float]]:
+    def extract_generation(self, response_payload: Any) -> tuple[list[int], list[float]]:
         """Return exact generated token IDs and selected-token log probabilities."""
         ...
 
-    def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
+    def extract_extras(self, response_payload: Any) -> dict[str, Any] | None:
         """Return optional versioned engine-native per-token material."""
         ...
 

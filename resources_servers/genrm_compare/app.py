@@ -164,7 +164,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     num_rollouts_per_prompt: int = Field(default=1, ge=1)
     cohort_collection_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
     cohort_evaluation_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
-    judge_request_timeout_s: float = Field(default=300.0, gt=0, allow_inf_nan=False)
+    judge_request_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
     cohort_result_ttl_s: Optional[float] = Field(default=3600.0, gt=0, allow_inf_nan=False)
     max_terminal_cohorts: int = Field(default=4096, gt=0)
 
@@ -420,14 +420,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     @staticmethod
     def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
         message = cohort.failure or "GenRM cohort evaluation failed"
+        if cohort.group_id is None:
+            message += (
+                " This legacy group has failed; retry requires a fresh _ng_group_id shared by every member."
+                " Reusing the task/prompt key could mix delayed answers with a replacement group."
+            )
         if cohort.failure_kind == "judge":
-            # judge_failsafe serializes this request with its original answer.
-            # NeMo-RL consumes the nested mask; the collector consumes judge_failed.
-            instance_config = (body.model_extra or {}).get("instance_config")
-            body.instance_config = {
-                **(instance_config if isinstance(instance_config, dict) else {}),
-                "mask_sample": True,
-            }
+            # The shared failsafe preserves the answer and sets both masking contracts.
             raise JudgeError(message)
         raise HTTPException(status_code=503, detail=message)
 
@@ -703,10 +702,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         waiter.set_exception(CohortEvaluationError(message))
                 member.body = None
                 member.waiters.clear()
-            # Legacy callers regenerate answers without a new group identity.
-            # Retire this failed instance without removing a replacement cohort.
-            if cohort.group_id is None and self._verify_cohorts.get(cohort.key) is cohort:
-                self._verify_cohorts.pop(cohort.key, None)
+            # Keep failed legacy groups fenced too: delayed old members must not
+            # join a replacement under the same key. Recovery needs an explicit ID.
             logger.warning(
                 "GenRM cohort disposition=failed key=%r attempt=%s members=%s kind=%s reason=%r",
                 cohort.key[:160],

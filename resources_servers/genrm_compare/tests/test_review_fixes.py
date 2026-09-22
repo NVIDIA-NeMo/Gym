@@ -25,6 +25,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 import resources_servers.genrm_compare.app as genrm
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
@@ -284,10 +285,12 @@ async def test_judge_failure_preserves_existing_instance_config_and_masks_all_me
     server._run_compare = AsyncMock(side_effect=genrm.JudgeError("judge offline"))
     bodies = [member(i) for i in range(2)]
     bodies[0].instance_config = {"task": "keep", "mask_sample": False}
-    results = await asyncio.gather(*(server.verify(body) for body in bodies), return_exceptions=True)
-    assert all(isinstance(result, genrm.JudgeError) for result in results)
-    assert bodies[0].instance_config == {"task": "keep", "mask_sample": True}
-    assert bodies[1].instance_config == {"mask_sample": True}
+    results = await asyncio.gather(*(judge_failsafe(server.verify)(body) for body in bodies))
+    rows = [json.loads(result.body) for result in results]
+    assert rows[0]["instance_config"] == {"task": "keep", "mask_sample": True}
+    assert rows[1]["instance_config"] == {"mask_sample": True}
+    assert all(row["mask_sample"] is True and row["failure_kind"] == "judge_failed" for row in rows)
+    assert bodies[0].instance_config == {"task": "keep", "mask_sample": False}
 
 
 async def test_empty_batch_has_no_rewards(server):

@@ -198,23 +198,29 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
     assert retired.phase == "failed" and not retired.rewards
 
 
-async def test_failed_legacy_group_restarts_and_ignores_late_completion(server):
+async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_member(server):
     server.config.cohort_collection_timeout_s = 0.02
     first = asyncio.create_task(server.verify(member(0, group=None)))
     await asyncio.sleep(0)
     old = next(iter(server._verify_cohorts.values()))
     with pytest.raises(HTTPException, match="did not collect"):
         await first
-    assert not server._verify_cohorts
+    assert server._verify_cohorts[old.key] is old and old.phase == "failed"
     assert all(m.body is None and not m.waiters for m in old.members.values())
 
     server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
-    retry = asyncio.create_task(server.verify(member(0, group=None, response_id="new-answer")))
-    await asyncio.sleep(0)
-    replacement = next(iter(server._verify_cohorts.values()))
+    results = await asyncio.gather(
+        server.verify(member(0, group=None, response_id="new-0")),
+        server.verify(member(1, group=None, response_id="old-1")),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
+    assert all("fresh _ng_group_id" in r.detail for r in results)
+    server._run_single_comparison.assert_not_awaited()
     await server._publish_verify_cohort(old.key, old, {0: 99.0, 1: 99.0})
-    assert replacement.phase == "collecting" and not replacement.rewards
-    assert next(iter(server._verify_cohorts.values())) is replacement
-    second = await server.verify(member(1, group=None))
-    assert second.reward == (await retry).reward == 3.0
-    assert not server._verify_cohorts
+    assert old.phase == "failed" and not old.rewards
+    replacement = await asyncio.gather(
+        *(server.verify(member(i, group="fresh", response_id=f"new-{i}")) for i in range(2))
+    )
+    assert [r.reward for r in replacement] == [3.0, 3.0]
+    assert [r.response.id for r in replacement] == ["new-0", "new-1"]
