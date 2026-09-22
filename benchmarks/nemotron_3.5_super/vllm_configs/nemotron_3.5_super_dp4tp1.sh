@@ -1,7 +1,6 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
-    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
@@ -34,9 +33,9 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
-    --data-parallel-size 1
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --data-parallel-size 4
+    --data-parallel-size-local 4
+    --tensor-parallel-size 1
     --api-server-count 1
 )
 VLLM_PREFILL_ARGS=(
