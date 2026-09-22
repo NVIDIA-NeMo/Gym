@@ -1,88 +1,75 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Indic AIME 2026
 
-This benchmark evaluates the translated
-[`anushakamathofficial/indic_aime_2026`](https://huggingface.co/datasets/anushakamathofficial/indic_aime_2026)
-dataset with the prompt, format-repair flow, and deterministic answer parser from
-[MathArena AIME 2026](https://github.com/eth-sri/matharena/tree/b89f2f0ad64ced464d2944f08c3c0aaeaa0df64b).
-It uses no model judge.
+Translated AIME 2026 using the same evaluation components as Gym's
+[`aime26`](../../aime26/config.yaml): the shared generic math prompt,
+`simple_agent`, and `math_with_judge` resource with the judge disabled by default.
+Only the problem text changes across languages. Each attempt generates one answer;
+there is no formatting-repair call or separate Indic answer parser.
 
-## Dataset
+The defaults are four independently seeded attempts, a 120,000-token output limit,
+thinking enabled, temperature 1.0, top-p 0.95, and top-k 64. Model-specific sampling
+overrides must be identical for the English and translated runs.
 
-The adapter pins both sources to immutable revisions:
+## Metrics
 
-| Source | Revision | Split |
+Use Gym's `pass@4/symbolic_accuracy` for the fraction of questions with at least
+one correct answer in four attempts. `pass@1[avg-of-4]/symbolic_accuracy` is the
+average accuracy across those attempts. Both use a 0–100 scale. Extraction,
+symbolic verification, majority metrics, and aggregation come directly from the
+English AIME resource. Check rollout coverage before reporting a complete score.
+Run each language separately for per-language results.
+
+This replaces the earlier MathArena-specific prompt, format repair, parser, and
+`matharena_aime/*` metrics. Previously prepared rows and results are not comparable
+to this profile. Re-prepare with caching disabled and rerun evaluations.
+
+## Dataset and alignment
+
+| Source | Pinned revision | Split |
 | --- | --- | --- |
 | `anushakamathofficial/indic_aime_2026` | `938c1c90c23b25ca0f43d1bfc5103b332e8c033e` | `train` |
 | `MathArena/aime_2026` | `d2de22f3c656b4f56cf8981212186377d1e23bc3` | `train` |
 
-The publisher calls the dataset split `train`; Gym uses it only for benchmark
-evaluation. The default selection has 358 questions across Bengali, Gujarati,
-Hindi, Kannada, Malayalam, Marathi, Nepali, Odia, Punjabi, Tamil, Telugu, and
-Urdu. Odia lacks question 12 and Punjabi lacks question 15. English is available
-only when explicitly selected. The source license is CC-BY-NC-SA-4.0.
+Preparation validates English text and answers against the canonical source and
+checks translated problem IDs and answers. English is selected explicitly with
+`languages: [en]`. The default 12 Indic languages contain 358 questions: Odia lacks
+question 12 and Punjabi lacks question 15. Missing translations are reported in
+the companion manifest and never replaced with English. Use the same question-ID
+subset in each language when comparing paired scores. Translation quality flags
+remain available for review. The source dataset license is CC-BY-NC-SA-4.0.
 
-Preparation validates every translated problem ID and answer against the pinned
-MathArena dataset. It writes a companion manifest with source hashes, selected
-languages, coverage, and prompt and adapter hashes. Missing translations are
-reported and are never replaced with English.
+## Comparable English and translated runs
 
-## Protocol
-
-Each question receives four independently seeded attempts. The prompt is the
-MathArena boxing and integer-range instruction followed by the translated
-problem. If strict parsing cannot find an answer, the agent makes one additional
-call with MathArena's formatting-repair prompt and the full conversation. A
-parseable but incorrect answer is not retried.
-
-The final response is graded with MathArena's non-strict answer extraction and
-symbolic comparison. The primary metric is `pass@4/accuracy`: a question counts
-as correct when at least one of its four attempts is correct. Values use Gym's
-0–100 percentage scale. Per-language metrics are reported as
-`matharena_aime/language/<code>/pass@4/accuracy`, and
-`matharena_aime/macro_pass@4/accuracy` weights languages equally.
-
-Incomplete repeat coverage, parser failures, warnings, or truncated responses
-make the result provisional. The server retains observed metrics and detailed
-coverage counters but withholds the completed headline metric until all selected
-measurements are present and review-free.
-
-Defaults are four attempts, distinct repeat seeds, a 120,000-token output limit,
-thinking enabled, temperature 1.0, top-p 0.95, and top-k 64. Override top-k when
-the selected model requires a different sampling profile. A formatting repair is
-a second call with the same sampling parameters and seed.
-
-## Usage
-
-From the repository root:
+Run both through this configuration to keep inference settings identical. The
+`en` source is checked against canonical English AIME, and the shared prompt and
+verifier are exactly those used by `benchmarks/aime26`.
 
 ```bash
-# Prepare Hindi. Omit --languages to prepare all 12 default languages.
-python -m benchmarks.indic.aime_2026.prepare --languages hi
+for language in en hi; do
+  gym eval prepare --benchmark indic/aime_2026 \
+    "+prepare_script_args={languages:[$language]}" \
+    +use_cached_prepared_benchmarks=false
 
-gym eval run \
-  --benchmark indic/aime_2026 \
-  --model-type vllm_model \
-  --model-url http://POLICY_HOST:PORT/v1 \
-  --model MODEL_NAME \
-  --model-api-key dummy \
-  --split benchmark \
-  --output results/indic-aime-2026.jsonl
+  gym eval run --benchmark indic/aime_2026 \
+    --model-type vllm_model \
+    --model MODEL_NAME \
+    --model-url http://HOST:PORT/v1 \
+    --model-api-key dummy \
+    --split benchmark \
+    --output "results/aime_2026/$language/rollouts.jsonl"
+done
 ```
 
-The vLLM endpoint must use the reasoning parser appropriate for the model. Gym
-adds repeat seeds 0, 1, 2, and 3 by default; do not add a fixed model-level seed.
-Downloaded source data and prepared JSONL files remain ignored runtime artifacts.
-
-Run the focused validation with:
+Use the same model/tokenizer revision and endpoint settings for both runs,
+including the reasoning parser appropriate for the model. Gym supplies distinct
+repeat seeds; do not pin a single seed at the model level. If using
+`--benchmark aime26` directly, explicitly apply the same repeats, seed handling,
+token limit, thinking, and sampling settings as this configuration.
 
 ```bash
-pytest --import-mode=importlib \
-  benchmarks/indic/aime_2026/tests \
-  responses_api_agents/matharena_aime/tests \
-  resources_servers/matharena_aime/tests
+pytest --import-mode=importlib benchmarks/indic/aime_2026/tests
+gym env test --resources-server math_with_judge
 ```

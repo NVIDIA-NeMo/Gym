@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 config_paths:
-  - resources_servers/matharena_aime/configs/matharena_aime.yaml
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
-# Native Gym supplies distinct, reproducible seeds to the four independent samples.
 num_repeats: 4
 num_repeats_add_seed: true
 responses_create_params:
@@ -26,14 +25,20 @@ policy_model:
         top_p: 0.95
         top_k: 64
 
-matharena_aime_agent:
+indic_aime_2026_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+indic_aime_2026_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
   responses_api_agents:
-    matharena_aime:
+    simple_agent:
+      resources_server:
+        name: indic_aime_2026_math_with_judge_resources_server
       datasets:
         - name: indic_aime_2026
           type: benchmark
           jsonl_fpath: benchmarks/indic/aime_2026/data/aime_2026_benchmark.jsonl
           prepare_script: benchmarks/indic/aime_2026/prepare.py
-          prompt_config: benchmarks/indic/aime_2026/prompts/default.yaml
+          prompt_config: benchmarks/prompts/generic/math.yaml
           num_repeats: 1
           license: CC-BY-NC-SA-4.0

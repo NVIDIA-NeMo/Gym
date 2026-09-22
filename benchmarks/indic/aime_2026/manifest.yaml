@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: indic/aime_2026
-version: 1.0.0
+version: 2.0.0
 experimental: true
 kind: benchmark
-integration_profile: custom-gym-agent-loop
+integration_profile: custom-gym-verifier
 domain: math
-description: Translated AIME 2026 with pinned MathArena prompting, answer extraction, format repair, and pass@4 scoring.
+description: Translated AIME 2026 using the English AIME prompt, simple agent, and math verifier.
 modality: text
 licensing: CC-BY-NC-SA-4.0
 authors: [NVIDIA NeMo Gym contributors]
@@ -14,17 +14,17 @@ reward:
   range: [0, 1]
   higher_is_better: true
 determinism: stochastic
-resources_server: matharena_aime
-agent_server: matharena_aime
+resources_server: math_with_judge
+agent_server: simple_agent
 model_server: policy_model
 datasets:
   - name: indic_aime_2026
     type: benchmark
     jsonl_fpath: benchmarks/indic/aime_2026/data/aime_2026_benchmark.jsonl
     prepare_script: benchmarks/indic/aime_2026/prepare.py
-    prompt_config: benchmarks/indic/aime_2026/prompts/default.yaml
+    prompt_config: benchmarks/prompts/generic/math.yaml
     num_repeats: 1
-standard_prompt_config: benchmarks/indic/aime_2026/prompts/default.yaml
+standard_prompt_config: benchmarks/prompts/generic/math.yaml
 canonical_split: train
 session_model: episode
 state: none
