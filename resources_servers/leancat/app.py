@@ -59,6 +59,7 @@ from nemo_gym.reward_profile import (
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.utils import cpu_cap_env
 from resources_servers.leancat.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
@@ -215,14 +216,21 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             default_metadata = resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict())
             sandbox_config = dict(self.config.sandbox_config)
 
+            resources = SandboxResources.from_mapping(sandbox_config.get("resources", {}))
+            env = dict(sandbox_config.get("env", {}))
+            if sandbox_config.get("derive_cpu_env", True):
+                # `lake` sizes its worker pool from the host core count, which leaks through on
+                # clusters without LXCFS. Explicit env keys win over the derived caps.
+                env = cpu_cap_env(resources.cpu) | env
+
             spec = SandboxSpec(
                 image=sandbox_config.get("image"),
                 ttl_s=sandbox_config.get("ttl_s"),
                 ready_timeout_s=sandbox_config.get("ready_timeout_s"),
                 workdir=self.config.lean_project_dir,
-                env=dict(sandbox_config.get("env", {})),
+                env=env,
                 metadata=default_metadata | sandbox_config.get("metadata", {}) | {"nemo_gym_agent": self.config.name},
-                resources=SandboxResources.from_mapping(sandbox_config.get("resources", {})),
+                resources=resources,
                 entrypoint=sandbox_config.get("entrypoint"),
                 provider_options=sandbox_config.get("provider_options", {}),
             )
