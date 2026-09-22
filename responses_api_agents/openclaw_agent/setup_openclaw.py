@@ -19,6 +19,10 @@ The module guarantees that ``openclaw`` is resolvable through ``PATH``. When it
 is missing it is installed with ``npm install -g``; when ``npm`` itself is
 missing a private Node.js toolchain is unpacked next to this file first.
 
+The toolchain is downloaded from nodejs.org for the running platform: Linux,
+macOS and Windows, on x64 and arm64. Anything else raises, since nodejs.org
+publishes no build for it.
+
 Versions are pinned for reproducibility and can be overridden per process with
 environment variables:
 
@@ -47,11 +51,14 @@ Examples:
 
 import logging
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
 
@@ -75,6 +82,12 @@ _NPM_INSTALL_ATTEMPTS = 3
 _LOCAL_PREFIX = Path(__file__).parent / ".openclaw_node"
 _USER_LOCAL_BIN = Path.home() / ".local" / "bin"
 
+#: ``sys.platform`` value -> the OS token nodejs.org uses in its archive names.
+_NODE_OS = {"linux": "linux", "darwin": "darwin", "win32": "win", "cygwin": "win"}
+
+#: Lowercased ``platform.machine()`` spelling -> the arch token nodejs.org uses.
+_NODE_ARCH = {"x86_64": "x64", "amd64": "x64", "x64": "x64", "aarch64": "arm64", "arm64": "arm64"}
+
 
 def resolve_openclaw_version(version: str | None = None) -> str:
     """Return the ``openclaw`` version to install.
@@ -90,8 +103,45 @@ def resolve_node_version() -> str:
     return os.environ.get(NODE_VERSION_ENV) or DEFAULT_NODE_VERSION
 
 
+def _node_platform() -> tuple[str, str]:
+    """Return the ``(os, arch)`` tokens nodejs.org uses for the running interpreter.
+
+    Raises:
+        RuntimeError: the OS or CPU architecture has no published Node.js build.
+    """
+    node_os = _NODE_OS.get(sys.platform)
+    if node_os is None:
+        raise RuntimeError(
+            f"no Node.js build is published for platform {sys.platform!r}; install Node.js manually "
+            f"and put 'npm' on PATH"
+        )
+    machine = platform.machine().lower()
+    node_arch = _NODE_ARCH.get(machine)
+    if node_arch is None:
+        raise RuntimeError(
+            f"no Node.js build is published for architecture {platform.machine()!r}; install Node.js "
+            f"manually and put 'npm' on PATH"
+        )
+    return node_os, node_arch
+
+
 def _node_dist_url(node_version: str) -> str:
-    return f"https://nodejs.org/dist/v{node_version}/node-v{node_version}-linux-x64.tar.xz"
+    """Return the nodejs.org download URL of *node_version* for this platform.
+
+    Windows builds ship as ``.zip``; every other platform ships ``.tar.xz``.
+    """
+    node_os, node_arch = _node_platform()
+    suffix = ".zip" if node_os == "win" else ".tar.xz"
+    return f"https://nodejs.org/dist/v{node_version}/node-v{node_version}-{node_os}-{node_arch}{suffix}"
+
+
+def _node_bin_dir(prefix: Path) -> Path:
+    """Return the directory under *prefix* that holds the ``node``/``npm`` launchers.
+
+    Windows distributions place them at the root of the tree; every other
+    platform uses a ``bin/`` subdirectory.
+    """
+    return prefix if _node_platform()[0] == "win" else prefix / "bin"
 
 
 def _prepend_path(bin_dir: Path | str) -> None:
@@ -105,7 +155,7 @@ def _openclaw_on_path() -> str | None:
 
 def _adopt_user_local_bin() -> bool:
     """Add ``~/.local/bin`` to ``PATH`` when it already holds ``openclaw``."""
-    if not (_USER_LOCAL_BIN / _OPENCLAW_PKG).is_file():
+    if not shutil.which(_OPENCLAW_PKG, path=str(_USER_LOCAL_BIN)):
         return False
     _prepend_path(_USER_LOCAL_BIN)
     return True
@@ -117,7 +167,7 @@ def _adopt_npm_global_bin(npm_bin: str) -> bool:
     prefix = completed.stdout.strip()
     if not prefix:
         return False
-    global_bin = Path(prefix) / "bin"
+    global_bin = _node_bin_dir(Path(prefix))
     if not global_bin.is_dir():
         return False
     _prepend_path(global_bin)
@@ -134,39 +184,53 @@ def _npm_install(npm_bin: str, version: str) -> None:
         except subprocess.CalledProcessError:
             if attempt == _NPM_INSTALL_ATTEMPTS:
                 raise
-            LOG.warning(
-                "npm install %s failed (attempt %d/%d), retrying", pkg, attempt, _NPM_INSTALL_ATTEMPTS
-            )
+            LOG.warning("npm install %s failed (attempt %d/%d), retrying", pkg, attempt, _NPM_INSTALL_ATTEMPTS)
             time.sleep(2 * attempt)
 
 
-def _download_node_tarball(node_version: str, dest: Path) -> None:
-    LOG.info("downloading Node.js %s", node_version)
-    urllib.request.urlretrieve(_node_dist_url(node_version), dest)  # noqa: S310
+def _download_node_archive(url: str, dest: Path) -> None:
+    LOG.info("downloading %s", url)
+    urllib.request.urlretrieve(url, dest)  # noqa: S310
+
+
+def _extract_node_archive(archive: Path, prefix: Path) -> None:
+    """Unpack *archive* into *prefix*.
+
+    ``zipfile`` drops the executable bit, but only Windows ships a zip and there
+    the launchers are ``.exe``/``.cmd``, so the mode does not matter.
+    """
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(prefix)
+    else:
+        with tarfile.open(archive, "r:xz") as tf:
+            tf.extractall(prefix, filter="data")
 
 
 def _flatten_extracted_node(prefix: Path) -> None:
-    """Hoist the ``node-vX.Y.Z-linux-x64/`` payload directly into *prefix*."""
-    nested = next(p for p in prefix.iterdir() if p.is_dir() and p.name.startswith("node-"))
+    """Hoist the ``node-vX.Y.Z-<os>-<arch>/`` payload directly into *prefix*."""
+    nested = next((p for p in prefix.iterdir() if p.is_dir() and p.name.startswith("node-")), None)
+    if nested is None:
+        raise RuntimeError(f"Node.js archive did not contain a 'node-*' directory under {prefix}")
     for item in nested.iterdir():
         item.rename(prefix / item.name)
     nested.rmdir()
 
 
 def _install_node_locally(node_version: str) -> Path:
-    """Unpack a private Node.js toolchain and return its ``bin`` directory."""
-    bin_dir = _LOCAL_PREFIX / "bin"
-    if (bin_dir / "node").is_file():
+    """Unpack a private Node.js toolchain and return the directory holding ``node``."""
+    bin_dir = _node_bin_dir(_LOCAL_PREFIX)
+    if shutil.which("node", path=str(bin_dir)):
         return bin_dir
 
     _LOCAL_PREFIX.mkdir(parents=True, exist_ok=True)
-    tarball = _LOCAL_PREFIX / "node.tar.xz"
+    url = _node_dist_url(node_version)
+    archive = _LOCAL_PREFIX / url.rsplit("/", 1)[-1]
     try:
-        _download_node_tarball(node_version, tarball)
-        with tarfile.open(tarball, "r:xz") as tf:
-            tf.extractall(_LOCAL_PREFIX, filter="data")
+        _download_node_archive(url, archive)
+        _extract_node_archive(archive, _LOCAL_PREFIX)
     finally:
-        tarball.unlink(missing_ok=True)
+        archive.unlink(missing_ok=True)
 
     _flatten_extracted_node(_LOCAL_PREFIX)
     return bin_dir

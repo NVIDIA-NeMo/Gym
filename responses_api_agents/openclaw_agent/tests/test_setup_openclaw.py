@@ -1,0 +1,162 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import tarfile
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from responses_api_agents.openclaw_agent import setup_openclaw
+
+
+# Every (sys.platform, platform.machine()) pair we claim to support, mapped to the
+# archive nodejs.org actually publishes. Verified against
+# https://nodejs.org/dist/v24.21.0/SHASUMS256.txt.
+SUPPORTED = [
+    ("linux", "x86_64", "node-v24.21.0-linux-x64.tar.xz"),
+    ("linux", "aarch64", "node-v24.21.0-linux-arm64.tar.xz"),
+    ("darwin", "x86_64", "node-v24.21.0-darwin-x64.tar.xz"),
+    ("darwin", "arm64", "node-v24.21.0-darwin-arm64.tar.xz"),
+    ("win32", "AMD64", "node-v24.21.0-win-x64.zip"),
+    ("win32", "ARM64", "node-v24.21.0-win-arm64.zip"),
+]
+
+
+@pytest.fixture
+def fake_platform(monkeypatch):
+    """Pretend to run on an arbitrary (sys.platform, machine) pair."""
+
+    def _set(sys_platform: str, machine: str) -> None:
+        monkeypatch.setattr(setup_openclaw.sys, "platform", sys_platform)
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: machine)
+
+    return _set
+
+
+class TestNodeDistUrl:
+    @pytest.mark.parametrize(("sys_platform", "machine", "archive"), SUPPORTED)
+    def test_builds_url_published_by_nodejs_org(self, fake_platform, sys_platform, machine, archive):
+        fake_platform(sys_platform, machine)
+        assert setup_openclaw._node_dist_url("24.21.0") == f"https://nodejs.org/dist/v24.21.0/{archive}"
+
+    def test_windows_uses_zip_and_others_use_tar_xz(self, fake_platform):
+        fake_platform("win32", "AMD64")
+        assert setup_openclaw._node_dist_url("24.21.0").endswith(".zip")
+        fake_platform("linux", "x86_64")
+        assert setup_openclaw._node_dist_url("24.21.0").endswith(".tar.xz")
+
+    def test_machine_spelling_is_case_insensitive(self, fake_platform):
+        fake_platform("linux", "X86_64")
+        assert "-linux-x64." in setup_openclaw._node_dist_url("24.21.0")
+
+    def test_version_is_interpolated(self, fake_platform):
+        fake_platform("linux", "x86_64")
+        assert setup_openclaw._node_dist_url("26.1.0") == (
+            "https://nodejs.org/dist/v26.1.0/node-v26.1.0-linux-x64.tar.xz"
+        )
+
+    def test_unsupported_os_raises_actionable_error(self, fake_platform):
+        fake_platform("freebsd14", "x86_64")
+        with pytest.raises(RuntimeError, match="freebsd14"):
+            setup_openclaw._node_dist_url("24.21.0")
+
+    def test_unsupported_arch_raises_actionable_error(self, fake_platform):
+        fake_platform("linux", "riscv64")
+        with pytest.raises(RuntimeError, match="riscv64"):
+            setup_openclaw._node_dist_url("24.21.0")
+
+
+class TestNodeBinDir:
+    def test_windows_launchers_sit_at_the_root(self, fake_platform):
+        """The win-x64 zip has node.exe/npm.cmd at the top level, with no bin/."""
+        fake_platform("win32", "AMD64")
+        assert setup_openclaw._node_bin_dir(Path("/prefix")) == Path("/prefix")
+
+    @pytest.mark.parametrize(("sys_platform", "machine"), [("linux", "x86_64"), ("darwin", "arm64")])
+    def test_posix_uses_bin_subdirectory(self, fake_platform, sys_platform, machine):
+        fake_platform(sys_platform, machine)
+        assert setup_openclaw._node_bin_dir(Path("/prefix")) == Path("/prefix/bin")
+
+
+class TestExtractNodeArchive:
+    def test_extracts_tar_xz(self, tmp_path):
+        payload = tmp_path / "node-v24.21.0-linux-x64" / "bin"
+        payload.mkdir(parents=True)
+        (payload / "node").write_text("#!/bin/sh\n")
+        archive = tmp_path / "node.tar.xz"
+        with tarfile.open(archive, "w:xz") as tf:
+            tf.add(payload.parent, arcname="node-v24.21.0-linux-x64")
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        setup_openclaw._extract_node_archive(archive, dest)
+
+        assert (dest / "node-v24.21.0-linux-x64" / "bin" / "node").is_file()
+
+    def test_extracts_zip(self, tmp_path):
+        archive = tmp_path / "node.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("node-v24.21.0-win-x64/node.exe", "binary")
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        setup_openclaw._extract_node_archive(archive, dest)
+
+        assert (dest / "node-v24.21.0-win-x64" / "node.exe").read_text() == "binary"
+
+
+class TestFlattenExtractedNode:
+    def test_hoists_payload_into_prefix(self, tmp_path):
+        nested = tmp_path / "node-v24.21.0-darwin-arm64" / "bin"
+        nested.mkdir(parents=True)
+        (nested / "node").write_text("x")
+
+        setup_openclaw._flatten_extracted_node(tmp_path)
+
+        assert (tmp_path / "bin" / "node").is_file()
+        assert not (tmp_path / "node-v24.21.0-darwin-arm64").exists()
+
+    def test_raises_when_archive_layout_is_unexpected(self, tmp_path):
+        (tmp_path / "unrelated").mkdir()
+        with pytest.raises(RuntimeError, match="node-\\*"):
+            setup_openclaw._flatten_extracted_node(tmp_path)
+
+
+class TestResolveVersions:
+    def test_config_value_is_used_when_env_is_unset(self, monkeypatch):
+        monkeypatch.delenv(setup_openclaw.OPENCLAW_VERSION_ENV, raising=False)
+        assert setup_openclaw.resolve_openclaw_version("2026.6.11") == "2026.6.11"
+
+    def test_defaults_when_nothing_is_supplied(self, monkeypatch):
+        monkeypatch.delenv(setup_openclaw.OPENCLAW_VERSION_ENV, raising=False)
+        monkeypatch.delenv(setup_openclaw.NODE_VERSION_ENV, raising=False)
+        assert setup_openclaw.resolve_openclaw_version(None) == setup_openclaw.DEFAULT_OPENCLAW_VERSION
+        assert setup_openclaw.resolve_node_version() == setup_openclaw.DEFAULT_NODE_VERSION
+
+    def test_env_overrides_config(self, monkeypatch):
+        monkeypatch.setenv(setup_openclaw.OPENCLAW_VERSION_ENV, "2026.9.5")
+        monkeypatch.setenv(setup_openclaw.NODE_VERSION_ENV, "26.1.0")
+        assert setup_openclaw.resolve_openclaw_version("2026.6.11") == "2026.9.5"
+        assert setup_openclaw.resolve_node_version() == "26.1.0"
+
+    def test_empty_env_falls_back_to_config(self, monkeypatch):
+        monkeypatch.setenv(setup_openclaw.OPENCLAW_VERSION_ENV, "")
+        assert setup_openclaw.resolve_openclaw_version("2026.6.11") == "2026.6.11"
+
+    def test_default_node_satisfies_default_openclaw_engine_range(self):
+        """openclaw 2026.9.4 declares engines.node '>=24.16.0 <25 || >=26.1.0'."""
+        major, minor, _ = (int(p) for p in setup_openclaw.DEFAULT_NODE_VERSION.split("."))
+        assert (major == 24 and minor >= 16) or (major, minor) >= (26, 1)

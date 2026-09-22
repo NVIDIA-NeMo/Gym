@@ -63,6 +63,9 @@ provider configuration is unchanged.
 - `openclaw_version`: npm version to pin on install; overridden by the
   `OPENCLAW_VERSION` env var, and falls back to `setup_openclaw.DEFAULT_OPENCLAW_VERSION`
 - `OPENCLAW_NODE_VERSION` (env only): Node.js version fetched when `npm` is absent
-  (default `24.21.0`, the newest release of the Node 24 LTS line OpenClaw supports)
+  (default `24.21.0`, the newest release of the Node 24 LTS line OpenClaw supports).
+  The build is picked for the host platform — Linux, macOS and Windows on x64 and
+  arm64. Other platforms raise, since nodejs.org publishes no build for them;
+  install Node.js yourself and put `npm` on `PATH`.
 
 See `configs/openclaw_agent.yaml`.
