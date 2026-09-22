@@ -18,25 +18,32 @@ import copy
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 from asyncio import Semaphore
+from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 from time import time
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from pydantic import ConfigDict, Field
+from fastapi import HTTPException, Request
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -47,6 +54,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import (
@@ -58,12 +66,17 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
+from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_SANDBOX_SESSION_KEY = "nemo_gym_pi_sandbox_session"
 
 
 def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
@@ -424,6 +437,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     pi_version: Optional[str] = None
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
+    session_close_timeout_seconds: float = Field(default=60, gt=0)
 
     @property
     def command_parts(self) -> list[str]:
@@ -449,6 +464,246 @@ class PiAgent(SimpleResponsesAPIAgent):
     config: PiAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _sandbox_sessions: dict[str, PiSandboxSession] = PrivateAttr(default_factory=dict)
+    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse]] = PrivateAttr(
+        default_factory=OrderedDict
+    )
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Borrow the Resources-owned task sandbox and install a pinned Pi runtime inside it."""
+        if request.session.get(_SANDBOX_SESSION_KEY) in self._sandbox_sessions:
+            raise HTTPException(409, "Pi session already exists")
+        if self.config.num_workers not in (None, 1):
+            raise HTTPException(422, "Native Pi sessions require num_workers=1")
+        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+            raise HTTPException(422, "Native Pi requires direct, Resources-owned SandboxAccess")
+        if not body.sandbox_access.workdir.startswith("/"):
+            raise HTTPException(422, "Pi sandbox workdir must be absolute")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise HTTPException(422, "Native Pi supports its own sandbox tools, not required HTTP/MCP tools")
+        if self.config.model_server is None:
+            raise HTTPException(422, "Native Pi requires a sandbox-reachable Gym model_server")
+        if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
+            raise HTTPException(422, "Native Pi requires an exact pi_version, for example 0.80.2")
+        if self.config.command != "pi" or self.config.extra_args or self.config.env:
+            raise HTTPException(422, "Native Pi does not support command, extra_args, or env overrides")
+
+        connection = body.sandbox_access.connection
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        session_id = f"pi-{uuid4().hex}"
+        directory = f"/tmp/nemo-gym-pi-sessions/{session_id}"
+        runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
+        state = PiSandboxSession(body, sandbox, directory, runtime)
+        try:
+            prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
+            if prepared.return_code != 0:
+                raise RuntimeError(prepared.stderr or "Cannot create Pi sandbox session directory")
+            for name in ("prepare_sandbox.sh", "sandbox_runner.py"):
+                await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+            installed = await sandbox.exec(
+                f"bash {shlex.quote(directory + '/prepare_sandbox.sh')} {shlex.quote(runtime)} "
+                f"{shlex.quote(self.config.pi_version)}",
+                cwd=body.sandbox_access.workdir,
+                timeout_s=self.config.sandbox_install_timeout_seconds,
+            )
+            if installed.return_code != 0:
+                raise RuntimeError(installed.stderr or installed.stdout or "Pi sandbox installation failed")
+        except BaseException:
+            await sandbox.disconnect()
+            raise
+        self._sandbox_sessions[session_id] = state
+        request.session[_SANDBOX_SESSION_KEY] = session_id
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        """Confirm Pi teardown before allowing verification; never destroy the borrowed sandbox."""
+        session_id = request.session.get(_SANDBOX_SESSION_KEY)
+        closed = self._closed_sandbox_sessions.get(session_id)
+        if closed is not None and body.agent_session_id == session_id and body.episode_id == closed[0]:
+            return closed[1]
+        state = self._sandbox_sessions.get(session_id)
+        if state is None or body.agent_session_id != session_id or body.episode_id != state.seed.episode_id:
+            raise HTTPException(409, "Pi close does not match the seeded session and episode")
+        await state.close(self.config.session_close_timeout_seconds)
+        observations = state.observations or AgentObservationBundle(
+            source="pi", gaps=[ObservationGap(code="agent_activation_interrupted")]
+        )
+        self._sandbox_sessions.pop(session_id, None)
+        result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
+        # Bound retry receipts in memory; keep the cookie so stale activations
+        # cannot silently fall back to host execution after a successful close.
+        self._closed_sandbox_sessions[session_id] = (body.episode_id, result)
+        while len(self._closed_sandbox_sessions) > 64:
+            self._closed_sandbox_sessions.popitem(last=False)
+        return result
+
+    async def _sandbox_response(
+        self, state: PiSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        unsupported = (
+            "temperature",
+            "top_p",
+            "reasoning",
+            "max_tool_calls",
+            "previous_response_id",
+            "prompt",
+            "text",
+            "context_management",
+            "conversation",
+            "moderation",
+            "top_logprobs",
+            "truncation",
+        )
+        values = body.model_dump(mode="json")
+        for name in unsupported:
+            if values.get(name) is not None:
+                raise HTTPException(422, f"Native Pi does not support request field {name}")
+        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
+            raise HTTPException(422, "Pi owns tool selection and execution policy")
+        if (body.metadata or {}).get("chat_template_kwargs") is not None:
+            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Pi")
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        roles = [getattr(item, "role", None) for item in items]
+        if roles not in (["user"], ["system", "user"]):
+            raise HTTPException(422, "Native Pi accepts one text user prompt with an optional system message")
+        for item in items:
+            if not isinstance(item.content, str) and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
+                for part in item.content
+            ):
+                raise HTTPException(422, "Native Pi only supports text input")
+        prompt, input_system = _extract_instruction(items)
+        system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        # Native sessions use only Gym's provider; do not copy credentials for
+        # unrelated direct providers from the host configuration into the sandbox.
+        models = {
+            "providers": {"nemo": self._build_models_config(state.seed.episode_id.capture_key)["providers"]["nemo"]}
+        }
+        if body.max_output_tokens is not None:
+            models["providers"]["nemo"]["models"][0]["maxTokens"] = body.max_output_tokens
+        await state.upload_json("home/.pi/agent/models.json", models)
+        command = [
+            f"{state.runtime}/node/bin/node",
+            f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            "--print",
+            "--mode",
+            "json",
+            "--no-session",
+            "--provider",
+            "nemo",
+            "--model",
+            self.config.model,
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+        ]
+        if self.config.thinking:
+            command += ["--thinking", self.config.thinking]
+        if system:
+            command += ["--append-system-prompt", system]
+        payload = {
+            "directory": state.directory,
+            "command": command,
+            "prompt": prompt,
+            "cwd": state.seed.sandbox_access.workdir,
+            "env": {
+                "HOME": f"{state.directory}/home",
+                "PI_CODING_AGENT_DIR": f"{state.directory}/home/.pi/agent",
+                "PI_SKIP_VERSION_CHECK": "1",
+                "PI_TELEMETRY": "0",
+            },
+            "timeout": self.config.timeout,
+            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
+        }
+        async with self.sem:
+            raw = await state.execute(
+                payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+            )
+        events = [tuple(json.loads(line)) for line in raw.splitlines() if line.strip()]
+        output = []
+        usage = {"input_tokens": 0, "output_tokens": 0}
+        cached_tokens = 0
+        errors = []
+        stop_reasons = []
+        for _, event in events:
+            message = event.get("message") or {}
+            if event.get("type") == "message_end" and message.get("role") == "assistant":
+                for part in message.get("content") or []:
+                    if part.get("type") == "thinking" and part.get("thinking"):
+                        output.append(
+                            NeMoGymResponseReasoningItem(
+                                id=f"reasoning-{len(output)}",
+                                summary=[{"type": "summary_text", "text": part["thinking"]}],
+                            )
+                        )
+                cached_tokens += int((message.get("usage") or {}).get("cacheRead") or 0)
+                stop_reasons.append(message.get("stopReason"))
+                if message.get("stopReason") in ("error", "aborted"):
+                    errors.append(message.get("errorMessage") or message["stopReason"])
+            parsed, tokens = parse_pi_events(json.dumps(event))
+            output.extend(parsed)
+            for key in usage:
+                usage[key] += tokens[key]
+        result = state.result
+        error = result.error or ("; ".join(errors) if errors else None)
+        if result.return_code != 0 and not result.timed_out:
+            error = error or f"Pi exited with code {result.return_code}"
+        if not stop_reasons:
+            error = error or "Pi produced no assistant result"
+        elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not result.timed_out:
+            error = error or "Pi ended without a terminal assistant result"
+        incomplete = result.timed_out or (stop_reasons and stop_reasons[-1] == "length")
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model,
+            object="response",
+            output=output,
+            status="failed" if error else "incomplete" if incomplete else "completed",
+            error={"code": "server_error", "message": error} if error else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=NeMoGymResponseUsage(
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                total_tokens=usage["input_tokens"] + usage["output_tokens"],
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            ),
+            metadata={
+                "harness_execution": "sandbox",
+                "harness_hostname": result.hostname,
+                "harness_pid": str(result.pid),
+                "pi_version": self.config.pi_version,
+            },
+        )
+        conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
+        conversation_input.append(NeMoGymEasyInputMessage(role="user", content=prompt))
+        try:
+            state.observations = _build_pi_observations(
+                events,
+                state.seed.episode_id.capture_key,
+                self.config.model_server,
+                [*conversation_input, *output],
+                transcript_available=bool(output),
+            )
+        except Exception:
+            # Observation parsing must not turn a valid response/patch into a
+            # failed episode (the existing local Pi path has the same policy).
+            LOG.exception("failed to build sandbox Pi observations")
+            state.observations = AgentObservationBundle(
+                source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
+            )
+        return response
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -658,6 +913,25 @@ class PiAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        try:
+            session_id = request.session.get(_SANDBOX_SESSION_KEY)
+        except (AssertionError, AttributeError):
+            session_id = None
+        if isinstance(session_id, str):
+            state = self._sandbox_sessions.get(session_id)
+            rollout_id = request.path_params.get("rollout_id")
+            if state is None or state.seed.episode_id.capture_key != rollout_id:
+                raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
+            if state.activated or state.closing:
+                raise HTTPException(409, "Pi sandbox sessions support one activation")
+            state.activated = True
+            state.task = asyncio.create_task(self._sandbox_response(state, body))
+            try:
+                return await asyncio.shield(state.task)
+            except asyncio.CancelledError:
+                if not state.task.done() and not state.task.cancelling():
+                    state.task.cancel()
+                raise
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(
