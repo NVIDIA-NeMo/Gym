@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     create_provider,
@@ -392,6 +393,7 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self._connected = False
         self.pty = SandboxPty(self)
 
     def _telemetry_provider_name(self) -> str:
@@ -541,6 +543,32 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def pause(self) -> None:
+        """Pause this sandbox while preserving its state.
+
+        Open PTY sessions are detached; whether processes survive and sessions
+        can be re-attached after ``resume()`` depends on the provider backend.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.pause(handle)
+
+    async def resume(self) -> None:
+        """Resume this sandbox and wait until it is ready.
+
+        On timeout the server-side state is unknown: reconnect and check
+        ``status()`` before retrying.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.resume(handle)
+
     async def stop(self) -> None:
         if self._closed:
             return
@@ -552,6 +580,22 @@ class AsyncSandbox:
             if self._owns_provider:
                 await self._provider.aclose()
                 self._closed = True
+        self._closed = True
+
+    async def disconnect(self) -> None:
+        """Release this client without stopping a borrowed sandbox.
+
+        Use this only for a sandbox rebuilt with :meth:`connect`.
+        The component that created the sandbox remains responsible for stopping it.
+        """
+        if self._closed:
+            return
+        if not self._connected:
+            raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        if self._owns_provider:
+            await self._provider.aclose()
+        self._handle = None
+        self._stopped = True
         self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
@@ -592,6 +636,7 @@ class AsyncSandbox:
         sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
+        sandbox._connected = True
         return sandbox
 
     async def __aenter__(self) -> "AsyncSandbox":
@@ -747,6 +792,12 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
+
+    def pause(self) -> None:
+        self._runner.run("pause", self._async_sandbox.pause)
+
+    def resume(self) -> None:
+        self._runner.run("resume", self._async_sandbox.resume)
 
     def stop(self) -> None:
         if self._closed:

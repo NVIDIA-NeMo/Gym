@@ -9,7 +9,6 @@ from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
-from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -30,6 +29,7 @@ def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
     validator = task_validator()
     for index, row in enumerate(rows):
         validator.validate_row(index, row)
+        assert row["task_id"] == row["task_name"]
         assert row["task_ref"] == tasks[row["task_name"]]
         assert row["dataset_ref"] == manifest["ref"]
         assert "path" not in row
@@ -93,8 +93,21 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     root = Path(preparation.__file__).resolve().parents[2]
     config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
-    harness = config.terminal_bench_4.resources_servers.terminal_bench_4.harness
+    harness = agent.harness
     assert harness.step_limit == steps
     assert harness.step_timeout_sec == timeout
     assert agent.datasets[0].num_repeats == 1
-    assert MiniSWEConfig.model_fields["step_timeout_sec"].default == 600
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, "results/terminal_bench_4/agent"),
+        ({"tb4_jobs_dir": "/run/resources"}, "/run/resources/agent"),
+        ({"tb4_agent_artifacts_dir": "/run/agent"}, "/run/agent"),
+        ({"tb4_jobs_dir": "/run/resources", "tb4_agent_artifacts_dir": "/run/agent"}, "/run/agent"),
+    ],
+)
+def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
+    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"), overrides)
+    assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected

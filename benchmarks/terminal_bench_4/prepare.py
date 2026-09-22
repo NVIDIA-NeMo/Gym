@@ -33,6 +33,7 @@ def prepare(task_names: list[str] | None = None, category: str | None = None) ->
             output.write(
                 json.dumps(
                     {
+                        "task_id": f"terminal-bench/{task['name']}",
                         "task_name": f"terminal-bench/{task['name']}",
                         "task_ref": task["ref"],
                         "dataset_ref": manifest["ref"],
