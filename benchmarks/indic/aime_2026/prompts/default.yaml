@@ -1,8 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# MathArena configs/aime_2026.yaml: no system message, no extra reasoning instruction.
-user: |-
-  Put your final answer within \boxed{{}}.
-  The answer is an integer between 0 and 999 inclusive.
-
-  {problem}

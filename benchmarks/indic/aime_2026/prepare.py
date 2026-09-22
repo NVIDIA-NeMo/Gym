@@ -7,39 +7,92 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from benchmarks.indic._shared.source import (
-    LANGUAGE_NAMES,
-    QUALITY_STAGES,
-    SourceSpec,
-    download_hf_file,
-    sha256,
-    write_jsonl_with_manifest,
-)
-
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "aime_2026_benchmark.jsonl"
+PROMPT_PATH = BENCHMARK_DIR.parents[1] / "prompts/generic/math.yaml"
 DEFAULT_LANGUAGES = ("bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "ta", "te", "ur")
-SOURCE = SourceSpec(
-    name="indic/aime_2026",
-    repo_id="anushakamathofficial/indic_aime_2026",
-    revision="938c1c90c23b25ca0f43d1bfc5103b332e8c033e",
-    split="train",
-    text_field="problem",
-    license="CC-BY-NC-SA-4.0",
-    expected_english_rows=30,
-)
+BENCHMARK_ID = "indic/aime_2026"
+SOURCE_ID = "anushakamathofficial/indic_aime_2026"
+SOURCE_REVISION = "938c1c90c23b25ca0f43d1bfc5103b332e8c033e"
+SOURCE_SPLIT = "train"
+SOURCE_LICENSE = "CC-BY-NC-SA-4.0"
+EXPECTED_ENGLISH_ROWS = 30
 CANONICAL_REPO = "MathArena/aime_2026"
 CANONICAL_REVISION = "d2de22f3c656b4f56cf8981212186377d1e23bc3"
 CANONICAL_FILE = "data/train-00000-of-00001.parquet"
-UPSTREAM_REVISION = "b89f2f0ad64ced464d2944f08c3c0aaeaa0df64b"
 CANONICAL_COLUMNS = {"problem_idx", "answer", "problem"}
 SOURCE_COLUMNS = CANONICAL_COLUMNS | {"language", "language_code", "judge_pass_stage"}
+
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
+}
+QUALITY_STAGES = {
+    "english_source",
+    "first_judge_pass",
+    "passed_after_correction",
+    "failed_after_correction_review_needed",
+    "not_judged_review_needed",
+    "failed_first_judge_review_needed",
+}
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def download_hf_file(repo_id: str, revision: str, filename: str) -> Path:
+    if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
+        raise ValueError("A full immutable 40-character HF revision is required")
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(repo_id, filename, repo_type="dataset", revision=revision))
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def write_jsonl_with_manifest(path: Path, rows: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]) -> Path:
+    if not rows:
+        raise ValueError("Refusing to write an empty benchmark dataset")
+    _write_atomic(path, "".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows))
+    manifest = {**metadata, "prepared_rows": len(rows), "prepared_sha256": sha256(path)}
+    _write_atomic(
+        path.with_suffix(".manifest.json"), json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    return path
 
 
 def _index_rows(records: Sequence[Mapping[str, Any]], *, language: str | None) -> dict[str, Mapping[str, Any]]:
@@ -127,15 +180,15 @@ def load_source(
     selected, question_ids = _selection(languages, config_name, question_ids)
     canonical_path = download_hf_file(CANONICAL_REPO, CANONICAL_REVISION, CANONICAL_FILE)
     canonical = _index_rows(pq.read_table(canonical_path).to_pylist(), language=None)
-    if set(canonical) != {str(index) for index in range(1, SOURCE.expected_english_rows + 1)}:
-        raise ValueError(f"Expected canonical AIME 2026 problem IDs 1 through {SOURCE.expected_english_rows}")
+    if set(canonical) != {str(index) for index in range(1, EXPECTED_ENGLISH_ROWS + 1)}:
+        raise ValueError(f"Expected canonical AIME 2026 problem IDs 1 through {EXPECTED_ENGLISH_ROWS}")
     wanted = set(canonical) if question_ids is None else set(question_ids)
     if wanted - canonical.keys():
         raise ValueError(f"Unknown question IDs: {sorted(wanted - canonical.keys(), key=int)}")
     configs, files = {}, {}
     for language in dict.fromkeys(["en", *selected]):
-        relative = f"data/{language}/{SOURCE.split}.parquet"
-        path = download_hf_file(SOURCE.repo_id, SOURCE.revision, relative)
+        relative = f"data/{language}/{SOURCE_SPLIT}.parquet"
+        path = download_hf_file(SOURCE_ID, SOURCE_REVISION, relative)
         indexed = _index_rows(pq.read_table(path).to_pylist(), language=language)
         if indexed.keys() - canonical.keys():
             raise ValueError(f"Translated IDs absent from canonical source: {language}")
@@ -174,10 +227,10 @@ def load_source(
             ),
         }
     return records, {
-        "source_id": SOURCE.repo_id,
-        "source_revision": SOURCE.revision,
-        "source_split": SOURCE.split,
-        "source_license": SOURCE.license,
+        "source_id": SOURCE_ID,
+        "source_revision": SOURCE_REVISION,
+        "source_split": SOURCE_SPLIT,
+        "source_license": SOURCE_LICENSE,
         "source_configs": selected,
         "source_files": files,
         "canonical_source_id": CANONICAL_REPO,
@@ -192,34 +245,20 @@ def load_source(
 
 
 def build_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Keep answer keys in verifier metadata, separate from the official policy prompt."""
-    rows = []
-    for row in records:
-        task_id = f"{SOURCE.name}/{SOURCE.revision}/{row['language']}/{row['question_id']}"
-        metadata = {
-            "task_id": task_id,
+    """Use the English AIME question/answer schema and retain translation provenance."""
+    return [
+        {
+            "question": row["problem"],
+            "expected_answer": str(row["answer"]),
+            "uuid": f"{BENCHMARK_ID}/{SOURCE_REVISION}/{row['language']}/{row['question_id']}",
+            "question_id": row["question_id"],
             "language": row["language"],
-            "problem_idx": row["problem_idx"],
-            "expected_answer": row["answer"],
+            "language_name": row["language_name"],
+            "judge_pass_stage": row["judge_pass_stage"],
+            "human_evaluation_pending": row["judge_pass_stage"].endswith("review_needed"),
         }
-        rows.append(
-            {
-                **row,
-                **metadata,
-                "uuid": task_id,
-                "verifier_metadata": metadata,
-                "benchmark_id": SOURCE.name,
-                "source_id": SOURCE.repo_id,
-                "source_revision": SOURCE.revision,
-                "subset_for_metrics": row["language"],
-                "human_evaluation_pending": row["judge_pass_stage"].endswith("review_needed"),
-            }
-        )
-    groups = {}
-    for language in sorted({row["language"] for row in rows}):
-        ids = sorted(row["task_id"] for row in rows if row["language"] == language)
-        groups[language] = {"questions": len(ids), "ids_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest()}
-    return [{**row, "expected_groups": groups} for row in rows]
+        for row in records
+    ]
 
 
 def prepare(
@@ -234,14 +273,14 @@ def prepare(
     rows = build_rows(records)
     metadata.update(
         {
-            "benchmark_id": SOURCE.name,
-            "official_protocol_revision": UPSTREAM_REVISION,
+            "benchmark_id": BENCHMARK_ID,
+            "evaluation_protocol": "gym_aime26",
+            "protocol_version": 2,
             "adapter_sha256": sha256(Path(__file__)),
-            "prompt_sha256": sha256(BENCHMARK_DIR / "prompts/default.yaml"),
-            "prompt_mode": "official_MathArena_English_instructions_translated_problem",
+            "prompt_sha256": sha256(PROMPT_PATH),
+            "prompt_mode": "gym_generic_math",
             "max_output_tokens": 120000,
             "thinking_enabled_by_default": True,
-            "expected_groups": rows[0]["expected_groups"],
         }
     )
     return write_jsonl_with_manifest(Path(output_fpath) if output_fpath else OUTPUT_FPATH, rows, metadata)

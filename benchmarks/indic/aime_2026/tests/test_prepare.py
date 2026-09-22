@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import hashlib
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pyarrow as pa
@@ -32,7 +30,7 @@ def source(*, language: str = "hi", index: int = 1) -> dict:
 
 @pytest.fixture
 def source_files(tmp_path, monkeypatch):
-    monkeypatch.setattr(module, "SOURCE", replace(module.SOURCE, expected_english_rows=2))
+    monkeypatch.setattr(module, "EXPECTED_ENGLISH_ROWS", 2)
     files, calls = {}, []
 
     def install(language, rows):
@@ -41,7 +39,7 @@ def source_files(tmp_path, monkeypatch):
         if language is None:
             files[(module.CANONICAL_REPO, module.CANONICAL_REVISION, module.CANONICAL_FILE)] = path
         else:
-            files[(module.SOURCE.repo_id, module.SOURCE.revision, f"data/{language}/train.parquet")] = path
+            files[(module.SOURCE_ID, module.SOURCE_REVISION, f"data/{language}/train.parquet")] = path
         return path
 
     install(None, [canonical(index=2), canonical()])
@@ -56,33 +54,35 @@ def source_files(tmp_path, monkeypatch):
     return install, files, calls
 
 
-def test_official_prompt_preserves_problem_and_has_no_system_answer_or_sampling(source_files) -> None:
+def test_prompt_and_row_schema_match_english_aime(source_files) -> None:
     _, files, calls = source_files
-    records, metadata = module.load_source(languages=["hi"])
+    records, metadata = module.load_source(languages=["hi", "en"])
     rows = module.build_rows(records)
-    assert [row["question_id"] for row in rows] == ["1", "2"]
-    assert len({row["task_id"] for row in rows}) == 2
+    assert [row["question_id"] for row in rows] == ["1", "2", "1", "2"]
+    assert len({row["uuid"] for row in rows}) == 4
     assert len(calls) == 3
     assert metadata["canonical_file_sha256"] == module.sha256(
         files[(module.CANONICAL_REPO, module.CANONICAL_REVISION, module.CANONICAL_FILE)]
     )
-    for row in rows:
-        assert row["verifier_metadata"]["expected_answer"] == 472
-        assert row["language"] == "hi" and row["language_name"] == "Hindi"
-        assert row["human_evaluation_pending"] is False
+    english_config = yaml.safe_load((module.BENCHMARK_DIR.parents[1] / "aime26/config.yaml").read_text())
+    dataset = english_config["aime26_math_with_judge_simple_agent"]["responses_api_agents"]["simple_agent"][
+        "datasets"
+    ][0]
+    prompt = load_prompt_config(str(module.BENCHMARK_DIR.parents[2] / dataset["prompt_config"]))
+    for row, record in zip(rows, records, strict=True):
+        assert row["question"] == record["problem"]
+        assert row["expected_answer"] == "472"
         assert "responses_create_params" not in row
-    prompt = load_prompt_config(str(module.BENCHMARK_DIR / "prompts/default.yaml"))
-    messages = apply_prompt_to_row(rows[0], prompt)["responses_create_params"]["input"]
-    assert messages == [
-        {
-            "role": "user",
-            "content": "Put your final answer within \\boxed{}.\n"
-            "The answer is an integer between 0 and 999 inclusive.\n\n एक काल्पनिक योग?\nदूसरी पंक्ति। ",
-        }
-    ]
-    assert "472" not in messages[0]["content"]
-    digest = hashlib.sha256(json.dumps(sorted(row["task_id"] for row in rows)).encode()).hexdigest()
-    assert rows[0]["expected_groups"] == {"hi": {"questions": 2, "ids_sha256": digest}}
+        assert "expected_groups" not in row
+        messages = apply_prompt_to_row(row, prompt)["responses_create_params"]["input"]
+        assert messages == [
+            {
+                "role": "user",
+                "content": "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}.\n\n"
+                + record["problem"],
+            }
+        ]
+        assert "472" not in messages[0]["content"]
 
 
 def test_default_is_12_indic_configs_english_is_explicit_and_filter_is_stable(source_files) -> None:
@@ -217,11 +217,12 @@ def test_prepare_manifest_and_no_overwrite_when_validation_fails(source_files, t
     manifest = json.loads(output.with_suffix(".manifest.json").read_text())
     assert manifest["prepared_rows"] == 2
     assert manifest["prepared_sha256"] == module.sha256(output)
-    assert manifest["official_protocol_revision"] == module.UPSTREAM_REVISION
+    assert manifest["evaluation_protocol"] == "gym_aime26"
+    assert manifest["protocol_version"] == 2
     assert manifest["max_output_tokens"] == 120000
     assert manifest["thinking_enabled_by_default"] is True
     assert manifest["source_license"] == "CC-BY-NC-SA-4.0"
-    assert manifest["prompt_mode"] == "official_MathArena_English_instructions_translated_problem"
+    assert manifest["prompt_mode"] == "gym_generic_math"
     original = output.read_bytes()
     install("hi", [{**source(), "answer": 473}])
     with pytest.raises(ValueError, match="Canonical field mismatch"):
@@ -242,26 +243,56 @@ def test_cli(monkeypatch) -> None:
     assert captured["output_fpath"] == "x"
 
 
-def test_native_config_keeps_protocol_agent_and_policy_defaults() -> None:
+def test_native_config_reuses_english_components_and_preserves_generation_defaults() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
-    assert manifest.name == "indic/aime_2026"
-    assert manifest.experimental and manifest.resources_server == "matharena_aime"
-    assert manifest.agent_server == "matharena_aime"
-    assert manifest.integration_profile == "custom-gym-agent-loop"
-    assert manifest.canonical_split == "train"
-    config = yaml.safe_load((module.BENCHMARK_DIR / "config.yaml").read_text())
-    assert config["config_paths"] == [
-        "resources_servers/matharena_aime/configs/matharena_aime.yaml",
-    ]
-    assert config["num_repeats_add_seed"] is True
-    assert config["num_repeats"] == 4
-    assert config["responses_create_params"]["max_output_tokens"] == 120000
-    policy = config["policy_model"]["responses_api_models"]["vllm_model"]
-    assert policy["chat_template_kwargs"]["enable_thinking"] is True
-    assert policy["sampling_overrides"] == {"temperature": 1.0, "top_p": 0.95, "top_k": 64}
-    assert "seed" not in policy["sampling_overrides"]
-    agent = config["matharena_aime_agent"]["responses_api_agents"]["matharena_aime"]
-    assert agent["datasets"][0]["type"] == "benchmark"
-    assert agent["datasets"][0]["num_repeats"] == 1
+    assert manifest.resources_server == "math_with_judge"
+    assert manifest.agent_server == "simple_agent"
+    assert manifest.standard_prompt_config == "benchmarks/prompts/generic/math.yaml"
     assert manifest.datasets[0].num_repeats == 1
-    assert agent["datasets"][0]["license"] == "CC-BY-NC-SA-4.0"
+    configs = []
+    parser = GlobalConfigDictParser()
+    for path in (module.BENCHMARK_DIR.parents[1] / "aime26/config.yaml", module.BENCHMARK_DIR / "config.yaml"):
+        configs.append(
+            parser.parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=OmegaConf.create(
+                        {
+                            "config_paths": ["responses_api_models/vllm_model/configs/vllm_model.yaml", str(path)],
+                            "policy_base_url": "http://unused/v1",
+                            "policy_api_key": "dummy",
+                            "policy_model_name": "test",
+                        }
+                    ),
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+        )
+    english, indic = configs
+    resource_key = "indic_aime_2026_math_with_judge_resources_server"
+    agent_key = "indic_aime_2026_math_with_judge_simple_agent"
+    english_resource = english.aime26_math_with_judge_resources_server.resources_servers.math_with_judge
+    indic_resource = indic[resource_key].resources_servers.math_with_judge
+    assert indic_resource == english_resource
+    assert indic_resource.should_use_judge is False
+    assert {server.name for server in parser.filter_for_server_instance_configs(indic)} == {
+        "policy_model",
+        resource_key,
+        agent_key,
+    }
+    agent = indic[agent_key].responses_api_agents.simple_agent
+    assert (
+        agent.datasets[0].prompt_config
+        == english.aime26_math_with_judge_simple_agent.responses_api_agents.simple_agent.datasets[0].prompt_config
+    )
+    assert agent.datasets[0].num_repeats == 1
+    assert indic.num_repeats == 4 and indic.num_repeats_add_seed is True
+    assert indic.responses_create_params.max_output_tokens == 120000
+    policy = indic.policy_model.responses_api_models.vllm_model
+    assert policy.chat_template_kwargs.enable_thinking is True
+    assert policy.sampling_overrides == {"temperature": 1.0, "top_p": 0.95, "top_k": 64}
