@@ -19,7 +19,7 @@ import warnings
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError, RequestInfo
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, RequestInfo
 from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
@@ -334,6 +334,33 @@ async def test_transient_judge_http_error_retries_within_existing_budget(server,
     )
     server.server_client.post = AsyncMock(side_effect=[failing_judge(status), valid])
     assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    assert server.server_client.post.await_count == 2
+
+
+@pytest.mark.parametrize("error_class", [ClientPayloadError, ClientConnectionError])
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_judge_body_transport_errors_share_the_bounded_retry_budget(server, error_class, recovers):
+    server.config.genrm_parse_retries = 1
+    response = MagicMock(ok=True)
+    valid = json.dumps(
+        {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
+                }
+            ]
+        }
+    ).encode()
+    response.read = AsyncMock(
+        side_effect=[error_class("interrupted body"), valid if recovers else error_class("interrupted body")]
+    )
+    server.server_client.post = AsyncMock(return_value=response)
+    if recovers:
+        assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    else:
+        with pytest.raises(genrm.JudgeError, match="interrupted body"):
+            await server._run_single_comparison([], {}, {})
     assert server.server_client.post.await_count == 2
 
 

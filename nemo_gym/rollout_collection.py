@@ -940,7 +940,14 @@ def _failure_rows_counted_as_zero(
             continue
         # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
         # averages every number it is handed.
-        scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
+        scored = {
+            k: v
+            for k, v in row.items()
+            if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
+        }
+        # This metrics-only copy honors the explicit denominator policy. The original
+        # answer, failure diagnostics, and training mask remain untouched in the sidecar.
+        scored["mask_sample"] = False
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted

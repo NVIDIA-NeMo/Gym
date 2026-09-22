@@ -41,7 +41,7 @@ from functools import lru_cache
 from math import isfinite
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -963,8 +963,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             try:
                 raw_response = await call()
             except Exception as error:
-                retryable = isinstance(error, ClientResponseError) and (
-                    error.status in (408, 429) or 500 <= error.status < 600
+                retryable = isinstance(error, (ClientPayloadError, ClientConnectionError)) or (
+                    isinstance(error, ClientResponseError)
+                    and (error.status in (408, 429) or 500 <= error.status < 600)
                 )
                 if retryable and attempt_idx < max_attempts - 1:
                     await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))

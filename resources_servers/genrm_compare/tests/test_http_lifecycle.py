@@ -91,6 +91,7 @@ async def services(config, monkeypatch):
         judge_empty=False,
         judge_media_type="application/json",
         judge_texts=[],
+        truncated_judge_responses=0,
         judge_release=asyncio.Event(),
     )
     state.judge_release.set()
@@ -121,6 +122,11 @@ async def services(config, monkeypatch):
         status = state.judge_statuses.pop(0) if state.judge_statuses else state.judge_status
         if status != 200:
             return JSONResponse({"error": "judge unavailable"}, status_code=status)
+        if state.truncated_judge_responses:
+            state.truncated_judge_responses -= 1
+            # Send successful headers and part of the body, then break the TCP response.
+            # Uvicorn closes the connection when the advertised length is not fulfilled.
+            return Response(b'{"output":', headers={"content-length": "1000"}, media_type="application/json")
         text = state.judge_texts.pop(0) if state.judge_texts else '{"score_1":4,"score_2":2,"ranking":1}'
         response = {
             "output": []
@@ -459,6 +465,22 @@ async def test_transient_http_failure_recovers_without_regenerating_answers(serv
     )
     assert services.policy_calls == 4 and services.judge_calls == 5
     assert len({body["response"]["id"] for _, body in results}) == 4
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_interrupted_judge_body_retries_without_regenerating_answers(services, recovers):
+    services.truncated_judge_responses = 1 if recovers else 100
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    assert services.policy_calls == 4
+    if recovers:
+        assert services.judge_calls == 5
+        assert all(status == 200 and body["reward"] == 3.0 and not body["mask_sample"] for status, body in results)
+    else:
+        assert 4 <= services.judge_calls <= 4 * (services.resource.config.genrm_parse_retries + 1)
+        for status, body in results:
+            assert_judge_failure(status, body, "ClientPayloadError")
+            assert body["mask_sample"] is True
+        assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
 
 
 @pytest.mark.parametrize("value", ["NaN", "Infinity"])

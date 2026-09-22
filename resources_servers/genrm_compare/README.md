@@ -154,8 +154,14 @@ for the input format, explicit group IDs, and recovery limits.
 | `default_score` | float | `3.0` | Default score when parsing fails |
 | `default_ranking` | float | `3.5` | Default ranking when parsing fails |
 | `debug_logging` | bool | `false` | Enable verbose logging |
-| `genrm_parse_retries` | int | `3` | Number of retries on parse failures |
+| `genrm_parse_retries` | int | `3` | Shared retry budget for parse failures and transient HTTP or response-body transport errors |
 | `genrm_parse_retry_sleep_s` | float | `0.2` | Sleep duration between retries |
+| `num_rollouts_per_prompt` | int | `1` | Required members per verification group; supplied YAML uses 16 |
+| `cohort_collection_timeout_s` | float | `1800` | Deadline to collect all group members |
+| `cohort_evaluation_timeout_s` | float | `1800` | Overall judging deadline after collection |
+| `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
+| `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
+| `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
 
 ## Comparison Strategies
 
@@ -331,7 +337,8 @@ deadline. The supplied YAML uses 16 members, so it requires 16 slots and enough 
 If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
 connection failures, expired deadlines, or exhausted retries for empty/unsuccessful judge responses also
 fail the group. Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
-answers and HTTP 408, 429, or 5xx responses, with `genrm_parse_retry_sleep_s` between attempts. The default
+answers, HTTP 408, 429, or 5xx responses, and interrupted response bodies, with
+`genrm_parse_retry_sleep_s` between attempts. The default
 budget permits four attempts in total, not four attempts for each failure type. Other HTTP errors fail
 immediately; exhausted HTTP errors remain judge failures and never become default scores.
 
@@ -350,8 +357,11 @@ Judge failures (including judge deadlines) use Gym's standard `JudgeError` fails
 receives HTTP 200 with its original generated `response`, `_ng_failure_class: judge_failed`, and
 `_ng_failure_judge_error`. The failsafe's `reward: 0.0` is a placeholder, not a valid GenRM score.
 The collector automatically saves these rows in the failures sidecar and excludes them from reward
-metrics. They are not counted by an `agent_run_error` zero-fill policy. A run without any successful
-results still raises. The shared failsafe emits `mask_sample: true`, `failure_kind: judge_failed`, and
+metrics by default. They are not counted by an `agent_run_error` zero-fill policy. An explicit
+`count_failure_classes_as_zero: [judge_failed]` evaluation policy includes them as zeros in metric
+inputs only; saved answers, failure diagnostics, and training masks remain unchanged. Without this
+opt-in, a run without any successful results still raises. The shared failsafe emits
+`mask_sample: true`, `failure_kind: judge_failed`, and
 `failure_reason` (at most 2,000 characters). It also keeps `instance_config.mask_sample: true` for older
 NeMo RL consumers. The standard and compatibility fields describe the same unusable score.
 
@@ -382,7 +392,8 @@ connection; shutdown does not guarantee delivery of a 503 response. Each termina
 bounded group key, attempt, member count, and disposition; failures include a bounded reason. Judge
 transport diagnostics include the model server, path, pair, deadline, and bounded HTTP error content.
 Connection retries retain the existing HTTP-client policy. The bounded comparison retry loop described
-above additionally handles transient HTTP statuses; it does not restart the entire cohort.
+above additionally handles transient HTTP statuses and response-body transport errors; it does not
+restart the entire cohort.
 
 ### Replacement attempts and retention
 

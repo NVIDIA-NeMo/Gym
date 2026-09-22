@@ -7,7 +7,7 @@ verification requires ``_ng_rollout_index`` slots 0..N-1. Caller-owned
 ``_ng_group_id`` and shared ``_ng_group_attempt`` coordinates support isolated
 replacement attempts and completed reward replay. Legacy task/prompt grouping
 remains available for sequential runs, without reliable late-request isolation.
-See the GenRM cohort guide for the wire contract and retention limits.
+See README.md's "GenRM comparison groups" section for the wire contract and retention limits.
 """
 
 from typing import Optional

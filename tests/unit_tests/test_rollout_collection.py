@@ -1127,6 +1127,76 @@ class TestRolloutCollection:
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
 
+    @pytest.mark.parametrize("count_judge_failure", [False, True])
+    async def test_masked_judge_failure_counts_as_zero_only_when_opted_in(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        count_judge_failure: bool,
+    ) -> None:
+        """Online and offline aggregation honor the opt-in without rewriting failure evidence."""
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                + "\n"
+                for i in range(4)
+            )
+        )
+        output_path = tmp_path / "output.jsonl"
+        failure = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "instance_config": {"mask_sample": True},
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "_ng_failure_judge_error": "judge unavailable",
+        }
+        metrics = []
+        metric_inputs = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, failure if json["x"] == 0 else {"reward": 1.0})
+            metric_inputs.append(json.verify_responses)
+            result = compute_aggregate_metrics(json.verify_responses)
+            metrics.append(result)
+            return FakeResponse(200, result.model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        counted = ["judge_failed"] if count_judge_failure else []
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_path),
+                output_jsonl_fpath=str(output_path),
+                route_failures_to_sidecar=True,
+                count_failure_classes_as_zero=counted,
+                disable_health_check=True,
+            )
+        )
+        sidecar_path = _failures_path_for(output_path)
+        original_sidecar = sidecar_path.read_bytes()
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                count_failure_classes_as_zero=counted,
+                disable_health_check=True,
+            )
+        )
+        assert len(metrics) == 2
+        for result, inputs in zip(metrics, metric_inputs):
+            assert result.key_metrics == {"mean/reward": 0.75 if count_judge_failure else 1.0}
+            assert result.agent_metrics.get("coverage/masked_rollouts", 0) == 0
+            assert len(inputs) == (4 if count_judge_failure else 3)
+            assert all("failure_kind" not in row and "failure_reason" not in row for row in inputs)
+        assert sidecar_path.read_bytes() == original_sidecar
+        saved_failure = orjson.loads(original_sidecar)
+        assert all(saved_failure[key] == value for key, value in failure.items())
+        assert len(output_path.read_text().splitlines()) == 3
+
     async def test_run_from_config_fails_when_no_rollout_produced_a_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
