@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Wires the OpenCode sandboxed agent to the resources server for model runs.
+# Keep agent wiring separate so golden- and null-patch validation can use the base config alone.
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
   - resources_servers/deepswe_external1/configs/deepswe_external1.yaml
@@ -19,7 +21,8 @@ deepswe_external1_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
-      sandbox_timeout: 10800
       resources_server:
         type: resources_servers
         name: deepswe_external1_opencode_resources_server
+
+      sandbox_timeout: 10800
