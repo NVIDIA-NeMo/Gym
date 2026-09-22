@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -167,6 +168,19 @@ def _install_pyautogui(monkeypatch: pytest.MonkeyPatch) -> _PyAutoGUI:
     return module
 
 
+class _PlaywrightError(Exception):
+    pass
+
+
+def _install_playwright_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.Error = _PlaywrightError
+    package = types.ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+
 def _driver(tmp_path: Path, **config_updates: Any) -> VisualBrowserDriver:
     return VisualBrowserDriver(
         _config(**config_updates),
@@ -287,12 +301,98 @@ def test_capture_handles_inactive_tab_and_title_failure(monkeypatch: pytest.Monk
     assert observation.screenshot is not None
     assert len(driver._evidence) == 1
 
-    dialog = types.SimpleNamespace(accepted=False)
+    _install_playwright_error(monkeypatch)
+    dialog = types.SimpleNamespace(accepted=False, type="confirm")
     dialog.accept = lambda: setattr(dialog, "accepted", True)
-    VisualBrowserDriver._configure_page(first)
+    driver._configure_page(first)
     callback = next(call[2] for call in first.calls if call[:2] == ("on", "dialog"))
     callback(dialog)
     assert dialog.accepted
+
+
+@pytest.mark.parametrize("benchmark", ["webarena", "visualwebarena", "webvoyager"])
+@pytest.mark.parametrize("dialog_type", ["alert", "confirm", "prompt", "beforeunload"])
+def test_dialog_accept_policy_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, benchmark: str, dialog_type: str
+) -> None:
+    _install_playwright_error(monkeypatch)
+    driver = _driver(tmp_path)
+    driver._task = _task(benchmark=benchmark, task_id="411")
+    driver._step = 8
+    calls: list[str] = []
+    dialog = types.SimpleNamespace(
+        type=dialog_type,
+        message="private-dialog-message",
+        default_value="private-prompt-value",
+        accept=lambda: calls.append("accept"),
+        dismiss=lambda: calls.append("dismiss"),
+    )
+    page = _Page()
+    driver._configure_page(page)
+    assert len(page.calls) == 1
+    _, event, callback = page.calls[0]
+    assert event == "dialog"
+    with caplog.at_level(logging.INFO, logger="nemo_gym.web.visual_browser"):
+        callback(dialog)
+    assert calls == ["accept"]
+    assert f"session=session-1 task=411 step=8 dialog_type={dialog_type} outcome=accepted" in caplog.text
+    assert "private-dialog-message" not in caplog.text
+    assert "private-prompt-value" not in caplog.text
+
+
+def test_stale_dialog_is_logged_without_retry_or_rollout_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install_playwright_error(monkeypatch)
+    driver = _driver(tmp_path)
+    driver._task = _task(benchmark="webarena", task_id="411")
+    driver._step = 8
+    driver._last_error = "previous-action-error"
+    observation = WebObservation(url="https://example.test/editor")
+    driver._observation = observation
+    calls: list[str] = []
+
+    def accept() -> None:
+        calls.append("accept")
+        raise _PlaywrightError("Dialog.accept: Protocol error (Page.handleJavaScriptDialog): No dialog is showing")
+
+    dialog = types.SimpleNamespace(type="beforeunload", accept=accept, dismiss=lambda: calls.append("dismiss"))
+    page = _Page()
+    driver._configure_page(page)
+    page.calls[0][2](dialog)
+    assert calls == ["accept"]
+    assert "session=session-1 task=411 step=8 dialog_type=beforeunload outcome=already_closed" in caplog.text
+    assert len(caplog.records) == 1 and caplog.records[0].levelno == logging.WARNING
+    assert driver.observe() is observation
+    assert driver._step == 8 and driver._last_error == "previous-action-error"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _PlaywrightError("Dialog.accept: Target page, context or browser has been closed"),
+        _PlaywrightError("Dialog.accept: Protocol error (Page.handleJavaScriptDialog): Session closed"),
+        _PlaywrightError("Dialog.accept: Protocol error (Other.command): No dialog is showing"),
+        RuntimeError("Dialog.accept: Protocol error (Page.handleJavaScriptDialog): No dialog is showing"),
+    ],
+)
+def test_unrelated_dialog_errors_are_not_suppressed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    _install_playwright_error(monkeypatch)
+    driver = _driver(tmp_path)
+    calls: list[str] = []
+
+    def accept() -> None:
+        calls.append("accept")
+        raise error
+
+    dialog = types.SimpleNamespace(type="confirm", accept=accept)
+    with pytest.raises(type(error)) as caught:
+        driver._accept_dialog(dialog)
+    assert caught.value is error
+    assert calls == ["accept"]
+    assert "outcome=already_closed" not in caplog.text
 
 
 def test_step_success_terminal_and_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -591,6 +691,47 @@ def test_reference_default_pointer_locations_and_zero_wait(monkeypatch: pytest.M
     assert ("dragTo", 999, 499, {"duration": 0.5, "button": "left"}) in pyautogui.calls
     assert 0.0 in sleeps
     assert 2.0 not in sleeps
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_relaxed_scroll_step_preserves_live_evaluation_state(monkeypatch, tmp_path, timeout):
+    _install_pyautogui(monkeypatch)
+    monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", lambda _: None)
+    calls = []
+
+    def scroll(direction, amount, point, *, timeout):
+        calls.append((direction, amount, point, timeout))
+        if should_timeout:
+            raise TimeoutError("child killed and reaped; partial action not retried")
+
+    should_timeout = timeout
+    monkeypatch.setattr("nemo_gym.web.visual_browser.run_scroll", scroll)
+    driver = _driver(tmp_path, max_scroll_amount=None, action_delay_seconds=0)
+    context = _Context()
+    page = context.new_page()
+    driver._page, driver._context, driver._task = page, context, _task()
+    driver._observation = WebObservation(url=page.url)
+    driver._capture = lambda: WebObservation(url=page.url)
+    item = {
+        "type": "function_call",
+        "name": "computer",
+        "arguments": {
+            "actions": [
+                {"action": "scroll", "scroll_parameters": {"scroll_direction": "down", "scroll_amount": 100000}}
+            ]
+        },
+    }
+    action = parse_nano_omni_tool_calls([item], max_scroll_amount=None)
+    before = action.model_dump(mode="json")
+    result = driver.step(action)
+    assert calls == [("down", 100000, (960, 540), 30.0)]
+    assert result.execution_ok is not timeout and result.terminated is timeout
+    assert driver.evaluation_context().page is page
+    assert driver.evaluation_context().browser_context is context
+    assert result.observation.url == page.url
+    assert action.model_dump(mode="json") == before
+    if timeout:
+        assert "child killed and reaped" in result.info["action_error"]
 
 
 def test_computer_action_validation_and_coordinate_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

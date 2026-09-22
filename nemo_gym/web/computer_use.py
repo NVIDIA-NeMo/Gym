@@ -227,10 +227,18 @@ NANO_OMNI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def nano_omni_tools() -> list[dict[str, Any]]:
+def nano_omni_tools(*, max_scroll_amount: int | None = MAX_SCROLL_AMOUNT) -> list[dict[str, Any]]:
     """Return a mutation-safe copy of Nano Omni's Responses tool schema."""
 
-    return deepcopy(NANO_OMNI_TOOLS)
+    tools = deepcopy(NANO_OMNI_TOOLS)
+    computer = next(tool for tool in tools if tool["name"] == "computer")
+    action = computer["parameters"]["properties"]["actions"]["items"]
+    amount = action["properties"]["scroll_parameters"]["anyOf"][0]["properties"]["scroll_amount"]
+    if max_scroll_amount is None:
+        amount.pop("maximum")
+    else:
+        amount["maximum"] = max_scroll_amount
+    return tools
 
 
 __all__ = ["NANO_OMNI_SYSTEM_PROMPT", "NANO_OMNI_TOOLS", "nano_omni_tools"]

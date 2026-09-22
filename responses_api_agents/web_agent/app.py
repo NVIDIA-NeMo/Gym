@@ -29,7 +29,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
+from nemo_gym.web.actions import MAX_SCROLL_AMOUNT, ActionParseError, parse_nano_omni_tool_calls
 from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateResponse,
@@ -99,6 +99,7 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     # action validation and resource operation timeouts remain in force.
     nano_omni_max_tool_calls: int | None = Field(default=8, ge=1)
     nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    nano_omni_max_scroll_amount: int | None = Field(default=MAX_SCROLL_AMOUNT, ge=0)
     nano_omni_retry_invalid_tool_calls: bool = True
     nano_omni_parse_retry_feedback: bool = False
     nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -190,6 +191,7 @@ def _parse_response_action(
     qwen_state: QwenPolicyState | None = None,
     nano_omni_max_tool_calls: int | None = 8,
     nano_omni_max_computer_actions: int = 20,
+    nano_omni_max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
         raise ActionParseError(f"unsupported visual-browser action profile: {profile.value!r}")
@@ -198,6 +200,7 @@ def _parse_response_action(
             response.output,
             max_calls=nano_omni_max_tool_calls,
             max_computer_actions=nano_omni_max_computer_actions,
+            max_scroll_amount=nano_omni_max_scroll_amount,
         )
     if qwen_state is None:
         raise ActionParseError("Qwen policy state is required for qwen_xml_computer_use")
@@ -581,7 +584,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             if base_body.instructions is None:
                 base_body.instructions = NANO_OMNI_SYSTEM_PROMPT
             if not base_body.tools:
-                base_body.tools = nano_omni_tools()
+                base_body.tools = nano_omni_tools(max_scroll_amount=self.config.nano_omni_max_scroll_amount)
             base_body.tool_choice = "auto"
             base_body.parallel_tool_calls = True
 
@@ -779,6 +782,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             qwen_state=qwen_state,
                             nano_omni_max_tool_calls=self.config.nano_omni_max_tool_calls,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
+                            nano_omni_max_scroll_amount=self.config.nano_omni_max_scroll_amount,
                         )
                         # Both maintained policy adapters add only a
                         # successfully parsed assistant turn to trajectory.
