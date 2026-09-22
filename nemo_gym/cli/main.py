@@ -1402,8 +1402,7 @@ def main() -> None:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
         hints = "".join(
-            did_you_mean(name, known_options)
-            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
