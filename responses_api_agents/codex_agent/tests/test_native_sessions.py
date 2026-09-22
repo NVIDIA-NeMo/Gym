@@ -268,6 +268,59 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
 
 
 @pytest.mark.parametrize(
+    "condition", ["completed", "failed-turn", "failed-exit", "in-turn", "other-error", "later-error"]
+)
+def test_startup_model_metadata_advisory_requires_successful_turn(setup, condition) -> None:
+    agent, sandbox = setup
+    warning = (
+        "Model metadata for `test-model` not found. Defaulting to fallback metadata; "
+        "this can degrade performance and cause issues."
+    )
+    diagnostic = {
+        "type": "item.completed",
+        "item": {"id": "startup", "type": "error", "message": warning},
+    }
+    started = {"type": "turn.started"}
+    if condition == "failed-turn":
+        sandbox.events = events(stop_reason="error")
+    elif condition == "failed-exit":
+        sandbox.result["return_code"] = 1
+    elif condition == "other-error":
+        diagnostic["item"]["message"] = "Failed to initialize model client"
+    prefix = [started, diagnostic] if condition == "in-turn" else [diagnostic, started]
+    if condition == "later-error":
+        prefix.append(
+            {"type": "item.completed", "item": {"id": "failed", "type": "error", "message": "Model call failed"}}
+        )
+    sandbox.events = "\n".join(json.dumps([-2 + i, event]) for i, event in enumerate(prefix)) + "\n" + sandbox.events
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["output"][-1]["content"][0]["text"] == "Fixed"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        observations = closed.json()["agent_observations"]
+        warnings = [gap for gap in observations["gaps"] if gap["code"] == "model_metadata_fallback"]
+        if condition == "completed":
+            assert body["status"] == "completed"
+            assert body["error"] is None
+            assert body["usage"]["total_tokens"] == 22
+            assert [gap["detail"] for gap in warnings] == [warning]
+            assert observations["records"][0]["status"] == "completed"
+        else:
+            assert body["status"] == "failed"
+            assert diagnostic["item"]["message"] in body["error"]["message"]
+            if condition == "failed-turn":
+                assert "model error" in body["error"]["message"]
+            if condition == "later-error":
+                assert "Model call failed" in body["error"]["message"]
+            assert not warnings
+            assert observations["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
     "override",
     [
         {"max_output_tokens": 123},

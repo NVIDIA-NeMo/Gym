@@ -539,6 +539,48 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    @pytest.mark.parametrize(
+        "details,expected",
+        [
+            (
+                {"input_tokens_details": {"cached_tokens": None}, "output_tokens_details": {"reasoning_tokens": None}},
+                {},
+            ),
+            ({"input_tokens_details": None, "output_tokens_details": None}, {}),
+            ({"input_tokens_details": {}, "output_tokens_details": {}}, {}),
+            (
+                {"input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": None}},
+                {"input_tokens_details": {"cached_tokens": 0}},
+            ),
+            (
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+            ),
+        ],
+    )
+    def test_unknown_usage_details_are_omitted_without_fabricating_counts(self, details, expected) -> None:
+        response = _build_response(
+            [ITEM_FIXTURES["reasoning"], _function_call_item("exec_command"), _message_item("done")]
+        ).model_dump(mode="json")
+        response["usage"].update(details)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected_usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, **expected}
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["output"] == response["output"]
+        assert [event["item"] for event in events if event["type"] == "response.output_item.done"] == response[
+            "output"
+        ]
+        assert response == original
+
+    @pytest.mark.parametrize("usage", [None, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}])
+    def test_usage_without_details_is_preserved(self, usage) -> None:
+        response = _build_response([_message_item("done")]).model_dump(mode="json")
+        response["usage"] = usage
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert events[-1]["response"]["usage"] == usage
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
