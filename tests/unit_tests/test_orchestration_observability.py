@@ -45,7 +45,7 @@ BENCH_DIR = Path("/remote/jobs/gym-job-20260921T100000Z-abc123/scicode")
 def _config(**overrides):
     base = {
         "services": {"policy": {"type": "vllm", "container": "vllm:latest", "model": "/checkpoint", "port": 8000}},
-        "compute": {"oci-hsg": {"type": "slurm", "account": "acct", "hostname": None}},
+        "compute": {"cluster-a": {"type": "slurm", "account": "acct", "hostname": None}},
         "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {}}},
         "job": {"output_path": "/remote/jobs"},
         "observability": {"endpoint": "https://otlp.example.com", "service_name": "my-registered-service"},
@@ -217,7 +217,7 @@ def test_collector_stamps_the_dashboard_labels():
     assert attrs["run_id"] == ("gym-job-20260921T100000Z-abc123", "upsert")
     assert attrs["slurm_job_id"] == ("${env:SLURM_JOB_ID}", "upsert")
     assert attrs["benchmark"] == ("scicode", "upsert")
-    assert attrs["cluster"] == ("oci-hsg", "upsert")
+    assert attrs["cluster"] == ("cluster-a", "upsert")
     assert attrs["model"] == ("/checkpoint", "upsert")
 
 
@@ -303,9 +303,9 @@ def test_script_runs_the_collector_on_the_node_by_default():
 
 
 def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
-    config = _config(observability={"container": "/lustre/containers/otelcol.sqsh", "binary": "/otelcol-contrib"})
+    config = _config(observability={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
     line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
-    assert "--container-image=/lustre/containers/otelcol.sqsh" in line
+    assert "--container-image=/shared/images/otelcol.sqsh" in line
     assert "--no-container-mount-home" in line
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
     assert f"--container-workdir={BENCH_DIR}" in line
@@ -322,9 +322,9 @@ def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkey
 
 
 def test_script_honours_a_binary_path_on_shared_storage():
-    config = _config(observability={"binary": "/lustre/tools/otelcol-contrib"})
+    config = _config(observability={"binary": "/shared/tools/otelcol-contrib"})
     line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
-    assert " /lustre/tools/otelcol-contrib --config " in line
+    assert " /shared/tools/otelcol-contrib --config " in line
     assert "--container" not in line
 
 
