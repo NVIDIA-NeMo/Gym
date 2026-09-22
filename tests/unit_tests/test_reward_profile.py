@@ -662,6 +662,12 @@ class TestHistogram:
 
         assert RewardProfiler().histogram(pd.Series([1, 2, 3])) is None
 
+    def test_warns_when_wandb_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "wandb", None)
+
+        with pytest.warns(UserWarning, match=r"pip install nemo-gym\[wandb\]"):
+            RewardProfiler().histogram(pd.Series([1, 2, 3]))
+
     def test_empty_data_returns_none(self) -> None:
         assert RewardProfiler().histogram(pd.Series([], dtype=float)) is None
 

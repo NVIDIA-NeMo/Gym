@@ -212,6 +212,13 @@ class RewardProfiler:
         try:
             from wandb import Histogram
         except ImportError:
+            # warnings.warn's default filter shows this once per (module, lineno), so it
+            # doesn't spam once per column per describe_dataframe call.
+            warnings.warn(
+                "wandb is not installed, so the histogram/* stats are being skipped. "
+                "Install with: pip install nemo-gym[wandb]",
+                stacklevel=2,
+            )
             return None
 
         return Histogram(data)
