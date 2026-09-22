@@ -672,10 +672,48 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     events.append((float(observed_at), event))
             except (ValueError, TypeError):
                 LOG.warning("Skipping malformed Codex event record")
-        output, usage = parse_exec_jsonl(
-            "\n".join(json.dumps(event) for _, event in events), structured_reasoning=True, include_partial=True
-        )
         result = state.result
+        terminal_events = [
+            event.get("type") for _, event in events if event.get("type") in ("turn.completed", "turn.failed")
+        ]
+        parse_events = []
+        startup_warnings = []
+        started = False
+        successful_exit = (
+            result is not None
+            and result.return_code == 0
+            and not result.timed_out
+            and not result.error
+            and failure is None
+            and terminal_events[-1:] == ["turn.completed"]
+            and any(event.get("type") == "turn.started" for _, event in events)
+        )
+        for _, event in events:
+            started = started or event.get("type") == "turn.started"
+            item = event.get("item") or {}
+            message = item.get("message") or ""
+            # Codex 0.144.4 reports missing custom-model metadata as an error item
+            # before starting a successful turn. Retain this exact advisory in
+            # observations; all in-turn errors and failed exits remain failures.
+            if (
+                successful_exit
+                and not started
+                and event.get("type") == "item.completed"
+                and item.get("type") == "error"
+                and message.startswith("Model metadata for `")
+                and message.endswith(
+                    "` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+                )
+            ):
+                startup_warnings.append(message)
+            else:
+                parse_events.append(event)
+        output, usage = parse_exec_jsonl(
+            "\n".join(json.dumps(event) for event in parse_events), structured_reasoning=True, include_partial=True
+        )
+        if startup_warnings and usage.get("errors"):
+            usage["errors"] = [*startup_warnings, *usage["errors"]]
+            startup_warnings = []
         error = result.error if result else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         if errors:
@@ -694,6 +732,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ObservationGap(code="reasoning_token_usage_unavailable"),
             ObservationGap(code="subagent_hierarchy_unavailable"),
             ObservationGap(code="compaction_observations_unavailable"),
+            *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
         ]
         if not completed:
             gaps.append(ObservationGap(code="partial_model_usage_unavailable"))

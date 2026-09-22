@@ -261,6 +261,22 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     for an acknowledgement before reading items.
     """
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
+    usage = response_json.get("usage")
+    if isinstance(usage, dict):
+        # Optional counters are unknown when null. Codex accepts omitted details,
+        # but rejects null integer counters and empty detail objects. Keep known zeros.
+        usage = usage.copy()
+        for key in ("input_tokens_details", "output_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                available = {name: value for name, value in details.items() if value is not None}
+                if available:
+                    usage[key] = available
+                else:
+                    usage.pop(key)
+            elif details is None:
+                usage.pop(key, None)
+        response_json = {**response_json, "usage": usage}
 
     yield _sse_event(
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
