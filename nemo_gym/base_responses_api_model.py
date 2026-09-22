@@ -371,6 +371,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 self.admission_limiter(),
                 pid=os.getpid(),
                 server_name=self.config.name,
+                capture_ledger=self._checkpoint_capture_ledger,
             )
             self._checkpoint_worker_agent = worker_agent
             coordinator_client = worker_agent.service_client()

@@ -33,21 +33,32 @@ service's. The coordinator fixes this by owning the service-level truth:
   reject close, and registrations remain closed until resume so replacement
   processes cannot substitute for frozen membership.
 
-The message protocol is newline-delimited JSON, chosen for debuggability:
+The message protocol uses bounded, length-prefixed JSON frames:
 ``register``, ``ack``, ``counters`` upstream; ``state`` downstream. The
 transport is a Unix-domain socket because the coordinator and its workers
-are one service on one host; nothing here crosses machines.
+are one service on one host; nothing here crosses machines. Length-prefixed
+frames avoid ``StreamReader.readline()``'s 64-KiB limit while retaining an
+explicit upper bound against corrupt or untrusted frame lengths.
 """
 
 import asyncio
+import hashlib
 import json
+import shutil
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Literal, Optional
 
 from fastapi import FastAPI, Header, Query
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym._checkpoint.admission import AdmissionLimiter
+from nemo_gym._checkpoint.artifacts import (
+    CheckpointArtifactReference,
+    read_jsonl_artifact,
+    write_jsonl_artifact,
+)
 from nemo_gym._checkpoint.control import (
     AdmissionState,
     CheckpointPhase,
@@ -60,12 +71,14 @@ from nemo_gym._checkpoint.control import (
 from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
     GenerationCutCoordinatorProof,
+    GenerationCutFrozenTicket,
     GenerationCutWorkerProof,
     ModelAbortInflightRequest,
     ModelAdmissionPauseRequest,
     ModelAdmissionResumeRequest,
 )
 from nemo_gym.token_id_capture.control_routes import require_control_auth
+from nemo_gym.token_id_capture.protocols import CaptureLedger, GenerationCutCaptureLedger
 
 
 class MissingWorkersError(ControlError):
@@ -113,6 +126,10 @@ class RestoredCutConsumedError(ControlError):
 
 CHECKPOINT_COORDINATOR_SOCKET_ENV = "NG_CHECKPOINT_COORDINATOR_SOCKET"
 
+_FRAME_LENGTH_BYTES = 8
+_MAX_COORDINATOR_MESSAGE_BYTES = 64 * 1024 * 1024
+_COORDINATOR_RESPONSE_GRACE_S = 5.0
+
 _LEASE_MUTATING_SERVICE_OPERATIONS = frozenset(
     {
         "abandon_generation_cut_claim",
@@ -123,8 +140,123 @@ _LEASE_MUTATING_SERVICE_OPERATIONS = frozenset(
 )
 
 
-def _identity_set(values: Iterable[dict[str, Any]]) -> set[tuple[str, int]]:
-    return {(str(value["rollout_id"]), int(value["attempt_index"])) for value in values}
+class _WorkerAttemptIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rollout_id: str = Field(min_length=1)
+    attempt_index: int = Field(ge=0)
+
+
+class _WorkerCheckpointIndexRecord(BaseModel):
+    """One compact row in a worker's checkpoint-scoped evidence index.
+
+    Full generation-cut coordinates live in the canonical rollout lineage.
+    This artifact records only frozen membership, which tickets wrote a cut,
+    and attempt exclusions needed to validate the service-level checkpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    record_type: Literal["ticket", "exclusion"]
+    ticket_id: str | None = None
+    rollout_id: str | None = None
+    attempt_index: int | None = Field(default=None, ge=0)
+    model_call_id: str | None = None
+    generation_started: bool | None = None
+    response_started: bool | None = None
+    cut_recorded: bool = False
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "_WorkerCheckpointIndexRecord":
+        if self.record_type == "exclusion":
+            if self.rollout_id is None or self.attempt_index is None:
+                raise ValueError("checkpoint exclusion requires rollout_id and attempt_index")
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.ticket_id,
+                        self.model_call_id,
+                        self.generation_started,
+                        self.response_started,
+                    )
+                )
+                or self.cut_recorded
+            ):
+                raise ValueError("checkpoint exclusion cannot contain generation-ticket fields")
+            return self
+        if self.ticket_id is None or self.generation_started is None or self.response_started is None:
+            raise ValueError("checkpoint ticket index row is missing frozen-ticket fields")
+        if (self.rollout_id is None) != (self.attempt_index is None):
+            raise ValueError("checkpoint ticket rollout_id and attempt_index must be provided together")
+        if self.cut_recorded and (
+            self.rollout_id is None or self.model_call_id is None or not self.generation_started
+        ):
+            raise ValueError("recorded generation cut requires a started, correlated model call")
+        return self
+
+    @classmethod
+    def from_ticket(
+        cls,
+        ticket: GenerationCutFrozenTicket,
+        *,
+        cut_recorded: bool,
+    ) -> "_WorkerCheckpointIndexRecord":
+        return cls(
+            record_type="ticket",
+            **ticket.model_dump(mode="json"),
+            cut_recorded=cut_recorded,
+        )
+
+    @classmethod
+    def from_exclusion(cls, rollout_id: str, attempt_index: int) -> "_WorkerCheckpointIndexRecord":
+        return cls(record_type="exclusion", rollout_id=rollout_id, attempt_index=attempt_index)
+
+    def frozen_ticket(self) -> GenerationCutFrozenTicket:
+        if self.record_type != "ticket":
+            raise ValueError("checkpoint exclusion is not a frozen ticket")
+        return GenerationCutFrozenTicket(
+            ticket_id=self.ticket_id,
+            rollout_id=self.rollout_id,
+            attempt_index=self.attempt_index,
+            model_call_id=self.model_call_id,
+            generation_started=self.generation_started,
+            response_started=self.response_started,
+        )
+
+
+@dataclass(frozen=True)
+class CoordinatorCheckpointEvidence:
+    """One coherent, digest-validated view of all frozen worker artifacts."""
+
+    generation_cut_proof: GenerationCutCoordinatorProof
+    generation_cut_tickets: tuple[GenerationCutFrozenTicket, ...]
+    checkpoint_exclusions: frozenset[tuple[str, int]]
+
+
+def _checkpoint_artifact_directory(checkpoint_id: str) -> str:
+    identity = checkpoint_id.encode()
+    return f"checkpoint-{hashlib.sha256(identity).hexdigest()}"
+
+
+def _worker_checkpoint_index_path(
+    checkpoint_id: str,
+    coordinator_sequence: int,
+    worker_id: str,
+    artifact_revision: int,
+) -> Path:
+    worker_digest = hashlib.sha256(worker_id.encode()).hexdigest()
+    return (
+        Path(_checkpoint_artifact_directory(checkpoint_id))
+        / f"sequence-{coordinator_sequence:08d}"
+        / f"worker-{worker_digest}"
+        / f"index-{artifact_revision:08d}.jsonl"
+    )
+
+
+def _attempt_fence_artifact_path(revision: int) -> Path:
+    return Path("attempt-fences") / f"fences-{revision:08d}.jsonl"
 
 
 class _RestoredCutEntry:
@@ -265,9 +397,10 @@ class WorkerRecord:
         "acked_seq",
         "inflight",
         "generation_pending",
-        "seen_attempts",
-        "checkpoint_exclusions",
-        "cut_proof",
+        "cut_artifact",
+        "cut_artifact_revision",
+        "cut_records",
+        "membership_digest",
         "proof_error",
         "writer",
         "write_lock",
@@ -282,9 +415,10 @@ class WorkerRecord:
         self.acked_seq = 0
         self.inflight = 0
         self.generation_pending = 0
-        self.seen_attempts: set[tuple[str, int]] = set()
-        self.checkpoint_exclusions: set[tuple[str, int]] = set()
-        self.cut_proof: GenerationCutWorkerProof | None = None
+        self.cut_artifact: CheckpointArtifactReference | None = None
+        self.cut_artifact_revision = 0
+        self.cut_records = 0
+        self.membership_digest: str | None = None
         self.proof_error: str | None = None
         self.writer = writer
         self.write_lock = asyncio.Lock()
@@ -310,6 +444,7 @@ class AdmissionCoordinator:
         service_handler: Callable[[str, str, dict[str, Any]], Awaitable[Any]] | None = None,
     ) -> None:
         self.socket_path = Path(socket_path)
+        self.artifact_root = self.socket_path.parent / "worker-checkpoint-artifacts"
         self.expected_workers = expected_workers
         self.restored_cuts = restored_cuts or RestoredCutRegistry()
         self.service_handler = service_handler
@@ -319,7 +454,10 @@ class AdmissionCoordinator:
         self._cut_timeout_s: float | None = None
         self._frozen_worker_ids: tuple[str, ...] = ()
         self._seq = 0
-        self._tombstones: list[dict[str, Any]] = []
+        self._tombstones: set[tuple[str, int]] = set()
+        self._attempt_fence_revision = 0
+        self._attempt_fence_artifact: CheckpointArtifactReference | None = None
+        self._attempt_fence_artifact_lock = asyncio.Lock()
         self._checkpoint_exclusions: set[tuple[str, int]] = set()
         self._server: Optional[asyncio.base_events.Server] = None
         self._changed = asyncio.Condition()
@@ -330,6 +468,7 @@ class AdmissionCoordinator:
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
             self.socket_path.unlink()
         self._server = await asyncio.start_unix_server(self._serve_worker, path=str(self.socket_path))
@@ -394,16 +533,13 @@ class AdmissionCoordinator:
                         continue
                     record.inflight = int(message.get("inflight", record.inflight))
                     record.generation_pending = int(message.get("generation_pending", record.inflight))
-                    if "seen_attempts" in message:
-                        record.seen_attempts = _identity_set(message["seen_attempts"])
-                    if "checkpoint_exclusions" in message:
-                        record.checkpoint_exclusions = _identity_set(message["checkpoint_exclusions"])
                     if self._state != AdmissionState.ACCEPTING:
-                        if not self._accept_cut_proof(record, message, message_seq):
-                            await self._notify()
-                            continue
+                        await self._accept_cut_proof(record, message, message_seq)
                     else:
-                        record.cut_proof = None
+                        record.cut_artifact = None
+                        record.cut_artifact_revision = 0
+                        record.cut_records = 0
+                        record.membership_digest = None
                         record.proof_error = None
                     record.acked_seq = message_seq
                     await self._notify()
@@ -414,7 +550,7 @@ class AdmissionCoordinator:
                     record.inflight = int(message["inflight"])
                     record.generation_pending = int(message.get("generation_pending", record.inflight))
                     if self._state != AdmissionState.ACCEPTING:
-                        self._accept_cut_proof(record, message, message_seq)
+                        await self._accept_cut_proof(record, message, message_seq)
                     await self._notify()
                 elif kind == "service_request":
                     operation = str(message.get("operation", ""))
@@ -510,21 +646,83 @@ class AdmissionCoordinator:
         async with record.write_lock:
             await _write_message(record.writer, message)
 
-    def _accept_cut_proof(self, record: WorkerRecord, message: dict[str, Any], message_seq: int) -> bool:
+    async def _accept_cut_proof(
+        self,
+        record: WorkerRecord,
+        message: dict[str, Any],
+        message_seq: int,
+    ) -> bool:
+        artifact_revision = int(message.get("generation_cut_artifact_revision", 0))
+        if artifact_revision < record.cut_artifact_revision:
+            # An older acknowledgement may arrive after a newer counter
+            # report. Never let it roll back the worker's accepted index.
+            return True
+        publication_error = message.get("generation_cut_error")
+        if publication_error is not None:
+            record.cut_artifact = None
+            record.cut_artifact_revision = artifact_revision
+            record.cut_records = 0
+            record.membership_digest = None
+            record.proof_error = str(publication_error)
+            return False
+        raw_reference = message.get("generation_cut_artifact")
+        if raw_reference is None:
+            record.cut_artifact = None
+            record.cut_artifact_revision = artifact_revision
+            record.cut_records = 0
+            record.membership_digest = None
+            record.proof_error = None
+            # A worker can acknowledge the closed admission state before its
+            # in-flight generation set becomes prepare-safe. The coordinator
+            # reports that state as draining until the complete artifact
+            # arrives in a later counter update.
+            return True
         try:
-            proof = GenerationCutWorkerProof.model_validate(message.get("generation_cut_proof"))
+            reference = CheckpointArtifactReference.model_validate(raw_reference)
+            if (
+                artifact_revision == record.cut_artifact_revision
+                and record.cut_artifact is not None
+                and reference != record.cut_artifact
+            ):
+                raise ValueError("worker reused a generation-cut index revision with different contents")
+            rows = await asyncio.to_thread(
+                read_jsonl_artifact,
+                self.artifact_root,
+                reference,
+                _WorkerCheckpointIndexRecord,
+            )
+            ticket_rows = [row for row in rows if row.record_type == "ticket"]
+            tickets = [row.frozen_ticket() for row in ticket_rows]
+            proof = GenerationCutWorkerProof.build(
+                checkpoint_id=str(self._checkpoint_id),
+                coordinator_sequence=self._seq,
+                worker_id=record.worker_id,
+                frozen_tickets=tickets,
+                ready_ticket_ids=[ticket.ticket_id for ticket in tickets],
+                generation_cut_receipt=None,
+            )
             if (
                 message_seq != self._seq
                 or proof.coordinator_sequence != self._seq
                 or proof.worker_id != record.worker_id
                 or proof.checkpoint_id != self._checkpoint_id
+                or proof.membership_digest != message.get("generation_cut_membership_digest")
             ):
-                raise ValueError("worker generation-cut proof identity does not match coordinator state")
+                raise ValueError("worker generation-cut index identity does not match coordinator state")
+            cut_records = sum(row.cut_recorded for row in ticket_rows)
+            if cut_records != message.get("generation_cut_records"):
+                raise ValueError("worker generation-cut index count does not match coordinator message")
         except (TypeError, ValueError) as error:
-            record.cut_proof = None
+            record.cut_artifact = None
+            record.cut_artifact_revision = artifact_revision
+            record.cut_records = 0
+            record.membership_digest = None
             record.proof_error = str(error)
             return False
-        record.cut_proof = proof
+        record.cut_artifact = reference
+        record.cut_artifact_revision = artifact_revision
+        record.cut_records = cut_records
+        record.membership_digest = proof.membership_digest
         record.proof_error = None
         return True
 
@@ -542,9 +740,30 @@ class AdmissionCoordinator:
             "checkpoint_id": self._checkpoint_id,
             "cut_timeout_s": self._cut_timeout_s,
             "frozen_worker_ids": self._frozen_worker_ids,
-            "tombstones": tuple(self._tombstones),
+            "attempt_fence_index": (
+                self._attempt_fence_artifact.model_dump(mode="json")
+                if self._attempt_fence_artifact is not None
+                else None
+            ),
             "restored_cuts_available": self.restored_cuts.has_unconsumed(),
         }
+
+    async def _refresh_attempt_fence_artifact(self) -> None:
+        # Multiple abort requests are valid while a checkpoint is preparing.
+        # Serialize their snapshots and publications so an older slow write
+        # cannot replace a newer index and silently lose a tombstone.
+        async with self._attempt_fence_artifact_lock:
+            self._attempt_fence_revision += 1
+            records = tuple(
+                _WorkerAttemptIdentity(rollout_id=rollout_id, attempt_index=attempt_index)
+                for rollout_id, attempt_index in sorted(self._tombstones)
+            )
+            self._attempt_fence_artifact = await asyncio.to_thread(
+                write_jsonl_artifact,
+                self.artifact_root,
+                _attempt_fence_artifact_path(self._attempt_fence_revision),
+                records,
+            )
 
     async def _broadcast_locked(self) -> None:
         """Publish one state revision while ``_broadcast_lock`` is held."""
@@ -576,37 +795,64 @@ class AdmissionCoordinator:
             self._frozen_worker_ids = connected
             self._checkpoint_exclusions.clear()
             for record in self._workers.values():
-                record.cut_proof = None
+                record.cut_artifact = None
+                record.cut_artifact_revision = 0
+                record.cut_records = 0
+                record.membership_digest = None
                 record.proof_error = None
             await self._broadcast_locked()
 
-    async def resume_admission(self) -> None:
+    async def resume_admission(self) -> str | None:
         async with self._broadcast_lock:
+            checkpoint_id = self._checkpoint_id
             self._state = AdmissionState.ACCEPTING
             self._checkpoint_id = None
             self._cut_timeout_s = None
             self._frozen_worker_ids = ()
             self._checkpoint_exclusions.clear()
             for record in self._workers.values():
-                record.cut_proof = None
+                record.cut_artifact = None
+                record.cut_artifact_revision = 0
+                record.cut_records = 0
+                record.membership_digest = None
                 record.proof_error = None
             await self._broadcast_locked()
+            return checkpoint_id
+
+    async def cleanup_checkpoint_artifacts(self, checkpoint_id: str | None) -> None:
+        """Remove one cut's transient files after every worker reopened.
+
+        Cleanup must happen after the accepting-state acknowledgements. A
+        worker may still be finishing its last artifact write when resume is
+        broadcast; deleting the directory before that write settles can let
+        the worker recreate an orphaned checkpoint directory.
+        """
+        if checkpoint_id is not None:
+            await asyncio.to_thread(
+                shutil.rmtree,
+                self.artifact_root / _checkpoint_artifact_directory(checkpoint_id),
+                ignore_errors=True,
+            )
 
     async def add_tombstone(self, rollout_id: str, attempt_index: int) -> None:
         async with self._broadcast_lock:
-            self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
+            self._tombstones.add((rollout_id, attempt_index))
             self._checkpoint_exclusions.add((rollout_id, attempt_index))
+            await self._refresh_attempt_fence_artifact()
             await self._broadcast_locked()
 
     async def install_tombstones(self, identities: Iterable[tuple[str, int]]) -> None:
         """Install restored attempt fences and publish them in one state update."""
         async with self._broadcast_lock:
-            known = {(item["rollout_id"], int(item["attempt_index"])) for item in self._tombstones}
+            changed = False
             for rollout_id, attempt_index in identities:
-                if (rollout_id, attempt_index) in known:
+                identity = (rollout_id, attempt_index)
+                if identity in self._tombstones:
                     continue
-                self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
-                known.add((rollout_id, attempt_index))
+                self._tombstones.add(identity)
+                changed = True
+            if changed:
+                await self._refresh_attempt_fence_artifact()
             await self._broadcast_locked()
 
     async def publish_restored_cut_state(self) -> None:
@@ -615,19 +861,117 @@ class AdmissionCoordinator:
             if self._state == AdmissionState.ACCEPTING:
                 await self._broadcast_locked()
 
-    def seen_attempts(self) -> set[tuple[str, int]]:
-        result: set[tuple[str, int]] = set()
-        for record in self._workers.values():
-            if record.connected:
-                result.update(record.seen_attempts)
-        return result
-
     def checkpoint_exclusions(self) -> set[tuple[str, int]]:
         result = set(self._checkpoint_exclusions)
         for record in self._workers.values():
-            if record.connected:
-                result.update(record.checkpoint_exclusions)
+            rows = self._worker_checkpoint_index(record)
+            if rows is not None:
+                result.update(
+                    (item.rollout_id, item.attempt_index)
+                    for item in rows
+                    if item.record_type == "exclusion"
+                    and item.rollout_id is not None
+                    and item.attempt_index is not None
+                )
         return result
+
+    def _worker_checkpoint_index(self, record: WorkerRecord) -> tuple[_WorkerCheckpointIndexRecord, ...] | None:
+        if not record.connected or record.cut_artifact is None:
+            return None
+        return tuple(
+            read_jsonl_artifact(
+                self.artifact_root,
+                record.cut_artifact,
+                _WorkerCheckpointIndexRecord,
+            )
+        )
+
+    def _checkpoint_artifact_snapshot(
+        self,
+    ) -> tuple[
+        str,
+        int,
+        tuple[str, ...],
+        tuple[tuple[str, CheckpointArtifactReference], ...],
+        frozenset[tuple[str, int]],
+    ]:
+        if self._checkpoint_id is None:
+            raise ValueError("coordinator has no active checkpoint")
+        live = sorted(
+            (record for record in self._workers.values() if record.connected),
+            key=lambda record: record.worker_id,
+        )
+        if len(live) != self.expected_workers or any(
+            record.acked_seq < self._seq or record.cut_artifact is None for record in live
+        ):
+            raise ValueError("coordinator generation-cut proof omits frozen worker membership")
+        references = tuple(
+            (record.worker_id, record.cut_artifact) for record in live if record.cut_artifact is not None
+        )
+        return (
+            self._checkpoint_id,
+            self._seq,
+            self._frozen_worker_ids,
+            references,
+            frozenset(self._checkpoint_exclusions),
+        )
+
+    async def checkpoint_evidence(self) -> CoordinatorCheckpointEvidence:
+        """Load every worker artifact once without blocking the control loop."""
+        snapshot = self._checkpoint_artifact_snapshot()
+        checkpoint_id, sequence, frozen_worker_ids, references, local_exclusions = snapshot
+        loaded = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    read_jsonl_artifact,
+                    self.artifact_root,
+                    reference,
+                    _WorkerCheckpointIndexRecord,
+                )
+                for _, reference in references
+            )
+        )
+        if self._checkpoint_artifact_snapshot() != snapshot:
+            raise ValueError("coordinator checkpoint evidence changed while it was being loaded")
+
+        worker_proofs: list[GenerationCutWorkerProof] = []
+        generation_cut_tickets: list[GenerationCutFrozenTicket] = []
+        checkpoint_exclusions = set(local_exclusions)
+        for (worker_id, _), rows in zip(references, loaded, strict=True):
+            ticket_rows = [row for row in rows if row.record_type == "ticket"]
+            tickets = [row.frozen_ticket() for row in ticket_rows]
+            proof = GenerationCutWorkerProof.build(
+                checkpoint_id=checkpoint_id,
+                coordinator_sequence=sequence,
+                worker_id=worker_id,
+                frozen_tickets=tickets,
+                ready_ticket_ids=[ticket.ticket_id for ticket in tickets],
+                generation_cut_receipt=None,
+            )
+            record = self._workers.get(worker_id)
+            if record is None or record.membership_digest != proof.membership_digest:
+                raise ValueError("worker generation-cut membership changed after artifact validation")
+            if record.cut_records != sum(row.cut_recorded for row in ticket_rows):
+                raise ValueError("worker generation-cut count changed after artifact validation")
+            worker_proofs.append(proof)
+            generation_cut_tickets.extend(row.frozen_ticket() for row in ticket_rows if row.cut_recorded)
+            checkpoint_exclusions.update(
+                (row.rollout_id, row.attempt_index)
+                for row in rows
+                if row.record_type == "exclusion" and row.rollout_id is not None and row.attempt_index is not None
+            )
+        proof = GenerationCutCoordinatorProof.build(
+            checkpoint_id=checkpoint_id,
+            coordinator_sequence=sequence,
+            expected_workers=self.expected_workers,
+            frozen_worker_ids=frozen_worker_ids,
+            workers=worker_proofs,
+        )
+        return CoordinatorCheckpointEvidence(
+            generation_cut_proof=proof,
+            generation_cut_tickets=tuple(sorted(generation_cut_tickets, key=lambda item: item.ticket_id)),
+            checkpoint_exclusions=frozenset(checkpoint_exclusions),
+        )
 
     # -- aggregation ---------------------------------------------------------
 
@@ -639,9 +983,7 @@ class AdmissionCoordinator:
         generation_pending_total = sum(record.generation_pending for record in live)
         all_acked = missing == 0 and acknowledged == len(live)
         all_proofs_complete = all(
-            record.cut_proof is not None
-            and record.cut_proof.coordinator_sequence == self._seq
-            and record.cut_proof.generation_pending == 0
+            record.cut_artifact is not None and record.membership_digest is not None and record.generation_pending == 0
             for record in live
         )
         drained = all_acked and generation_pending_total == 0 and all_proofs_complete
@@ -664,8 +1006,13 @@ class AdmissionCoordinator:
                     "acked_seq": record.acked_seq,
                     "inflight": record.inflight,
                     "generation_pending": record.generation_pending,
-                    "generation_cut_proof": (
-                        record.cut_proof.model_dump(mode="json") if record.cut_proof is not None else None
+                    "generation_cut_summary": (
+                        {
+                            "membership_digest": record.membership_digest,
+                            "records": record.cut_records,
+                        }
+                        if record.cut_artifact is not None
+                        else None
                     ),
                     "proof_error": record.proof_error,
                     "connected": record.connected,
@@ -680,16 +1027,65 @@ class AdmissionCoordinator:
             raise ValueError("coordinator has no active checkpoint")
         live = [record for record in self._workers.values() if record.connected]
         if len(live) != self.expected_workers or any(
-            record.acked_seq < self._seq or record.cut_proof is None for record in live
+            record.acked_seq < self._seq or record.cut_artifact is None for record in live
         ):
             raise ValueError("coordinator generation-cut proof omits frozen worker membership")
+        worker_proofs = []
+        for record in live:
+            rows = self._worker_checkpoint_index(record)
+            if rows is None:
+                continue
+            tickets = [row.frozen_ticket() for row in rows if row.record_type == "ticket"]
+            worker_proofs.append(
+                GenerationCutWorkerProof.build(
+                    checkpoint_id=self._checkpoint_id,
+                    coordinator_sequence=self._seq,
+                    worker_id=record.worker_id,
+                    frozen_tickets=tickets,
+                    ready_ticket_ids=[ticket.ticket_id for ticket in tickets],
+                    generation_cut_receipt=None,
+                )
+            )
+            if record.membership_digest != worker_proofs[-1].membership_digest:
+                raise ValueError("worker generation-cut index membership does not match its validated digest")
         return GenerationCutCoordinatorProof.build(
             checkpoint_id=self._checkpoint_id,
             coordinator_sequence=self._seq,
             expected_workers=self.expected_workers,
             frozen_worker_ids=self._frozen_worker_ids,
-            workers=[record.cut_proof for record in live if record.cut_proof is not None],
+            workers=worker_proofs,
         )
+
+    def generation_cut_summary(self) -> dict[str, Any]:
+        """Return bounded evidence that all frozen worker artifacts were validated."""
+        if self._checkpoint_id is None:
+            raise ValueError("coordinator has no active checkpoint")
+        live = [record for record in self._workers.values() if record.connected]
+        if len(live) != self.expected_workers or any(
+            record.acked_seq < self._seq or record.cut_artifact is None for record in live
+        ):
+            raise ValueError("coordinator generation-cut summary omits frozen worker membership")
+        workers = [
+            {
+                "worker_id": record.worker_id,
+                "artifact_sha256": record.cut_artifact.sha256,
+                "membership_digest": record.membership_digest,
+                "records": record.cut_records,
+            }
+            for record in sorted(live, key=lambda item: item.worker_id)
+            if record.cut_artifact is not None
+        ]
+        payload = {
+            "checkpoint_id": self._checkpoint_id,
+            "coordinator_sequence": self._seq,
+            "expected_workers": self.expected_workers,
+            "records": sum(record.cut_records for record in live),
+            "workers": workers,
+        }
+        payload["proof_digest"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return payload
 
     async def wait_until(self, predicate: Callable[[dict[str, Any]], bool], timeout_s: float) -> dict[str, Any]:
         """Wait for the aggregated status to satisfy ``predicate``; return the last status."""
@@ -796,37 +1192,42 @@ class WorkerAdmissionAgent:
         pid: int = 0,
         server_name: str = "policy",
         cut_timeout_s: float | None = None,
+        capture_ledger: CaptureLedger | None = None,
     ) -> None:
         self.socket_path = Path(socket_path)
+        self.artifact_root = self.socket_path.parent / "worker-checkpoint-artifacts"
         self.worker_id = worker_id
         self.limiter = limiter
         self.pid = pid
         self.server_name = server_name
         self.cut_timeout_s = cut_timeout_s
+        self.capture_ledger = capture_ledger
         self._writer: Optional[asyncio.StreamWriter] = None
         self._listener: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
+        self._checkpoint_artifact_lock = asyncio.Lock()
         self._service_requests: dict[str, asyncio.Future[Any]] = {}
         self._next_service_request_id = 0
         self._coordinator_sequence = 0
         self._checkpoint_id: str | None = None
         self._restored_cuts_available = False
-        self._reported_seen_attempts_checkpoint_id: str | None = None
         self._counter_report_pending = False
         self._counter_report_task: asyncio.Task[None] | None = None
+        self._checkpoint_artifact_revision = 0
+        self._checkpoint_artifact_fingerprint: str | None = None
+        self._checkpoint_artifact_reference: CheckpointArtifactReference | None = None
 
     async def start(self) -> None:
         reader, writer = await asyncio.open_unix_connection(path=str(self.socket_path))
         self._writer = writer
         self.limiter.add_listener(self._on_limiter_change)
         await self._write({"type": "register", "worker_id": self.worker_id, "pid": self.pid})
-        line = await reader.readline()
-        if not line:
+        first_message = await _read_message(reader)
+        if first_message is None:
             self.limiter.remove_listener(self._on_limiter_change)
             self._writer = None
             writer.close()
             raise WorkerRegistrationError("coordinator closed the worker registration connection")
-        first_message = json.loads(line)
         if first_message.get("type") == "registration_rejected":
             self._checkpoint_id = first_message.get("checkpoint_id")
             self.limiter.close(self._checkpoint_id)
@@ -886,12 +1287,26 @@ class WorkerAdmissionAgent:
         self._restored_cuts_available = bool(message.get("restored_cuts_available", False))
         if state == AdmissionState.ACCEPTING:
             self.limiter.resume()
-            self._reported_seen_attempts_checkpoint_id = None
+            # A checkpoint artifact may still be finishing in ``to_thread``.
+            # Serialize the reset with publication so a stale write cannot
+            # repopulate the cache after admission has reopened.
+            async with self._checkpoint_artifact_lock:
+                self._checkpoint_artifact_fingerprint = None
+                self._checkpoint_artifact_reference = None
         else:
             checkpoint_id = message.get("checkpoint_id")
             self.limiter.close(checkpoint_id)
-        for tombstone in message.get("tombstones", ()):
-            self.limiter.abort_inflight(tombstone["rollout_id"], tombstone["attempt_index"])
+        raw_fence_index = message.get("attempt_fence_index")
+        if raw_fence_index is not None:
+            reference = CheckpointArtifactReference.model_validate(raw_fence_index)
+            fences = await asyncio.to_thread(
+                read_jsonl_artifact,
+                self.artifact_root,
+                reference,
+                _WorkerAttemptIdentity,
+            )
+            for fence in fences:
+                self.limiter.abort_inflight(fence.rollout_id, fence.attempt_index)
         if state != AdmissionState.ACCEPTING and checkpoint_id is not None:
             requested_cut_timeout_s = message.get("cut_timeout_s")
             cut_timeout_s = 10.0 if requested_cut_timeout_s is None else max(float(requested_cut_timeout_s), 0.0)
@@ -903,23 +1318,15 @@ class WorkerAdmissionAgent:
                 timeout_s=cut_timeout_s,
             )
         assert self._writer is not None
+        artifact_payload = await self._generation_cut_artifact_status_payload()
         payload = {
             "type": "ack",
             "seq": message_sequence,
             "inflight": self.limiter.counts()["inflight_total"],
             "generation_pending": self.limiter.counts()["generation_pending_total"],
-            **self._generation_cut_proof_payload(),
+            **artifact_payload,
         }
-        report_seen_attempts = (
-            state != AdmissionState.ACCEPTING
-            and checkpoint_id is not None
-            and self._reported_seen_attempts_checkpoint_id != checkpoint_id
-        )
-        if report_seen_attempts:
-            payload.update(self._lineage_identity_payload())
         await self._write(payload)
-        if report_seen_attempts:
-            self._reported_seen_attempts_checkpoint_id = checkpoint_id
 
     def _on_limiter_change(self) -> None:
         writer = self._writer
@@ -935,12 +1342,13 @@ class WorkerAdmissionAgent:
             while self._counter_report_pending:
                 self._counter_report_pending = False
                 counts = self.limiter.counts()
+                artifact_payload = await self._generation_cut_artifact_status_payload()
                 payload = {
                     "type": "counters",
                     "seq": self._coordinator_sequence,
                     "inflight": counts["inflight_total"],
                     "generation_pending": counts["generation_pending_total"],
-                    **self._generation_cut_proof_payload(),
+                    **artifact_payload,
                 }
                 await self._write(payload)
         except (BrokenPipeError, ConnectionError):
@@ -953,27 +1361,98 @@ class WorkerAdmissionAgent:
             if self._counter_report_pending and writer is not None and not writer.is_closing():
                 self._counter_report_task = asyncio.get_running_loop().create_task(self._flush_counter_reports())
 
-    def _generation_cut_proof_payload(self) -> dict[str, Any]:
-        if self._checkpoint_id is None or self._coordinator_sequence <= 0:
-            return {}
-        proof = self.limiter.generation_cut_worker_proof(
-            self._checkpoint_id,
-            coordinator_sequence=self._coordinator_sequence,
-            worker_id=self.worker_id,
-        )
-        return {"generation_cut_proof": proof.model_dump(mode="json")}
+    async def _generation_cut_artifact_status_payload(self) -> dict[str, Any]:
+        """Publish evidence or a visible fail-closed diagnostic.
 
-    def _lineage_identity_payload(self) -> dict[str, list[dict[str, Any]]]:
+        Backends may fail while persisting lineage or the compact artifact.
+        Keep the worker connected so status reports the exact cause, but do
+        not acknowledge a usable proof until a later retry succeeds.
+        """
+        try:
+            payload = await self._generation_cut_artifact_payload()
+        except Exception as error:
+            payload = {"generation_cut_error": f"{type(error).__name__}: {error}"}
         return {
-            "seen_attempts": [
-                {"rollout_id": rollout_id, "attempt_index": attempt_index}
-                for rollout_id, attempt_index in sorted(self.limiter.seen_attempts())
-            ],
-            "checkpoint_exclusions": [
-                {"rollout_id": rollout_id, "attempt_index": attempt_index}
-                for rollout_id, attempt_index in sorted(self.limiter.checkpoint_exclusions())
-            ],
+            "generation_cut_artifact_revision": self._checkpoint_artifact_revision,
+            **payload,
         }
+
+    async def _generation_cut_artifact_payload(self) -> dict[str, Any]:
+        # State acknowledgements and counter reports can both publish an
+        # artifact. Keep the snapshot, file write, and cache update in one
+        # critical section so an older slow write cannot overwrite a newer
+        # reference or reuse the same revision number.
+        async with self._checkpoint_artifact_lock:
+            if self._checkpoint_id is None or self._coordinator_sequence <= 0:
+                return {}
+            # Frozen membership and readiness are monotonic while admission is
+            # closed. Publish one complete artifact rather than repeatedly
+            # rewriting a potentially large partial proof on every counter tick.
+            if self.limiter.generation_pending() != 0:
+                return {}
+            proof = self.limiter.generation_cut_worker_proof(
+                self._checkpoint_id,
+                coordinator_sequence=self._coordinator_sequence,
+                worker_id=self.worker_id,
+            )
+            receipt = proof.generation_cut_receipt
+            if receipt is not None:
+                if not isinstance(self.capture_ledger, GenerationCutCaptureLedger):
+                    raise RuntimeError(
+                        "multi-worker generation cuts require a process-shared capture ledger "
+                        "that can persist and reload generation-cut lineage"
+                    )
+                # The lineage append is the durability boundary.  Never
+                # advertise the compact index until the full cut is visible
+                # to every policy worker and the coordinator.
+                await self.capture_ledger.record_generation_cut(receipt)
+            cut_ticket_ids = {prefix.ticket_id for prefix in receipt.prefixes} if receipt is not None else set()
+            records = tuple(
+                [
+                    _WorkerCheckpointIndexRecord.from_ticket(
+                        ticket,
+                        cut_recorded=ticket.ticket_id in cut_ticket_ids,
+                    )
+                    for ticket in proof.frozen_tickets
+                ]
+                + [
+                    _WorkerCheckpointIndexRecord.from_exclusion(rollout_id, attempt_index)
+                    for rollout_id, attempt_index in self.limiter.checkpoint_exclusions()
+                ]
+            )
+            fingerprint_payload = "\n".join(record.model_dump_json() for record in records).encode()
+            fingerprint = hashlib.sha256(fingerprint_payload).hexdigest()
+            response = {
+                "generation_cut_membership_digest": proof.membership_digest,
+                "generation_cut_records": len(cut_ticket_ids),
+            }
+            if (
+                fingerprint == self._checkpoint_artifact_fingerprint
+                and self._checkpoint_artifact_reference is not None
+            ):
+                return {
+                    **response,
+                    "generation_cut_artifact": self._checkpoint_artifact_reference.model_dump(mode="json"),
+                }
+            self._checkpoint_artifact_revision += 1
+            relative_path = _worker_checkpoint_index_path(
+                self._checkpoint_id,
+                self._coordinator_sequence,
+                self.worker_id,
+                self._checkpoint_artifact_revision,
+            )
+            reference = await asyncio.to_thread(
+                write_jsonl_artifact,
+                self.artifact_root,
+                relative_path,
+                records,
+            )
+            self._checkpoint_artifact_fingerprint = fingerprint
+            self._checkpoint_artifact_reference = reference
+            return {
+                **response,
+                "generation_cut_artifact": reference.model_dump(mode="json"),
+            }
 
     def service_client(self) -> "CoordinatorServiceClient":
         """Return the async client for coordinator-owned checkpoint operations."""
@@ -1074,6 +1553,26 @@ class CoordinatorServiceClient:
     ) -> Any:
         return await self._worker._service_request(operation, payload, timeout_s=timeout_s)
 
+    async def request_with_deadline(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        deadline: Deadline,
+    ) -> Any:
+        """Wait through the operation deadline plus local response delivery.
+
+        The coordinator enforces the shared operation deadline.  Its worker
+        proxy needs a small additional window to receive and forward the
+        already-computed result; otherwise success at the deadline can be
+        reported as a proxy timeout.
+        """
+        return await self.request(
+            operation,
+            payload,
+            timeout_s=max(deadline.remaining(), 0.001) + _COORDINATOR_RESPONSE_GRACE_S,
+        )
+
 
 def build_coordinator_control_app(
     coordinator: AdmissionCoordinator,
@@ -1136,10 +1635,8 @@ def build_coordinator_control_app(
                 "inflight_total": status["inflight_total"],
                 "response_inflight_total": status["response_inflight_total"],
                 "generation_pending_total": status["generation_pending_total"],
-                "generation_cut_proof": (
-                    coordinator.generation_cut_proof().model_dump(mode="json")
-                    if status["state"] == AdmissionState.PAUSED.value
-                    else None
+                "generation_cut_summary": (
+                    coordinator.generation_cut_summary() if status["state"] == AdmissionState.PAUSED.value else None
                 ),
                 "waiters_total": status["waiters_total"],
             }
@@ -1186,7 +1683,7 @@ def build_coordinator_control_app(
         if status["state"] == AdmissionState.PAUSED.value and fence.phase == CheckpointPhase.PREPARING:
             fence.mark_prepared(checkpoint_id)
         if status["state"] == AdmissionState.PAUSED.value:
-            status["generation_cut_proof"] = coordinator.generation_cut_proof().model_dump(mode="json")
+            status["generation_cut_summary"] = coordinator.generation_cut_summary()
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
@@ -1197,8 +1694,9 @@ def build_coordinator_control_app(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
-            await coordinator.resume_admission()
+            checkpoint_artifacts = await coordinator.resume_admission()
             status = await _await_worker_acks(ack_timeout_s)
+            await coordinator.cleanup_checkpoint_artifacts(checkpoint_artifacts)
             return {
                 "state": status["state"],
                 "workers": {
@@ -1251,15 +1749,46 @@ def build_coordinator_control_app(
 
 
 async def _write_message(writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
-    writer.write(json.dumps(message).encode() + b"\n")
+    writer.write(_encode_message(message))
     await writer.drain()
+
+
+def _encode_message(message: dict[str, Any]) -> bytes:
+    payload = json.dumps(message, separators=(",", ":")).encode()
+    if len(payload) > _MAX_COORDINATOR_MESSAGE_BYTES:
+        raise ValueError(
+            "checkpoint coordinator message exceeds the configured frame limit: "
+            f"bytes={len(payload)}, limit={_MAX_COORDINATOR_MESSAGE_BYTES}"
+        )
+    return len(payload).to_bytes(_FRAME_LENGTH_BYTES, byteorder="big") + payload
+
+
+async def _read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+    try:
+        header = await reader.readexactly(_FRAME_LENGTH_BYTES)
+    except asyncio.IncompleteReadError as error:
+        if not error.partial:
+            return None
+        raise ConnectionError("checkpoint coordinator connection closed during a frame header") from error
+    payload_length = int.from_bytes(header, byteorder="big")
+    if payload_length > _MAX_COORDINATOR_MESSAGE_BYTES:
+        raise ValueError(
+            "checkpoint coordinator frame exceeds the configured limit: "
+            f"bytes={payload_length}, limit={_MAX_COORDINATOR_MESSAGE_BYTES}"
+        )
+    try:
+        payload = await reader.readexactly(payload_length)
+    except asyncio.IncompleteReadError as error:
+        raise ConnectionError("checkpoint coordinator connection closed during a frame payload") from error
+    message = json.loads(payload)
+    if not isinstance(message, dict):
+        raise ValueError("checkpoint coordinator frame payload must be a JSON object")
+    return message
 
 
 async def _read_messages(reader: asyncio.StreamReader):
     while True:
-        line = await reader.readline()
-        if not line:
+        message = await _read_message(reader)
+        if message is None:
             return
-        line = line.strip()
-        if line:
-            yield json.loads(line)
+        yield message
