@@ -424,6 +424,10 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
+            # A call OpenCode recorded as errored or aborted carries its error
+            # text in place of an output; the transcript keeps that outcome.
+            status = "completed" if state.get("status") in (None, "completed") else "incomplete"
+            result = state.get("output") if state.get("output") is not None else state.get("error")
             output_items.append(
                 NeMoGymResponseFunctionToolCall(
                     arguments=arguments,
@@ -431,16 +435,16 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
                     name=part.get("tool", ""),
                     type="function_call",
                     id=call_id,
-                    status="completed",
+                    status=status,
                 )
             )
-            if state.get("output") is not None:
+            if result is not None:
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=call_id,
-                        output=str(state["output"]),
-                        status="completed",
+                        output=str(result),
+                        status=status,
                     )
                 )
 
@@ -545,10 +549,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return base
 
     def _workspace_root(self) -> Path:
-        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex[:8]}"
+        """Create a fresh per-rollout workspace directory and return it.
+
+        The full uuid plus exist_ok=False: a name collision must fail this
+        rollout loudly rather than silently merge two live rollouts' trees.
+        """
+        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex}"
         if not root.is_absolute():
             root = Path.cwd() / root
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=False)
         return root
 
     def _repo_dir(self, fallback: Path) -> Path:
