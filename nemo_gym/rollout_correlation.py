@@ -56,6 +56,7 @@ ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
 MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
 SOURCE_CAPTURE_KEY_HEADER = "x-nemo-gym-source-capture-key"
 PARENT_MODEL_CALL_ID_HEADER = "x-nemo-gym-parent-model-call-id"
+LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
 
 # The transport id appends ``-a{n}`` for re-dispatch attempts. The suffix is a
 # capture and routing key, never the logical identity. This pattern recovers
