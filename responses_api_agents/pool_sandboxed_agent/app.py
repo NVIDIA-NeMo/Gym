@@ -51,7 +51,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -79,18 +79,14 @@ class PoolSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
-    # `latest` or a release tag such as v1.0.16; ignored when remote_pool_binary_path is set.
     pool_version: str = "latest"
     remote_pool_binary_path: Optional[str] = None
-    # Model name pool sends to the Gym model proxy, which substitutes the configured policy model.
     pool_model: str = "dummy_model"
     pool_max_context_window: int
     pool_extra_args: List[str] = Field(default_factory=list)
     pool_env: Dict[str, str] = Field(default_factory=dict)
-    # Deep-merged over the generated pool agent config (see _pool_agent_config).
     pool_agent_config: Dict[str, Any] = Field(default_factory=dict)
 
-    # Overrides the Gym-side model server URL when it is not routable from inside the sandbox.
     sandbox_model_base_url: Optional[str] = None
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
@@ -123,16 +119,10 @@ class PoolSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 
 def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem], Dict[str, Any]]:
-    """Convert `pool exec -o json` NLJSON output into Responses output items.
-
-    Reasoning is buffered and prepended to the next assistant message inside <think> tags,
-    matching the Claude Code and Codex agents. `thought` events duplicate `reasoning` and are
-    skipped. Each toolCall is paired with the following toolCallResult.
-    """
     output_items: List[NeMoGymResponseOutputItem] = []
     buffered_think: Optional[str] = None
     pending_call: Optional[Dict[str, Any]] = None
-    metadata: Dict[str, Any] = {"errors": []}
+    errors: List[str] = []
 
     def flush_pending_call(output: str) -> None:
         nonlocal pending_call
@@ -180,40 +170,35 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
         if not isinstance(event, dict):
             continue
 
-        etype = event.get("type")
-        if etype == "reasoning":
-            think = event.get("reasoning") or ""
-            if think.strip():
+        match event:
+            case {"type": "reasoning", "reasoning": str(think)} if think.strip():
                 buffered_think = f"{buffered_think}\n{think}" if buffered_think else think
-        elif etype == "thought":
-            continue
-        elif etype == "assistantMessage":
-            text = event.get("message") or ""
-            if text.strip() or buffered_think:
+            case {"type": "reasoning"} | {"type": "thought"}:
+                # thought duplicates the preceding reasoning event.
+                pass
+            case {"type": "assistantMessage"}:
+                text = event.get("message") or ""
+                if text.strip() or buffered_think:
+                    flush_pending_call("")
+                    emit_message(text)
+            case {"type": "toolCall"}:
                 flush_pending_call("")
-                emit_message(text)
-        elif etype == "toolCall":
-            flush_pending_call("")
-            pending_call = event
-        elif etype == "toolCallResult":
-            if "err" in event:
-                output = f"[error] {event['err']}"
-            elif "entries" in event:
-                output = "\n".join(event.get("entries") or [])
-            else:
-                output = str(event.get("result") or "")
-            flush_pending_call(output)
-        elif etype == "error" or "error" in event:
-            metadata["errors"].append(str(event.get("error") or "unknown error"))
-        else:
-            raise NotImplementedError(event)
+                pending_call = event
+            case {"type": "toolCallResult", "err": err}:
+                flush_pending_call(f"[error] {err}")
+            case {"type": "toolCallResult", "entries": list(entries)}:
+                flush_pending_call("\n".join(entries))
+            case {"type": "toolCallResult"}:
+                flush_pending_call(str(event.get("result") or ""))
+            case {"type": "error"} | {"error": _}:
+                errors.append(str(event.get("error") or "unknown error"))
+            case _:
+                raise NotImplementedError(event)
 
     flush_pending_call("")
     if buffered_think:
         emit_message("")
-    if not metadata["errors"]:
-        metadata.pop("errors")
-    return output_items, metadata
+    return output_items, ({"errors": errors} if errors else {})
 
 
 class PoolSandboxedAgent(SimpleResponsesAPIAgent):
@@ -227,9 +212,7 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
     async def _connect_sandbox(self, sandbox_id: Optional[str]) -> AsyncSandbox:
         if not sandbox_id:
             raise ValueError("pool_sandboxed_agent requires a sandbox_handle from the resources server")
-        global_config_dict = get_global_config_dict()
-        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config_dict))
-        resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
         return await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
 
     async def _model_base_url(self, request: Request) -> str:
@@ -247,8 +230,8 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
     def _pool_agent_config(self, base_url: str) -> Dict[str, Any]:
-        # Mirrors pool's built-in defaults; `pool exec --agent-config-file` does not merge with them.
-        # use_streaming is off: token ids / logprobs are only returned on non-streaming responses.
+        # `pool exec --agent-config-file` does not merge with pool's defaults, so this mirrors them.
+        context_window = self.config.pool_max_context_window
         config = {
             "max_steps": 0,
             "enabled_tools": [
@@ -280,8 +263,8 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
             "parallel_tool_calls": {"tools": ["subagent"]},
             "tools": {
                 "edit": {"fuzzy_match_threshold": 0.05},
-                "read": {"max_lines": 500, "line_num_separator": "|\u25ca|"},
-                "write": {"line_num_separator": "|\u25ca|"},
+                "read": {"max_lines": 500, "line_num_separator": "|◊|"},
+                "write": {"line_num_separator": "|◊|"},
                 "shell": {"foreground_timeout": "120s"},
             },
             "model": {
@@ -301,32 +284,29 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
             },
             "memory": {
                 "compact": {
-                    "TriggerCompressionTokenCount": 100000,
-                    "MaxSummarizeTokenCount": 90000,
+                    "TriggerCompressionTokenCount": int(context_window * 0.8),
+                    "MaxSummarizeTokenCount": int(context_window * 0.7),
                     "MinRetainedSteps": 5,
                 }
             },
         }
         return _deep_merge(config, self.config.pool_agent_config)
 
-    def _pool_env(self, home: str, base_url: str) -> Dict[str, str]:
-        # Everything pool writes (config, state, trajectories) stays under `home`, outside the
-        # repo workdir: the resources server extracts the patch with `git diff` in the workdir.
+    def _pool_env(self, home: str) -> Dict[str, str]:
         return {
             "HOME": home,
             "XDG_CONFIG_HOME": f"{home}/config",
             "XDG_STATE_HOME": f"{home}/state",
             "XDG_DATA_HOME": f"{home}/data",
-            "POOLSIDE_STANDALONE_BASE_URL": base_url,
+            # Any value makes pool skip its login bootstrap; the provider key lives in the agent config.
             "POOLSIDE_API_KEY": "dummy_key",  # pragma: allowlist secret
-            "POOLSIDE_STANDALONE_CONTEXT_LENGTH": str(self.config.pool_max_context_window),
             **self.config.pool_env,
         }
 
-    def _build_command(self, home: str, base_url: str) -> str:
-        env_str = " ".join(f"{key}={quote(value)}" for key, value in self._pool_env(home, base_url).items())
+    def _build_command(self, home: str) -> str:
+        env_str = " ".join(f"{key}={quote(value)}" for key, value in self._pool_env(home).items())
         extra_args = " ".join(quote(arg) for arg in self.config.pool_extra_args)
-        # `pool exec` exits 4 when the agent gives up on the task, so the run is not chained with &&.
+        # pool exits 4 when it gives up on the task, so the run is not chained with &&.
         return f"""
         echo "Shell: $SHELL" \
         && mkdir -p {home} \
@@ -334,7 +314,8 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed pool" \
         && {home}/bin/pool --version \
         && {{ {env_str} {home}/bin/pool exec -o json --sandbox disabled --unsafe-auto-allow \
-            --agent-config-file {home}/agent_config.json -f {home}/prompt.txt {extra_args} > {home}/events.jsonl 2> {home}/pool.stderr; \
+            --agent-config-file {home}/agent_config.json -f {home}/prompt.txt {extra_args} \
+            > {home}/events.jsonl 2> {home}/pool.stderr; \
             echo "pool run finished rc=$?"; }}
         """
 
@@ -357,16 +338,17 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
     ) -> SandboxObservation:
         handle = getattr(sandbox, "_handle", None)
         normalized_error = error_type.lower() if isinstance(error_type, str) else ""
-        if "timeout" in normalized_error:
-            outcome = "timeout"
-        elif normalized_error:
-            outcome = "sandbox_error"
-        elif finished and return_code == 0:
-            outcome = "completed"
-        elif isinstance(return_code, int):
-            outcome = "failed"
-        else:
-            outcome = "unknown"
+        match (normalized_error, finished, return_code):
+            case (err, _, _) if "timeout" in err:
+                outcome = "timeout"
+            case (err, _, _) if err:
+                outcome = "sandbox_error"
+            case (_, True, 0):
+                outcome = "completed"
+            case (_, _, int()):
+                outcome = "failed"
+            case _:
+                outcome = "unknown"
         provider = getattr(handle, "provider_name", None)
         sandbox_id = getattr(handle, "sandbox_id", None)
         return SandboxObservation(
@@ -385,6 +367,7 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
         query = self._query_from_body(body)
+        # Everything pool writes stays under `home`, outside the repo workdir the resources server diffs.
         home = f"/tmp/nemo-gym-pool-{uuid4().hex}"
         base_url = await self._model_base_url(request)
 
@@ -398,7 +381,7 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
             finally:
                 Path(local_file.name).unlink(missing_ok=True)
 
-        command = self._build_command(home, base_url)
+        command = self._build_command(home)
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
 
@@ -426,11 +409,11 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         events_local_fpath = results_dir / "events.jsonl"
-        for remote_name, local_name in (("events.jsonl", "events.jsonl"), ("pool.stderr", "pool.stderr")):
+        for name in ("events.jsonl", "pool.stderr"):
             try:
-                await sandbox.download(f"{home}/{remote_name}", results_dir / local_name)
+                await sandbox.download(f"{home}/{name}", results_dir / name)
             except Exception:
-                print(f"Failed to download {remote_name}", format_exc(), file=sys.stderr)
+                print(f"Failed to download {name}", format_exc(), file=sys.stderr)
 
         output: List[NeMoGymResponseOutputItem] = []
         parse_metadata: Dict[str, Any] = {}

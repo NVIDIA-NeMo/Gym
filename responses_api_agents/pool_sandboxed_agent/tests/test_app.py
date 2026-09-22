@@ -17,6 +17,7 @@ import json
 from unittest.mock import MagicMock
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pool_sandboxed_agent.app import (
     PoolSandboxedAgent,
@@ -39,8 +40,8 @@ EVENTS = "\n".join(
 )
 
 
-def _config() -> PoolSandboxedAgentConfig:
-    return PoolSandboxedAgentConfig(
+def _agent() -> PoolSandboxedAgent:
+    config = PoolSandboxedAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -48,13 +49,14 @@ def _config() -> PoolSandboxedAgentConfig:
         resources_server=ResourcesServerRef(type="resources_servers", name=""),
         model_server=ModelServerRef(type="responses_api_models", name=""),
         pool_version="v1.0.16",
-        pool_max_context_window=1234,
+        pool_max_context_window=1000,
         pool_extra_args=["--verbose"],
         sandbox_provider="",
         sandbox_config=dict(),
         sandbox_timeout=0,
         token_id_capture=True,
     )
+    return PoolSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 def test_parse_pool_events_pairs_tool_calls_and_prepends_reasoning() -> None:
@@ -80,34 +82,55 @@ def test_parse_pool_events_collects_errors() -> None:
     assert metadata == {"errors": ["approval required"]}
 
 
-def test_build_command_installs_and_runs_pool_outside_the_workdir() -> None:
-    agent = PoolSandboxedAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
-    command = agent._build_command("/tmp/nemo-gym-pool-x", "http://gym:8000/ng-rollout/r1/v1")
+def test_build_command_installs_and_runs_pool_under_its_own_home() -> None:
+    home = "/tmp/pool-home"
+    command = _agent()._build_command(home)
 
-    assert "POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_DIR=/tmp/nemo-gym-pool-x/bin" in command
+    assert f"POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_DIR={home}/bin" in command
     assert 'sh "$installer" v1.0.16' in command
-    assert "POOLSIDE_STANDALONE_BASE_URL=http://gym:8000/ng-rollout/r1/v1" in command
-    assert "--agent-config-file /tmp/nemo-gym-pool-x/agent_config.json" in command
-    assert "POOLSIDE_STANDALONE_CONTEXT_LENGTH=1234" in command
-    assert "XDG_STATE_HOME=/tmp/nemo-gym-pool-x/state" in command
+    assert f"XDG_STATE_HOME={home}/state" in command
     assert "pool exec -o json --sandbox disabled --unsafe-auto-allow" in command
-    assert "-f /tmp/nemo-gym-pool-x/prompt.txt --verbose > /tmp/nemo-gym-pool-x/events.jsonl" in command
+    assert f"--agent-config-file {home}/agent_config.json" in command
+    assert f"-f {home}/prompt.txt --verbose" in command
+    assert f"> {home}/events.jsonl" in command
     assert 'echo "pool run finished rc=$?"' in command
 
 
-def test_pool_agent_config_is_non_streaming_and_points_at_gym() -> None:
-    agent = PoolSandboxedAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+def test_pool_agent_config_is_non_streaming_and_scales_compaction() -> None:
+    agent = _agent()
     agent.config.pool_agent_config = {"model": {"max_completion_retries": 5}}
 
     config = agent._pool_agent_config("http://gym:8000/ng-rollout/r1/v1")
 
-    openai = config["model"]["provider"]["openai"]
-    assert openai == {
+    assert config["model"]["provider"]["openai"] == {
         "base_url": "http://gym:8000/ng-rollout/r1/v1",
         "api_key": "dummy_key",  # pragma: allowlist secret
         "model_id": "dummy_model",
         "use_streaming": False,
     }
     assert config["model"]["max_completion_retries"] == 5
-    assert config["model"]["exit_tool_on_stop"] is True
+    assert config["memory"]["compact"]["TriggerCompressionTokenCount"] == 800
+    assert config["memory"]["compact"]["MaxSummarizeTokenCount"] == 700
     assert "exit" in config["enabled_tools"]
+
+
+def test_chat_params_accept_pool_cache_control_hints() -> None:
+    NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "model": "dummy_model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "read", "parameters": {"type": "object"}},
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    )
