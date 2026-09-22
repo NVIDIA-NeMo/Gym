@@ -16,12 +16,12 @@
 import asyncio
 import builtins
 import logging
-import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -40,6 +40,138 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+@pytest.mark.parametrize("timeout_kind", ["client", "server", "readiness"])
+async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, timeout_kind):
+    import tenacity
+    import tenacity.wait
+    import yaml
+    from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
+
+    config = yaml.safe_load(Path("benchmarks/terminal_bench_4/resources.yaml").read_text())
+    environment = config["terminal_bench_4"]["resources_servers"]["terminal_bench_4"]["environment"]
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create=environment["sandbox_provider"]["opensandbox"]["create"]
+    )
+    errors = {
+        "client": opensandbox_provider.OpenSandboxCreateTimeoutError("create timeout"),
+        "server": SandboxApiException("POD_READY_TIMEOUT: BATCHSANDBOX_PENDING", status_code=504),
+        "readiness": SandboxReadyTimeoutException("readiness timeout"),
+    }
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="ready", provider_name="opensandbox", raw=None)
+    provider._create_once = AsyncMock(
+        side_effect=[errors[timeout_kind]] * 5 + [handle if recovers else errors[timeout_kind]]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_tenacity",
+        lambda: (
+            lambda **kwargs: tenacity.AsyncRetrying(sleep=sleep, **kwargs),
+            tenacity.retry_if_exception,
+            tenacity.stop_after_attempt,
+            tenacity.wait_random_exponential,
+        ),
+    )
+    bounds = []
+
+    def midpoint(low, high):
+        bounds.append((low, high))
+        return (low + high) / 2
+
+    monkeypatch.setattr(tenacity.wait.random, "uniform", midpoint)
+    if recovers:
+        assert await provider.create(SandboxSpec(image="task")) is handle
+    else:
+        with pytest.raises(type(errors[timeout_kind])):
+            await provider.create(SandboxSpec(image="task"))
+    assert provider._create_once.await_count == 6
+    assert [call.args[0] for call in sleep.await_args_list] == [2.5, 5, 10, 20, 30]
+    assert bounds[:5] == [(0, 5), (0, 10), (0, 20), (0, 40), (0, 60)]
+
+
+async def test_create_does_not_retry_rejected_credentials():
+    from opensandbox.exceptions import SandboxApiException
+
+    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 5})
+    provider._create_once = AsyncMock(side_effect=SandboxApiException("unauthorized", status_code=401))
+    with pytest.raises(SandboxApiException):
+        await provider.create(SandboxSpec(image="task"))
+    provider._create_once.assert_awaited_once()
+
+
+@pytest.mark.parametrize("interval", [0, -1, float("nan"), float("inf")])
+def test_renewal_rejects_invalid_intervals(interval: float) -> None:
+    with pytest.raises(ValueError, match="renew_interval_s"):
+        opensandbox_provider.OpenSandboxCreateConfig(renew_interval_s=interval)
+
+
+@pytest.mark.parametrize("ttl", [None, 1, 2])
+async def test_renewal_requires_ttl_longer_than_interval(ttl: int | None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 2, "retries": 0})
+    with pytest.raises(ValueError, match="longer, explicit"):
+        await provider.create(SandboxSpec(image="example", ttl_s=ttl))
+
+
+async def test_renewal_refreshes_ttl_and_stops_before_termination(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 0.01}, probe={"command": None})
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    renewed = asyncio.Event()
+    durations = []
+
+    async def renew(duration: timedelta) -> None:
+        durations.append(duration)
+        renewed.set()
+
+    async def kill() -> None:
+        assert handle.sandbox_id not in provider._renewals
+
+    handle.raw.renew = renew
+    handle.raw.kill = AsyncMock(side_effect=kill)
+    handle.raw.close = AsyncMock()
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    task = provider._renewals[handle.sandbox_id]
+    await provider.close(handle)
+    assert durations and all(duration == timedelta(seconds=28800) for duration in durations)
+    assert task.cancelled()
+    handle.raw.kill.assert_awaited_once()
+    handle.raw.close.assert_awaited_once()
+    await provider.aclose()
+
+
+async def test_renewal_failure_surfaces_and_still_allows_cleanup(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_interval_s": 0.01}, probe={"command": None}, operations={"retries": 0}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    handle.raw.renew = AsyncMock(side_effect=RuntimeError("renewal rejected"))
+    handle.raw.kill = AsyncMock()
+    handle.raw.close = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+    with pytest.raises(RuntimeError, match="renewal rejected"):
+        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    operation = AsyncMock()
+    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+        await provider._await_sdk_operation(operation, operation="get_info", sandbox_id=handle.sandbox_id, timeout_s=1)
+    operation.assert_not_awaited()
+    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+        await provider.close(handle)
+    handle.raw.kill.assert_awaited_once()
+    handle.raw.close.assert_awaited_once()
+    await provider.aclose()
+
+
+async def test_provider_shutdown_cancels_renewal_without_terminating_sandbox(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 10}, probe={"command": None})
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    handle.raw.kill = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+    await provider.aclose()
+    assert task.cancelled()
+    assert not provider._renewals
+    handle.raw.kill.assert_not_awaited()
+
+
 @dataclass(frozen=True)
 class FakePlatformSpec:
     os: str
@@ -50,6 +182,12 @@ class FakeConnectionConfig:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
 
+    def with_transport_if_missing(self) -> "FakeConnectionConfig":
+        return self
+
+    async def close_transport_if_owned(self) -> None:
+        return None
+
 
 @dataclass(frozen=True)
 class FakeVolume:
@@ -59,7 +197,10 @@ class FakeVolume:
 class FakeSandbox:
     created_kwargs: dict[str, Any] = {}
     connected_args: tuple[Any, ...] = ()
-    connected_kwargs: dict[str, Any] = {}
+    connected_state = "RUNNING"
+    ready_calls = 0
+    resumed_args: tuple[Any, ...] = ()
+    resumed_kwargs: dict[str, Any] = {}
 
     def __init__(self, sandbox_id: str = "sandbox-1") -> None:
         self.id = sandbox_id
@@ -72,12 +213,39 @@ class FakeSandbox:
     @classmethod
     async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
         cls.connected_args = args
-        cls.connected_kwargs = kwargs
-        return cls()
+        sandbox = cls(str(args[0]))
+        if not kwargs.get("skip_health_check", False):
+            await sandbox.check_ready(
+                kwargs["connect_timeout"],
+                kwargs.get("health_check_polling_interval", timedelta(milliseconds=200)),
+            )
+        return sandbox
+
+    @classmethod
+    async def resume(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+        cls.resumed_args = args
+        cls.resumed_kwargs = kwargs
+        return cls(str(args[0]))
+
+    async def get_info(self) -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state=type(self).connected_state))
+
+    async def check_ready(self, _timeout: timedelta, _polling_interval: timedelta) -> None:
+        if type(self).connected_state == "PAUSED":
+            raise RuntimeError("a paused sandbox has no exec daemon")
+        type(self).ready_calls += 1
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.fixture
 def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeSandbox.connected_state = "RUNNING"
+    FakeSandbox.ready_calls = 0
+    FakeSandbox.resumed_args = ()
+    FakeSandbox.resumed_kwargs = {}
+
     def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
         return FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
 
@@ -274,6 +442,31 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
         )
 
 
+@pytest.mark.parametrize(
+    ("resources", "expected"),
+    [
+        (
+            {"cpu": 4, "memory_mib": 4096, "disk_gib": 10},
+            {"cpu": "4", "memory": "4096Mi", "ephemeral-storage": "10Gi"},
+        ),
+        ({"cpu": 0.5, "memory_mib": 512}, {"cpu": "0.5", "memory": "512Mi"}),
+        (
+            {"cpu": 4, "memory_mib": 16384, "gpu": 1, "gpu_type": "H100"},
+            {"cpu": "4", "memory": "16384Mi", "gpu": "1", "gpu_type": "H100"},
+        ),
+        ({}, {"cpu": "1", "memory": "2Gi"}),
+    ],
+)
+async def test_explicit_requests_match_each_sandbox_limits(fake_opensandbox_sdk, resources, expected):
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    await provider.create(
+        SandboxSpec(image="image:tag", resources=resources, provider_options={"resource_requests": "limits"})
+    )
+    assert FakeSandbox.created_kwargs["resource"] == expected
+    assert FakeSandbox.created_kwargs["resource_requests"] == expected
+    assert FakeSandbox.created_kwargs["resource_requests"] is not FakeSandbox.created_kwargs["resource"]
+
+
 async def test_direct_create_passes_image_auth_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
@@ -442,6 +635,8 @@ def test_provider_validation_and_retry_helpers() -> None:
 
     assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
+    assert opensandbox_provider._to_sandbox_status("pausing") == SandboxStatus.STARTING
+    assert opensandbox_provider._to_sandbox_status("paused") == SandboxStatus.PAUSED
     assert opensandbox_provider._to_sandbox_status("terminated") == SandboxStatus.STOPPED
     assert opensandbox_provider._to_sandbox_status("failed") == SandboxStatus.ERROR
     assert opensandbox_provider._to_sandbox_status(None) == SandboxStatus.UNKNOWN
@@ -461,6 +656,7 @@ def test_provider_validation_and_retry_helpers() -> None:
         {"operations": {"command_retries": -1}},
         {"operations": {"close_timeout_s": 0}},
         {"operations": {"status_poll_timeout_s": 0}},
+        {"operations": {"pause_resume_timeout_s": 0}},
         {"create": {"connect_attempt_timeout_s": 0}},
         {"create": {"connect_poll_s": 0}},
         {"create": {"image_pull_policy": "Sometimes"}},
@@ -564,11 +760,13 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
-def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default backend is httpx, with the configured keepalive expiry on the pool.
+def test_connection_transport_backends(fake_opensandbox_sdk: None) -> None:
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    # The default backend borrows Gym's global aiohttp client.
     provider = opensandbox_provider.OpenSandboxProvider()
     transport = provider._build_transport()
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert isinstance(transport, GymAiohttpTransport)
 
     # Custom pool settings still produce an httpx transport.
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -585,21 +783,16 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     # connect_retries reaches the pool rather than silently falling back.
     assert transport._pool._retries == 1
 
-    # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "httpx_aiohttp", None)
-        provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
-        transport = provider._build_transport()
-        assert isinstance(transport, httpx.AsyncHTTPTransport)
-
-    # keepalive_expiry_s=null disables transport injection entirely.
-    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    # SDK transport defaults are sufficient when certificate verification is enabled.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "httpx", "keepalive_expiry_s": None, "tls_verify": True}
+    )
     config = provider._connection_config()
     assert "transport" not in config.kwargs
 
     # max_connections=null uncaps the pool; max_keepalive_connections=0 disables reuse.
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"max_connections": None, "max_keepalive_connections": 0}
+        connection={"transport_backend": "httpx", "max_connections": None, "max_keepalive_connections": 0}
     )
     transport = provider._build_transport()
     assert isinstance(transport, httpx.AsyncHTTPTransport)
@@ -629,17 +822,54 @@ async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensa
     assert provider._transport is None
 
 
+@pytest.mark.parametrize("backend", ["httpx", "aiohttp"])
+@pytest.mark.parametrize("verify", [True, False])
+@pytest.mark.parametrize(
+    "keepalive_expiry_s,disable_pooling", [(None, False), (3.0, False), (None, True), (3.0, True)]
+)
+async def test_connection_tls_is_independent_of_pool_settings(
+    fake_opensandbox_sdk: None,
+    backend: str,
+    verify: bool,
+    keepalive_expiry_s: float | None,
+    disable_pooling: bool,
+) -> None:
+    import ssl
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": backend,
+            "tls_verify": verify,
+            "keepalive_expiry_s": keepalive_expiry_s,
+            "disable_connection_pooling": disable_pooling,
+        }
+    )
+    try:
+        config = provider._connection_config()
+        if backend == "httpx" and verify and keepalive_expiry_s is None and not disable_pooling:
+            # The SDK verifies certificates by default; no custom transport is needed.
+            assert "transport" not in config.kwargs
+            assert provider._transport is None
+        else:
+            transport = config.kwargs["transport"]
+            if backend == "aiohttp":
+                assert transport.verify is verify
+            else:
+                context = transport._pool._ssl_context
+                assert context.verify_mode == (ssl.CERT_REQUIRED if verify else ssl.CERT_NONE)
+                assert context.check_hostname is verify
+            assert provider._connection_config().kwargs["transport"] is transport
+    finally:
+        await provider.aclose()
+    assert provider._transport is None
+
+
 def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
-    # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
-    # declared dependency, so this coverage only runs where it is installed.
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
     provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
     transport = provider._build_transport()
-    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
-    assert transport.limits.keepalive_expiry == 3.0
-    # Both backends honor connect_retries; the bridge default is 0, so this
-    # would catch the option being dropped on the aiohttp path.
-    assert transport.retries == 2
+    assert isinstance(transport, GymAiohttpTransport)
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
@@ -653,14 +883,16 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
     import httpx
 
     # Default: a keepalive-bounded transport with connection reuse enabled.
-    pooled = opensandbox_provider.OpenSandboxProvider(connection={"domain": "sandbox.example"})
+    pooled = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "httpx", "domain": "sandbox.example"}
+    )
     pooled_transport = pooled._connection_config().kwargs["transport"]
     assert isinstance(pooled_transport, httpx.AsyncHTTPTransport)
     assert pooled_transport._pool._max_keepalive_connections > 0
 
     # disable_connection_pooling -> same transport plumbing, but no reuse.
     fresh = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "disable_connection_pooling": True}
+        connection={"transport_backend": "httpx", "domain": "sandbox.example", "disable_connection_pooling": True}
     )
     transport = fresh._connection_config().kwargs.get("transport")
     assert isinstance(transport, httpx.AsyncHTTPTransport)
@@ -1622,9 +1854,20 @@ async def test_connect_health_checks_by_default(fake_opensandbox_sdk: None) -> N
     """An unchecked handle would defer the exec-daemon startup gap to the first call."""
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
-    await provider.connect({"sandbox_id": "sandbox-9"})
+    handle = await provider.connect({"sandbox_id": "sandbox-9"})
 
-    assert FakeSandbox.connected_kwargs["skip_health_check"] is False
+    assert handle.sandbox_id == "sandbox-9"
+    assert FakeSandbox.ready_calls == 1
+
+
+async def test_connect_accepts_a_paused_sandbox_without_health_checking_execd(fake_opensandbox_sdk: None) -> None:
+    FakeSandbox.connected_state = "PAUSED"
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    handle = await provider.connect({"sandbox_id": "sandbox-9"})
+
+    assert handle.sandbox_id == "sandbox-9"
+    assert FakeSandbox.ready_calls == 0
 
 
 async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: None) -> None:
@@ -1636,7 +1879,220 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
 
     await provider.connect({"sandbox_id": "sandbox-9"})
 
-    assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+    assert FakeSandbox.ready_calls == 0
+
+
+async def test_connect_preserves_failure_when_cleanup_stalls(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeSandbox, "check_ready", AsyncMock(side_effect=ConnectionError("readiness failed")))
+    close = AsyncMock(side_effect=asyncio.Event().wait)
+    monkeypatch.setattr(FakeSandbox, "close", close)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"connect_attempt_timeout_s": 0.05},
+        operations={"close_timeout_s": 0.05},
+        probe={"command": None},
+    )
+
+    with pytest.raises(ConnectionError, match="readiness failed"):
+        async with asyncio.timeout(0.5):
+            await provider.connect({"sandbox_id": "sandbox-9"})
+    close.assert_awaited_once_with()
+
+
+async def test_pause_waits_until_opensandbox_reports_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"connect_attempt_timeout_s": 0.000001},
+        operations={"pause_resume_timeout_s": 1},
+    )
+    raw = SimpleNamespace(
+        pause=AsyncMock(),
+        get_info=AsyncMock(
+            side_effect=[
+                SimpleNamespace(status=SimpleNamespace(state="PAUSING")),
+                SimpleNamespace(status=SimpleNamespace(state="PAUSED")),
+            ]
+        ),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    await provider.pause(handle)
+
+    raw.pause.assert_awaited_once_with()
+    assert raw.get_info.await_count == 2
+
+
+async def test_pause_failure_is_not_retried() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 5})
+    raw = SimpleNamespace(
+        pause=AsyncMock(side_effect=ConnectionError("pause request outcome is unknown")),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(ConnectionError, match="outcome is unknown"):
+        await provider.pause(handle)
+
+    raw.pause.assert_awaited_once_with()
+
+
+async def test_pause_timeout_bounds_the_full_transition() -> None:
+    opensandbox_provider._require_tenacity()
+    status_started = asyncio.Event()
+
+    async def slow_pause() -> None:
+        await asyncio.sleep(0.05)
+
+    async def stalled_status() -> None:
+        status_started.set()
+        await asyncio.Event().wait()
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 1},
+        operations={"pause_resume_timeout_s": 0.1, "retries": 0},
+    )
+    raw = SimpleNamespace(
+        pause=slow_pause,
+        get_info=stalled_status,
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match=r"waiting .* to pause after 0\.1s"):
+        await asyncio.wait_for(provider.pause(handle), timeout=0.14)
+    assert status_started.is_set()
+
+
+async def test_pause_preserves_a_shorter_request_timeout() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 0.001},
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    raw = SimpleNamespace(pause=AsyncMock(side_effect=asyncio.Event().wait))
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match="OpenSandbox pause after 0.001s"):
+        await provider.pause(handle)
+
+
+async def test_resume_rebuilds_the_sdk_handle_after_readiness(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
+        create={
+            "connect_poll_s": 0.25,
+            "skip_health_check": False,
+        },
+        operations={"pause_resume_timeout_s": 7},
+    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    await provider.resume(handle)
+
+    assert handle.raw is not raw
+    raw.close.assert_awaited_once_with()
+    assert FakeSandbox.resumed_args == ("sandbox-paused",)
+    assert FakeSandbox.resumed_kwargs["resume_timeout"] == timedelta(seconds=7)
+    assert FakeSandbox.resumed_kwargs["health_check_polling_interval"] == timedelta(seconds=0.25)
+    assert FakeSandbox.resumed_kwargs["skip_health_check"] is False
+    assert FakeSandbox.resumed_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(seconds=5)
+
+
+async def test_resume_failure_keeps_the_paused_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    resume = AsyncMock(side_effect=ConnectionError("resume request outcome is unknown"))
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SimpleNamespace(resume=resume), FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"keepalive_expiry_s": None},
+        operations={"retries": 5},
+    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(ConnectionError, match="outcome is unknown"):
+        await provider.resume(handle)
+
+    assert resume.await_count == 1
+    raw.close.assert_not_awaited()
+
+
+async def test_resume_timeout_bounds_the_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SDK applies resume_timeout only to the readiness check; the request and endpoint rebuild must count too."""
+    resume_started = asyncio.Event()
+
+    async def stalled_resume(*_args: Any, **_kwargs: Any) -> Any:
+        resume_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SimpleNamespace(resume=stalled_resume), FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"keepalive_expiry_s": None},
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s; reconnect and check status\(\)"):
+        await asyncio.wait_for(provider.resume(handle), timeout=1)
+
+    assert resume_started.is_set()
+    assert handle.raw is raw
+    raw.close.assert_not_awaited()
+
+
+async def test_resume_timeout_closes_an_sdk_owned_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout cancels the SDK call with CancelledError, which the SDK's own cleanup never sees."""
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from opensandbox.config import ConnectionConfig
+
+    transport_close = AsyncMock()
+
+    async def stalled_resume(_sandbox_id: str, *, connection_config: Any, **_kwargs: Any) -> Any:
+        assert connection_config.transport is not None and connection_config._owns_transport
+        monkeypatch.setattr(connection_config.transport, "aclose", transport_close)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SimpleNamespace(resume=stalled_resume), ConnectionConfig, object, FakePlatformSpec, FakeVolume),
+    )
+    # The only configuration that leaves the SDK to build its own transport.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "keepalive_expiry_s": None,
+            "transport_backend": "httpx",
+            "tls_verify": True,
+        },
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", SimpleNamespace(close=AsyncMock()))
+
+    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s"):
+        await asyncio.wait_for(provider.resume(handle), timeout=1)
+
+    transport_close.assert_awaited_once_with()
+
+
+async def test_resume_installs_the_new_handle_before_closing_the_old_one(fake_opensandbox_sdk: None) -> None:
+    """A cancellation during the best-effort close of the old handle must not lose a successful resume."""
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    raw = SimpleNamespace(close=AsyncMock(side_effect=asyncio.Event().wait))
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.resume(handle), timeout=0.05)
+
+    assert isinstance(handle.raw, FakeSandbox)
+    assert handle.raw.id == "sandbox-paused"
+    raw.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1874,14 +2330,15 @@ def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:
     verified = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx", "tls_verify": True})
     assert verified._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_REQUIRED
 
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
     bridge = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})._build_transport()
-    assert isinstance(bridge, httpx_aiohttp.AiohttpTransport)
-    assert bridge.ssl_context.verify_mode == ssl.CERT_NONE
+    assert isinstance(bridge, GymAiohttpTransport)
+    assert bridge.verify is False
     bridge_verified = opensandbox_provider.OpenSandboxProvider(
         connection={"transport_backend": "aiohttp", "tls_verify": True}
     )._build_transport()
-    assert bridge_verified.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert bridge_verified.verify is True
 
 
 @pytest.mark.asyncio
@@ -1956,3 +2413,12 @@ def test_scheme_in_domain_reaches_sdk_and_pty_protocol(fake_opensandbox_sdk: Non
     assert kwargs["protocol"] == "https"
     # The PTY WebSocket URL is built from the provider's own protocol, not the SDK's base URL.
     assert provider._connection.protocol == "https"
+
+
+@pytest.mark.parametrize("size", ["true", "8Gi", "67108864"])
+async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, size):
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
+    await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
+    assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size

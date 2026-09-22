@@ -95,13 +95,63 @@ def test_policy_model_conflict_raises():
 
 
 def test_service_env_accepted():
-    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:bar"}}}))
     assert config.services["svc"].env == {"FOO": "bar"}
 
 
 def test_driver_env_accepted():
-    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "val"}}))
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "lit:val"}}))
     assert config.driver.env == {"KEY": "val"}
+
+
+def test_env_lit_prefix_strips_to_literal():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:600"}}}))
+    assert config.services["svc"].env == {"FOO": "600"}
+
+
+def test_env_no_prefix_raises():
+    with pytest.raises(ValidationError, match="must start with one of the prefixes"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+
+
+def test_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_HOST_VAR", "host-value")
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_HOST_VAR"}}}))
+    assert config.services["svc"].env == {"FOO": "host-value"}
+
+
+def test_env_host_prefix_missing_var_raises(monkeypatch):
+    monkeypatch.delenv("MY_MISSING_HOST_VAR", raising=False)
+    with pytest.raises(ValidationError, match="MY_MISSING_HOST_VAR"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_MISSING_HOST_VAR"}}}))
+
+
+def test_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:NEL_INVOCATION_ID"}}})
+    )
+    assert config.services["svc"].env == {"FOO": "runtime:NEL_INVOCATION_ID"}
+
+
+def test_env_host_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:1BAD"}}}))
+
+
+def test_env_runtime_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:1BAD"}}}))
+
+
+def test_driver_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_DRIVER_HOST_VAR", "driver-host-value")
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "host:MY_DRIVER_HOST_VAR"}}))
+    assert config.driver.env == {"KEY": "driver-host-value"}
+
+
+def test_driver_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "runtime:NEL_INVOCATION_ID"}}))
+    assert config.driver.env == {"KEY": "runtime:NEL_INVOCATION_ID"}
 
 
 def test_service_unknown_field_raises():
@@ -215,17 +265,81 @@ def test_multi_node_dp_per_node_footprint_exceeds_raises():
         )
 
 
-def test_multi_instance_per_instance_multi_node_tp_not_supported():
-    # Each instance's own TP/PP footprint (TP5) already exceeds a single node's GPU count (4), so
-    # spreading 2 such instances across nodes would require each instance to itself span multiple
-    # nodes - that's not supported (only whole-instance placement across nodes is).
-    with pytest.raises(ValidationError, match="not supported"):
+def test_multi_instance_per_instance_multi_node_tp_uses_ray_serve_gateway():
+    # TP5 exceeds a single node's GPU count (4), forcing the Ray Serve gateway path automatically.
+    with pytest.raises(ValidationError, match="exceeds the total GPUs across all nodes"):
         SubmitConfig.model_validate(
             _config(
                 services={"svc": {**SERVICE, "tensor_parallel_size": 5, "number_of_instances": 2}},
                 compute=COMPUTE_MULTI_NODE,
             )
         )
+
+
+COMPUTE_4_NODES_8_GPUS = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "nodes": 4, "gpus_per_node": 8}},
+    }
+}
+
+
+def test_multi_instance_per_instance_multi_node_tp_accepted_when_footprint_fits():
+    # TP8 x PP2 = 16 GPUs/instance spans nodes; 2 instances x 16 fits exactly in 4 nodes x 8 GPUs.
+    config = SubmitConfig.model_validate(
+        _config(
+            services={
+                "svc": {**SERVICE, "tensor_parallel_size": 8, "pipeline_parallel_size": 2, "number_of_instances": 2}
+            },
+            compute=COMPUTE_4_NODES_8_GPUS,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 2
+
+
+COMPUTE_4_NODES_6_GPUS = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "nodes": 4, "gpus_per_node": 6}},
+    }
+}
+
+
+def test_multi_instance_per_instance_multi_node_tp_number_of_instances_need_not_divide_nodes():
+    # 3 instances don't evenly divide 4 nodes - fine for the Ray Serve gateway path (opted in here).
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 3, "use_ray_serve": True}},
+            compute=COMPUTE_4_NODES_6_GPUS,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 3
+
+
+# ---------------------------------------------------------------------------
+# use_ray_serve opt-in
+# ---------------------------------------------------------------------------
+
+
+def test_use_ray_serve_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    assert config.services["svc"].use_ray_serve is False
+
+
+def test_use_ray_serve_opt_in_single_node_multi_instance_accepted():
+    service = {**SERVICE, "number_of_instances": 4, "use_ray_serve": True}
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+    assert config.services["svc"].use_ray_serve is True
+
+
+def test_use_ray_serve_opt_in_does_not_require_gpus_per_node():
+    service = {**SERVICE, "use_ray_serve": True}
+    config = SubmitConfig.model_validate(_config(services={"svc": service}))
+    assert config.services["svc"].use_ray_serve is True
 
 
 # ---------------------------------------------------------------------------
