@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: indic/swebench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: Translated SWE-bench Verified using the English OpenCode agent and sandboxed test verifier.
+modality: text
+licensing: Apache-2.0
+authors: [NVIDIA NeMo Gym contributors]
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: stochastic
+resources_server: swebench
+agent_server: opencode_sandboxed_agent
+model_server: policy_model
+datasets:
+  - name: indic_swebench
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/swebench/data/swebench_benchmark.jsonl
+    prepare_script: benchmarks/indic/swebench/prepare.py
+    prompt_config: benchmarks/prompts/generic/default.yaml
+    num_repeats: 3
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+canonical_split: test
+session_model: episode
+state: per_session
+sandbox: sandbox
+lifecycle: active

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/swebench/verified/opencode.yaml
+
+swebench_verified_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: indic_swebench
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/swebench/data/swebench_benchmark.jsonl
+          prepare_script: benchmarks/indic/swebench/prepare.py
+          prompt_config: benchmarks/prompts/generic/default.yaml
+          num_repeats: 3
+          license: Apache-2.0
