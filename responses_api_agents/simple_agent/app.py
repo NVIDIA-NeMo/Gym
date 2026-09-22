@@ -355,7 +355,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         self.config.model_server.name,
                         model_response.id,
                         rollout_id,
-                        step,
+                        turn_index,
                     )
                 resource_request_id = None
                 boundary_index += 1
