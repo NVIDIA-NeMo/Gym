@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- responses_api_agents/pool_sandboxed_agent/configs/pool_sandboxed_agent.yaml
+- resources_servers/swebench_pro/configs/swebench_pro.yaml
+
+swebench_pro_pool_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [pool_sandboxed_agent]
+
+swebench_pro_pool_sandboxed_agent:
+  _inherit_from: pool_sandboxed_agent
+  responses_api_agents:
+    pool_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_pool_resources_server
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 3
