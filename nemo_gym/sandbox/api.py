@@ -42,7 +42,7 @@ from nemo_gym.sandbox.providers import (
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
-from nemo_gym.telemetry.metrics import record_sandbox_active
+from nemo_gym.telemetry.gym_metrics import record_sandbox_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 

@@ -24,7 +24,7 @@ import pytest
 
 from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
-from nemo_gym.telemetry import metrics as telemetry_metrics
+from nemo_gym.telemetry import gym_metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from tests.unit_tests.test_sandbox import FakeSandboxProvider
 
@@ -49,7 +49,7 @@ def collected_metrics(monkeypatch):
         meter = provider.get_meter("test")
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
-    monkeypatch.setattr(telemetry_metrics, "_SANDBOX_ACTIVE", None)
+    telemetry_metrics._reset_for_testing()
 
     def collect():
         data = reader.get_metrics_data()
@@ -105,8 +105,8 @@ def test_counter_is_non_monotonic_and_dimensioned_by_provider(collected_metrics)
 
 def test_instrument_is_created_once_per_meter(collected_metrics):
     handle = telemetry_setup.get_telemetry()
-    first = telemetry_metrics._sandbox_active_counter(handle.meter)
-    assert telemetry_metrics._sandbox_active_counter(handle.meter) is first
+    first = telemetry_metrics._get_or_create(handle.meter, ACTIVE, lambda: object())
+    assert telemetry_metrics._get_or_create(handle.meter, ACTIVE, lambda: object()) is first
 
 
 @pytest.mark.asyncio

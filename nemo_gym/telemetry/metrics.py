@@ -47,10 +47,7 @@ papered over, so this module takes an explicit position on each of the five:
     ``http.request.method`` and ``http.response.status_code``, which is strictly better.
     Use that instead; see ``fern/versions/latest/pages/observability/metrics.mdx``.
 
-``gym.sandbox.active`` (up-down counter, Gym-owned)
-    Used. Created on the lens meter by :func:`record_sandbox_active`: ``+1`` when a provider
-    hands back a handle, ``-1`` when Gym releases it, per ``nemo.gym.sandbox.provider``. A
-    counter rather than a gauge so the backend sums it across the processes holding sandboxes.
+Attributed instruments (the sandbox lifecycle set) live in :mod:`nemo_gym.telemetry.gym_metrics`.
 
 Every function here is a no-op unless telemetry is initialised *and* exporting, so call
 sites do not need their own guards for correctness — though they should still sit under a
@@ -69,12 +66,6 @@ logger = logging.getLogger(__name__)
 _VERIFY_LOCK = threading.Lock()
 _VERIFY_TOTAL = 0
 _VERIFY_SUCCEEDED = 0
-
-SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
-SANDBOX_PROVIDER_ATTRIBUTE = "nemo.gym.sandbox.provider"
-#: (meter, counter) so a re-initialised telemetry handle gets a fresh instrument.
-_SANDBOX_ACTIVE_LOCK = threading.Lock()
-_SANDBOX_ACTIVE: tuple[object, object] | None = None
 
 
 def _record(**kwargs) -> None:
@@ -125,33 +116,6 @@ def record_active_servers(count: int) -> None:
     orchestrator is the only process that knows the fleet size, so it is the only caller.
     """
     _record(active_servers=count)
-
-
-def _sandbox_active_counter(meter):
-    """The process's ``gym.sandbox.active`` instrument on ``meter``, created once per meter."""
-    global _SANDBOX_ACTIVE
-    with _SANDBOX_ACTIVE_LOCK:
-        if _SANDBOX_ACTIVE is None or _SANDBOX_ACTIVE[0] is not meter:
-            counter = meter.create_up_down_counter(
-                SANDBOX_ACTIVE_INSTRUMENT,
-                unit="{sandbox}",
-                description="Sandboxes this process currently holds, from provider create to release.",
-            )
-            _SANDBOX_ACTIVE = (meter, counter)
-        return _SANDBOX_ACTIVE[1]
-
-
-def record_sandbox_active(delta: int, *, provider: str) -> None:
-    """Add ``delta`` (``+1`` on start, ``-1`` on stop) to ``gym.sandbox.active`` for ``provider``."""
-    from nemo_gym.telemetry.setup import get_telemetry
-
-    telemetry = get_telemetry()
-    if telemetry is None or not telemetry.is_exporting:
-        return
-    try:
-        _sandbox_active_counter(telemetry.meter).add(delta, {SANDBOX_PROVIDER_ATTRIBUTE: provider})
-    except Exception:
-        logger.debug("nemo-lens: failed to record %s", SANDBOX_ACTIVE_INSTRUMENT, exc_info=True)
 
 
 def _reset_verify_tally_for_testing() -> None:
