@@ -1,7 +1,7 @@
 ---
 title: "Distributed Tracing"
 description: ""
-position: 3
+position: 5
 ---
 A NeMo Gym rollout crosses several processes. This page explains how those hops become a
 single trace, and what to check when they do not.
@@ -130,7 +130,7 @@ pending. NeMo Gym flushes on normal shutdown, but a `SIGKILL` cannot be caught. 
 The `default` preset includes `job`, which wraps a whole rollout-collection run, so every
 rollout in the run nests inside one trace. For long runs, use `per_rollout` instead. It
 omits `job`, so each rollout becomes its own bounded root trace. See
-[Span Groups](/observability/span-groups).
+[Span Groups](/main/observability/span-groups).
 
 ### Only the Orchestrator Emits Spans
 

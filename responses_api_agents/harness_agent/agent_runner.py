@@ -67,7 +67,7 @@ def main() -> None:
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))
     resp = asyncio.run(agent.responses(request, params))
     (WORK_DIR / "response.json").write_text(resp.model_dump_json())
-    print("RUNNER_DONE")
+    print("RUNNER_DONE", file=sys.__stdout__, flush=True)
 
 
 if __name__ == "__main__":

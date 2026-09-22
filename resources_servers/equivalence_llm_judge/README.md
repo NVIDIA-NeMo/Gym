@@ -19,6 +19,39 @@ https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa
 - `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
 - `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
 
+### Empty answers, answer-length guard, and judge recovery
+
+Missing assistant messages and empty or whitespace-only final assistant text
+score zero without a judge call, with `failure_reason: empty_final_answer`.
+The full response is retained, including any reasoning. This check applies before
+regex extraction, so nonempty answers still use the existing extraction and
+full-generation fallback logic even when a regex produces an empty match.
+
+`max_answer_chars` is optional and defaults to `null` (no limit) for every dataset.
+To protect a judge endpoint from oversized answers, set it on the resources server:
+
+```yaml
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      max_answer_chars: 100000
+```
+
+When enabled, longer final assistant answers score zero without a judge call.
+The full response is retained, with `failure_reason` starting with
+`final_answer_too_long`. The check counts characters in the last assistant message
+before regex extraction, excludes reasoning and earlier messages, and does not
+stop generation early. Enabling the limit changes reward assignment, so choose it
+explicitly in the configuration for your workload (evaluation, synthetic data
+generation, or RL).
+
+If judge calls exhaust their retries, the shared judge failsafe saves the policy
+response in the failures sidecar as `judge_failed`, excluded from scored aggregates.
+Recover these rows with `gym eval reverify --judge-failed-only` and the same
+verifier/judge configuration. Successful grades are preserved. This applies to
+new sidecar-tagged failures; older in-band `JUDGE_ERROR` rows require migration
+before using it. A run with pending grades is incomplete.
+
 ### Input schema
 Accepts the same outer request structure as other resources servers:
 - `responses_create_params`: the original model query (used here to extract a question/context string from user messages for the judge prompt).
