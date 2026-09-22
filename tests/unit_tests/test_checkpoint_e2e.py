@@ -62,6 +62,7 @@ from nemo_gym.rollout_correlation import (
     rollout_context,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 
@@ -254,9 +255,9 @@ async def _record_lineage(
                 chain_hash="4" * 64,
                 cumulative_hash="5" * 64,
                 response_id=f"response-{rollout_id}",
-                output_fingerprint="6" * 64,
-                continuation_fingerprint="7" * 64,
-                fingerprint_version=1,
+                output_fingerprint=assistant_fingerprint(output_items) or None,
+                continuation_fingerprint=assistant_fingerprint(request_items + output_items) or None,
+                fingerprint_version=FINGERPRINT_VERSION,
             ),
             staging_chain=(f"stage/{rollout_id}/{call_id}",),
             request_items=request_items,
