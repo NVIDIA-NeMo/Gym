@@ -174,9 +174,16 @@ def candidate_text(
 
 
 async def run_sweep(
-    server: VeriSoftBenchResourcesServer, sweep: str, rows: list[dict[str, Any]], concurrency: int, out, mode: str
+    server: VeriSoftBenchResourcesServer,
+    sweep: str,
+    rows: list[dict[str, Any]],
+    concurrency: int,
+    out,
+    mode: str,
+    all_rows: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    rows_by_id = {r["verifier_metadata"]["id"]: r for r in rows}
+    # The wrong-theorem control borrows the next task's proof, which may be outside --ids.
+    rows_by_id = {r["verifier_metadata"]["id"]: r for r in (all_rows or rows)}
     sem = asyncio.Semaphore(concurrency)
     results: list[dict[str, Any]] = []
 
@@ -282,6 +289,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     rows = [json.loads(line) for line in open(args.input, encoding="utf-8") if line.strip()]
+    all_rows = rows
     if args.ids:
         wanted = set(args.ids)
         rows = [r for r in rows if r["verifier_metadata"]["id"] in wanted]
@@ -305,7 +313,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     all_results: list[dict[str, Any]] = []
     with open(args.output, "a", encoding="utf-8") as out:
         for sweep in args.sweeps:
-            all_results.extend(asyncio.run(run_sweep(server, sweep, rows, args.concurrency, out, args.gold_mode)))
+            all_results.extend(
+                asyncio.run(run_sweep(server, sweep, rows, args.concurrency, out, args.gold_mode, all_rows=all_rows))
+            )
     summary = summarize(all_results)
     summary["input_sha256"] = hashlib.sha256(open(args.input, "rb").read()).hexdigest()
     summary["gold_mode"] = args.gold_mode
