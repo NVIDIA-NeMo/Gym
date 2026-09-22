@@ -281,6 +281,75 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides):
     assert body.input == "Fix the bug"  # Do not mutate the caller's request.
 
 
+@pytest.mark.parametrize("output_available", [True, False], ids=["late-output", "missing-output"])
+async def test_runner_exit_rechecks_output_after_stale_probe(
+    agent: HermesAgent, state: HermesAgentSessionState, output_available: bool
+) -> None:
+    agent._upload_json = AsyncMock()
+    runner = AsyncMock()
+    state.sandbox.pty.create.return_value = runner
+    published = asyncio.Event()
+
+    async def wait_exit() -> int:
+        await published.wait()
+        return 0
+
+    runner.wait_exit.side_effect = wait_exit
+    probes = []
+
+    async def execute(command: str, **kwargs) -> SimpleNamespace:
+        if command.startswith("if [ -f "):
+            probes.append(command)
+            if len(probes) == 1:
+                # The remote probe saw no output, but the runner publishes its
+                # result and exits before that probe's reply reaches the agent.
+                published.set()
+                await state.runner_exit_task
+                return SimpleNamespace(stdout="running\n", stderr="", return_code=0)
+            assert len(probes) == 2
+            return SimpleNamespace(stdout="output\n" if output_available else "exited\n", return_code=0)
+        assert command.startswith("cat ")
+        return SimpleNamespace(stdout="runner stderr", stderr="", return_code=0)
+
+    state.sandbox.exec.side_effect = execute
+
+    async def download(sandbox, path: str) -> dict:
+        if path.endswith("/cleanup.json"):
+            return {"cleanup_confirmed": True}
+        assert output_available and path.endswith("/output.json")
+        return {
+            "result": {
+                "completed": True,
+                "messages": [
+                    {"role": "user", "content": "task"},
+                    {"role": "assistant", "content": "Patch done"},
+                ],
+            },
+            "runtime": {"pid": 123},
+        }
+
+    agent._download_json = AsyncMock(side_effect=download)
+    activation = agent._run_sandbox_episode(
+        request=request(state),
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        agent_session_id="session",
+        state=state,
+    )
+    if output_available:
+        result = await activation
+        assert result.response.status == "completed"
+        assert result.response.output[-1].content[0].text == "Patch done"
+        assert result.observations.records[0].status == "completed"
+    else:
+        with pytest.raises(RuntimeError, match="runner exited without output: runner stderr"):
+            await activation
+    assert len(probes) == 2
+    assert state.cleanup_confirmed
+    runner.send_signal.assert_not_awaited()
+    runner.close.assert_awaited_once()
+    assert state.runner_session is None
+
+
 @pytest.mark.parametrize(
     "override",
     [

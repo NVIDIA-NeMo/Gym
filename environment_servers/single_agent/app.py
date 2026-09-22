@@ -246,15 +246,10 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
                 partial_response=agent_response,
             ) from error
 
-        try:
-            await resources_cleanup.close()
-        except Exception as error:
-            raise self._failure(
-                stage="cleanup",
-                message=str(error),
-                terminal=True,
-                partial_response=agent_response,
-            ) from error
+        # Verification is already complete. Use the bounded final unwind so
+        # cleanup errors or an expired episode deadline cannot erase its result.
+        # Keep the original registration active for a retry if this close fails.
+        cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
 
         return SingleAgentEpisodeResponse(
             episode_id=request.episode_id,
