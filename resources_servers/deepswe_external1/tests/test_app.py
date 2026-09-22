@@ -267,7 +267,7 @@ async def test_sandbox_spec_and_native_setup(
     server.config.task_memory_multiplier = 1.5
     server.config.sandbox_config = {"env": {"EXPLICIT": "yes"}, "ttl_s": 3600, "ready_timeout_s": 60}
     box = AsyncMock()
-    box.exec.return_value = SimpleNamespace(return_code=int(setup_fails), stderr="setup diagnostic")
+    box.exec.return_value = SimpleNamespace(return_code=int(setup_fails), stdout="", stderr="setup diagnostic")
     specs = []
 
     async def start(spec, setup) -> None:
@@ -302,11 +302,37 @@ async def test_sandbox_spec_and_native_setup(
         "phase": phase,
         "nemo_gym_agent": "test",
     }
-    command = box.exec.await_args.args[0]
+    command = box.exec.await_args_list[0].args[0]
     assert "git rev-parse --show-toplevel" in command and task.definition.base_commit in command
     assert ("user.email" in command) == (phase == "agent")
-    assert ("command -v python3" in command) == (phase == "verifier")
-    assert box.exec.await_args.kwargs == {"timeout_s": 60}
+    assert "command -v python3" not in command
+    assert box.exec.await_args_list[0].kwargs == {"timeout_s": 60}
+    if phase == "verifier" and not setup_fails:
+        assert box.exec.await_count == 2
+        bootstrap = box.exec.await_args_list[1]
+        assert bootstrap.args[0] == "ALLOW_PYTHON_INSTALL=1\n" + module.VERIFIER_PYTHON_SETUP
+        assert bootstrap.kwargs == {"timeout_s": 300}
+    else:
+        assert box.exec.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1, 124])
+async def test_verifier_python_setup_policy_and_failures(task: PreparedTask, offline: bool, exit_code: int) -> None:
+    server = make_server(task)
+    server.config.enforce_verifier_no_network = offline
+    box = AsyncMock()
+    box.exec.return_value = SimpleNamespace(return_code=exit_code, stdout="package output\n", stderr="diagnostic")
+    if exit_code:
+        with pytest.raises(RuntimeError, match=rf"Verifier Python setup failed \(exit {exit_code}\): package output"):
+            await server._ensure_verifier_python(box)
+    else:
+        await server._ensure_verifier_python(box)
+    box.exec.assert_awaited_once_with(
+        f"ALLOW_PYTHON_INSTALL={int(not offline)}\n" + module.VERIFIER_PYTHON_SETUP,
+        timeout_s=300,
+    )
 
 
 @pytest.mark.asyncio

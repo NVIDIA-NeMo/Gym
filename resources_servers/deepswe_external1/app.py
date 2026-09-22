@@ -40,6 +40,38 @@ from resources_servers.deepswe_external1.task_store import PreparedTask, Prepare
 
 logger = logging.getLogger(__name__)
 
+VERIFIER_PYTHON_SETUP = """\
+set -eu
+if ! command -v python3 >/dev/null 2>&1; then
+    if [ "$ALLOW_PYTHON_INSTALL" != 1 ]; then
+        echo "Verifier Python is missing; a network-disabled verifier needs Python preinstalled in its image." >&2
+        exit 1
+    fi
+    if [ "$(id -u)" != 0 ]; then
+        echo "Installing verifier Python requires root; use a verifier image with Python preinstalled." >&2
+        exit 1
+    fi
+    echo "Installing Python in the disposable verifier sandbox."
+    if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -y --no-install-recommends install python3
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache python3
+    elif command -v microdnf >/dev/null 2>&1; then
+        microdnf -y install python3
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf -y install python3
+    elif command -v yum >/dev/null 2>&1; then
+        yum -y install python3
+    else
+        echo "No supported package manager for verifier Python; use a verifier image with Python preinstalled." >&2
+        exit 1
+    fi
+fi
+python3 --version
+"""
+
 
 class DeepsweExternal1ResourcesServerConfig(DeepSWEResourcesServerConfig):
     logs_dir: Path = Path("resources_servers/deepswe_external1/logs")
@@ -151,14 +183,28 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                     "git config --global user.name 'NeMo Gym Agent'"
                 )
             else:
-                # Verifier prerequisites belong in the image, not an online runtime install.
-                command += "command -v python3 >/dev/null; mkdir -p /tests /logs/artifacts /logs/verifier"
+                command += "mkdir -p /tests /logs/artifacts /logs/verifier"
             result = await started.exec(command, timeout_s=60)
             if result.return_code != 0:
                 raise RuntimeError(f"{phase} image setup failed: {(result.stderr or '')[-2000:]}")
+            if not agent:
+                await self._ensure_verifier_python(started)
 
         await sandbox.start_with_setup(spec, setup)
         return sandbox
+
+    async def _ensure_verifier_python(self, sandbox: AsyncSandbox) -> None:
+        # Run only in fresh B, before staging any candidate code or held-out tests.
+        # Never relax an explicitly requested no-network policy to install packages.
+        allow_install = int(not self.config.enforce_verifier_no_network)
+        result = await sandbox.exec(
+            f"ALLOW_PYTHON_INSTALL={allow_install}\n" + VERIFIER_PYTHON_SETUP,
+            timeout_s=300,
+        )
+        details = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.return_code != 0:
+            raise RuntimeError(f"Verifier Python setup failed (exit {result.return_code}): {details[-4000:]}")
+        logger.info("Verifier Python setup: %s", details)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         await self._release_sandbox(sandbox, task_id=task_id, phase=phase)
