@@ -17,7 +17,9 @@ import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -189,6 +191,58 @@ class TestParseOpencodeSession:
         assert items[1].call_id == "c1"
         assert "6" in items[1].output
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
+
+    @pytest.mark.parametrize("state_status", ["error", "aborted"])
+    def test_a_failed_tool_call_keeps_its_outcome_and_error_text(self, tmp_path, state_status: str) -> None:
+        """OpenCode records a failed call with an error and no output.
+
+        The transcript must say the call did not complete and carry the error the model saw,
+        otherwise the model appears to have called a tool and received nothing at all.
+        """
+        db = _session_db(
+            tmp_path,
+            [
+                (
+                    "assistant",
+                    [
+                        {
+                            "type": "tool",
+                            "callID": "c1",
+                            "tool": "bash",
+                            "state": {
+                                "status": state_status,
+                                "input": {"command": "nope"},
+                                "error": "command not found: nope",
+                                "time": {"start": 1000, "end": 1200},
+                            },
+                        }
+                    ],
+                )
+            ],
+        )
+
+        items, _ = parse_opencode_session(db)
+
+        call, output = items
+        assert isinstance(call, NeMoGymResponseFunctionToolCall)
+        assert call.status == "incomplete"
+        assert isinstance(output, NeMoGymFunctionCallOutput)
+        assert output.call_id == "c1"
+        assert output.status == "incomplete"
+        assert output.output == "command not found: nope"
+
+    def test_a_failed_tool_call_without_an_error_yields_no_output_item(self, tmp_path) -> None:
+        """Nothing came back, so there is no output item; the call still reports the outcome."""
+        db = _session_db(
+            tmp_path,
+            [("assistant", [{"type": "tool", "callID": "c1", "tool": "bash", "state": {"status": "error"}}])],
+        )
+
+        items, _ = parse_opencode_session(db)
+
+        (call,) = items
+        assert isinstance(call, NeMoGymResponseFunctionToolCall)
+        assert call.status == "incomplete"
 
     def test_step_finish_usage(self, tmp_path) -> None:
         db = _session_db(
@@ -390,6 +444,28 @@ class TestEnv:
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+
+class TestWorkspaceRoot:
+    def test_each_rollout_gets_its_own_directory(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+
+        first = agent._workspace_root()
+        second = agent._workspace_root()
+
+        assert first != second
+        assert first.is_dir() and second.is_dir()
+        assert first.parent == tmp_path
+
+    def test_a_name_collision_fails_the_rollout(self, tmp_path: Path) -> None:
+        """Two live rollouts must never share a tree, so a collision raises instead of merging."""
+        agent = _make_agent(workspace_root=str(tmp_path))
+        fixed = uuid4()
+        (tmp_path / f"opencode_{fixed.hex}").mkdir()
+
+        with patch("responses_api_agents.opencode_agent.app.uuid4", return_value=fixed):
+            with pytest.raises(FileExistsError):
+                agent._workspace_root()
 
 
 class TestRolloutObservability:
