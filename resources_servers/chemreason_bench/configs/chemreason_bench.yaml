@@ -1,0 +1,25 @@
+chemreason_bench:
+  resources_servers:
+    chemreason_bench:
+      entrypoint: app.py
+      domain: knowledge
+      description: ChemReason-Bench -- six action-grounded chemical procedure reasoning tasks, deterministically scored (ACL 2026 Long Papers 33211-33248)
+      value: Tests whether a model can order, validate, complete and explain real experimental procedures, scored without an LLM judge
+      verified: false
+chemreason_bench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: chemreason_bench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        # Pre-materialized with benchmarks/prompts/eval/chemreason_bench/paper.yaml.
+        jsonl_fpath: resources_servers/chemreason_bench/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
