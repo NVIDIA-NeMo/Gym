@@ -139,13 +139,14 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
+    ClientResponseError,
     get_response_json,
     raise_for_status,
     request,
@@ -1228,6 +1229,50 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
+# 429 is usually a transient rate limit. Match only these spent-key codes/types;
+# generic "quota exceeded" wording is used by per-minute limits that recover.
+PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
+PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
+
+
+def _decode_error_text(content: bytes | str) -> str:
+    return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+
+
+def _parsed_error_codes(content: bytes | str) -> list[str]:
+    """error.code / error.type tokens from an OpenAI-style error body."""
+    text = _decode_error_text(content)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error")
+    if isinstance(error, str):
+        return [error]
+    if not isinstance(error, dict):
+        return []
+    return [str(error[key]) for key in ("code", "type") if error.get(key) is not None]
+
+
+def _error_body_is_permanent_quota(content: bytes | str) -> bool:
+    """True when a 429 body is a spent key, not a transient rate limit."""
+    codes = {token.lower() for token in _parsed_error_codes(content)}
+    return any(code in codes for code in PERMANENT_QUOTA_CODES)
+
+
+def _error_body_is_permanent_auth(content: bytes | str) -> bool:
+    """True when a 401/403 body is a revoked or invalid key, not a one-off denial."""
+    codes = {token.lower() for token in _parsed_error_codes(content)}
+    if any(code in codes for code in PERMANENT_AUTH_CODES):
+        return True
+    lowered = _decode_error_text(content).lower()
+    return "invalid api key" in lowered or "incorrect api key" in lowered
+
+
+class PermanentEndpointError(ClientResponseError):
+    """The upstream key is spent or unauthorized; further calls on this client skip the wire."""
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -1256,7 +1301,38 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
+    _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
+
+    def _raise_permanent_error(self) -> None:
+        assert self._permanent_trip is not None
+        status, body, url = self._permanent_trip
+        snippet = body.decode("utf-8", errors="replace")[:200]
+        error = PermanentEndpointError(
+            request_info=None,
+            history=(),
+            status=status,
+            message=(
+                f"Skipping further requests to {self.base_url}: HTTP {status} is permanent "
+                f"(url={url} error_msg={snippet})"
+            ),
+            headers=None,
+        )
+        error.response_content = body
+        raise error
+
+    def _trip_permanent_error(self, status: int, content: bytes | str, url: Any) -> None:
+        body = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+        self._permanent_trip = (status, body, str(url))
+        print(
+            f"[model_retry_stop url={url} status={status} error_msg={body.decode('utf-8', errors='replace')[:200]}]",
+            flush=True,
+        )
+        self._raise_permanent_error()
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        if self._permanent_trip is not None:
+            self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
@@ -1270,33 +1346,45 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
+        if self._permanent_trip is not None:
+            self._raise_permanent_error()
         max_num_tries = self.max_http_attempts
         tries = 0
         while tries < max_num_tries:
+            if self._permanent_trip is not None:
+                self._raise_permanent_error()
             tries += 1
             response = await request(**request_kwargs)
 
-            if response.status in RETRY_ERROR_CODES:
-                # Internal NeMo Gym servers extend max tries for retryable errors.
-                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
-                    max_num_tries += 1
-
-                # Preserve the final error body for raise_for_status and avoid sleeping
-                # after the last attempt. Reading intermediate bodies releases sockets.
-                if tries >= max_num_tries:
-                    break
-                content = (await response.content.read()).decode(errors="replace")
-                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
-                print(
-                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
-                    flush=True,
-                )
-                await sleep(0.5)
-                continue
-            else:
+            if response.status in (401, 403):
+                content = await response.content.read()
+                if _error_body_is_permanent_auth(content):
+                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
                 return response
 
-        # We've exited the loop
+            if response.status not in RETRY_ERROR_CODES:
+                return response
+
+            content = await response.content.read()
+            if response.status == 429 and _error_body_is_permanent_quota(content):
+                self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+
+            # Internal NeMo Gym servers extend max tries for retryable errors.
+            if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+                max_num_tries += 1
+
+            # Preserve the final error body for raise_for_status and avoid sleeping
+            # after the last attempt. Reading intermediate bodies releases sockets.
+            if tries >= max_num_tries:
+                await raise_for_status(response, content)
+
+            kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
+            print(
+                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
+                flush=True,
+            )
+            await sleep(0.5)
+
         await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
