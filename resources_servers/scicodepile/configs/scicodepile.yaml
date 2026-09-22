@@ -24,3 +24,11 @@ scicodepile_simple_agent:
         type: example
         jsonl_fpath: resources_servers/scicodepile/data/example.jsonl
         license: Apache 2.0
+
+scicodepile_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: scicodepile_simple_agent

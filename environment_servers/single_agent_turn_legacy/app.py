@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Legacy flat-row adapter for the single-agent environment server."""
+"""Legacy flat-row adapter for the single-agent-turn environment server."""
 
 from typing import Any
 
 from fastapi import FastAPI
 
-from environment_servers.single_agent.app import (
-    SingleAgentEnvironmentServer,
-    SingleAgentEnvironmentServerConfig,
+from environment_servers.single_agent_turn.app import (
+    SingleAgentTurnEnvironmentServer,
+    SingleAgentTurnEnvironmentServerConfig,
 )
 from nemo_gym.episode_types import (
     EpisodeId,
@@ -27,17 +27,17 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.single_agent_episode_types import (
-    SingleAgentEpisodeRequest,
-    SingleAgentEpisodeResponse,
-    SingleAgentTaskInput,
+from nemo_gym.single_agent_turn_types import (
+    SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
 )
 
 
-class SingleAgentLegacyEnvironmentServer(SingleAgentEnvironmentServer):
+class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentEnvironmentServerConfig
+    config: SingleAgentTurnEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -46,14 +46,14 @@ class SingleAgentLegacyEnvironmentServer(SingleAgentEnvironmentServer):
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
         request = (
-            SingleAgentEpisodeRequest.model_validate(row)
+            SingleAgentTurnRequest.model_validate(row)
             if "episode_id" in row and "task" in row
             else self._native_request(row)
         )
         response = await self.run_request(request)
         return self._legacy_result(response)
 
-    def _native_request(self, row: dict[str, Any]) -> SingleAgentEpisodeRequest:
+    def _native_request(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
@@ -92,11 +92,11 @@ class SingleAgentLegacyEnvironmentServer(SingleAgentEnvironmentServer):
             ROLLOUT_INDEX_KEY_NAME,
             ATTEMPT_INDEX_KEY_NAME,
         }
-        return SingleAgentEpisodeRequest(
+        return SingleAgentTurnRequest(
             episode_id=EpisodeId(rollout_id=rollout_id, attempt=attempt),
             task=MaterializedTask(
                 task_id=TaskId(taskset=task_source, task_id=task_id),
-                task_input=SingleAgentTaskInput(
+                task_input=SingleAgentTurnTaskInput(
                     responses_create_params=row[RESPONSES_CREATE_PARAMS_KEY_NAME],
                     task_data={
                         key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")
@@ -105,7 +105,7 @@ class SingleAgentLegacyEnvironmentServer(SingleAgentEnvironmentServer):
             ),
         )
 
-    def _legacy_result(self, response: SingleAgentEpisodeResponse) -> dict[str, Any]:
+    def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
@@ -128,4 +128,4 @@ class SingleAgentLegacyEnvironmentServer(SingleAgentEnvironmentServer):
 
 
 if __name__ == "__main__":
-    SingleAgentLegacyEnvironmentServer.run_webserver()
+    SingleAgentTurnLegacyEnvironmentServer.run_webserver()
