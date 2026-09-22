@@ -120,7 +120,6 @@ class PoolSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem], Dict[str, Any]]:
     output_items: List[NeMoGymResponseOutputItem] = []
-    buffered_think: Optional[str] = None
     pending_call: Optional[Dict[str, Any]] = None
     errors: List[str] = []
 
@@ -145,10 +144,6 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
         pending_call = None
 
     def emit_message(text: str) -> None:
-        nonlocal buffered_think
-        if buffered_think:
-            text = f"<think>\n{buffered_think}\n</think>\n\n{text}" if text else f"<think>\n{buffered_think}\n</think>"
-            buffered_think = None
         output_items.append(
             NeMoGymResponseOutputMessage(
                 id=f"msg-{len(output_items)}",
@@ -172,15 +167,16 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
 
         match event:
             case {"type": "reasoning", "reasoning": str(think)} if think.strip():
-                buffered_think = f"{buffered_think}\n{think}" if buffered_think else think
+                flush_pending_call("")
+                emit_message(f"<think>\n{think}\n</think>")
             case {"type": "reasoning"} | {"type": "thought"}:
-                # thought duplicates the preceding reasoning event.
+                # thought repeats the preceding reasoning event.
                 pass
+            case {"type": "assistantMessage", "message": str(text)} if text.strip():
+                flush_pending_call("")
+                emit_message(text)
             case {"type": "assistantMessage"}:
-                text = event.get("message") or ""
-                if text.strip() or buffered_think:
-                    flush_pending_call("")
-                    emit_message(text)
+                pass
             case {"type": "toolCall"}:
                 flush_pending_call("")
                 pending_call = event
@@ -196,8 +192,6 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
                 raise NotImplementedError(event)
 
     flush_pending_call("")
-    if buffered_think:
-        emit_message("")
     return output_items, ({"errors": errors} if errors else {})
 
 

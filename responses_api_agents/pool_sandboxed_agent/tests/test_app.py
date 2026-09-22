@@ -29,6 +29,7 @@ from responses_api_agents.pool_sandboxed_agent.app import (
 EVENTS = "\n".join(
     json.dumps(event)
     for event in [
+        {"type": "assistantMessage", "message": "\n\n"},
         {"type": "reasoning", "reasoning": "Look at the file first."},
         {"type": "thought", "thought": "Look at the file first."},
         {"type": "toolCall", "name": "read", "args": {"path": "/testbed/a.py"}},
@@ -59,20 +60,22 @@ def _agent() -> PoolSandboxedAgent:
     return PoolSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def test_parse_pool_events_pairs_tool_calls_and_prepends_reasoning() -> None:
+def test_parse_pool_events_keeps_reasoning_in_order_and_pairs_tool_calls() -> None:
     items, metadata = parse_pool_events(EVENTS)
 
     assert [item.type for item in items] == [
+        "message",
         "function_call",
         "function_call_output",
         "function_call",
         "function_call_output",
         "message",
     ]
-    assert items[0].name == "read" and json.loads(items[0].arguments) == {"path": "/testbed/a.py"}
-    assert items[1].call_id == items[0].call_id and items[1].output == "print('hi')"
-    assert items[3].output == "[error] boom"
-    assert items[4].content[0].text == "<think>\nLook at the file first.\n</think>\n\nDone."
+    assert items[0].content[0].text == "<think>\nLook at the file first.\n</think>"
+    assert items[1].name == "read" and json.loads(items[1].arguments) == {"path": "/testbed/a.py"}
+    assert items[2].call_id == items[1].call_id and items[2].output == "print('hi')"
+    assert items[4].output == "[error] boom"
+    assert items[5].content[0].text == "Done."
     assert metadata == {}
 
 
