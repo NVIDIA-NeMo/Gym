@@ -1,0 +1,32 @@
+config_paths:
+  - resources_servers/gsm8k_reference/configs/gsm8k_reference.yaml
+  - responses_api_models/vllm_model/configs/vllm_model_completions.yaml
+
+indic_gsm8k_resources_server:
+  _inherit_from: gsm8k_reference
+
+indic_gsm8k_simple_agent:
+  _inherit_from: gsm8k_reference_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_gsm8k_resources_server
+      model_server:
+        name: policy_model
+      datasets:
+        - name: indic-gsm8k
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/gsm8k/data/indic_gsm8k_benchmark.jsonl
+          prompt_config: benchmarks/indic/gsm8k/prompts/default.yaml
+          prepare_script: benchmarks/indic/gsm8k/prepare.py
+          num_repeats: 1
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 0.0
+        stop:
+          - 'Question:'
+          - '</s>'
+          - '<|im_end|>'

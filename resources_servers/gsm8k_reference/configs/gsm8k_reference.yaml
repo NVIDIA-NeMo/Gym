@@ -1,0 +1,24 @@
+gsm8k_reference:
+  resources_servers:
+    gsm8k_reference:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Deterministic lm-eval-compatible GSM8K numeric exact match.
+      value: Measure grade-school math reasoning with strict and flexible answer extraction.
+
+gsm8k_reference_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gsm8k_reference
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/gsm8k_reference/data/example.jsonl
+          license: MIT
