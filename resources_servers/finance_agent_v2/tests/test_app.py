@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
@@ -48,6 +49,8 @@ from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
     CachedPriceHistory,
 )
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
+from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
 
 _PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"
@@ -358,6 +361,54 @@ class TestToolSurface:
         assert server._cache.enabled is True
         assert isinstance(server._tools["parse_html_page"], CachedParseHtmlPage)
         assert isinstance(server._tools["price_history"], CachedPriceHistory)
+
+
+# ============================================================================
+# sec_mode
+# ============================================================================
+
+
+class TestSecMode:
+    def test_live_is_the_default(self) -> None:
+        server = _make_server()
+
+        assert server._sec_mode == "live"
+        assert not isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+        assert not isinstance(server._tools["parse_html_page"], LocalParseHtmlPage)
+
+    def test_an_index_alone_selects_local(self, tmp_path) -> None:
+        """Configuring the index is how a training run asks for local mode."""
+        server = _make_server(local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+
+        assert server._sec_mode == "local"
+        assert isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_a_corpus_is_what_moves_filing_reads_off_the_network(self, tmp_path) -> None:
+        server = _make_server(
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+            sec_dump_path=str(tmp_path / "corpus"),
+        )
+
+        assert isinstance(server._tools["parse_html_page"], LocalParseHtmlPage)
+
+    def test_live_wins_over_a_configured_index(self, tmp_path) -> None:
+        """Eval against sec-api.io while the training index stays configured."""
+        server = _make_server(
+            sec_mode="live",
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+        )
+
+        assert not isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_local_without_an_index_fails_at_startup(self) -> None:
+        """Refused at boot rather than per search, which would surface as a
+        rollout of failed tool calls."""
+        with pytest.raises(ValueError, match="local_edgar_index_path is not set"):
+            _make_server(sec_mode="local")
+
+    def test_an_unknown_mode_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="Input should be 'live' or 'local'"):
+            _make_server(sec_mode="offline")
 
 
 # ============================================================================

@@ -127,6 +127,30 @@ so track how many rollouts never submit, not just mean reward.
 With a local corpus or index available, also set `sec_dump_path` and
 `local_edgar_index_path` (see [Local EDGAR index](#local-edgar-index)).
 
+### Where SEC data comes from
+
+`sec_mode` selects the source for `edgar_search`.
+
+| `sec_mode` | `edgar_search` | Needs |
+|---|---|---|
+| `local` | Local SQLite index | `local_edgar_index_path` |
+| `live` | sec-api.io | `sec_api_key` |
+
+Left unset it follows `local_edgar_index_path`: `local` when one is configured,
+`live` otherwise. Asking for `local` without an index fails at startup.
+
+`sec_filing_search` is unaffected by `sec_mode`: it resolves tickers and filing
+metadata against SEC.gov in both, and `use_cache: true` with
+`scripts/prefetch_sec_metadata.py` keeps that off the critical path during
+training.
+
+In local mode `edgar_search` makes no network call, which is what training
+throughput needs, and filing text is read from `sec_dump_path`. It can only
+answer for dates the corpus holds — a search outside the indexed span returns
+an error naming that span rather than an empty result.
+
+Live mode is the one that matches the published benchmark.
+
 ### What is cached
 
 | Directory | Contents |

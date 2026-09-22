@@ -16,7 +16,7 @@ installed upstream package, so a pin bump that changes the harness fails here.
 | Tool | Description | Requires |
 |------|-------------|----------|
 | `web_search` | Tavily web search (`TavilyWebSearch`) | `tavily_api_key` |
-| `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`) | `sec_api_key` |
+| `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`), or a local index | `sec_api_key`, or `local_edgar_index_path` |
 | `price_history` | Tiingo daily OHLC for equity/etf/crypto/fx (`PriceHistory`) | `pricing_data_api_key` |
 | `parse_html_page` | Fetch + parse a page to text, store under a key (`ParseHtmlPage`) | — |
 | `retrieve_information` | LLM over stored docs via `{{key}}` prompts (`RetrieveInformation`) | `retrieval_model_server` |
@@ -27,6 +27,38 @@ installed upstream package, so a pin bump that changes the harness fails here.
 (`state`) dict, scoped by the HTTP session cookie. A tool whose required key or
 model is not configured is registered as unavailable and its endpoint returns a
 clear error, so the agent can route around it.
+
+### Where SEC data comes from
+
+`sec_mode` selects the source for `edgar_search`.
+
+| `sec_mode` | `edgar_search` | SEC `parse_html_page` | Needs |
+|---|---|---|---|
+| `local` | Local SQLite index | Cache, then the filing corpus, then sec.gov | `local_edgar_index_path`; `sec_dump_path` for corpus reads |
+| `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
+
+Left unset it follows `local_edgar_index_path`: `local` when one is configured,
+`live` otherwise. Asking for `local` without an index fails at startup.
+
+Local mode subclasses the upstream tools rather than replacing them, so the
+name, description and parameter schema the model sees are unchanged and a
+sample written against the live benchmark runs either way. Only the fetch
+differs. Corpus reads need the index to map a filing URL to its file, which is
+why they are local-mode only. Parsed corpus text is written to the cache when
+`use_cache` is on, so each filing is parsed once. `parse_html_page` still
+resolves URLs the corpus does not hold, through the same cached fetch live mode
+uses, and logs its reads by source
+(`sec-corpus`, `cache`, `live`) so a corpus that is missing most of what is
+asked for is visible rather than just slow.
+
+A search whose date range falls outside the indexed span returns an error
+naming that span, rather than the empty result that would send the model
+looking for a better query. Live mode has no equivalent, since sec-api.io
+serves the whole of EDGAR.
+
+See [`resources_servers/sec_local_index/README.md`](../sec_local_index/README.md)
+for the shared library behind both modes and how it is kept aligned with
+upstream.
 
 ## Dependencies
 
