@@ -3,9 +3,9 @@
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
-connection configuration, instruction, execution user, MCP/skills metadata, and
-official agent timeout. The mini-SWE agent server connects to that sandbox and
-owns harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
+connection configuration, instruction, `task_id`, execution user, MCP/skills metadata,
+and official agent timeout. An agent server connects to that sandbox and owns
+harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
 runs the separate official verifier, and cleans up the task's resources.
 
 Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
@@ -25,10 +25,16 @@ normal verifier timeout and cleanup lifecycle take over.
 
 The resources server retains the Compose creator, TTL renewal, and shared-volume
 ownership throughout the episode. The agent closes its attached transport after
-joining the mini-SWE worker, then submits its response, termination, execution
+joining its harness worker, then submits its response, termination, execution
 status, timings, and harness metadata to `/verify`. Failed setup skips grading;
 a started agent is graded even after failure, cancellation, or timeout. Official
 zero and nonzero grades survive agent failure or timeout.
+
+The wire models in `models.py` are resources-owned. Agent implementations use
+their own HTTP models and need not import this server. `termination.reason` accepts
+`completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
+`agent_started` indicates whether execution began. `harness_metadata` is opaque
+result metadata, independent of the selected harness.
 
 Completed version-3 records can replay after a restart. Active records cannot
 resume after resources-process restart. Shutdown drains active verification for

@@ -14,9 +14,8 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
@@ -30,13 +29,19 @@ from nemo_gym.server_utils import (
     raise_for_status,
     rollout_path_prefix,
 )
-from resources_servers.terminal_bench_4.models import (
-    AgentTermination,
+from responses_api_agents.miniswe_sandboxed_agent.harness import (
+    HarnessContext,
+    HarnessOutcome,
+    MiniSWEConfig,
+    MiniSWEHarness,
+)
+from responses_api_agents.miniswe_sandboxed_agent.models import (
+    AgentExecutionResult,
+    MiniSWERunRequest,
+    MiniSWEVerifyResponse,
     SandboxedVerifyRequest,
-    SandboxedVerifyResponse,
     SeedSessionResponse,
 )
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
 
 
 LOGGER = logging.getLogger(__name__)
@@ -47,18 +52,10 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
-    artifacts_dir: Path = Path("results/terminal_bench_4/agent")
+    artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
-
-
-class MiniSWERunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class MiniSWEVerifyResponse(SandboxedVerifyResponse):
-    model_config = ConfigDict(extra="allow")
 
 
 def now() -> str:
@@ -178,19 +175,50 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         cookies = cookies | seed_response.cookies
         seed = SeedSessionResponse.model_validate(await get_response_json(seed_response))
         if seed.verified_response is not None:
-            return MiniSWEVerifyResponse.model_validate(seed.verified_response.model_dump())
+            return seed.verified_response
         params = MiniSWERunRequest.model_validate(payload).responses_create_params
+        if cancelled:
+            result = AgentExecutionResult(
+                responses_create_params=params,
+                response=empty_response(params, self.config.model_server.name),
+                termination=HarnessOutcome(reason="cancelled"),
+            )
+        else:
+            result = await self.execute(
+                seed,
+                params,
+                rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
+                capture_model_calls=capture_model_calls,
+                cookies=cookies,
+                artifact_directory=Path(payload["artifact_directory"]) if payload.get("artifact_directory") else None,
+            )
+        verify_body = SandboxedVerifyRequest(session_id=seed.session_id, **result.model_dump())
+        finalizer = asyncio.create_task(self._verify(verify_body, cookies))
+        self._finalizers.add(finalizer)
+        finalizer.add_done_callback(self._finalizers.discard)
+        finalizer.add_done_callback(self._observe_background_task)
+        return await asyncio.shield(finalizer)
+
+    async def execute(
+        self,
+        seed: SeedSessionResponse,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: str,
+        capture_model_calls: bool,
+        cookies: dict,
+        artifact_directory: Path | None = None,
+    ) -> AgentExecutionResult:
+        """Execute on a borrowed sandbox; the caller owns seeding and verification."""
         response = empty_response(params, self.config.model_server.name)
-        termination = seed.termination or AgentTermination(
+        termination = seed.termination or HarnessOutcome(
             reason="infrastructure_error", detail="Setup did not complete"
         )
         extra, timings = {}, {}
         agent_started = False
         provider = None
-        with rollout_context(payload.get("_ng_rollout_id")):
+        with rollout_context(rollout_id if capture_model_calls else None):
             try:
-                if cancelled:
-                    raise asyncio.CancelledError
                 if seed.termination is None:
                     timings["agent_setup"] = {"started_at": now()}
                     async with asyncio.timeout(self.config.setup_timeout_sec):
@@ -201,8 +229,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             raise RuntimeError("Unable to determine the task working directory")
                         context = HarnessContext(
                             session_id=seed.session_id,
-                            task_id=payload.get("task_name"),
-                            rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
+                            task_id=seed.task_id,
+                            rollout_id=rollout_id,
                             instruction=seed.instruction,
                             user=seed.user,
                             workdir=cwd.stdout.strip(),
@@ -214,7 +242,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
                         async def query(model_params):
                             prefix = rollout_path_prefix(
-                                payload.get("_ng_rollout_id") if capture_model_calls else None,
+                                rollout_id if capture_model_calls else None,
                                 token_capture=self._token_id_capture_enabled(),
                             )
                             model_response = await self.server_client.post(
@@ -237,9 +265,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             params=params,
                             query=query,
                             model_name=self.config.model_server.name,
-                            directory=Path(payload["artifact_directory"])
-                            if payload.get("artifact_directory")
-                            else self.config.artifacts_dir / seed.session_id,
+                            directory=artifact_directory or self.config.artifacts_dir / seed.session_id,
                         )
                         await harness.setup()
                     timings["agent_setup"]["finished_at"] = now()
@@ -248,13 +274,13 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     deadline = monotonic() + budget
                     agent_started = True
                     response, outcome, extra = await harness.execute(max(0, deadline - monotonic()))
-                    termination = AgentTermination.model_validate(outcome.model_dump())
+                    termination = HarnessOutcome.model_validate(outcome.model_dump())
                     if monotonic() >= deadline:
                         termination.reason = "timeout"
             except asyncio.CancelledError:
-                termination = AgentTermination(reason="cancelled")
+                termination = HarnessOutcome(reason="cancelled")
             except Exception as exc:
-                termination = AgentTermination(
+                termination = HarnessOutcome(
                     reason="timeout"
                     if isinstance(exc, TimeoutError) and not agent_started
                     else "infrastructure_error",
@@ -269,20 +295,14 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         await provider.aclose()
                     except Exception:
                         LOGGER.exception("Failed to close the mini-SWE sandbox transport")
-                verify_body = SandboxedVerifyRequest(
-                    responses_create_params=params,
-                    session_id=seed.session_id,
-                    response=response,
-                    termination=termination,
-                    agent_started=agent_started,
-                    agent_timings=timings,
-                    harness_metadata=extra,
-                )
-                finalizer = asyncio.create_task(self._verify(verify_body, cookies))
-                self._finalizers.add(finalizer)
-                finalizer.add_done_callback(self._finalizers.discard)
-                finalizer.add_done_callback(self._observe_background_task)
-            return await asyncio.shield(finalizer)
+        return AgentExecutionResult(
+            responses_create_params=params,
+            response=response,
+            termination=termination,
+            agent_started=agent_started,
+            agent_timings=timings,
+            harness_metadata=extra,
+        )
 
     async def _verify(self, body: SandboxedVerifyRequest, cookies: dict) -> MiniSWEVerifyResponse:
         response = await self.server_client.post(

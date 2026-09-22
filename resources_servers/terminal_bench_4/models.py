@@ -51,6 +51,7 @@ class TerminalBench4RunRequest(BaseRunRequest):
 
 
 class SeedSessionResponse(SessionRequest):
+    task_id: str | None = None
     sandbox_descriptor: dict[str, Any] | None = None
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""

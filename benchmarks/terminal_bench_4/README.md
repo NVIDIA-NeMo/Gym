@@ -117,8 +117,8 @@ Infrastructure failures carry `infrastructure_error` and `_ng_failure_class` and
 must be excluded from model-negative aggregates.
 
 The standalone smoke runner starts real Gym HTTP agent, resources, and model
-servers on loopback. The resources process runs the complete episode and calls
-the Gym model server through the mini-SWE harness.
+servers on loopback. The agent runs mini-SWE and calls the Gym model server;
+resources owns task provisioning, grading, and cleanup.
 It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 
 ```sh

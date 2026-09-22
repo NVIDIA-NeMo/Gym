@@ -10,11 +10,27 @@ benchmark code and has no dataset, provisioning, verification, or sandbox lifecy
 The synchronous mini-SWE loop uses a bridge to async model and sandbox operations.
 Cancellation closes pending I/O and joins the worker before returning its outcome,
 response, and trajectory metadata. The caller owns subsequent collection and
-cleanup. `app.py` owns the Gym `/run` loop: it calls the TB4 resources server's
+cleanup. `app.py` owns the Gym `/run` loop: it calls the configured resources server's
 `/seed_session`, attaches to the returned sandbox, sets up and executes mini-SWE,
 then sends the response and termination to `/verify`. Cookies from seeding are
 forwarded to model and verification calls. Retried runs share one agent worker.
 The resource server retains provisioning, sandbox renewal, grading, and cleanup.
+
+`MiniSWESandboxedAgent.execute()` consumes a seeded sandbox and returns agent
+output without seeding or verifying a task. `/run` wraps that execution with the
+legacy seed/verify lifecycle. This keeps execution separate from orchestration so
+it can later use Gym's shared agent/task session contracts.
+
+`models.py` defines the agent's local view of the HTTP protocol; it imports no
+resources implementation. Seeding supplies `session_id`, `sandbox_descriptor`,
+`sandbox_provider`, `instruction`, and optional `task_id`, `user`,
+`agent_timeout_sec`, `mcp_servers`, and `skills_dir`. A failed seed can supply
+`termination`; a completed session can supply `verified_response` for replay.
+Task-specific `/run` fields are forwarded unchanged. Verification receives the
+response and agent execution status; its result only needs Gym's
+`BaseVerifyResponse` fields. Additional benchmark result fields pass through
+unchanged. Other harnesses can implement the same HTTP exchange without importing
+mini-SWE or TB4 code.
 
 Agent shutdown uses one `shutdown_timeout_sec` budget for finishing an in-flight
 seed request, joining the harness, and requesting verification or cleanup. If the
@@ -27,8 +43,9 @@ has a separate 360-second budget. Execution uses the smaller of the official tas
 budget and the configured cap. The benchmark retains the `tb4_max_steps`,
 `tb4_step_timeout_sec`, and `tb4_agent_max_timeout_sec` overrides; custom nested
 overrides must now target `terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent`.
-Agent trajectories default to `results/terminal_bench_4/agent/<session_id>/` and can
-be relocated with `tb4_agent_artifacts_dir` or a run's `artifact_directory`. When
+Agent trajectories default to `results/miniswe_sandboxed_agent/<session_id>/`.
+The TB4 profile selects `results/terminal_bench_4/agent/<session_id>/`, overridable
+with `tb4_agent_artifacts_dir` or a run's `artifact_directory`. When
 `tb4_jobs_dir` is set, agent artifacts default to its `agent/` subdirectory so the
 configured run directory captures artifacts from both servers.
 
@@ -82,7 +99,7 @@ Enable `observability_enabled: true` in Gym's run configuration to collect
 callers pass `observability_enabled=True`; collection is disabled by default.
 Responses without an ID retain their turn and record a
 `model_call_reference_unavailable` gap.
-TB4 sends the resources session ID as `x-session-id` on every Gym model request,
+The agent sends the resources session ID as `x-session-id` on every Gym model request,
 so capture can assign failed attempts and retries to the same invocation even
 when there is no response ID. Successful responses retain exact response refs;
 decisions are recorded before mini-SWE parses them, including rejected output.
@@ -97,3 +114,7 @@ zero sum.
 
 `benchmarks/terminal_bench_4/smoke.py` now retains `model_calls/`,
 `evaluator_rollouts.jsonl`, and Gym's `quality_summary.json` for offline inspection.
+
+The agent unit tests use an unrelated resource schema. `tests/test_server.py`
+retains the TB4 composition tests in the server test suite for CI discovery; those
+tests require both servers' dependencies.

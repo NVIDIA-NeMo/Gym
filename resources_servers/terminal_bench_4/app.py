@@ -192,6 +192,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 await lifecycle.prepare_session(session, self._loader)
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id,
+                    task_id=session.request.task_name,
                     sandbox_descriptor=await session.environment.main.serialize(),
                     sandbox_provider=session.environment.provider_config,
                     instruction=session.task.instruction,

@@ -17,6 +17,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4ResourcesServer,
     TerminalBench4RunRequest,
 )
+from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
 from responses_api_agents.miniswe_sandboxed_agent import app as module
@@ -138,7 +139,7 @@ async def fixture(tmp_path, monkeypatch):
         if url_path == "/seed_session":
             value = await server.seed_session(resource_request, TerminalBench4RunRequest.model_validate(json))
         elif url_path == "/verify":
-            value = await server.verify(resource_request, module.SandboxedVerifyRequest.model_validate(json))
+            value = await server.verify(resource_request, SandboxedVerifyRequest.model_validate(json))
         else:
             raise AssertionError(url_path)
         return SimpleNamespace(
@@ -334,7 +335,7 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
 
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     result = await f.agent.run(f.request, f.body)
-    assert result.termination.reason == reason
+    assert result.termination["reason"] == reason
     assert result.reward == 0.75 and result.evaluation_completed
     assert bool(result.infrastructure_error) == (reason == "infrastructure_error")
     assert all(env.closed for env in f.envs)
@@ -396,7 +397,7 @@ async def test_setup_budget_covers_workdir_and_never_grades(fixture, monkeypatch
 
     monkeypatch.setattr(lifecycle, "Environment", environment)
     result = await f.agent.run(f.request, f.body)
-    assert result.termination.reason == "timeout"
+    assert result.termination["reason"] == "timeout"
     assert result.infrastructure_error == "AgentSetupTimeoutError"
     f.grade.assert_not_awaited()
     assert all(env.closed for env in f.envs)
@@ -635,7 +636,7 @@ async def test_seed_and_verify_retries_share_resource_work(fixture):
     assert first.sandbox_provider == {"local": {}}
     assert f.events == ["agent_start"]
     assert not f.harnesses
-    verify = module.SandboxedVerifyRequest(
+    verify = SandboxedVerifyRequest(
         session_id=first.session_id,
         responses_create_params=f.body.responses_create_params,
         response=module.empty_response(f.body.responses_create_params, "model"),
@@ -666,8 +667,8 @@ async def test_reconnect_failure_still_requests_cleanup(fixture, monkeypatch):
     f = fixture
     monkeypatch.setattr(module.AsyncSandbox, "connect", AsyncMock(side_effect=RuntimeError("reconnect failed")))
     result = await f.agent.run(f.request, f.body)
-    assert result.termination.reason == "infrastructure_error"
-    assert "reconnect failed" in result.termination.detail
+    assert result.termination["reason"] == "infrastructure_error"
+    assert "reconnect failed" in result.termination["detail"]
     assert not result.evaluation_completed
     assert not f.harnesses
     assert all(e.closed for e in f.envs)
@@ -727,7 +728,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
         return {"rewards": {"reward": 0.75}}
 
     f.grade.side_effect = grade
-    body = module.SandboxedVerifyRequest(
+    body = SandboxedVerifyRequest(
         session_id=seed.session_id,
         responses_create_params=f.body.responses_create_params,
         response=module.empty_response(f.body.responses_create_params, "model"),
@@ -758,7 +759,7 @@ async def test_late_verify_cannot_race_expiry_cleanup(fixture):
     session = f.server._sessions[seed.session_id]
     # Simulate /verify winning scheduling ahead of an overdue timer callback.
     session.agent_deadline = asyncio.get_running_loop().time() - 1
-    body = module.SandboxedVerifyRequest(
+    body = SandboxedVerifyRequest(
         session_id=seed.session_id,
         responses_create_params=f.body.responses_create_params,
         response=module.empty_response(f.body.responses_create_params, "model"),
@@ -848,7 +849,7 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
         release.set()
         await shutdown
         result = await caller
-    assert result.termination.reason == "cancelled"
+    assert result.termination["reason"] == "cancelled"
     assert not f.harnesses
     assert all(e.closed for e in f.envs)
     assert [c.kwargs["url_path"] for c in f.agent.server_client.post.await_args_list] == ["/seed_session", "/verify"]
