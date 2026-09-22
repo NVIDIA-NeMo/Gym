@@ -1,0 +1,241 @@
+{
+  "_ng_task_index": 0,
+  "_ng_rollout_index": 0,
+  "ng_model_call_capture": {
+    "rollout_id": "0-0",
+    "calls": [
+      {
+        "model_call_id": "call-1",
+        "response_id": "response-1",
+        "client_session_id": "root",
+        "call_index": 0,
+        "model_ref": {
+          "type": "responses_api_models",
+          "name": "policy"
+        },
+        "model": "model",
+        "dialect": "responses",
+        "status_code": 200,
+        "response_status": "completed",
+        "finish_reason": null,
+        "started_at": 1.0,
+        "completed_at": 2.0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "tokens_reasoning": 2,
+        "tokens_total": 15,
+        "tool_calls": [
+          {
+            "call_id": "tool-1",
+            "name": "bash",
+            "arguments": {
+              "command": "printf ok"
+            }
+          }
+        ],
+        "reasoning_content": null,
+        "cache_hit": true,
+        "cached_tokens": 3,
+        "cache_creation_tokens": null,
+        "error_category": null,
+        "latency_total_ms": 1000.0,
+        "latency_ttft_ms": null
+      }
+    ]
+  },
+  "ng_agent_observations": {
+    "source": "opencode",
+    "records": [
+      {
+        "kind": "agent_invocation",
+        "invocation_id": "root",
+        "parent_invocation_id": null,
+        "spawned_by_tool_call_id": null,
+        "status": "completed",
+        "duration_ms": null,
+        "error_type": null,
+        "model_calls": [
+          {
+            "model_call_id": "call-1",
+            "model_ref": {
+              "type": "responses_api_models",
+              "name": "policy"
+            },
+            "response_id": "response-1"
+          }
+        ],
+        "conversation": [
+          {
+            "arguments": "{\"command\": \"printf ok\"}",
+            "call_id": "tool-1",
+            "name": "bash",
+            "type": "function_call",
+            "id": "tool-1",
+            "status": "completed",
+            "namespace": null
+          },
+          {
+            "call_id": "tool-1",
+            "output": "ok",
+            "type": "function_call_output",
+            "id": null,
+            "status": "completed"
+          }
+        ]
+      },
+      {
+        "kind": "tool_call",
+        "invocation_id": "root",
+        "tool_call_id": "tool-1",
+        "sandbox_id": null,
+        "tool_name": "bash",
+        "started_at": 2.0,
+        "completed_at": 3.0,
+        "duration_ms": 1000.0,
+        "timing_source": "artifact",
+        "status": "completed",
+        "error_type": null
+      }
+    ],
+    "gaps": []
+  },
+  "ng_trajectory": {
+    "schema_version": "1.0",
+    "task_id": "0",
+    "rollout_id": "0-0",
+    "invocations": [
+      {
+        "kind": "agent_invocation",
+        "invocation_id": "root",
+        "parent_invocation_id": null,
+        "spawned_by_tool_call_id": null,
+        "status": "completed",
+        "duration_ms": null,
+        "error_type": null,
+        "model_calls": [
+          {
+            "model_call_id": "call-1",
+            "model_ref": {
+              "type": "responses_api_models",
+              "name": "policy"
+            },
+            "response_id": "response-1"
+          }
+        ],
+        "conversation": [
+          {
+            "arguments": "{\"command\": \"printf ok\"}",
+            "call_id": "tool-1",
+            "name": "bash",
+            "type": "function_call",
+            "id": "tool-1",
+            "status": "completed",
+            "namespace": null
+          },
+          {
+            "call_id": "tool-1",
+            "output": "ok",
+            "type": "function_call_output",
+            "id": null,
+            "status": "completed"
+          }
+        ]
+      }
+    ],
+    "turns": [],
+    "model_calls": [
+      {
+        "model_call_id": "call-1",
+        "started_at": 1.0,
+        "completed_at": 2.0,
+        "duration_ms": 1000.0,
+        "request": {
+          "model": "model",
+          "input": [
+            {
+              "role": "user",
+              "content": "Print ok"
+            }
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "name": "bash",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          ]
+        },
+        "response": {
+          "id": "response-1",
+          "model": "model",
+          "status": "completed",
+          "output": [
+            {
+              "type": "function_call",
+              "call_id": "tool-1",
+              "name": "bash",
+              "arguments": "{\"command\":\"printf ok\"}"
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": {
+              "cached_tokens": 3
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 2
+            }
+          }
+        },
+        "response_metadata": {
+          "response_id": "response-1",
+          "model_ref": {
+            "type": "responses_api_models",
+            "name": "policy"
+          },
+          "model": "model",
+          "dialect": "responses",
+          "status_code": 200,
+          "response_status": "completed",
+          "finish_reason": null,
+          "error_category": null,
+          "latency_ttft_ms": null
+        },
+        "token_stats": {
+          "prompt_tokens": 10,
+          "completion_tokens": 5,
+          "reasoning_tokens": 2,
+          "total_tokens": 15,
+          "cached_tokens": 3
+        }
+      }
+    ],
+    "tool_calls": [
+      {
+        "kind": "tool_call",
+        "invocation_id": "root",
+        "tool_call_id": "tool-1",
+        "sandbox_id": null,
+        "tool_name": "bash",
+        "started_at": 2.0,
+        "completed_at": 3.0,
+        "duration_ms": 1000.0,
+        "timing_source": "artifact",
+        "status": "completed",
+        "error_type": null,
+        "output": "ok"
+      }
+    ],
+    "gaps": [
+      {
+        "code": "turns_unavailable",
+        "invocation_id": null,
+        "detail": null
+      }
+    ]
+  }
+}
