@@ -45,6 +45,10 @@ seeded episode's capture key in its URL. Chat-only backends need Gym's Responses
 pointing Codex directly at a Chat Completions endpoint does not work. This adapter does not strip
 reasoning or tool history from Codex model requests. Gym treats Codex's empty `include=[]` as requesting
 no additional fields; nonempty Responses-only include requests still require a Responses backend.
+Codex also sends `prompt_cache_key`; the inference backend must accept it. Some hosted NIM Chat
+endpoints reject this parameter, and no documented Codex configuration omits it. Gym preserves
+caller caching controls. A validation-only NIM compatibility bridge that explicitly omits this
+optimization does not establish direct NIM compatibility for this adapter.
 
 Native setup currently requires a direct connection, one agent worker, Linux/glibc on x86_64 or
 AArch64, Bash, and Python 3.9+. The installer checks bootstrap dependencies and installs missing
