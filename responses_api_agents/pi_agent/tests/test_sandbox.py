@@ -206,6 +206,9 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "PATH" not in payload["env"]
+            extension = f"{sandbox.directory}/output-limit.mjs"
+            assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("output-limit.mjs").read_text()
+            assert payload["command"][payload["command"].index("--extension") + 1] == extension
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
             assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 123
             assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
@@ -220,6 +223,45 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("limit", [0, -1, 2**53])
+def test_invalid_output_limit_does_not_consume_activation(setup, limit):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200
+        response = client.post(
+            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": limit}
+        )
+        assert response.status_code == 422
+        assert not next(iter(agent._sandbox_sessions.values())).activated
+        sandbox.pty.create.assert_not_awaited()
+        response = client.post(
+            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": 128}
+        )
+        assert response.status_code == 200
+
+
+def test_native_output_limit_uses_config_default(setup):
+    agent, sandbox = setup
+    agent.config.max_output_tokens = 4096
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 4096
+
+
+def test_invalid_native_config_output_limit_does_not_consume_activation(setup):
+    agent, sandbox = setup
+    agent.config.max_output_tokens = 0
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert response.status_code == 422
+        assert not next(iter(agent._sandbox_sessions.values())).activated
+        sandbox.pty.create.assert_not_awaited()
 
 
 def test_direct_run_without_resources_rejected_before_execution(setup):
