@@ -966,7 +966,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
         if self._external_capture_handler is not None:
-            self._apply_restored_generation_cut()
+            self._apply_restored_generation_cut(body_dict)
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
@@ -978,7 +978,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         return context is not None and context.external_staging
 
-    def _apply_restored_generation_cut(self) -> None:
+    def _apply_restored_generation_cut(self, body_dict: Dict[str, Any]) -> None:
         """Attach a restored cut to the request-scoped capture admission."""
         context = current_capture_context()
         if context is None or not context.external_staging:
@@ -1030,6 +1030,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 restored_cut.rollout_id,
                 restored_cut.attempt_index + 1,
             )
+
     # Protect the ``[supplied, eligible, total]`` diagnostic counts.
     # Eligible calls have a resolved parent.
     _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0, 0])

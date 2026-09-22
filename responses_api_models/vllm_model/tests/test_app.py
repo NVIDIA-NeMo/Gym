@@ -73,9 +73,6 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
 )
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.lineage import RolloutLineage
-from nemo_gym.token_id_capture.records import ParentResolutionStatus
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
@@ -492,7 +489,10 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
     )
     token = set_token_sink(context)
     try:
-        payload = model._apply_external_capture({"tool_choice": "auto"})
+        payload = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"tool_choice": "auto"},
+        )
         assert payload["tool_choice"] == "auto"
         continuation = payload["ng_capture"]["generation_cut"]
         assert continuation.pop("schema_version") == context.capture_admission.schema_version
@@ -622,13 +622,14 @@ def test_generation_cut_restore_restarts_constrained_tool_call(
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.INFO, logger="nemo_gym.vllm_model"):
-            payload = model._apply_external_capture(
+            payload = model._preprocess_chat_completion_create_params(
+                MagicMock(),
                 {
                     "tool_choice": {
                         "type": "function",
                         "function": {"name": "increment_counter"},
                     }
-                }
+                },
             )
         assert payload["ng_capture"]["generation_cut"] is None
         assert context.capture_admission.generation_cut is None
