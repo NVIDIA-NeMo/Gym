@@ -1,5 +1,0 @@
-# Training JSONL embeds eval_script/patch content from the Hub dataset -- large, regenerate with
-# prepare_openswe.py rather than committing.
-*.jsonl
-!example.jsonl
-!example_rollouts.jsonl
