@@ -327,6 +327,52 @@ NAMESPACE_TOOL = {
 
 
 class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
+        summary = "Inspect /app/arithmetic.py, fix multiply, and run Python checks.\n"
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": summary}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        call = _function_call_item("exec_command")
+        result = {"type": "function_call_output", "call_id": call["call_id"], "output": "6"}
+        body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        item_id = cleaned["input"][1]["id"]
+        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
+        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].summary[0].text == summary
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
+        assert converted.messages[1]["content"] == f"<think>{summary}</think>"
+        assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
+        assert converted.messages[1]["tool_calls"][0]["function"] == {
+            "name": call["name"],
+            "arguments": call["arguments"],
+        }
+        assert converted.messages[2] == {"role": "tool", "tool_call_id": call["call_id"], "content": "6"}
+
+    def test_reasoning_content_remains_available_for_responses_backends(self) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Known reasoning text"}],
+            "encrypted_content": "opaque-content",
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json")
+        assert actual == {**reasoning, "id": actual["id"]}
+
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
@@ -670,6 +716,38 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    def test_streaming_codex_reasoning_replay_keeps_history(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Inspect multiply"}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert len(server.last_params.input) == 1
+        assert server.last_params.input[0].summary[0].text == "Inspect multiply"
+        assert server.last_params.input[0].id.startswith("rs_")
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [
+            {"summary": None},
+            {},
+            {"summary": [{"type": "unknown", "text": "Do not drop this"}]},
+            {"summary": [], "id": None},
+            {"summary": [], "content": ["Do not drop this"]},
+            {"summary": [], "encrypted_content": {"opaque": "Do not drop this"}},
+        ],
+    )
+    def test_malformed_streaming_reasoning_fails_before_backend(self, reasoning) -> None:
+        client, server = _client(_EchoModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": [{"type": "reasoning", **reasoning}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})

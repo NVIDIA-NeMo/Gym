@@ -512,6 +512,11 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        if m.get("encrypted_content") or m.get("content"):
+            raise NotImplementedError(
+                "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
+                "conversion; route the request to a model server that passes Responses through."
+            )
         state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
