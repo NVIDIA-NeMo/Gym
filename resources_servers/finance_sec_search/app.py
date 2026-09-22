@@ -1563,4 +1563,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
+    # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
+    logging.basicConfig(level=logging.WARNING)
+    for _logger_name in (__name__, "resources_servers"):
+        logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentResourcesServer.run_webserver()

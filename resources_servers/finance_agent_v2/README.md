@@ -38,7 +38,9 @@ clear error, so the agent can route around it.
 | `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
 
 Left unset it follows `local_edgar_index_path`: `local` when one is configured,
-`live` otherwise. Asking for `local` without an index fails at startup.
+`live` otherwise. Asking for `local` without an index fails at startup. The
+mode in use, and in local mode the date range the index covers, is logged at
+startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
 
 Local mode subclasses the upstream tools rather than replacing them, so the
 name, description and parameter schema the model sees are unchanged and a

@@ -37,6 +37,7 @@ Tools implement ``async execute(args, state, logger)`` and share a per-session
 import asyncio
 import json
 import logging
+import os
 import time
 from types import SimpleNamespace
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
@@ -1200,4 +1201,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
+    # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
+    logging.basicConfig(level=logging.WARNING)
+    for _logger_name in (__name__, "resources_servers"):
+        logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentV2ResourcesServer.run_webserver()

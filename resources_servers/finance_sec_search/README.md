@@ -137,7 +137,9 @@ With a local corpus or index available, also set `sec_dump_path` and
 | `live` | sec-api.io | `sec_api_key` |
 
 Left unset it follows `local_edgar_index_path`: `local` when one is configured,
-`live` otherwise. Asking for `local` without an index fails at startup.
+`live` otherwise. Asking for `local` without an index fails at startup. The
+mode in use, and in local mode the date range the index covers, is logged at
+startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
 
 `sec_filing_search` is unaffected by `sec_mode`: it resolves tickers and filing
 metadata against SEC.gov in both, and `use_cache: true` with
