@@ -509,6 +509,68 @@ async def test_prepare_freezes_a_model_wait_at_its_last_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_wait_arriving_after_prepare_parks_instead_of_failing() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    model_wait = asyncio.create_task(participant.begin_model_wait(execution))
+    report = await prepare
+
+    assert report["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert execution.model_wait_depth == 0
+    assert not model_wait.done()
+
+    await participant.resume()
+    await asyncio.wait_for(model_wait, timeout=1)
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    assert execution.model_wait_depth == 1
+    assert await participant.end_model_wait(execution) is False
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
+async def test_stale_resume_signal_cannot_release_model_wait_across_checkpoint_epochs() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+    await participant.begin_model_wait(execution)
+
+    report = await participant.prepare(
+        time.time() + 2,
+        allow_model_wait_boundary=True,
+    )
+    assert report["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.MODEL_WAIT_FROZEN
+
+    completed = asyncio.create_task(participant.end_model_wait(execution))
+    await asyncio.sleep(0)
+    assert not completed.done()
+    # Checkpoint 1 signals resume, then checkpoint 2 freezes the execution
+    # before the completed model-wait task is scheduled.
+    execution.state = agent_checkpoint.AgentExecutionState.RUNNING
+    execution.resume_epoch = participant._checkpoint_epoch
+    execution.resume_event.set()
+    participant._checkpoint_epoch += 1
+    participant._accepting = False
+    execution.state = agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert not completed.done()
+
+    await participant.resume()
+    assert await asyncio.wait_for(completed, timeout=1) is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
 async def test_stale_resume_signal_cannot_cross_a_new_external_wait_checkpoint() -> None:
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())

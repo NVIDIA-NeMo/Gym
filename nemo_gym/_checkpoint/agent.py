@@ -530,6 +530,22 @@ class AgentCheckpointParticipant:
     async def begin_model_wait(self, execution: AgentExecution) -> None:
         """Mark an execution as blocked on a policy-model response."""
         self._require_owner(execution)
+        # If checkpoint preparation won immediately before this call, join
+        # that checkpoint and defer model dispatch until resume. The state
+        # check and depth increment are otherwise atomic on this event loop.
+        if execution.state == AgentExecutionState.PARK_REQUESTED:
+            await self.park(execution)
+            self._require_owner(execution)
+        elif execution.state in {
+            AgentExecutionState.PARKED,
+            AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+            AgentExecutionState.MODEL_WAIT_FROZEN,
+        }:
+            await self._wait_until_running(
+                execution,
+                minimum_epoch=self._checkpoint_epoch,
+                retired_detail="agent execution was retired before entering a model wait",
+            )
         if execution.state != AgentExecutionState.RUNNING:
             raise AgentCheckpointError("an agent execution can enter a model wait only while running")
         execution.model_wait_depth += 1
@@ -545,10 +561,14 @@ class AgentCheckpointParticipant:
         if execution.model_wait_depth > 0:
             return False
         if execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
-            await execution.resume_event.wait()
-            self._require_owner(execution)
-            if execution.state == AgentExecutionState.RETIRED:
-                raise AgentStaleAttemptError("agent execution was retired while its model result was frozen")
+            await self._wait_until_running(
+                execution,
+                minimum_epoch=self._checkpoint_epoch,
+                retired_detail="agent execution was retired while its model result was frozen",
+            )
+            return True
+        if execution.state == AgentExecutionState.PARK_REQUESTED:
+            await self.park(execution)
             return True
         return False
 
@@ -680,7 +700,7 @@ class AgentCheckpointParticipant:
                 released += 1
             elif execution.state == AgentExecutionState.MODEL_WAIT_FROZEN:
                 execution.state = AgentExecutionState.RUNNING
-                execution.resume_event.set()
+                self._signal_resume(execution)
                 released += 1
             elif execution.state == AgentExecutionState.PARKED:
                 if execution.outer_task is None:
