@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/scicodepile/configs/scicodepile.yaml
+
+indic_mbpp_resources_server:
+  _inherit_from: scicodepile
+
+indic_mbpp_simple_agent:
+  _inherit_from: scicodepile_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_mbpp_resources_server
+      datasets:
+        - name: indic_mbpp
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/mbpp/data/mbpp_benchmark.jsonl
+          prepare_script: benchmarks/indic/mbpp/prepare.py
+          prompt_config: benchmarks/mbpp/prompts/default.yaml
+          num_repeats: 1
+          license: Apache-2.0
