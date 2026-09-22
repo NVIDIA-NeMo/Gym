@@ -66,10 +66,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import (
-    get_global_aiohttp_client,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
+)
+from nemo_gym.server_utils import (
+    request as http_request,
 )
 
 
@@ -259,7 +261,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
     ) -> Tuple[NeMoGymResponse, Dict[str, str]]:
         """One hardened POST to the remote service. Returns (validated response, its cookies)."""
         remote_url = f"{self.config.agent_base_url}/v1/responses"
-        client = get_global_aiohttp_client()
         # exclude_unset keeps the wire payload to the fields the dataset row (and the loop)
         # actually set, never materialized None defaults.
         data = orjson.dumps(new_body.model_dump(exclude_unset=True))
@@ -272,9 +273,10 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             try:
                 # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
                 # re-sends 307/308 to an address the user never configured; fail with the 3xx.
-                response = await client.request(
+                response = await http_request(
                     "POST",
                     remote_url,
+                    _max_connection_retries=1,
                     data=data,
                     headers=headers,
                     cookies=cookies or {},
