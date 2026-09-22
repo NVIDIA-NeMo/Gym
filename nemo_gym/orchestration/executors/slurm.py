@@ -155,9 +155,6 @@ class SlurmExecutor(BaseExecutor):
         cluster = next(iter(config.compute))
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
-        # Before anything is rendered or staged, and on a dry run too: a missing destination or
-        # token is a configuration error of this submit, not something to discover after the jobs
-        # are queued.
         token = None
         if observability_active(config):
             validate_destination(config)
@@ -175,8 +172,6 @@ class SlurmExecutor(BaseExecutor):
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
                 conn.copy(staging, remote_run_dir)
-                # The token reaches the job through sbatch's environment export, so it lives in
-                # this one shell and in the job's environment, never in a file under the run dir.
                 token_export = (
                     [f"export {config.observability.token_env}={shlex.quote(token)}"] if token is not None else []
                 )
