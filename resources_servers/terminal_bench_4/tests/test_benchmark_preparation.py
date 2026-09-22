@@ -8,7 +8,9 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from responses_api_agents.hermes_sandboxed_agent.harness import HermesConfig
 from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEConfig
 
 
@@ -99,3 +101,35 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     assert harness.step_timeout_sec == timeout
     assert agent.datasets[0].num_repeats == 1
     assert MiniSWEConfig.model_fields["step_timeout_sec"].default == 600
+
+
+def test_hermes_profile_composes_with_experiment_overrides():
+    """An experiment overrides the included Hermes profile through Gym configuration."""
+    _, configs = GlobalConfigDictParser().load_extra_config_paths(["benchmarks/terminal_bench_4/hermes.yaml"])
+    config = OmegaConf.merge(
+        *configs,
+        {
+            "tb4_max_steps": 12,
+            "terminal_bench_4": {
+                "resources_servers": {
+                    "terminal_bench_4": {
+                        "harness": {
+                            "toolsets": ["file"],
+                            "tool_delay": 0,
+                        }
+                    }
+                }
+            },
+        },
+    )
+    harness = HermesConfig.model_validate(
+        OmegaConf.to_container(
+            config.terminal_bench_4.resources_servers.terminal_bench_4.harness,
+            resolve=True,
+        )
+    )
+    assert harness.max_turns == 12
+    assert harness.step_timeout_sec == 30
+    assert harness.toolsets == ["file"]
+    assert harness.tool_delay == 0
+    assert harness.quiet_mode is True

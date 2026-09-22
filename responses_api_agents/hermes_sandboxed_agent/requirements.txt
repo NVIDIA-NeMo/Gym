@@ -1,7 +1,2 @@
 -e nemo-gym[dev,sandbox] @ ../../
-pathspec==1.1.1
-opensandbox==0.1.16
-httpx-aiohttp
-mini-swe-agent==2.4.6
-mcp==1.29.0
 hermes-agent @ git+https://github.com/cmunley1/hermes-agent@26bb847a88493342ca1b194e0455b479073ae21d
