@@ -15,31 +15,21 @@ from nemo_gym import server_utils
 def _map_aiohttp_exceptions() -> Iterator[None]:
     # SDK retry policies expect HTTPX errors, including while consuming streams.
     # More specific subclasses must precede their base classes.
-    import sys
-    from traceback import format_exc
-
     try:
         yield
     except aiohttp.SocketTimeoutError as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.ReadTimeout(str(exc)) from exc
     except aiohttp.ConnectionTimeoutError as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.ConnectTimeout(str(exc)) from exc
     except TimeoutError as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.TimeoutException(str(exc)) from exc
     except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError) as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.ProxyError(str(exc)) from exc
     except (aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError) as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.ReadError(str(exc)) from exc
     except aiohttp.ClientConnectionError as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.ConnectError(str(exc)) from exc
     except (aiohttp.InvalidURL, aiohttp.NonHttpUrlClientError) as exc:
-        print(format_exc(), file=sys.stderr)
         raise httpx.UnsupportedProtocol(str(exc)) from exc
 
 
