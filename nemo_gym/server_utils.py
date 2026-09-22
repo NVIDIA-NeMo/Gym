@@ -1140,6 +1140,8 @@ class SimpleServer(BaseServer):
         base ``setup_webserver`` must call this themselves to be reachable by
         the checkpoint coordinator.
         """
+        if self._CONTROL_COMPONENT is None:
+            return
         install_control_plane(app, capabilities=self.control_capabilities(), fence=self.checkpoint_fence())
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
