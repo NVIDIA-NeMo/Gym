@@ -102,6 +102,11 @@ def format_row(row: dict[str, Any], system_prompt: str, user_prompt: str) -> dic
                 {"role": "user", "content": user_prompt},
             ]
         },
+        # The same two strings again as top-level fields, so that the benchmark's
+        # pass-through prompt config (benchmarks/verisoftbench/prompt.yaml) can
+        # re-materialise exactly this input; a prompt config is required there.
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
         "verifier_metadata": metadata,
         "agent_ref": AGENT_REF,
     }

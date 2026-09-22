@@ -35,5 +35,13 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
+    },
+    "system_prompt": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "user_prompt": {
+        "unique_count": 5,
+        "total_count": 5
     }
 }

@@ -73,6 +73,17 @@ class TestShippedConfig:
         manifest = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/manifest.yaml").read_text())
         assert manifest["datasets"][0]["num_repeats"] == 8 and manifest["resources_server"] == "verisoftbench"
 
+    def test_pass_through_prompt_config_reproduces_the_prepared_input(self) -> None:
+        from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+
+        prompt = load_prompt_config(str(GYM_ROOT / "benchmarks/verisoftbench/prompt.yaml"))
+        row = json.loads((SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()[0])
+        rebuilt = apply_prompt_to_row(dict(row), prompt)
+        assert rebuilt["responses_create_params"]["input"] == row["responses_create_params"]["input"]
+        bench = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/config.yaml").read_text())
+        [dataset] = bench["verisoftbench_benchmark_agent"]["responses_api_agents"]["verisoftbench_agent"]["datasets"]
+        assert dataset["prompt_config"] == "benchmarks/verisoftbench/prompt.yaml"
+
     def test_resources_server_block_comes_first(self) -> None:
         # The README-table hook reads the first top-level key.
         assert next(iter(_config())) == "verisoftbench"

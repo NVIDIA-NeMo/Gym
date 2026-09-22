@@ -1,0 +1,9 @@
+# Pass-through prompt for VeriSoftBench.
+#
+# Every row is prepared with upstream's own PromptBuilder (system turn from
+# prompts/templates/init.txt, user turn from user.txt with the task's curated context),
+# and carries those two strings as `system_prompt` / `user_prompt`. Applying this file
+# reproduces the prepared `responses_create_params.input` byte for byte; it exists
+# because a benchmark manifest requires a standard prompt config. It adds nothing.
+system: "{system_prompt}"
+user: "{user_prompt}"
