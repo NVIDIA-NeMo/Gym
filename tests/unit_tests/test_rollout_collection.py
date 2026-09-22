@@ -28,7 +28,7 @@ import orjson
 import pytest
 import yaml
 from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnectedError
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
@@ -58,6 +58,7 @@ from nemo_gym.rollout_collection import (
     RolloutCollectionHelper,
     _attach_ng_perf,
     _attach_trajectory_record,
+    _benchmark_name_for_agent,
     _build_ng_perf,
     _build_trajectory_record,
     _expand_input_glob,
@@ -308,6 +309,22 @@ class TestRolloutCollection:
         )
         assert observed_only.tool_call_id == "observed-only" and observed_only.output == "new"
 
+    def test_build_trajectory_record_attaches_run_id_benchmark_and_repeat_index(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, ATTEMPT_INDEX_KEY_NAME: 1}
+        trajectory = _build_trajectory_record(row, {}, run_id="run-abc", benchmark="arena")
+
+        assert trajectory.run_id == "run-abc"
+        assert trajectory.benchmark == "arena"
+        assert trajectory.repeat_index == 1
+
+    def test_build_trajectory_record_correlation_fields_default_to_none(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        trajectory = _build_trajectory_record(row, {})
+
+        assert trajectory.run_id is None
+        assert trajectory.benchmark is None
+        assert trajectory.repeat_index is None
+
     def test_build_trajectory_record_normalizes_identity_and_merges_model_calls(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, "task_id": "collector-task"}
         result = {
@@ -390,6 +407,16 @@ class TestRolloutCollection:
         assert result["ng_trajectory"]["gaps"] == [
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
+
+    def test_attach_trajectory_record_forwards_run_id_and_benchmark(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, ATTEMPT_INDEX_KEY_NAME: 2}
+        result = {"ng_trajectory": {}}
+
+        _attach_trajectory_record(row, result, run_id="run-xyz", benchmark="arena")
+
+        assert result["ng_trajectory"]["run_id"] == "run-xyz"
+        assert result["ng_trajectory"]["benchmark"] == "arena"
+        assert result["ng_trajectory"]["repeat_index"] == 2
 
     def test_rollout_for_export_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
         result = {
@@ -2818,6 +2845,38 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+
+class TestBenchmarkNameForAgent:
+    def test_prefers_the_agents_resources_server_name(self) -> None:
+        global_config = DictConfig(
+            {
+                "my_agent": {
+                    "responses_api_agents": {
+                        "my_agent": {"resources_server": {"name": "arena"}},
+                    },
+                },
+            }
+        )
+        assert _benchmark_name_for_agent(global_config, "my_agent") == "arena"
+
+    def test_falls_back_to_the_agent_name_without_a_resources_server_field(self) -> None:
+        global_config = DictConfig(
+            {
+                "my_agent": {
+                    "responses_api_agents": {
+                        "my_agent": {},
+                    },
+                },
+            }
+        )
+        assert _benchmark_name_for_agent(global_config, "my_agent") == "my_agent"
+
+    def test_falls_back_to_the_agent_name_when_the_lookup_fails(self) -> None:
+        assert _benchmark_name_for_agent(DictConfig({}), "missing_agent") == "missing_agent"
+
+    def test_none_agent_name_yields_no_benchmark(self) -> None:
+        assert _benchmark_name_for_agent(DictConfig({}), None) is None
 
 
 class TestExpandInputGlob:

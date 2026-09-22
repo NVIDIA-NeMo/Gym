@@ -185,6 +185,16 @@ def test_caller_resource_attributes_are_merged(enabled_console_env, monkeypatch)
     assert captured["nemo.gym.version"] == __version__
 
 
+def test_current_run_id_is_none_before_init(clean_otel_env):
+    assert telemetry_setup.current_run_id() is None
+
+
+def test_current_run_id_reflects_the_resolved_config(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_RUN_ID", "run-abc")
+    init_telemetry(server_name="x")
+    assert telemetry_setup.current_run_id() == "run-abc"
+
+
 # --------------------------------------------------------------------------- #
 # The three shared-global-state questions
 # --------------------------------------------------------------------------- #

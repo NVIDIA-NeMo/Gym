@@ -234,3 +234,26 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     )
 
     assert maybe_rollout_id_from_run_body(body) == "4-2"
+
+
+class TestDecodeRolloutId:
+    def test_decodes_task_and_rollout_index(self) -> None:
+        from nemo_gym.rollout_correlation import decode_rollout_id
+
+        assert decode_rollout_id("4-2") == (4, 2, 0)
+
+    def test_decodes_an_attempt_suffix(self) -> None:
+        from nemo_gym.rollout_correlation import decode_rollout_id
+
+        assert decode_rollout_id("4-2-a3") == (4, 2, 3)
+
+    def test_an_explicit_custom_id_does_not_decode(self) -> None:
+        from nemo_gym.rollout_correlation import decode_rollout_id
+
+        assert decode_rollout_id("my-custom-rollout-id") == (None, None, None)
+
+    def test_none_and_empty_do_not_decode(self) -> None:
+        from nemo_gym.rollout_correlation import decode_rollout_id
+
+        assert decode_rollout_id(None) == (None, None, None)
+        assert decode_rollout_id("") == (None, None, None)

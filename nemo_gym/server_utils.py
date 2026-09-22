@@ -800,6 +800,21 @@ class SimpleServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         pass
 
+    def _telemetry_benchmark_name(self) -> Optional[str]:
+        """Best-effort benchmark identity for this process's resource attributes.
+
+        A resources server's own config name *is* the benchmark being scored. An agent
+        server statically wired to one resources server (the common case — see
+        `ResourcesServerRef` config fields) inherits that resources server's name. Other
+        server types (model servers, custom drivers serving more than one benchmark) have
+        no single benchmark for their whole process lifetime and get no attribute; Gap C's
+        per-rollout `benchmark` field on `TrajectoryRecord` covers those instead.
+        """
+        if _telemetry_server_type(type(self)) == "resources_servers":
+            return getattr(self.config, "name", None)
+        resources_server = getattr(self.config, "resources_server", None)
+        return getattr(resources_server, "name", None)
+
     def setup_telemetry(self) -> None:
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
@@ -810,9 +825,11 @@ class SimpleServer(BaseServer):
         """
         from nemo_gym.telemetry.setup import init_telemetry
 
+        benchmark_name = self._telemetry_benchmark_name()
         init_telemetry(
             server_name=self.config.name,
             server_type=_telemetry_server_type(type(self)),
+            resource_attributes={"nemo.gym.benchmark.name": benchmark_name} if benchmark_name else None,
         )
 
     def instrument_app_for_telemetry(self, app: FastAPI) -> None:

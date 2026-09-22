@@ -34,7 +34,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.telemetry.endpoints import traced_verify_endpoint
+from nemo_gym.telemetry.endpoints import ToolCallTelemetryMiddleware, traced_verify_endpoint
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -142,6 +142,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        # Starlette's `add_middleware` inserts at the front of the stack, so the
+        # last-added middleware runs outermost/first. Add ToolCallTelemetryMiddleware
+        # *before* RolloutContextMiddleware so Rollout ends up outermost, stripping the
+        # `/ng-rollout/<id>/...` prefix before ToolCall sees the path -- otherwise
+        # `_is_tool_route` would try to match against the still-prefixed route.
+        app.add_middleware(ToolCallTelemetryMiddleware, server_name=self.config.name)
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)

@@ -34,6 +34,7 @@ GYM_SPECIFIC = {
     "model_call",
     "sandbox",
     "concurrency",
+    "tool_call",
 }
 
 
@@ -103,6 +104,7 @@ def test_every_preset_group_has_a_call_site():
         "model_call",
         "sandbox",
         "concurrency",
+        "tool_call",
     }
     for preset in ("default", "per_rollout"):
         assert GymSpanGroup.resolve(preset) <= emitting_groups, (

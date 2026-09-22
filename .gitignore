@@ -227,6 +227,7 @@ outputs
 
 # Environment with sensitive information like API keys
 env.yaml
+configs/telemetry_honeycomb.yaml
 
 # Backup files
 *.backup

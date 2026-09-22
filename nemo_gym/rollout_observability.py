@@ -246,6 +246,15 @@ class TrajectoryRecord(ObservationModel):
     schema_version: Literal["1.0"] = "1.0"
     task_id: str
     rollout_id: str
+    run_id: Optional[str] = Field(
+        default=None, description="This run's fleet-wide id, joinable against OTel span attribute nemo.gym.run.id."
+    )
+    benchmark: Optional[str] = Field(
+        default=None, description="Resources-server/benchmark this rollout was scored against."
+    )
+    repeat_index: Optional[int] = Field(
+        default=None, ge=0, description="Re-dispatch attempt index; 0 for a rollout's first attempt."
+    )
     invocations: list[AgentInvocation] = Field(default_factory=list)
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)

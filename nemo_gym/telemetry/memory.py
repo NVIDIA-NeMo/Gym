@@ -75,10 +75,66 @@ def sample_host_memory_mib(min_resample_interval_s: float) -> Optional[tuple]:
         return (_LAST_USED_MIB, _LAST_TOTAL_MIB)
 
 
+_PROCESS_LOCK = threading.Lock()
+_PROCESS: Optional[psutil.Process] = None
+_LAST_PROCESS_TREE_RSS_MIB: Optional[float] = None
+_LAST_PROCESS_SAMPLE_TIME: float = 0.0
+
+
+def sample_process_tree_memory_mib(min_resample_interval_s: float) -> Optional[float]:
+    """This process's RSS plus every live child process's RSS, recursively summed --
+    the process-scoped counterpart to :func:`sample_host_memory_mib`'s host-wide
+    reading, and the memory half of "the actual job workload"
+    (:func:`nemo_gym.telemetry.cpu.sample_process_tree_cpu_percent` is the CPU half).
+
+    Unlike CPU, RSS needs no delta/priming: `psutil.Process.memory_info().rss` is a
+    direct read, so a child contributes its full reading from the very first sample that
+    sees it (no "0 on first sight" caveat like the CPU tree sampler has). Still
+    rate-limited the same way, so a burst of span closes does not turn into a burst of
+    `/proc` reads across a potentially large child-process tree.
+
+    Returns ``None`` on any ``psutil.Error`` reading the root process's own children list,
+    including on the very first call.
+    """
+    global _PROCESS, _LAST_PROCESS_TREE_RSS_MIB, _LAST_PROCESS_SAMPLE_TIME
+
+    now = time.monotonic()
+    with _PROCESS_LOCK:
+        if now - _LAST_PROCESS_SAMPLE_TIME < min_resample_interval_s and _LAST_PROCESS_TREE_RSS_MIB is not None:
+            return _LAST_PROCESS_TREE_RSS_MIB
+
+        if _PROCESS is None:
+            try:
+                _PROCESS = psutil.Process()
+            except psutil.Error:
+                logger.debug("memory sampler: failed to open psutil.Process()", exc_info=True)
+                return None
+
+        try:
+            total_bytes = _PROCESS.memory_info().rss
+            for child in _PROCESS.children(recursive=True):
+                try:
+                    total_bytes += child.memory_info().rss
+                except psutil.Error:
+                    continue  # exited between children() and this read -- skip, not fatal
+        except psutil.Error:
+            logger.debug("memory sampler: process-tree RSS read failed", exc_info=True)
+            return _LAST_PROCESS_TREE_RSS_MIB
+
+        _LAST_PROCESS_TREE_RSS_MIB = total_bytes / _BYTES_PER_MIB
+        _LAST_PROCESS_SAMPLE_TIME = now
+        return _LAST_PROCESS_TREE_RSS_MIB
+
+
 def _reset_for_testing() -> None:
     """Drop cached sampler state. Test-only."""
     global _LAST_USED_MIB, _LAST_TOTAL_MIB, _LAST_SAMPLE_TIME
+    global _PROCESS, _LAST_PROCESS_TREE_RSS_MIB, _LAST_PROCESS_SAMPLE_TIME
     with _LOCK:
         _LAST_USED_MIB = None
         _LAST_TOTAL_MIB = None
         _LAST_SAMPLE_TIME = 0.0
+    with _PROCESS_LOCK:
+        _PROCESS = None
+        _LAST_PROCESS_TREE_RSS_MIB = None
+        _LAST_PROCESS_SAMPLE_TIME = 0.0

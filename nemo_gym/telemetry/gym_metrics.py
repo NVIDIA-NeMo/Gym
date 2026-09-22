@@ -152,6 +152,22 @@ def record_sandbox_startup(duration_ms: float, *, provider: str) -> None:
     )
 
 
+def record_sandbox_exec_duration(duration_ms: float, *, provider: str) -> None:
+    """Record one sandbox command's execution wall-clock time, attributed by provider.
+
+    Mirrors :func:`record_sandbox_startup` — that one covers provisioning, this one
+    covers the command run inside an already-provisioned sandbox. Neither exists for
+    sandboxes a harness drives outside ``nemo_gym.sandbox.api.AsyncSandbox`` (e.g.
+    ``mini_swe_agent_2``'s own container lifecycle via the ``minisweagent`` library)."""
+    _record_histogram(
+        "gym.sandbox.exec_duration_ms",
+        "ms",
+        "Wall-clock time to run one command inside an already-provisioned sandbox.",
+        duration_ms,
+        {"nemo.gym.sandbox.provider": provider},
+    )
+
+
 def record_sandbox_create_retry(*, provider: str) -> None:
     """Increment ``gym.sandbox.create_retry_total`` for one sandbox-create retry attempt."""
     _record_counter(
@@ -199,6 +215,175 @@ def record_retry(*, reason: str) -> None:
         "gym.http.retry_total",
         "Count of outbound HTTP request retries by reason.",
         {"nemo.gym.http.retry_reason": reason},
+    )
+
+
+def record_concurrency_limit(value: int, *, site: str) -> None:
+    """Record the configured size of one concurrency-limiting semaphore.
+
+    Set once at construction (``TimedSemaphore.__init__``), not resampled — the OTel SDK
+    re-exports a synchronous gauge's last-set value on every export tick regardless, so
+    one ``.set()`` is enough for this to show up as a flat line for the semaphore's whole
+    lifetime, same as a Prometheus-style "configured limit" stat panel wants."""
+    _record_gauge(
+        "gym.concurrency.limit",
+        "1",
+        "Configured size of a Gym concurrency-limiting semaphore.",
+        value,
+        {"nemo.gym.concurrency.site": site},
+    )
+
+
+def record_concurrency_active(value: int, *, site: str) -> None:
+    """Record how many holders currently hold this semaphore's permits (in-flight work,
+    not waiting). Paired with :func:`record_concurrency_limit` so a dashboard can show
+    "active / limit" directly, and with :func:`record_concurrency_queue_depth` for
+    "queued" alongside it."""
+    _record_gauge(
+        "gym.concurrency.active",
+        "1",
+        "Current holders of a Gym concurrency-limiting semaphore's permits.",
+        value,
+        {"nemo.gym.concurrency.site": site},
+    )
+
+
+def record_concurrency_available(value: int, *, site: str) -> None:
+    """Record how many permits this semaphore currently has free (``limit - active``).
+    A separate gauge rather than something a dashboard derives from the other two,
+    for the same reason :func:`record_process_gpu_memory_total_mib` gives used/total
+    as their own gauges instead of a ratio: the source already has the number, so give
+    it, rather than making every consumer re-derive it."""
+    _record_gauge(
+        "gym.concurrency.available",
+        "1",
+        "Free permits on a Gym concurrency-limiting semaphore (limit - active).",
+        value,
+        {"nemo.gym.concurrency.site": site},
+    )
+
+
+def record_concurrency_queue_depth(value: int, *, site: str) -> None:
+    """Record how many callers are currently waiting (not yet admitted) for this
+    semaphore. Unlike :func:`record_queue_wait` (a duration histogram recorded *after*
+    admission), this is the live count of who is stuck waiting *right now*."""
+    _record_gauge(
+        "gym.concurrency.queue_depth",
+        "1",
+        "Current waiters for a Gym concurrency-limiting semaphore.",
+        value,
+        {"nemo.gym.concurrency.site": site},
+    )
+
+
+def record_concurrency_admission_cancelled(*, site: str) -> None:
+    """Increment ``gym.concurrency.admission_cancelled_total`` for one caller whose wait
+    for a semaphore permit was cancelled before it was admitted (e.g. the caller's own
+    timeout cancelled the awaiting task). There is no separate "rejected" or "admission
+    timeout" outcome distinct from this today — Gym's semaphores have no reject-on-full
+    policy, only cooperative cancellation, so this is the one abnormal-admission signal
+    that actually has a call site."""
+    _record_counter(
+        "gym.concurrency.admission_cancelled_total",
+        "Count of semaphore acquisitions cancelled before admission, by site.",
+        {"nemo.gym.concurrency.site": site},
+    )
+
+
+def record_agent_turn_count(value: int, *, agent_name: Optional[str], benchmark: Optional[str]) -> None:
+    """Record the number of turns in one completed rollout, attributed by agent and
+    benchmark. A histogram, not a gauge: the interesting question is the distribution
+    across rollouts ("most tasks take ~4 turns, p99 takes 40"), not a live count."""
+    _record_histogram(
+        "gym.agent.turn_count",
+        "1",
+        "Number of agent turns in one completed rollout.",
+        value,
+        {"nemo.gym.agent.name": agent_name or "", "nemo.gym.benchmark.name": benchmark or ""},
+    )
+
+
+def record_agent_turn_duration(duration_ms: float, *, agent_name: Optional[str]) -> None:
+    """Record one turn's wall-clock duration (the gap between consecutive
+    ``TrajectoryTurn`` timestamps), attributed by agent. Recorded post-hoc, at rollout
+    completion, from the assembled trajectory — Gym's agent harnesses have no live
+    per-turn span today, so this is derived rather than sampled in real time."""
+    _record_histogram(
+        "gym.agent.turn_duration_ms",
+        "ms",
+        "Wall-clock duration of one agent turn, derived from trajectory turn timestamps.",
+        duration_ms,
+        {"nemo.gym.agent.name": agent_name or ""},
+    )
+
+
+def record_tool_call_duration(duration_ms: float, *, tool_name: str, server_name: Optional[str]) -> None:
+    """Record one tool call's duration, attributed by tool name — unlike the generic
+    SERVER span (named after the HTTP route, not a metric label), this is directly
+    queryable/group-by-able in Prometheus. See ``GymSpanGroup.TOOL_CALL``."""
+    _record_histogram(
+        "gym.tool.call_duration_ms",
+        "ms",
+        "Wall-clock duration of one resources-server tool call, by tool name.",
+        duration_ms,
+        {"nemo.gym.tool.name": tool_name, "nemo.gym.server.name": server_name or ""},
+    )
+
+
+def record_process_tree_memory_used_mib(value: float) -> None:
+    """This process's RSS plus its full child-process tree, summed -- the process-scoped
+    counterpart to :func:`record_host_memory_used_mib` (host-wide). See
+    :func:`nemo_gym.telemetry.memory.sample_process_tree_memory_mib`."""
+    _record_gauge(
+        "gym.process_tree.memory_used_mib",
+        "MiB",
+        "This process's RSS plus its full child-process tree, sampled inline at span boundaries.",
+        value,
+        {},
+    )
+
+
+def record_tool_call_cpu_percent(value: float, *, tool_name: str) -> None:
+    """This process-tree's CPU utilization at the moment one tool call's span closed,
+    attributed by tool name. An approximation, not an isolated per-tool-call
+    measurement -- Gym cannot attribute CPU to a single concurrent tool call in a
+    multi-tenant process the way it can attribute it to a whole sandbox lifetime, so
+    this is "how busy was the process tree during this tool call's window", the same
+    honest scope :func:`nemo_gym.telemetry.cpu.sample_process_tree_cpu_percent` already
+    has everywhere else it is used."""
+    _record_histogram(
+        "gym.tool.call_cpu_percent",
+        "%",
+        "Process-tree CPU utilization sampled at one tool call's span close, by tool name.",
+        value,
+        {"nemo.gym.tool.name": tool_name},
+    )
+
+
+def record_tool_call_memory_used_mib(value: float, *, tool_name: str) -> None:
+    """This process-tree's RSS at the moment one tool call's span closed, attributed by
+    tool name. Same approximation scope as :func:`record_tool_call_cpu_percent`."""
+    _record_histogram(
+        "gym.tool.call_memory_used_mib",
+        "MiB",
+        "Process-tree RSS sampled at one tool call's span close, by tool name.",
+        value,
+        {"nemo.gym.tool.name": tool_name},
+    )
+
+
+def record_process_tree_cpu_percent(value: float) -> None:
+    """This process's CPU utilization plus every child process it has spawned (Enroot,
+    OpenClaw, unsquashfs, sandbox-runtime processes, ...), summed. Unlike
+    :func:`record_process_cpu_percent` (this process's own PID only), this is "the actual
+    job workload" — the number the saturation dashboard wants. See
+    :func:`nemo_gym.telemetry.cpu.sample_process_tree_cpu_percent`."""
+    _record_gauge(
+        "gym.process_tree.cpu.percent",
+        "%",
+        "This process's CPU utilization plus its full child-process tree, sampled inline at span boundaries.",
+        value,
+        {},
     )
 
 

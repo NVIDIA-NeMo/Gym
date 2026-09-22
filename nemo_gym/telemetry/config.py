@@ -165,3 +165,14 @@ class TelemetryConfig(BaseModel, extra="allow"):
     """Minimum seconds between real host-memory reads. Same rate-limiting shape as
     ``cpu_min_resample_interval_s``, kept as an independent cache/interval so CPU and
     memory sampling cadences can be tuned separately."""
+
+    metrics_export_interval_s: Optional[float] = None
+    """How often the metrics reader flushes to the exporter, e.g. ``600`` for "every 10
+    minutes" (the MVP dashboard's "trajectories per hour, sampled every 10 min" ask is a
+    property of *this* setting, not a separate counter -- ``gym.rollout.completed_total``
+    is always a running counter; how often its rate is visible in the backend is exactly
+    this interval).
+
+    ``None`` (default) leaves the OTel SDK's own default/``OTEL_METRIC_EXPORT_INTERVAL``
+    env var in charge -- translated via ``os.environ.setdefault`` like every other field
+    here, so an explicit ``OTEL_METRIC_EXPORT_INTERVAL`` always wins over this."""

@@ -63,6 +63,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    get_first_server_config_dict,
     get_global_config_dict,
     pairing_override_enabled,
     resolve_dataset_agent,
@@ -179,8 +180,38 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     return task_id, rollout_id
 
 
-def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+def _benchmark_name_for_agent(global_config: Any, agent_name: Optional[str]) -> Optional[str]:
+    """Best-effort benchmark identity for a dispatched rollout.
+
+    Prefers the resources server the named agent is statically wired to (the actual
+    benchmark being scored); falls back to the agent's own name when that lookup fails,
+    e.g. a custom driver with no single `resources_server` field. Returns ``None`` only
+    when there is no agent name to look up at all.
+    """
+    if not agent_name:
+        return None
+    try:
+        agent_config = get_first_server_config_dict(global_config, agent_name)
+        resources_server = agent_config.get("resources_server")
+        if isinstance(resources_server, (DictConfig, dict)):
+            name = resources_server.get("name")
+            if isinstance(name, str) and name:
+                return name
+    except Exception:
+        pass
+    return agent_name
+
+
+def _build_trajectory_record(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    run_id: Optional[str] = None,
+    benchmark: Optional[str] = None,
+) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
+    repeat_index = row.get(ATTEMPT_INDEX_KEY_NAME)
+    repeat_index = repeat_index if isinstance(repeat_index, int) and repeat_index >= 0 else None
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
     turns: list[TrajectoryTurn] = []
@@ -328,6 +359,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     return TrajectoryRecord(
         task_id=task_id,
         rollout_id=rollout_id,
+        run_id=run_id,
+        benchmark=benchmark,
+        repeat_index=repeat_index,
         invocations=invocations,
         turns=turns,
         model_calls=model_calls,
@@ -366,9 +400,45 @@ def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+def _record_agent_turn_metrics(trajectory: TrajectoryRecord, agent_name: Optional[str], benchmark: Optional[str]) -> None:
+    """Emit ``gym.agent.turn_count``/``gym.agent.turn_duration_ms`` from an already-built
+    trajectory. Recorded post-hoc here, not live inside an agent's own turn loop: Gym's
+    agent harnesses have no per-turn span today, and this is the one place every
+    harness's turns already land regardless (`TrajectoryRecord.turns`), so it is the
+    smallest-diff way to get a consistent metrics surface across all of them at once.
+    """
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+    if not is_span_group_enabled(GymSpanGroup.AGENT):
+        return
+    from nemo_gym.telemetry.gym_metrics import record_agent_turn_count, record_agent_turn_duration
+
+    turns = trajectory.turns
+    if not turns:
+        return
+    record_agent_turn_count(len(turns), agent_name=agent_name, benchmark=benchmark)
+    ordered = sorted(turns, key=lambda t: t.turn_no)
+    for previous, current in zip(ordered, ordered[1:]):
+        if previous.timestamp is None or current.timestamp is None:
+            continue
+        duration_ms = (current.timestamp - previous.timestamp) * 1000.0
+        if duration_ms >= 0:
+            record_agent_turn_duration(duration_ms, agent_name=agent_name)
+
+
+def _attach_trajectory_record(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    run_id: Optional[str] = None,
+    benchmark: Optional[str] = None,
+) -> None:
     try:
-        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+        trajectory = _build_trajectory_record(row, result, run_id=run_id, benchmark=benchmark)
+        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        _record_agent_turn_metrics(trajectory, agent_name, benchmark)
+        result[NG_TRAJECTORY_KEY] = trajectory.model_dump(mode="json")
     except Exception as exc:
         result.pop(NG_TRAJECTORY_KEY, None)
         logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
@@ -1378,6 +1448,15 @@ class RolloutCollectionHelper(BaseModel):
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
 
+        # Resolved once per run: this run's telemetry id (None when telemetry is off) and a
+        # per-agent-name cache of benchmark identity, both attached to every rollout's
+        # ng_trajectory below so system telemetry (spans) and experiment telemetry
+        # (trajectory JSONL) share the same join keys.
+        from nemo_gym.telemetry.setup import current_run_id
+
+        trajectory_run_id = current_run_id()
+        benchmark_name_by_agent: dict[str, Optional[str]] = {}
+
         if config.route_failures_to_sidecar:
             print(
                 "route_failures_to_sidecar is on: a failed agent /run becomes a sidecar row instead of "
@@ -1422,7 +1501,12 @@ class RolloutCollectionHelper(BaseModel):
                 )
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
-                _attach_trajectory_record(row, result)
+                agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+                if agent_name not in benchmark_name_by_agent:
+                    benchmark_name_by_agent[agent_name] = _benchmark_name_for_agent(global_config, agent_name)
+                _attach_trajectory_record(
+                    row, result, run_id=trajectory_run_id, benchmark=benchmark_name_by_agent[agent_name]
+                )
 
             # Assembles ng_perf from ng_trajectory when observability is enabled;
             # additionally drops the internal wall-clock timer key so it never
@@ -1929,6 +2013,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     outcome = "success"
                     return row, result
                 except Exception as e:
+                    # Timeout is its own outcome bucket, not folded into "failure": a
+                    # rollout that never got an answer in time is a different signal from
+                    # one that errored fast, and a dashboard splitting throughput by
+                    # outcome needs to tell them apart (see `record_rollout_completed`).
+                    outcome = "timeout" if isinstance(e, TimeoutError) else "failure"
                     print(
                         "[rollout_collection] /run failed "
                         f"status={getattr(res, 'status', None)} "

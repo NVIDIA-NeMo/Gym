@@ -169,6 +169,20 @@ def test_a_single_run_id_is_minted_for_the_whole_fleet(clean_otel_env):
     assert os.environ["NEMO_GYM_OTEL_RUN_ID"] == run_id
 
 
+def test_run_id_is_aliased_to_the_sandbox_attribution_env_var(clean_otel_env):
+    """`nemo_gym.sandbox.attribution.resolve_run_id` reads NEMO_GYM_RUN_ID independently of
+    telemetry -- aliasing it here is what lets a run's sandboxes and its trace/trajectory
+    data share one id without either consumer renaming its own env var."""
+    run_id = configure_telemetry_env(TelemetryConfig(enabled=True))
+    assert os.environ["NEMO_GYM_RUN_ID"] == run_id
+
+
+def test_run_id_alias_does_not_override_an_explicit_sandbox_run_id(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_RUN_ID", "sandbox-run")
+    configure_telemetry_env(TelemetryConfig(enabled=True))
+    assert os.environ["NEMO_GYM_RUN_ID"] == "sandbox-run"
+
+
 def test_explicit_run_id_is_respected(clean_otel_env):
     clean_otel_env.setenv("NEMO_GYM_OTEL_RUN_ID", "my-run")
     assert configure_telemetry_env(TelemetryConfig(enabled=True)) == "my-run"

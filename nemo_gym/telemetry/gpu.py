@@ -66,6 +66,11 @@ _NVIDIA_SMI_UNAVAILABLE = False
 _NVIDIA_SMI_QUERY_FIELDS = "index,uuid,utilization.gpu,memory.used,memory.total"
 _SUBPROCESS_TIMEOUT_S = 5.0
 
+#: Sum of `utilization.gpu` across every visible GPU as of the last background-thread
+#: sample, cached for `last_gpu_utilization_percent` -- see that function's docstring for
+#: why a span reads this cache instead of forcing a fresh `nvidia-smi` call.
+_LAST_UTILIZATION_PERCENT_SUM: Optional[float] = None
+
 
 def start_gpu_sampler(interval_s: float) -> None:
     """Start the background sampler thread. Idempotent -- a second call while one is
@@ -199,16 +204,47 @@ def _sample_once() -> None:
         record_process_gpu_utilization,
     )
 
+    global _LAST_UTILIZATION_PERCENT_SUM
+    utilization_sum = 0.0
+    saw_any_visible_gpu = False
     for index, uuid, utilization_pct, memory_used_mib, memory_total_mib in _parse_nvidia_smi_output(result.stdout):
         if selector is not None and str(index) not in selector and uuid not in selector:
             continue
         record_process_gpu_utilization(utilization_pct, index=index, uuid=uuid)
         record_process_gpu_memory_used_mib(memory_used_mib, index=index, uuid=uuid)
         record_process_gpu_memory_total_mib(memory_total_mib, index=index, uuid=uuid)
+        utilization_sum += utilization_pct
+        saw_any_visible_gpu = True
+    if saw_any_visible_gpu:
+        with _LOCK:
+            _LAST_UTILIZATION_PERCENT_SUM = utilization_sum
+
+
+def last_gpu_utilization_percent() -> Optional[float]:
+    """The sum of `utilization.gpu` across every GPU this process can see, as of the
+    background sampler's most recent tick -- up to `gpu_sample_interval_s` stale (10s by
+    default), not a fresh reading.
+
+    This is what lets a span (see `nemo_gym.telemetry.endpoints`, `nemo_gym.sandbox.api`)
+    attach a GPU figure the same way it attaches CPU/memory, *without* adding a fresh
+    `nvidia-smi` fork+exec to every span-boundary call site -- exactly the cost `gpu.py`'s
+    module docstring explains the background-thread design exists to avoid. The
+    trade-off: a rollout shorter than one sample interval may see a stale or entirely
+    absent (`None`) reading, and -- same caveat as every other GPU metric in this module
+    -- on a node sharing GPUs across more than one process, this number is not exclusively
+    "this rollout's" GPU usage.
+
+    Returns `None` before the sampler's first successful tick, or if GPU sampling was
+    never started for this process.
+    """
+    with _LOCK:
+        return _LAST_UTILIZATION_PERCENT_SUM
 
 
 def _reset_for_testing() -> None:
     """Stop the sampler and clear sticky state. Test-only."""
-    global _NVIDIA_SMI_UNAVAILABLE
+    global _NVIDIA_SMI_UNAVAILABLE, _LAST_UTILIZATION_PERCENT_SUM
     stop_gpu_sampler()
     _NVIDIA_SMI_UNAVAILABLE = False
+    with _LOCK:
+        _LAST_UTILIZATION_PERCENT_SUM = None

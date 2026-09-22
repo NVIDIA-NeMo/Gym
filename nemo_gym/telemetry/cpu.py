@@ -87,6 +87,85 @@ def sample_cpu_percent(min_resample_interval_s: float) -> Optional[float]:
         return _LAST_VALUE
 
 
+_TREE_LOCK = threading.Lock()
+#: Cached child handles, keyed by pid. A separate cache from ``_PROCESS`` above: children
+#: come and go across the process's lifetime (a new sandbox spawned, an old one reaped),
+#: so this is a dict rather than one handle, pruned each call rather than built once.
+_CHILD_PROCESSES: dict[int, psutil.Process] = {}
+_TREE_LAST_VALUE: Optional[float] = None
+_TREE_LAST_SAMPLE_TIME: float = 0.0
+
+
+def sample_process_tree_cpu_percent(min_resample_interval_s: float) -> Optional[float]:
+    """This process's CPU utilization plus every live child process, recursively summed
+    -- "the actual job workload" (Enroot, OpenClaw, unsquashfs, sandbox-runtime
+    processes, ...), not just the Gym server's own PID that :func:`sample_cpu_percent`
+    reports.
+
+    Same resample-interval/caching shape as :func:`sample_cpu_percent`, and shares its
+    rate limiter's priming semantics per-process: a child seen for the first time this
+    call contributes 0 to this reading (its own ``cpu_percent(interval=None)`` has
+    nothing to compare against yet) and is fully counted from the next sample onward.
+    That understates a reading taken immediately after a burst of new child processes,
+    the same way the root process's own first-ever sample is `None` -- both resolve
+    themselves within one more sampling interval, and dying children are pruned so they
+    never appear in the sum.
+
+    Returns ``None`` on the very first call (root process not primed yet) and on any
+    ``psutil.Error`` reading the root process's own children list.
+    """
+    global _TREE_LAST_VALUE, _TREE_LAST_SAMPLE_TIME
+
+    now = time.monotonic()
+    with _LOCK:
+        root = _PROCESS
+    if root is None:
+        # Root process not primed yet -- `sample_cpu_percent` must run first (it shares
+        # this call's root handle), so there is nothing to build a tree from.
+        return None
+
+    with _TREE_LOCK:
+        if now - _TREE_LAST_SAMPLE_TIME < min_resample_interval_s:
+            return _TREE_LAST_VALUE
+
+        try:
+            live_children = root.children(recursive=True)
+        except psutil.Error:
+            logger.debug("cpu sampler: failed to list child processes", exc_info=True)
+            return _TREE_LAST_VALUE
+
+        live_pids = {child.pid for child in live_children}
+        for stale_pid in set(_CHILD_PROCESSES) - live_pids:
+            del _CHILD_PROCESSES[stale_pid]
+
+        total = 0.0
+        try:
+            total += root.cpu_percent(interval=None)
+        except psutil.Error:
+            logger.debug("cpu sampler: root cpu_percent read failed", exc_info=True)
+            return _TREE_LAST_VALUE
+
+        for child in live_children:
+            handle = _CHILD_PROCESSES.get(child.pid)
+            if handle is None:
+                try:
+                    child.cpu_percent(interval=None)  # prime -- see docstring
+                except psutil.Error:
+                    continue
+                _CHILD_PROCESSES[child.pid] = child
+                continue
+            try:
+                total += handle.cpu_percent(interval=None)
+            except psutil.Error:
+                # Exited between the children() list and this read -- next call's
+                # live_pids diff prunes it, nothing to do here but skip it this round.
+                continue
+
+        _TREE_LAST_VALUE = total
+        _TREE_LAST_SAMPLE_TIME = now
+        return _TREE_LAST_VALUE
+
+
 def host_cpu_count_logical() -> Optional[int]:
     """Static logical CPU count for this node (includes SMT/hyperthreads), read once
     (not sampled). This is the count to normalize `gym.process.cpu.percent` against --
@@ -113,8 +192,12 @@ def host_cpu_count_physical() -> Optional[int]:
 
 def _reset_for_testing() -> None:
     """Drop cached sampler state. Test-only."""
-    global _PROCESS, _LAST_VALUE, _LAST_SAMPLE_TIME
+    global _PROCESS, _LAST_VALUE, _LAST_SAMPLE_TIME, _TREE_LAST_VALUE, _TREE_LAST_SAMPLE_TIME
     with _LOCK:
         _PROCESS = None
         _LAST_VALUE = None
         _LAST_SAMPLE_TIME = 0.0
+    with _TREE_LOCK:
+        _CHILD_PROCESSES.clear()
+        _TREE_LAST_VALUE = None
+        _TREE_LAST_SAMPLE_TIME = 0.0

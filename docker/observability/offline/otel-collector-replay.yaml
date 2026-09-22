@@ -1,0 +1,52 @@
+# OTel Collector — replay mode.
+#
+# Reads back files written by otel-collector-record.yaml's file exporter and re-emits
+# them into the SAME exporters the live stack's otel-collector-config.yaml uses
+# (prometheus + tempo), so previously-recorded, offline data shows up in the exact same
+# Grafana dashboards as a live run. Run this joined to the `observability` docker-compose
+# network (see docker-compose.record.yml) so `tempo`/`prometheus` resolve.
+#
+# One-shot: the otlpjsonfile receiver reads its files once, emits everything, and the
+# collector process can then be stopped -- there is nothing to keep running afterward.
+
+receivers:
+  otlpjsonfile:
+    include:
+      - /data/traces.jsonl
+      - /data/metrics.jsonl
+    # otlpjsonfile shares its file-tailing implementation with filelogreceiver, which
+    # defaults to start_at: end (tail -f semantics) -- without this, a file that already
+    # existed in full before the receiver started (exactly the replay case) is never
+    # read at all, only bytes appended after startup would be.
+    start_at: beginning
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlpjsonfile]
+      processors: [batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlpjsonfile]
+      processors: [batch]
+      exporters: [prometheus, debug]

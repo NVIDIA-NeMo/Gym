@@ -32,7 +32,11 @@ from nemo_gym.telemetry.endpoints import (
     CPU_PERCENT_ATTRIBUTE,
     MEMORY_TOTAL_MIB_ATTRIBUTE,
     MEMORY_USED_MIB_ATTRIBUTE,
+    MODEL_REQUEST_ID_ATTRIBUTE,
+    REPEAT_INDEX_ATTRIBUTE,
     ROLLOUT_ID_ATTRIBUTE,
+    RUN_ID_ATTRIBUTE,
+    TASK_ID_ATTRIBUTE,
     traced_endpoint,
     traced_rollout_endpoint,
     traced_verify_endpoint,
@@ -147,6 +151,97 @@ async def test_gyms_existing_rollout_id_is_bridged_onto_the_span(recorded_spans)
         await wrapped()
 
     assert recorded_spans()[0].attributes[ROLLOUT_ID_ATTRIBUTE] == "7-2-a1"
+
+
+async def test_run_id_is_bridged_onto_the_span_when_telemetry_resolved_one(recorded_spans, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_RUN_ID", "run-xyz")
+
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()
+
+    assert recorded_spans()[0].attributes[RUN_ID_ATTRIBUTE] == "run-xyz"
+
+
+async def test_no_run_id_attribute_when_telemetry_resolved_none(recorded_spans):
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()
+
+    assert RUN_ID_ATTRIBUTE not in recorded_spans()[0].attributes
+
+
+async def test_task_and_repeat_are_decoded_from_an_auto_generated_rollout_id(recorded_spans):
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    with rollout_context("7-2-a1"):
+        await wrapped()
+
+    attributes = recorded_spans()[0].attributes
+    assert attributes[TASK_ID_ATTRIBUTE] == 7
+    assert attributes[REPEAT_INDEX_ATTRIBUTE] == 1
+
+
+async def test_task_and_repeat_are_absent_for_an_explicit_custom_rollout_id(recorded_spans):
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    with rollout_context("my-custom-id"):
+        await wrapped()
+
+    attributes = recorded_spans()[0].attributes
+    assert TASK_ID_ATTRIBUTE not in attributes
+    assert REPEAT_INDEX_ATTRIBUTE not in attributes
+
+
+async def test_model_request_id_is_attached_from_a_dict_response(recorded_spans):
+    async def handler():
+        return {"id": "resp-123"}
+
+    wrapped = traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", handler, response_attributes=_id_attr)
+    await wrapped()
+
+    assert recorded_spans()[0].attributes[MODEL_REQUEST_ID_ATTRIBUTE] == "resp-123"
+
+
+async def test_model_request_id_is_attached_from_an_object_response(recorded_spans):
+    class Response:
+        id = "resp-456"
+
+    async def handler():
+        return Response()
+
+    wrapped = traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", handler, response_attributes=_id_attr)
+    await wrapped()
+
+    assert recorded_spans()[0].attributes[MODEL_REQUEST_ID_ATTRIBUTE] == "resp-456"
+
+
+async def test_a_raising_response_attributes_callback_does_not_fail_the_request(recorded_spans):
+    async def handler():
+        return {"id": "resp-789"}
+
+    def boom(_result):
+        raise RuntimeError("bad extractor")
+
+    wrapped = traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", handler, response_attributes=boom)
+    result = await wrapped()
+
+    assert result == {"id": "resp-789"}
+    assert MODEL_REQUEST_ID_ATTRIBUTE not in recorded_spans()[0].attributes
+
+
+def _id_attr(result):
+    from nemo_gym.telemetry.endpoints import _model_request_id_attribute
+
+    return _model_request_id_attribute(result)
 
 
 # --------------------------------------------------------------------------- #

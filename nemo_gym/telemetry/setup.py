@@ -85,6 +85,12 @@ _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
 _GPU_SAMPLING_ENABLED = False
 _GPU_SAMPLE_INTERVAL_S = 10.0
 
+#: This run's id, resolved once in `init_telemetry` from `NemoLensConfig.run_id` (itself
+#: read from `NEMO_GYM_OTEL_RUN_ID`/`NEMO_LENS_RUN_ID`) and cached here so per-span
+#: attribution (`telemetry.endpoints`) does not re-touch the environment on every request —
+#: same reasoning as the CPU/GPU/memory caches above.
+_RUN_ID: Optional[str] = None
+
 #: Cached the same way as the CPU/GPU pairs above.
 _MEMORY_SAMPLING_ENABLED = False
 _MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
@@ -237,6 +243,16 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         if value is not None:
             os.environ.setdefault(env_name, str(value))
 
+    # `OTEL_METRIC_EXPORT_INTERVAL` is the OTel SDK's own env var (milliseconds), read
+    # directly by the PeriodicExportingMetricReader nemo-lens builds -- not a
+    # NEMO_GYM_OTEL_*-prefixed var nemo-lens re-translates, so it lives outside
+    # `_ENV_FIELD_MAP`/`_OTLP_ENV_FIELD_MAP` alongside the unit conversion those two maps
+    # don't need.
+    if telemetry_config.metrics_export_interval_s is not None:
+        os.environ.setdefault(
+            "OTEL_METRIC_EXPORT_INTERVAL", str(int(telemetry_config.metrics_export_interval_s * 1000))
+        )
+
     if telemetry_config.service_name:
         os.environ.setdefault(_SERVICE_NAME_ENV, str(telemetry_config.service_name))
 
@@ -251,6 +267,12 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
     if not run_id:
         run_id = os.environ.get("SLURM_JOB_ID", "").strip() or uuid4().hex[:12]
         os.environ[f"{_OTEL_PREFIX}_RUN_ID"] = run_id
+
+    # `nemo_gym.sandbox.attribution.resolve_run_id` mints its own run id from a separate
+    # env var (`NEMO_GYM_RUN_ID`), for sandbox metadata/labels rather than telemetry. Alias
+    # it to the same value with `setdefault` so an interrupted run's sandboxes and its
+    # trace/trajectory data share one id, without renaming either consumer's env var.
+    os.environ.setdefault("NEMO_GYM_RUN_ID", run_id)
     return run_id
 
 
@@ -465,6 +487,9 @@ def init_telemetry(
         _GPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["gpu_sampling_enabled"], False)
         _GPU_SAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["gpu_sample_interval_s"], 10.0)
 
+        global _RUN_ID
+        _RUN_ID = config.run_id or None
+
         try:
             handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
         except Exception:
@@ -553,6 +578,17 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
     return _TELEMETRY_HANDLE
 
 
+def current_run_id() -> Optional[str]:
+    """This run's id, shared by every process the orchestrator spawned (see
+    `configure_telemetry_env`), or ``None`` when telemetry is uninitialised/disabled.
+
+    Cached at `init_telemetry` time rather than re-read from the environment per call,
+    matching `is_cpu_sampling_enabled` and friends -- this is called from
+    `telemetry.endpoints`, a per-request hot path.
+    """
+    return _RUN_ID
+
+
 def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     """Flush and shut down this process's telemetry providers.
 
@@ -584,6 +620,7 @@ def _reset_for_testing() -> None:
     global _TELEMETRY_HANDLE, _INITIALISED, _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
     global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
     global _MEMORY_SAMPLING_ENABLED, _MEMORY_MIN_RESAMPLE_INTERVAL_S
+    global _RUN_ID
     _TELEMETRY_HANDLE = None
     _INITIALISED = False
     _CPU_SAMPLING_ENABLED = False
@@ -592,6 +629,7 @@ def _reset_for_testing() -> None:
     _GPU_SAMPLE_INTERVAL_S = 10.0
     _MEMORY_SAMPLING_ENABLED = False
     _MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
+    _RUN_ID = None
     try:
         from nemo_gym.telemetry.gpu import _reset_for_testing as _reset_gpu_for_testing
 
