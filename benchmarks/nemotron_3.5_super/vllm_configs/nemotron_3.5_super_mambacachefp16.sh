@@ -29,7 +29,11 @@ VLLM_COMMON_ARGS=(
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
     --mamba-cache-mode align
-    --mamba-ssm-cache-dtype float32
+    --mamba-ssm-cache-dtype float16
+    --enable-mamba-cache-stochastic-rounding
+    --mamba-cache-philox-rounds 5
+    --prefix-match-unit 16
+    --enable-mamba-fine-grained-prefix-cache
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
