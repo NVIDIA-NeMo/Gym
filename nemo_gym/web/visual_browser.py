@@ -607,9 +607,34 @@ class VisualBrowserDriver:
         except Exception:
             return ""
 
-    @staticmethod
-    def _configure_page(page: Any) -> None:
-        page.on("dialog", lambda dialog: dialog.accept())
+    def _configure_page(self, page: Any) -> None:
+        page.on("dialog", self._accept_dialog)
+
+    def _accept_dialog(self, dialog: Any) -> None:
+        from playwright.sync_api import Error as PlaywrightError
+
+        outcome = "accepted"
+        log = LOG.info
+        try:
+            dialog.accept()
+        except PlaywrightError as exc:
+            # PyAutoGUI can close a dialog before the synchronous Playwright
+            # event queue is serviced. Only tolerate that exact stale event;
+            # do not retry, dismiss another dialog, or hide other failures.
+            if str(exc) != "Dialog.accept: Protocol error (Page.handleJavaScriptDialog): No dialog is showing":
+                raise
+            outcome = "already_closed"
+            log = LOG.warning
+        # Dialog text and page URLs can contain private input. Keep only the
+        # event identity and outcome, not the message, prompt value or URL.
+        log(
+            "event=visual_browser_dialog session=%s task=%s step=%d dialog_type=%s outcome=%s",
+            self.session_id,
+            self._task.task_id if self._task is not None else "unknown",
+            self._step,
+            dialog.type,
+            outcome,
+        )
 
     def _goto(self, page: Any, url: str, *, wait_until: str) -> Any:
         """Navigate using the retry policy supplied by a benchmark subclass.
