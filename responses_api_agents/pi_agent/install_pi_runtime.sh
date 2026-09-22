@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
-# The pinned Pi package requires Node >=22.19.0. Do not replace task runtimes
-# or put this Node on the PATH used by benchmark tools.
+# Install only Pi's runtime inside an existing Resources-owned task sandbox.
+# Do not prepare task dependencies or replace runtimes on the task's PATH.
 runtime=$1
 pi_version=$2
 node_version=22.19.0
