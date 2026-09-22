@@ -568,3 +568,81 @@ def test_malformed_later_artifact_keeps_partial_output(setup):
     assert output[-1].output == "failed tool"
     assert output[-1].status == "incomplete"
     assert observations.gaps[0].code == "agent_artifact_record_unparseable"
+
+
+@pytest.mark.parametrize(
+    "workdir",
+    [
+        "/",
+        "/tmp",
+        "/tmp/",
+        "/tmp/../tmp/task",
+        "/tmp/nemo-gym-opencode-sessions",
+        "/tmp/nemo-gym-opencode-runtime-1.17.11/repo",
+    ],
+)
+async def test_adapter_workdir_overlap_is_rejected_before_connection(setup, workdir):
+    agent, sandbox = setup
+    body = seed()
+    body.sandbox_access.workdir = workdir
+    with pytest.raises(HTTPException) as error:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    assert error.value.status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_resolved_workdir_check_runs_before_session_files_are_created(setup, tmp_path):
+    import shlex
+    import subprocess
+    import sys
+
+    agent, sandbox = setup
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    command = shlex.split(sandbox.exec.await_args_list[0].args[0])
+    script = command[3]
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    workdir = tmp_path / "task"
+    workdir.symlink_to(sessions, target_is_directory=True)
+    rejected = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(workdir), str(sessions), str(tmp_path / "runtime")],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "overlaps the task workdir" in rejected.stderr
+    ordinary = tmp_path / "repo"
+    ordinary.mkdir()
+    accepted = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(ordinary), str(sessions), str(tmp_path / "runtime")],
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert list(sessions.iterdir()) == []
+
+
+@pytest.mark.parametrize("marker", [None, "", [], {}, 0, "closed-session"])
+async def test_native_markers_block_legacy_run_and_responses(setup, marker):
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentRunRequest
+
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {"nemo_gym_opencode_native_session": marker}})
+    with pytest.raises(HTTPException) as error:
+        await agent.run(request, OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": "task"}))
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException) as error:
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == 409
+    agent.server_client.post.assert_not_called()
+    sandbox.pty.create.assert_not_awaited()
+
+
+def test_close_response_cookie_blocks_legacy_run(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+        response = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert response.status_code == 409
+    agent.server_client.post.assert_not_called()

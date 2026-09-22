@@ -20,7 +20,8 @@ import sqlite3
 import sys
 import tempfile
 from collections import OrderedDict
-from pathlib import Path
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
 from traceback import format_exc
@@ -482,10 +483,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         default_factory=OrderedDict
     )
 
+    def _native_session_marker(self, request: Request) -> str | None:
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping) or _NATIVE_SESSION_KEY not in session:
+            return None
+        marker = session[_NATIVE_SESSION_KEY]
+        if not isinstance(marker, str) or not marker:
+            raise HTTPException(409, "Invalid native OpenCode session marker")
+        return marker
+
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Install OpenCode inside the Resources-owned sandbox before publishing a session."""
         self._expire_native_receipts()
-        if request.session.get(_NATIVE_SESSION_KEY) in self._native_sessions:
+        if self._native_session_marker(request) in self._native_sessions:
             raise HTTPException(409, "OpenCode session already exists")
         session_id = f"opencode-{uuid4().hex}"
         state = await self._initialize_agent_session_state(session_id, body)
@@ -501,8 +514,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
             raise HTTPException(422, "Native OpenCode requires Resources-owned direct SandboxAccess")
         workdir = body.sandbox_access.workdir
-        if not workdir.startswith("/") or "\x00" in workdir or workdir.rstrip("/") in ("", "/tmp"):
-            raise HTTPException(422, "Native OpenCode workdir must be an absolute path")
+        normalized_workdir = PurePosixPath(workdir)
+        if (
+            not normalized_workdir.is_absolute()
+            or "\x00" in workdir
+            or ".." in normalized_workdir.parts
+            or normalized_workdir in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or str(normalized_workdir).startswith("/tmp/nemo-gym-opencode")
+        ):
+            raise HTTPException(
+                422, "Native OpenCode workdir must be absolute and separate from adapter runtime/session storage"
+            )
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Native OpenCode uses its own tools; required HTTP/MCP tools are unsupported")
         if not re.fullmatch(r"\d+\.\d+\.\d+", self.config.opencode_version):
@@ -527,10 +549,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise
         directory = f"/tmp/nemo-gym-opencode-sessions/{session_id}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
+        prepared_directory = False
         try:
-            command = f"test -d {quote(workdir)} && mkdir -p {quote(directory)}"
+            # Resolve inside the sandbox: host-side lexical checks cannot detect task symlinks.
+            validate_paths = (
+                "from pathlib import Path; import sys; "
+                "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
+                "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
+                "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
+                "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
+            )
+            command = (
+                f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+                f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+            )
             result = await sandbox.exec(command, timeout_s=30)
             self._check_native_setup(command, result)
+            prepared_directory = True
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
             command = "bash " + " ".join(
@@ -549,7 +584,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException:
             try:
-                await sandbox.exec(f"rm -rf -- {quote(directory)}", timeout_s=30)
+                if prepared_directory:
+                    await sandbox.exec(f"rm -rf -- {quote(directory)}", timeout_s=30)
             finally:
                 await sandbox.disconnect()
             raise
@@ -571,7 +607,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
         """Stop descendants and disconnect before EnvironmentServer can start verification."""
         self._expire_native_receipts()
-        session_id = request.session.get(_NATIVE_SESSION_KEY)
+        session_id = self._native_session_marker(request)
         receipt = self._closed_native_sessions.get(session_id)
         if receipt is not None and body.agent_session_id == session_id and body.episode_id == receipt[0]:
             return receipt[1]
@@ -1074,7 +1110,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        session_id = request.session.get(_NATIVE_SESSION_KEY)
+        session_id = self._native_session_marker(request)
         if isinstance(session_id, str):
             state = self._native_sessions.get(session_id)
             if state is None or request.path_params.get("rollout_id") != state.seed.episode_id.capture_key:
@@ -1334,6 +1370,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
+        if self._native_session_marker(request) is not None:
+            raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Submit native episodes to EnvironmentServer /run; legacy /run requires resources_server"

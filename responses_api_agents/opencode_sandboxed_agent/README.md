@@ -66,7 +66,8 @@ and the installed binary's version must match `opencode_version`.
 The version-scoped runtime cache lives under `/tmp/nemo-gym-opencode-runtime-<version>`
 and installation is serialized with a file lock. Per-session HOME, caches, instructions,
 SQLite state and supervisor files live under `/tmp/nemo-gym-opencode-sessions/<id>`,
-outside the task repository. Session close removes only the session directory and leaves
+outside the task repository. Root, `/tmp`, adapter-owned workdirs, and resolved path
+aliases that overlap runtime/session storage are rejected before installation. Session close removes only the session directory and leaves
 the reusable runtime cache for Resources to destroy with the sandbox. No host OpenCode
 installation or execution occurs in native sessions.
 
