@@ -139,6 +139,8 @@ class VeriSoftBenchVerifyResponse(BaseVerifyResponse):
     needs_repair: bool = False
     repair_prompt: Optional[str] = None
     repair_state: Optional[dict[str, Any]] = None
+    # Set when upstream's repair-prompt builder raised; the chain ends as it does upstream.
+    repair_prompt_error: Optional[str] = None
 
 
 def _last_assistant_text(response: NeMoGymResponse) -> str:
@@ -327,6 +329,7 @@ class VeriSoftBenchResourcesServer(SimpleResourcesServer):
         needs_repair = not outcome.verified and round_index < self.config.max_repair_rounds
         repair_prompt = None
         next_state = None
+        repair_prompt_error = None
         if needs_repair:
             next_state = RepairState(
                 proof=outcome.proof, aux_lemmas=outcome.aux_lemmas, err_msg=outcome.error_msg or ""
@@ -336,10 +339,14 @@ class VeriSoftBenchResourcesServer(SimpleResourcesServer):
                     harness.repair_prompt, entry, next_state.proof, next_state.aux_lemmas, next_state.err_msg
                 )
             except Exception as e:
-                logger.exception("repair_prompt raised for task %s", metadata.get("id"))
-                return self._respond(
-                    body, Status.BACKEND_ERROR, failure_reason=f"repair_prompt: {type(e).__name__}: {e}"
-                )
+                # Upstream's prompt builder can raise on some compiler-error shapes
+                # (`_format_no_goals` indexes a list that may be shorter than two). In
+                # upstream's evaluator that exception ends the candidate's repair chain and
+                # the round's verdict stands; the same happens here, and it is flagged.
+                logger.warning("repair_prompt raised for task %s: %s: %s", metadata.get("id"), type(e).__name__, e)
+                needs_repair = False
+                next_state = None
+                repair_prompt_error = f"{type(e).__name__}: {e}"
         return self._respond(
             body,
             status,
@@ -353,6 +360,7 @@ class VeriSoftBenchResourcesServer(SimpleResourcesServer):
             needs_repair=needs_repair,
             repair_prompt=repair_prompt,
             repair_state=next_state.model_dump() if next_state else None,
+            repair_prompt_error=repair_prompt_error,
         )
 
     async def _entry_for(self, metadata: dict[str, Any]) -> dict[str, Any]:

@@ -314,6 +314,19 @@ class TestHarnessFaults:
         assert r.status == "backend_error" and "deadbeef" in r.failure_reason
 
     @pytest.mark.asyncio
+    async def test_repair_prompt_exception_ends_the_chain_like_upstream(self, monkeypatch) -> None:
+        def explode(*a, **k):
+            raise IndexError("list index out of range")
+
+        server = make_server()
+        monkeypatch.setattr(server._harness, "repair_prompt", explode)
+        r = await verify(server, "<lean4_proof>by bad</lean4_proof>")
+        # The verdict stands and is charged to the candidate; there is just no repair round.
+        assert (r.status, r.reward, r.needs_repair, r.harness_failure) == ("lean_error", 0.0, False, 0.0)
+        assert r.repair_prompt is None and r.repair_state is None
+        assert r.repair_prompt_error == "IndexError: list index out of range"
+
+    @pytest.mark.asyncio
     async def test_verifier_exception_is_a_status_not_a_500(self, monkeypatch) -> None:
         def explode(*a, **k):
             raise RuntimeError("kaboom")
