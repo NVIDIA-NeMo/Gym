@@ -658,7 +658,10 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "Off by default. Needs the run's materialized inputs; a shard without them is warned "
             "about and skipped. A rollout recorded in the failures sidecar is never counted here, "
             "whatever its class, so this does not override count_failure_classes_as_zero. The "
-            "count is reported separately as coverage/imputed."
+            "count is reported separately as coverage/imputed. Known limitation, shared with "
+            "count_failure_classes_as_zero: some benchmark metric hooks cannot score a row that "
+            "carries only identity and a reward, and a few score it as a measurement instead of "
+            "skipping it."
         ),
     )
 
@@ -2188,7 +2191,8 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         description=(
             "Count a materialized rollout that produced no row at all as a zero, reading each "
             "shard's own materialized inputs and its own failures sidecar. Same contract as the "
-            "collection-time flag, including that a recorded failure is never counted here."
+            "collection-time flag, including that a recorded failure is never counted here and "
+            "the same metric-hook limitation."
         ),
     )
     disable_health_check: bool = Field(
