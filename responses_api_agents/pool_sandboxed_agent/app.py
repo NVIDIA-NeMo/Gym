@@ -122,38 +122,14 @@ class PoolSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem], Dict[str, Any]]:
     output_items: List[NeMoGymResponseOutputItem] = []
-    pending_call: Optional[Dict[str, Any]] = None
+    # toolCallResult events carry no id; pool reports results in call order.
+    unanswered_call_ids: List[str] = []
     errors: List[str] = []
 
-    def flush_pending_call(output: str) -> None:
-        nonlocal pending_call
-        if pending_call is None:
-            return
-        call_id = f"call-{uuid4().hex[:8]}"
-        output_items.append(
-            NeMoGymResponseFunctionToolCall(
-                arguments=json.dumps(pending_call.get("args") or {}),
-                call_id=call_id,
-                name=str(pending_call.get("name") or "tool"),
-                type="function_call",
-                id=call_id,
-                status="completed",
-            )
-        )
+    def emit_output(output: str) -> None:
+        call_id = unanswered_call_ids.pop(0) if unanswered_call_ids else f"call-{uuid4().hex[:8]}"
         output_items.append(
             NeMoGymFunctionCallOutput(type="function_call_output", call_id=call_id, output=output, status="completed")
-        )
-        pending_call = None
-
-    def emit_message(text: str) -> None:
-        output_items.append(
-            NeMoGymResponseOutputMessage(
-                id=f"msg-{len(output_items)}",
-                content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                role="assistant",
-                status="completed",
-                type="message",
-            )
         )
 
     for line in events_text.splitlines():
@@ -169,7 +145,6 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
 
         match event:
             case {"type": "reasoning", "reasoning": str(think)} if think.strip():
-                flush_pending_call("")
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
@@ -181,25 +156,43 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
                 # thought repeats the preceding reasoning event.
                 pass
             case {"type": "assistantMessage", "message": str(text)} if text.strip():
-                flush_pending_call("")
-                emit_message(text)
+                output_items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg-{len(output_items)}",
+                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
             case {"type": "assistantMessage"}:
                 pass
             case {"type": "toolCall"}:
-                flush_pending_call("")
-                pending_call = event
+                call_id = f"call-{uuid4().hex[:8]}"
+                unanswered_call_ids.append(call_id)
+                output_items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        arguments=json.dumps(event.get("args") or {}),
+                        call_id=call_id,
+                        name=str(event.get("name") or "tool"),
+                        type="function_call",
+                        id=call_id,
+                        status="completed",
+                    )
+                )
             case {"type": "toolCallResult", "err": err}:
-                flush_pending_call(f"[error] {err}")
+                emit_output(f"[error] {err}")
             case {"type": "toolCallResult", "entries": list(entries)}:
-                flush_pending_call("\n".join(entries))
+                emit_output("\n".join(entries))
             case {"type": "toolCallResult"}:
-                flush_pending_call(str(event.get("result") or ""))
+                emit_output(str(event.get("result") or ""))
             case {"type": "error"} | {"error": _}:
                 errors.append(str(event.get("error") or "unknown error"))
             case _:
                 raise NotImplementedError(event)
 
-    flush_pending_call("")
+    while unanswered_call_ids:
+        emit_output("")
     return output_items, ({"errors": errors} if errors else {})
 
 
