@@ -432,6 +432,12 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
     assert "NEMO_GYM_OTEL_ENABLED=1" in line
 
 
+def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
+    assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
+    off = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_logs": False})
+    assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
+
+
 def test_script_honours_configured_gym_span_groups():
     config = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_span_groups": "per_rollout,sandbox"})
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))

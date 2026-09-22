@@ -266,6 +266,8 @@ class OtelConfig(_StrictModel):
     # per rollout and the rollout duration metric; `verify` adds the verify duration and success
     # metrics, which are gated on that group.
     gym_span_groups: str = "default,verify"
+    # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
+    gym_logs: bool = True
     # Node-level exporters that clusters commonly run as system services on every compute node;
     # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.

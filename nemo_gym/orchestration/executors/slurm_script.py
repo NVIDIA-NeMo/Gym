@@ -508,7 +508,11 @@ def build_sbatch_script(
     # at the collector; anything the config sets explicitly wins.
     driver_env = (
         {
-            **driver_telemetry_env(remote_bench_dir.parent.name, config.observability.gym_span_groups),
+            **driver_telemetry_env(
+                remote_bench_dir.parent.name,
+                config.observability.gym_span_groups,
+                logs=config.observability.gym_logs,
+            ),
             **config.driver.env,
         }
         if observed
