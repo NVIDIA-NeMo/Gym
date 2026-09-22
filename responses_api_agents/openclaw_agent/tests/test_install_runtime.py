@@ -107,10 +107,11 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     (root / "runtime/ready").write_text("2026.6.11")
     (root / "runtime/node/bin").mkdir(parents=True)
     node = root / "runtime/node/bin/node"
-    node.write_text('#!/bin/bash\necho "2026.6.11"\n')
+    node.write_text('#!/bin/bash\nprintf "%s\\n" "$HOME" > "$TEST_ROOT/runtime-home"\necho "2026.6.11"\n')
     node.chmod(0o755)
     result = run_installer(root, env)
     assert result.returncode == 0, result.stderr
+    assert (root / "runtime-home").read_text().strip() == str(root / "runtime/home")
     assert not (root / "packages.log").exists()
     assert not (root / "download.log").exists()
 
