@@ -130,9 +130,6 @@ def prepare_examples(
         rows.append(row)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-    (output_path.parent / "example_metrics.json").write_text(
-        json.dumps({"Number of examples": len(rows)}, indent=2) + "\n", encoding="utf-8"
-    )
     return rows
 
 

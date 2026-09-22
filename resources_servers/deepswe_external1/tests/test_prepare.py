@@ -5,12 +5,15 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import TypeAdapter
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe_external1.prepare_examples as module
+from nemo_gym.config_types import DatasetConfig
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.task_data import TaskDataValidator
+from nemo_gym.train_data_utils import TrainDataProcessor
 from resources_servers.deepswe_external1.task_data import TaskData
 from resources_servers.deepswe_external1.task_store import PreparedTask
 
@@ -32,6 +35,10 @@ def test_public_preparation_keeps_original_prompt_and_separates_assets(
 
     monkeypatch.setattr(module, "DeepSWETaskStore", Store)
     output = tmp_path / "public/example.jsonl"
+    output.parent.mkdir()
+    metrics_path = output.parent / "example_metrics.json"
+    existing_metrics = '{"Number of examples": 1, "Number of turns": {"Average": 1.0}}\n'
+    metrics_path.write_text(existing_metrics)
     rows = module.prepare_examples(
         source_dir=tmp_path / "source", tasks_dir=tmp_path / "cache/tasks", output_path=output, allow_download=False
     )
@@ -39,7 +46,7 @@ def test_public_preparation_keeps_original_prompt_and_separates_assets(
     assert rows[0]["responses_create_params"]["input"][0]["content"] == task.instruction
     assert rows[0]["public_source"]["revision"] == module.DEEPSWE_SOURCE_REVISION
     assert rows[0]["public_source"]["upstream_project"] == "https://github.com/example/project"
-    assert json.loads((output.parent / "example_metrics.json").read_text()) == {"Number of examples": 1}
+    assert metrics_path.read_text() == existing_metrics
     cache = tmp_path / "cache/tasks" / task.definition.task_id
     assert (cache / "solution/solve.sh").read_bytes() == task.asset_path("solution/solve.sh").read_bytes()
     assert set(rows[0]) == {
@@ -94,6 +101,21 @@ def test_public_cli_and_row_schema(task: PreparedTask, tmp_path: Path, monkeypat
         }
     ]
     assert "does not execute or validate" in capsys.readouterr().out
+
+
+def test_committed_metrics_match_standard_dataset_statistics() -> None:
+    config_path = module.PACKAGE_DIR / "configs/deepswe_external1.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    settings = config["deepswe_external1_resources_server"]["resources_servers"]["deepswe_external1"]
+    dataset = DatasetConfig.model_validate(settings["datasets"][0])
+    absolute_dataset = dataset.model_copy(update={"jsonl_fpath": str(module.PACKAGE_DIR / "data/example.jsonl")})
+    state = TrainDataProcessor()._validate_samples_and_aggregate_metrics_single_dataset(absolute_dataset)
+    assert not state.offending_example_idxs
+    expected = dataset.model_dump(mode="json", exclude={"agent"}) | state.metrics.aggregate().model_dump(
+        mode="json", by_alias=True
+    )
+    actual = json.loads((module.PACKAGE_DIR / "data/example_metrics.json").read_text())
+    assert actual == expected
 
 
 def test_committed_rollouts_match_public_examples() -> None:

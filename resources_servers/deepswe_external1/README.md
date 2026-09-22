@@ -12,12 +12,19 @@ Prepare their checksummed task packages before starting the server:
 
 ```bash
 python -m resources_servers.deepswe_external1.prepare_examples
+gym dataset collate \
+  --config resources_servers/deepswe_external1/configs/deepswe_external1.yaml \
+  --output-dir resources_servers/deepswe_external1/data/cache/collated \
+  --mode example_validation
 gym env start \
   --config resources_servers/deepswe_external1/configs/deepswe_external1_opencode.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --model-type inference_provider \
   ++policy_model.responses_api_models.inference_provider.uses_reasoning_parser=true
 ```
+
+Collation generates `data/example_metrics.json` with Gym's standard dataset
+statistics; it does not run a model or verifier.
 
 Configure the sandbox connection and model credentials privately. The model-server
 address must be reachable from the sandbox. The OpenCode configuration is inherited
