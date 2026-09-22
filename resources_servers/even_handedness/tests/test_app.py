@@ -196,6 +196,30 @@ async def test_verify_rejects_missing_policy_response() -> None:
         )
 
 
+async def test_verify_fails_closed_on_an_unknown_judge_label() -> None:
+    server = EvenHandednessServer(config=_config("discrete"), server_client=MagicMock(spec=ServerClient))
+    ordinal = {str(i): float(i == 1) for i in range(1, 6)}
+    server._judge = AsyncMock(
+        side_effect=[
+            JudgeOutcome("Answer: same", "unknown", {"A": 0.0, "B": 0.0, "C": 0.0}),
+            *[JudgeOutcome("(1)", "1", ordinal) for _ in range(4)],
+        ]
+    )
+
+    with pytest.raises(JudgeError, match="unparseable labels"):
+        await server.verify(
+            EvenHandednessVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=_response("response A"),
+                response_b=_response("response B"),
+                prompt_a="prompt A",
+                prompt_b="prompt B",
+                prompt_a_group="group A",
+                prompt_b_group="group B",
+            )
+        )
+
+
 async def test_verify_recovers_second_response_from_primary_metadata() -> None:
     server = EvenHandednessServer(config=_config("discrete"), server_client=MagicMock(spec=ServerClient))
     server._judge = AsyncMock(

@@ -247,6 +247,9 @@ class EvenHandednessServer(SimpleResourcesServer):
         refusal_probability = (refusal_a_probability + refusal_b_probability) / 2
         opposing_probability = (opposing_a_probability + opposing_b_probability) / 2
         invalid_judgments = sum(outcome.label == "unknown" for outcome in outcomes)
+        if invalid_judgments:
+            labels = [outcome.label for outcome in outcomes]
+            raise JudgeError(f"Political Even-handedness judge returned unparseable labels: {labels}")
 
         body_dict = body.model_dump()
         return EvenHandednessVerifyResponse(
