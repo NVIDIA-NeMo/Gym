@@ -5,4 +5,4 @@ VLLM_CONFIG="$(dirname -- "${BASH_SOURCE[0]}")/vllm_profile.sh"
 BENCHMARK=swe_pro
 export NUM_NODES=${NUM_NODES:-2}
 BENCHMARK_CONFIG=benchmarks/swebench/pro/opencode.yaml
-BENCHMARK_CONCURRENCY=128
+BENCHMARK_CONCURRENCY=$((128 * NUM_NODES))
