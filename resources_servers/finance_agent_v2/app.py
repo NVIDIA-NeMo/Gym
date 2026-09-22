@@ -122,9 +122,9 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     # --- SEC data source -----------------------------------------------------
     sec_mode: Optional[Literal["live", "local"]] = Field(
         default=None,
-        description="Where edgar_search and SEC parse_html_page reads come from. 'live' uses sec-api.io and "
-        "sec.gov. 'local' uses local_edgar_index_path and local_sec_corpus_path and makes no network call, "
-        "which is what training throughput requires. Unset follows local_edgar_index_path.",
+        description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
+        "'local' reads local_edgar_index_path. Left unset, it follows local_edgar_index_path: local when one is "
+        "configured, live otherwise.",
     )
     local_edgar_index_path: Optional[str] = Field(
         default=None,
@@ -136,10 +136,10 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
         "plus '.metadata' when that file exists. Searches are far slower without it.",
     )
-    local_sec_corpus_path: Optional[str] = Field(
+    sec_dump_path: Optional[str] = Field(
         default=None,
-        description="Root of the downloaded filing corpus that parse_html_page reads in local mode. "
-        "URLs it does not hold still fall back to the network.",
+        description="Root of the downloaded filing corpus. parse_html_page reads SEC filings from it after the "
+        "cache and before the network. Only used in local mode, since the index is what maps a URL to its file.",
     )
     pricing_data_api_key: Optional[str] = Field(default=None, description="Tiingo API key for the price_history tool.")
 
@@ -477,8 +477,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         tools["calculator"] = Calculator()
         tools["submit_final_result"] = SubmitFinalResult()
 
-        if self._local_edgar is not None and self.config.local_sec_corpus_path:
-            tools["parse_html_page"] = LocalParseHtmlPage(self._local_edgar, self.config.local_sec_corpus_path)
+        if self._local_edgar is not None and self.config.sec_dump_path:
+            tools["parse_html_page"] = LocalParseHtmlPage(self._local_edgar, self.config.sec_dump_path, cache=cache)
         else:
             tools["parse_html_page"] = CachedParseHtmlPage(cache) if cache.enabled else ParseHtmlPage()
 

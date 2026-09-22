@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -244,6 +245,10 @@ class CachedParseHtmlPage(ParseHtmlPage):
     def __init__(self, cache: ToolCache) -> None:
         super().__init__()
         self._cache = cache
+        self.read_sources: Counter[str] = Counter()
+
+    def _record_read(self, source: str) -> None:
+        self.read_sources[source] += 1
 
     def _doc_path(self, url: str) -> Optional[Path]:
         clean = url.split("?", 1)[0].split("#", 1)[0]
@@ -262,12 +267,15 @@ class CachedParseHtmlPage(ParseHtmlPage):
         path = self._doc_path(url) if cache.enabled else None
         if path is None:
             # Non-SEC URL (or cache disabled): identical to upstream, uncached.
+            self._record_read("live")
             return await super()._parse_html_page(url)
 
         cached = cache.read_text(path)
         if cached is not None:
+            self._record_read("cache")
             return cached
 
+        self._record_read("live")
         text = await super()._parse_html_page(url)
         if text:
             cache.write_text(path, text)
