@@ -75,7 +75,7 @@ See `configs/pi_agent.yaml`.
 ## Native sandbox sessions
 
 The native session path runs the Pi CLI itself inside the task sandbox, with the
-Resources-provided working directory (`/app` for SWE-bench Pro). The agent server
+Resources-provided working directory. The agent server
 remains outside. It installs and launches Pi, collects its JSON events, and confirms
 process cleanup; it does not own or stop the sandbox.
 
@@ -95,8 +95,8 @@ rewards. Do not assume parity with existing local Pi rollouts.
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
 6. Agent close confirms supervisor and descendant cleanup, returns observations,
    removes session files, and disconnects. A failed or missing cleanup receipt blocks close.
-7. EnvironmentServer asks Resources to verify and close the task session. For SWE Pro,
-   Resources extracts the patch and grades it in a fresh verification sandbox.
+7. EnvironmentServer asks Resources to verify and close the task session. The benchmark
+   owns its verification procedure and sandbox teardown.
 
 The native session supports one activation, a matching episode and rollout identity,
 and a single agent-server worker. It never falls back to a host CLI when sandbox setup
@@ -110,13 +110,20 @@ detail, not a separate endpoint or a setup step users must run.
 
 ### Configure and run
 
-Use [pi_swe_pro_native.yaml](configs/pi_swe_pro_native.yaml) as a composition example.
-Combine it with the SWE Pro resources configuration, a sandbox provider, and a Gym
-model-server instance named `policy`; set `pi_swe_pro_agent.model` to the served model ID
-using Gym's normal server configuration nesting. Only EnvironmentServer needs the Resources
-reference in this composition; Pi's `resources_server` setting is needed only for its existing `/run`.
+Select `pi_agent` in your environment/run configuration and compose it with your
+benchmark's Resources server, a sandbox provider, and a Gym model server:
 
-The sample uses Pi `0.80.2`. Native seed requires an exact `pi_version`, not `latest`.
+- On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
+  `model_server` pointing to the Gym model server, and `model` to its served model ID.
+- On [single-agent EnvironmentServer](../../environment_servers/single_agent/configs/single_agent.yaml),
+  set `agent_server` to Pi, `resources_server` to the benchmark, and `resources_tool_transports: []`.
+- Resources must support native sessions and return direct `SandboxAccess` with an
+  absolute task working directory. Pi does not create a fallback sandbox.
+
+Benchmark selection and evaluation settings belong in that environment/run configuration,
+not a Pi-specific benchmark preset. Pi's own `resources_server` setting is needed only for
+its existing `/run`; omit it for native sessions. Native seed rejects `pi_version: latest`.
+
 Supported task images are Linux x86_64/aarch64 glibc with Python 3.9+, bash, curl, tar/xz,
 and SHA-256 utilities. The provider must implement PTY process sessions, including exit
 acknowledgement and signalling. Installation needs network access to nodejs.org and npm.
@@ -127,29 +134,19 @@ Node is addressed by absolute path; it does not replace the task's Python or Nod
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 
-Keep `resources_tool_transports: []` for SWE Pro: Pi provides its own sandbox tools.
+Keep `resources_tool_transports: []`: Pi provides its own sandbox tools.
 Required Resources HTTP/MCP tools are rejected. Native sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
-After starting the composed servers, submit a materialized native task to EnvironmentServer's
-`/run` endpoint, not the agent's `/run`. For example, with `swe-task.json` containing one row
-produced by [the SWE Pro preparation script](../../benchmarks/swebench/pro/prepare.py),
-including its prepared prompt, verification scripts, and task fields:
+After starting the composed servers, submit a native episode request to EnvironmentServer's
+`/run` endpoint, not the agent's `/run`. Use the benchmark's prepared task: `task.task_input`
+contains `responses_create_params` for Pi and `task_data` matching that Resources server's
+seed contract. The request also contains `episode_id` and `task.task_id` for rollout identity.
+For a request saved as `episode.json`:
 
 ```bash
-jq '{
-  episode_id: {rollout_id: "pi-smoke", attempt: 1},
-  task: {
-    task_id: {taskset: "swebench-pro", task_id: .instance_id},
-    task_input: {
-      responses_create_params: .responses_create_params,
-      task_data: del(.responses_create_params, .agent_ref)
-    }
-  }
-}' swe-task.json > pi-episode.json
-
 curl --fail-with-body -H 'Content-Type: application/json' \
-  --data-binary @pi-episode.json "${PI_ENVIRONMENT_URL}/run"
+  --data-binary @episode.json "${PI_ENVIRONMENT_URL}/run"
 ```
 
 Input is one text user message, optionally preceded by a system message. The adapter also
