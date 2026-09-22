@@ -1,0 +1,24 @@
+# Chain to the existing resources server, agent, policy model and docker sandbox config.
+config_paths:
+  - resources_servers/oragentbench/configs/oragentbench.yaml
+
+oragentbench_benchmark_agent:
+  _inherit_from: oragentbench_agent
+  responses_api_agents:
+    terminus_2_multi_step_sandboxed_agent:
+      datasets:
+      - name: oragentbench
+        type: benchmark
+        jsonl_fpath: benchmarks/oragentbench/data/oragentbench_benchmark.jsonl
+        prepare_script: benchmarks/oragentbench/prepare.py
+        # null: each row already carries the task's instruction.md verbatim as its user turn;
+        # Terminus 2 applies Harbor's own prompt template at rollout time.
+        prompt_config: null
+        # Upstream's main-table protocol is "one complete run per model-agent configuration"
+        # (pass@1, single run). Raise to 3 to match the DeepSeek V4 Pro row, the only one
+        # upstream averaged over three runs.
+        num_repeats: 1
+        # Upstream declares CC BY 4.0 for data, but task content derived from OR papers and
+        # IndustryOR is not itemised; TBD until a rights decision is recorded. See
+        # resources_servers/oragentbench/README.md "Licensing".
+        license: TBD
