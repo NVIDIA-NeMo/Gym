@@ -65,6 +65,16 @@ POOL_INSTALL_URL = "https://downloads.poolside.ai/pool/install.sh"
 _FINISHED_RE = re.compile(r"pool run finished rc=(\d+)")
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class PoolSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -77,6 +87,8 @@ class PoolSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     pool_max_context_window: int
     pool_extra_args: List[str] = Field(default_factory=list)
     pool_env: Dict[str, str] = Field(default_factory=dict)
+    # Deep-merged over the generated pool agent config (see _pool_agent_config).
+    pool_agent_config: Dict[str, Any] = Field(default_factory=dict)
 
     # Overrides the Gym-side model server URL when it is not routable from inside the sandbox.
     sandbox_model_base_url: Optional[str] = None
@@ -234,6 +246,69 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
             f'&& POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_DIR={home}/bin sh "$installer" {quote(self.config.pool_version)}'
         )
 
+    def _pool_agent_config(self, base_url: str) -> Dict[str, Any]:
+        # Mirrors pool's built-in defaults; `pool exec --agent-config-file` does not merge with them.
+        # use_streaming is off: token ids / logprobs are only returned on non-streaming responses.
+        config = {
+            "max_steps": 0,
+            "enabled_tools": [
+                "todo_action",
+                "read",
+                "edit",
+                "write",
+                "get_diagnostics",
+                "question",
+                "shell",
+                "shell_list",
+                "shell_tail",
+                "shell_status",
+                "shell_kill",
+                "shell_send",
+                "shell_wait",
+                "skill",
+                "subagent",
+                "switch_mode",
+                "list_secrets",
+                "exit",
+            ],
+            "http_timeout": "5m0s",
+            "enable_no_tool_call_retry": False,
+            "enable_truncation_recovery": True,
+            "enable_multi_tool_calls": True,
+            "enable_tool_call_loop_detection": True,
+            "enable_todo_reminders": True,
+            "parallel_tool_calls": {"tools": ["subagent"]},
+            "tools": {
+                "edit": {"fuzzy_match_threshold": 0.05},
+                "read": {"max_lines": 500, "line_num_separator": "|\u25ca|"},
+                "write": {"line_num_separator": "|\u25ca|"},
+                "shell": {"foreground_timeout": "120s"},
+            },
+            "model": {
+                "provider": {
+                    "openai": {
+                        "base_url": base_url,
+                        "api_key": "dummy_key",  # pragma: allowlist secret
+                        "model_id": self.config.pool_model,
+                        "use_streaming": False,
+                    }
+                },
+                "prompt": {"hidden_tool_names": ["exit"]},
+                "max_completion_retries": 2,
+                "max_completion_retries_transient": 3,
+                "exit_tool_on_stop": True,
+                "streaming_events_interval": "100ms",
+            },
+            "memory": {
+                "compact": {
+                    "TriggerCompressionTokenCount": 100000,
+                    "MaxSummarizeTokenCount": 90000,
+                    "MinRetainedSteps": 5,
+                }
+            },
+        }
+        return _deep_merge(config, self.config.pool_agent_config)
+
     def _pool_env(self, home: str, base_url: str) -> Dict[str, str]:
         # Everything pool writes (config, state, trajectories) stays under `home`, outside the
         # repo workdir: the resources server extracts the patch with `git diff` in the workdir.
@@ -244,7 +319,6 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
             "XDG_DATA_HOME": f"{home}/data",
             "POOLSIDE_STANDALONE_BASE_URL": base_url,
             "POOLSIDE_API_KEY": "dummy_key",  # pragma: allowlist secret
-            "POOLSIDE_STANDALONE_MODEL": self.config.pool_model,
             "POOLSIDE_STANDALONE_CONTEXT_LENGTH": str(self.config.pool_max_context_window),
             **self.config.pool_env,
         }
@@ -260,7 +334,7 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed pool" \
         && {home}/bin/pool --version \
         && {{ {env_str} {home}/bin/pool exec -o json --sandbox disabled --unsafe-auto-allow \
-            -f {home}/prompt.txt {extra_args} > {home}/events.jsonl 2> {home}/pool.stderr; \
+            --agent-config-file {home}/agent_config.json -f {home}/prompt.txt {extra_args} > {home}/events.jsonl 2> {home}/pool.stderr; \
             echo "pool run finished rc=$?"; }}
         """
 
@@ -315,12 +389,14 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         base_url = await self._model_base_url(request)
 
         await sandbox.exec(command=f"mkdir -p {home}")
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as prompt_file:
-            prompt_file.write(query)
-        try:
-            await sandbox.upload(prompt_file.name, f"{home}/prompt.txt")
-        finally:
-            Path(prompt_file.name).unlink(missing_ok=True)
+        uploads = {"prompt.txt": query, "agent_config.json": json.dumps(self._pool_agent_config(base_url))}
+        for remote_name, content in uploads.items():
+            with tempfile.NamedTemporaryFile("w", suffix=remote_name, delete=False) as local_file:
+                local_file.write(content)
+            try:
+                await sandbox.upload(local_file.name, f"{home}/{remote_name}")
+            finally:
+                Path(local_file.name).unlink(missing_ok=True)
 
         command = self._build_command(home, base_url)
         if self.config.debug:
