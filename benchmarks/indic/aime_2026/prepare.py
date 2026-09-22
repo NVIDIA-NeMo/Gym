@@ -210,8 +210,6 @@ def load_source(
         "english_rows": len(canonical),
         "coverage": coverage,
         "question_ids": question_ids,
-        "canonical_join": "exact_problem_idx_all_three_English_fields_translated_answer_unchanged",
-        "translation_quality_policy": "include_all_published_translations",
     }
 
 
@@ -244,12 +242,8 @@ def prepare(
         {
             "benchmark_id": BENCHMARK_ID,
             "evaluation_protocol": "gym_aime26",
-            "protocol_version": 2,
             "adapter_sha256": sha256(Path(__file__)),
             "prompt_sha256": sha256(PROMPT_PATH),
-            "prompt_mode": "gym_generic_math",
-            "max_output_tokens": 120000,
-            "thinking_enabled_by_default": True,
         }
     )
     return write_jsonl_with_manifest(Path(output_fpath) if output_fpath else OUTPUT_FPATH, rows, metadata)

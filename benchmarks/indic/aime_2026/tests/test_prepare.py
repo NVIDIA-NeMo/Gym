@@ -166,9 +166,6 @@ def test_prepare_manifest_and_no_overwrite_when_validation_fails(source_files, t
     assert manifest["prepared_rows"] == 2
     assert manifest["prepared_sha256"] == module.sha256(output)
     assert manifest["evaluation_protocol"] == "gym_aime26"
-    assert manifest["protocol_version"] == 2
-    assert manifest["max_output_tokens"] == 120000
-    assert manifest["thinking_enabled_by_default"] is True
     assert manifest["source_id"] == "ai4bharat/indic-aime-2026"
     assert manifest["source_license"] == "Apache-2.0"
     original = output.read_bytes()

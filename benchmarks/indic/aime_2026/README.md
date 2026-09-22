@@ -3,77 +3,49 @@
 
 # Indic AIME 2026
 
-Translated AIME 2026 using the same evaluation components as Gym's
-[`aime26`](../../aime26/config.yaml): the shared generic math prompt,
-`simple_agent`, and `math_with_judge` resource with the judge disabled by default.
-Only the problem text changes across languages. Each attempt generates one answer;
-there is no formatting-repair call or separate Indic answer parser.
+Translated AIME 2026 from `ai4bharat/indic-aime-2026`: 30 problems per language
+across 14 Indic languages. Uses the English [`aime26`](../../aime26) benchmark's
+math prompt, `simple_agent`, and symbolic math verifier with the LLM judge disabled.
+Preparation validates problem IDs, English text, and answers against the pinned
+`MathArena/aime_2026` dataset.
 
-The defaults are four independently seeded attempts, a 120,000-token output limit,
-thinking enabled, temperature 1.0, top-p 0.95, and top-k 64. Model-specific sampling
-overrides must be identical for the English and translated runs.
+## Configuration
 
-## Metrics
+Defaults: four independently seeded responses per question, 120,000 output tokens,
+thinking enabled, temperature 1.0, top-p 0.95, and top-k 64.
 
-Use Gym's `pass@4/symbolic_accuracy` for the fraction of questions with at least
-one correct answer in four attempts. `pass@1[avg-of-4]/symbolic_accuracy` is the
-average accuracy across those attempts. Both use a 0–100 scale. Extraction,
-symbolic verification, majority metrics, and aggregation come directly from the
-English AIME resource. Check rollout coverage before reporting a complete score.
-Run each language separately for per-language results.
+`pass@4/symbolic_accuracy` measures questions answered correctly at least once in
+four responses. `pass@1[avg-of-4]/symbolic_accuracy` measures average accuracy.
+Both use a 0–100 scale. Use identical model and generation settings when comparing
+English and translated results.
 
-This replaces the earlier MathArena-specific prompt, format repair, parser, and
-`matharena_aime/*` metrics. Previously prepared rows and results are not comparable
-to this profile. Re-prepare with caching disabled and rerun evaluations.
-
-## Dataset and alignment
-
-| Source | Pinned revision | Split |
-| --- | --- | --- |
-| `ai4bharat/indic-aime-2026` | `6cbc9d963bdd9f77e18f28de396f2f9b09bb180a` | `train` |
-| `MathArena/aime_2026` | `d2de22f3c656b4f56cf8981212186377d1e23bc3` | `train` |
-
-Preparation reads the single `train.parquet` file and validates English text,
-problem IDs, and answers against the pinned MathArena source. Translations use
-columns such as `problem_Hindi_translation`; the English pipeline is unchanged.
-English is selected explicitly with `languages: [en]`. The default 14 Indic
-languages contain 420 questions, including Assamese and Sanskrit, with all 30
-questions present in every language. Empty translations are rejected and never
-replaced with English. No translation-quality flags are published in this schema.
-
-The AI4Bharat dataset card declares Apache-2.0; the canonical MathArena source
-retains CC-BY-NC-SA-4.0. Regenerate prepared data after this dataset migration:
-translation corrections and expanded coverage can change benchmark scores.
-
-## Comparable English and translated runs
-
-Run both through this configuration to keep inference settings identical. The
-`en` source is checked against canonical English AIME, and the shared prompt and
-verifier are exactly those used by `benchmarks/aime26`.
+## Prepare data
 
 ```bash
-for language in en hi; do
-  gym eval prepare --benchmark indic/aime_2026 \
-    "+prepare_script_args={languages:[$language]}" \
-    +use_cached_prepared_benchmarks=false
-
-  gym eval run --benchmark indic/aime_2026 \
-    --model-type vllm_model \
-    --model MODEL_NAME \
-    --model-url http://HOST:PORT/v1 \
-    --model-api-key dummy \
-    --split benchmark \
-    --output "results/aime_2026/$language/rollouts.jsonl"
-done
+gym eval prepare --benchmark indic/aime_2026
 ```
 
-Use the same model/tokenizer revision and endpoint settings for both runs,
-including the reasoning parser appropriate for the model. Gym supplies distinct
-repeat seeds; do not pin a single seed at the model level. If using
-`--benchmark aime26` directly, explicitly apply the same repeats, seed handling,
-token limit, thinking, and sampling settings as this configuration.
+Defaults to `as`, `bn`, `gu`, `hi`, `kn`, `ml`, `mr`, `ne`, `or`, `pa`, `sa`, `ta`,
+`te`, and `ur` (420 questions). Select a single language for per-language scores;
+English is available as `en`:
 
 ```bash
-pytest --import-mode=importlib benchmarks/indic/aime_2026/tests
-gym env test --resources-server math_with_judge
+gym eval prepare --benchmark indic/aime_2026 \
+  '+prepare_script_args={languages:[hi]}' \
+  +use_cached_prepared_benchmarks=false
 ```
+
+## Collect rollouts
+
+```bash
+gym eval run --benchmark indic/aime_2026 \
+  --model-type vllm_model \
+  --model MODEL_NAME \
+  --model-url http://HOST:PORT/v1 \
+  --model-api-key dummy \
+  --split benchmark \
+  --output results/indic_aime_2026/rollouts.jsonl
+```
+
+The AI4Bharat dataset declares Apache-2.0; the underlying MathArena data retains
+CC-BY-NC-SA-4.0. Prepared data and its provenance manifest are generated locally.
