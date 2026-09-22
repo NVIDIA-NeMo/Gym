@@ -18,6 +18,15 @@ case "$(uname -m)" in
 esac
 
 if [ ! -f "$runtime/ready" ]; then
+  # Slim task images may omit the downloader needed to bootstrap Node.
+  if ! command -v curl >/dev/null 2>&1; then
+    if [ "$(id -u)" -ne 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+      echo 'Native Pi requires curl: preinstall curl and ca-certificates in the task image (automatic installation requires root and apt-get).' >&2
+      exit 1
+    fi
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+  fi
   mkdir -p "$runtime"
   cd "$runtime"
   archive="node-v${node_version}-linux-${arch}.tar.xz"
