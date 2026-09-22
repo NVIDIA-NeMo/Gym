@@ -1,5 +1,27 @@
 # Hermes Agent
 
+## Native sandbox sessions
+
+EnvironmentServer creates the Resources session first, then passes its `SandboxAccess` to Hermes.
+Hermes installs its pinned runtime and runs inside that task sandbox; Resources owns verification
+and sandbox teardown. Use `enabled_toolsets: [terminal]`, one agent-server worker, and a Linux
+sandbox with PTY process support. Existing calls without an agent session keep the local path below.
+
+Each native session accepts one activation. Repeated activations and stale session cookies return
+409. Close stops the active invocation and requires a supervisor receipt confirming that tool
+descendants have exited before verification can proceed. Unknown launch outcomes or missing
+receipts fail close. Successful close receipts are cached for immediate retries, not crash recovery.
+
+Native input may be a string or text history ending in a user message, optionally starting with
+a system message. Configured system text, request `instructions`, and input system text are combined.
+Request `max_output_tokens` and `temperature` override their configured defaults; the token limit
+applies to each model call, as with the existing `max_tokens` config. Unsupported input modes,
+sampling fields, and required Resources tools return 422 rather than being silently ignored.
+
+Usage aggregation is still a follow-up: the final response currently reports zero usage even when
+the trajectory contains token IDs. Cleanup is cooperative, not isolation against hostile task code.
+Resources/provider expiry is still needed after an agent-server crash.
+
 # Quick start
 
 ## Create env.yaml in Gym/
