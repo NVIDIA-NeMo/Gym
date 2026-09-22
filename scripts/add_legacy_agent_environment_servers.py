@@ -54,13 +54,22 @@ def agent_type_of(instance: dict) -> str | None:
     return next(iter(agents))
 
 
-def is_bound(instance: dict) -> bool:
-    """An unbound template leaves `resources_server.name` unset for composition to fill."""
+def needs_environment_server(instance: dict) -> bool:
+    """True for an agent instance a run dispatches to, so it needs a server in front of it.
+
+    Two kinds are skipped. An unbound template leaves `resources_server.name` unset for
+    composition to fill. A shared overlay names several benchmarks' agents to override one field
+    on each; without an entrypoint or an `_inherit_from` supplying one, that name is not a server
+    a run can start, and declaring a server for it strands the reference in every run that merges
+    the overlay without the agent.
+    """
     agent_type = agent_type_of(instance)
     agent = instance.get("responses_api_agents", {}).get(agent_type) if agent_type else None
     if not isinstance(agent, dict):
         return False
-    return (agent.get("resources_server") or {}).get("name") != "???"
+    if (agent.get("resources_server") or {}).get("name") == "???":
+        return False
+    return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
 
 def server_name(instance_name: str, agent_type: str) -> str:
@@ -96,7 +105,7 @@ def server_names_for(document: dict) -> dict[str, str]:
     stems: dict[str, str] = {}
     for name, instance in document.items():
         agent_type = agent_type_of(instance) if isinstance(instance, dict) else None
-        if agent_type and is_bound(instance):
+        if agent_type and needs_environment_server(instance):
             stems[name] = server_name(name, agent_type)
     taken = [s for s in stems.values()]
     return {name: stem if taken.count(stem) == 1 else f"{name}{SUFFIX}" for name, stem in stems.items()}
