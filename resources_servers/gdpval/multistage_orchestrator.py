@@ -1377,6 +1377,10 @@ async def run_multistage_stages(
             )
         stage_summaries.append(summary)
         if not stage_complete:
+            # Recorded on the summary so the caller can tell a dead end from a
+            # stop a resume would clear (see ``_require_final_stage_rows``).
+            summary["incomplete"] = True
+            summary["coverage_blocked"] = coverage_rejected
             _emit(
                 "stage_incomplete",
                 index=index,
@@ -1391,6 +1395,42 @@ async def run_multistage_stages(
             break
 
     return all_results, stage_summaries
+
+
+def _require_final_stage_rows(
+    all_results: Sequence[Mapping[str, Any]],
+    total_stages: int,
+    stage_summaries: Sequence[Mapping[str, Any]],
+) -> None:
+    """Fail the run when a coverage rejection left the final stage empty.
+
+    Every row is stamped ``expected_final_stage_index = total_stages - 1``, so a
+    run that stops early still declares a final stage it never reached.
+    Aggregation records that as ``comparison/final_stage_degraded`` and returns
+    normally, which makes an abandoned run indistinguishable from a finished one
+    for anything reading the exit status.
+
+    Only a coverage rejection is terminal here. When the stage loop stopped with
+    rows still retryable, a resume picks them up and the run is expected to
+    continue in a later process; that path is left alone. Likewise a final stage
+    with *some* rows is a legitimate degraded-but-scored outcome.
+    """
+    if not total_stages:
+        return
+    final_stage_index = total_stages - 1
+    if any(int(row.get("stage_index", -1) or 0) == final_stage_index for row in all_results):
+        return
+    blocked = [s for s in stage_summaries if s.get("coverage_blocked")]
+    if not blocked:
+        return
+    reached = sorted({int(s.get("stage_index", -1) or 0) for s in stage_summaries})
+    raise RuntimeError(
+        f"multi-stage run declared stage {final_stage_index} as its final stage but produced no rows for it "
+        f"(stages reached: {reached}, {len(all_results)} row(s) total). "
+        f"Stage {int(blocked[-1].get('stage_index', -1) or 0)} was rejected on coverage with nothing left to "
+        "retry, so no downstream stage was planned and there is no final-stage result to report. "
+        "This needs an explicit policy or data change, not a resume."
+    )
 
 
 def _plan_stage(
@@ -2257,6 +2297,11 @@ async def run_e2e_multistage(
     print(latency_tracker.summary())
 
     write_rollouts(all_results, output_fpath)
+
+    # After the rollouts file is on disk (so the evidence survives) but before
+    # any aggregate metrics are emitted: a run that never reached its declared
+    # final stage has no result to report.
+    _require_final_stage_rows(all_results, len(multistage_config.stages), stage_summaries)
 
     print("[multistage-elo] computing stage-aware aggregate metrics")
     aggregate_metrics_fpath = await helper._call_aggregate_metrics(all_results, all_results, output_fpath)
