@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -106,6 +106,7 @@ class TestSanity:
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         connect = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
@@ -188,7 +189,7 @@ class TestSanity:
         hermes._close_agent_session_state = AsyncMock()
         request = SimpleNamespace(session={"agent_session_id": "session"})
 
-        with pytest.raises(ValueError, match="episode_id does not match"):
+        with pytest.raises(HTTPException, match="episode_id does not match"):
             await hermes.close_agent_session(
                 request,
                 AgentCloseSessionRequest(
@@ -253,6 +254,7 @@ class TestSandboxSessionCleanup:
         )
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        hermes._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
         state = HermesAgentSessionState(
             request=AgentSeedSessionRequest(
                 episode_id=EpisodeId(rollout_id="rollout"),
@@ -262,6 +264,7 @@ class TestSandboxSessionCleanup:
             workdir="/app",
             session_dir="/tmp/nemo-gym-hermes-sessions/session",
             runner_session=AsyncMock(),
+            launch_started=True,
             observations=AgentObservationBundle(source="hermes"),
         )
         return hermes, state
@@ -372,9 +375,11 @@ class TestSandboxSessionCleanup:
             runner = state.runner_session
             runner.send_signal.side_effect = lambda name: os.killpg(process.pid, getattr(signal, name))
             state.runner_exit_task = asyncio.create_task(process.wait())
-            await hermes._terminate_sandbox_runner(state)
+            hermes._download_json = AsyncMock(return_value={"cleanup_confirmed": False})
+            with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+                await hermes._terminate_sandbox_runner(state)
             assert [call.args[0] for call in runner.send_signal.await_args_list] == ["SIGTERM", "SIGKILL"]
-            assert state.runner_session is None
+            assert state.runner_session is runner
             assert process.returncode == -signal.SIGKILL
             with pytest.raises(ProcessLookupError):
                 os.killpg(process.pid, 0)
@@ -440,7 +445,9 @@ async def test_sandbox_relay_preserves_template_overrides_in_gym_metadata(
         "runtime": {"pid": 123},
     }
     monkeypatch.setattr(HermesAgent, "_upload_json", AsyncMock())
-    monkeypatch.setattr(HermesAgent, "_download_json", AsyncMock(side_effect=[model_request, output]))
+    monkeypatch.setattr(
+        HermesAgent, "_download_json", AsyncMock(side_effect=[model_request, output, {"cleanup_confirmed": True}])
+    )
     request = Request(
         {
             "type": "http",

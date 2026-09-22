@@ -21,8 +21,9 @@ import shutil
 import sys
 import tempfile
 from asyncio import Semaphore
+from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -30,7 +31,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -44,6 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -159,6 +161,12 @@ class HermesAgentSessionState:
     runner_session: SandboxPtySession | None = None
     runner_exit_task: asyncio.Task[int] | None = None
     observations: AgentObservationBundle | None = None
+    task: asyncio.Task[NeMoGymResponse] | None = None
+    activated: bool = False
+    closing: bool = False
+    launch_started: bool = False
+    cleanup_confirmed: bool = False
+    close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -284,30 +292,37 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: AgentCloseSessionRequest,
     ) -> AgentCloseSessionResponse:
-        agent_session_id = body.agent_session_id
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        async with lock:
-            state = self._agent_sessions.get(agent_session_id)
-            if state is None:
-                self._closed_agent_session_ids.add(agent_session_id)
-                request.session.pop(_AGENT_SESSION_ID_KEY, None)
-                return AgentCloseSessionResponse(agent_session_id=agent_session_id)
-            if body.episode_id != state.request.episode_id:
-                raise ValueError("episode_id does not match the seeded agent session")
+        agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
+        if body.agent_session_id != agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        closed = self._closed_agent_sessions.get(agent_session_id)
+        if closed is not None:
+            if body.episode_id != closed[0]:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            return closed[1]
+        state = self._require_agent_session(agent_session_id)
+        if body.episode_id != state.request.episode_id:
+            raise HTTPException(409, "episode_id does not match the seeded agent session")
+        async with state.close_lock:
+            closed = self._closed_agent_sessions.get(agent_session_id)
+            if closed is not None:
+                return closed[1]
+            state.closing = True
             observations = await self._close_agent_session_state(state)
+            result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
             del self._agent_sessions[agent_session_id]
-            self._closed_agent_session_ids.add(agent_session_id)
-            request.session.pop(_AGENT_SESSION_ID_KEY, None)
-            return AgentCloseSessionResponse(
-                agent_session_id=agent_session_id,
-                agent_observations=observations,
-            )
+            # Keep the cookie as a tombstone so later activations cannot fall back
+            # to host execution. Receipts support immediate retries, not crash recovery.
+            self._closed_agent_sessions[agent_session_id] = (body.episode_id, result)
+            while len(self._closed_agent_sessions) > 64:
+                self._closed_agent_sessions.popitem(last=False)
+            return result
 
     def _require_agent_session(self, agent_session_id: str) -> HermesAgentSessionState:
         try:
             return self._agent_sessions[agent_session_id]
         except KeyError as error:
-            raise ValueError(f"Unknown agent_session_id: {agent_session_id}") from error
+            raise HTTPException(409, f"Unknown agent_session_id: {agent_session_id}") from error
 
     @staticmethod
     def _agent_session_id_from_request(request: Request | None) -> str | None:
@@ -380,6 +395,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self._agent_sessions: dict[str, HermesAgentSessionState] = {}
         self._agent_session_locks: dict[str, asyncio.Lock] = {}
         self._closed_agent_session_ids: set[str] = set()
+        self._closed_agent_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse]] = OrderedDict()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
@@ -471,10 +487,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
         runner_session = state.runner_session
         runner_exit_task = state.runner_exit_task
-        if runner_session is None:
+        if runner_session is None and (state.cleanup_confirmed or not state.launch_started):
             return
-        if runner_exit_task is None:
-            raise RuntimeError("Hermes runner has no exit watcher; cannot confirm termination")
+        if runner_session is None or runner_exit_task is None:
+            raise RuntimeError("Hermes launch outcome is unknown; cannot confirm termination")
         try:
             if not runner_exit_task.done():
                 await runner_session.send_signal("SIGTERM")
@@ -497,6 +513,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # Signalling can race with process exit, but a failed exit watcher
             # is not evidence that the runner stopped.
             runner_exit_task.result()
+        if not state.cleanup_confirmed:
+            receipt = await self._download_json(state.sandbox, f"{state.session_dir}/cleanup.json")
+            if receipt.get("cleanup_confirmed") is not True:
+                raise RuntimeError(f"Hermes descendant cleanup was not confirmed: {receipt.get('error')}")
+            state.cleanup_confirmed = True
         # Keep both handles on timeout, cancellation, or provider failure so a
         # later close can retry without incorrectly authorizing verification.
         await runner_session.close()
@@ -507,12 +528,26 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self,
         state: HermesAgentSessionState,
     ) -> AgentObservationBundle:
+        if state.task is not None:
+            if not state.task.done() and not state.task.cancelling():
+                state.task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(state.task), timeout=self.config.session_close_timeout_seconds)
+            except asyncio.CancelledError:
+                if not state.task.cancelled():
+                    raise
+            except Exception:
+                if not state.task.done():
+                    raise
+                # An activation error is not proof of cleanup; confirm it below.
         await self._terminate_sandbox_runner(state)
-        await state.sandbox.exec(
+        removed = await state.sandbox.exec(
             f"rm -rf {quote(state.session_dir)}",
             cwd=state.workdir,
             timeout_s=self.config.session_close_timeout_seconds,
         )
+        if removed.return_code != 0:
+            raise RuntimeError("Could not remove Hermes session files")
         if state.owns_sandbox:
             await state.sandbox.stop()
         else:
@@ -637,6 +672,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         state: HermesAgentSessionState,
     ) -> AgentEpisode:
+        body = self._validate_sandbox_request(body)
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         input_path = f"{state.session_dir}/input.json"
         output_path = f"{state.session_dir}/output.json"
@@ -646,22 +682,27 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(),
+            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
             "disabled_toolsets": self.config.disabled_toolsets,
             "enabled_toolsets": self.config.enabled_toolsets,
             "history": history,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
-            "system_message": self.config.system_prompt or input_system,
-            "temperature": self.config.temperature,
+            "system_message": "\n\n".join(
+                part for part in (self.config.system_prompt, body.instructions, input_system) if part
+            )
+            or None,
+            "temperature": body.temperature if body.temperature is not None else self.config.temperature,
             "terminal_timeout": self.config.terminal_timeout,
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
+        state.launch_started = True
         try:
             state.runner_session = await state.sandbox.pty.create(
                 command=(
-                    f"{quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} "
+                    f"exec {quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} "
                     f"{quote(input_path)} {quote(output_path)} "
                     f">{quote(stdout_path)} 2>{quote(stderr_path)}"
                 ),
@@ -669,7 +710,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 pty=False,
             )
         except NotImplementedError as error:
-            raise ValueError("Hermes requires a sandbox provider with PTY process sessions") from error
+            raise HTTPException(422, "Hermes requires a sandbox provider with PTY process sessions") from error
         state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
 
         model_cookies: Any = None
@@ -779,6 +820,50 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 await asyncio.sleep(self.config.sandbox_runner_poll_seconds)
         finally:
             await self._terminate_sandbox_runner(state)
+
+    @staticmethod
+    def _validate_sandbox_request(
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Accept text conversations and supported limits without silently dropping request semantics."""
+        for name in (
+            "top_p",
+            "reasoning",
+            "max_tool_calls",
+            "previous_response_id",
+            "prompt",
+            "text",
+            "context_management",
+            "conversation",
+            "moderation",
+            "top_logprobs",
+            "truncation",
+        ):
+            if getattr(body, name, None) is not None:
+                raise HTTPException(422, f"Native Hermes does not support request field {name}")
+        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
+            raise HTTPException(422, "Native Hermes owns tool selection and execution policy")
+        if (body.metadata or {}).get("chat_template_kwargs") is not None:
+            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Hermes")
+        body = body.model_copy(deep=True)
+        if isinstance(body.input, str):
+            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+        roles = [getattr(item, "role", None) for item in body.input]
+        conversation_roles = roles[1:] if roles and roles[0] == "system" else roles
+        if (
+            not conversation_roles
+            or conversation_roles[-1] != "user"
+            or any(role not in ("user", "assistant") for role in conversation_roles)
+        ):
+            raise HTTPException(422, "Native Hermes accepts text history ending with a user message")
+        for item in body.input:
+            if not isinstance(item.content, str) and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
+                not in ("input_text", "output_text")
+                for part in item.content
+            ):
+                raise HTTPException(422, "Native Hermes only supports text input")
+        return body
 
     def _response_from_result(
         self,
@@ -989,18 +1074,33 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if isinstance(agent_session_id, str):
             if not isinstance(rollout_id, str):
-                raise ValueError("Agent sessions require an attempt-qualified rollout path")
+                raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
-                raise ValueError("Agent-session episode_id does not match the rollout route")
-            episode = await self._run_sandbox_episode(
-                request=request,
-                body=body,
-                agent_session_id=agent_session_id,
-                state=state,
-            )
-            state.observations = episode.observations
-            return episode.response
+                raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            if state.activated or state.closing:
+                raise HTTPException(409, "Hermes sandbox sessions support one activation")
+            body = self._validate_sandbox_request(body)
+            state.activated = True
+
+            async def activate() -> NeMoGymResponse:
+                async with self.sem:
+                    episode = await self._run_sandbox_episode(
+                        request=request,
+                        body=body,
+                        agent_session_id=agent_session_id,
+                        state=state,
+                    )
+                    state.observations = episode.observations
+                    return episode.response
+
+            state.task = asyncio.create_task(activate())
+            try:
+                return await asyncio.shield(state.task)
+            except asyncio.CancelledError:
+                if not state.task.done() and not state.task.cancelling():
+                    state.task.cancel()
+                raise
         if not isinstance(rollout_id, str):
             return await self._create_response(body)
         episode = await self._create_episode(body, rollout_id=rollout_id)
