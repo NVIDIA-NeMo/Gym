@@ -649,6 +649,17 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+def _eval_conformance(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if overrides != expected_overrides:
+        args._parser.error("conformance does not accept Hydra overrides")
+    from nemo_gym.harness_capabilities.cli import run_inspection
+
+    sys.exit(
+        run_inspection(bundle=args.bundle, output=args.output, profile=args.profile, capture_dir=args.capture_dir)
+    )
+
+
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
     if args.json:
@@ -1070,6 +1081,34 @@ COMMANDS = {
                 "health-check-ignore",
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+        ),
+    ),
+    "eval conformance": Command(
+        target=_eval_conformance,
+        summary="Check retained harness capability evidence in rollout artifacts.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--bundle", required=True, type=Path, help="Rollout JSONL file or run directory."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--output", required=True, type=Path, help="Directory for immutable capability reports."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--capture-dir", type=Path, help="Original shared model-call capture directory, if needed."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--profile",
+                    default="gym-artifacts-p0/v1",
+                    help="Artifact gate: gym-artifacts-p0/v1 (default), gym-artifacts-p1/v1, or gym-artifacts-all/v1.",
+                )
             ),
         ),
     ),

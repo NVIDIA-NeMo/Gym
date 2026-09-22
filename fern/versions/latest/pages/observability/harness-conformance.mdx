@@ -1,0 +1,32 @@
+---
+title: "Harness Conformance"
+description: "Check retained harness evidence and onboard a custom agent's observability."
+position: 3
+---
+
+# Harness Conformance
+
+Harness conformance checks whether collected rollouts retain model-call payloads,
+token counts, invocation ownership, semantic turns, and tool execution evidence.
+Run it after collecting an evaluation with observability enabled:
+
+```bash
+gym eval conformance \
+    --bundle results/my-harness/rollouts.jsonl \
+    --profile gym-artifacts-p0/v1 \
+    --output results/my-harness/capabilities
+```
+
+The command writes `capability_summary.json`, `capability_results.jsonl`, and
+`capability_report.md` under an immutable report directory. Exit codes are 0 for a
+met gate, 1 for an unmet gate, and 2 for a checker/input error.
+
+Follow the [harness owner onboarding README](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/harness_capabilities/README.md)
+for capture configuration, invocation and tool contracts, profiles, troubleshooting,
+and CI usage. Start with [Rollout Evidence](/main/observability/rollout-evidence)
+if your harness does not yet emit agent observations.
+
+These are retained-artifact checks. Independent behavioral qualification and a live
+probe runner are not implemented. P0 is the initial usable gate; P1 and All include
+incomplete validators and currently cannot pass. Run
+[rollout health checks](/main/evaluation/rollout-health) separately to assess health.

@@ -18,6 +18,7 @@ from nemo_gym.base_responses_api_model import (
     install_model_call_capture,
     merge_model_call_capture_into_record,
 )
+from nemo_gym.harness_capabilities.cli import inspect_bundle
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
@@ -175,3 +176,13 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         assert coverage[key]["evaluated"] == 1, (key, result.summary)
     if scenario == "http_error":
         assert result.summary["run"]["issues"]["model_call_failed"] == 1
+
+    # Inspect the emitted records, not a reconstructed copy of the expected evidence.
+    _, conformance = inspect_bundle(
+        path, output=tmp_path / "capabilities", profile="gym-artifacts-p0/v1", capture_dir=capture_dir
+    )
+    expected = "not_fulfilled" if scenario in {"missing_usage", "missing_details"} else "fulfilled"
+    assert conformance["verdict"] == expected
+    for capability in ("C1", "C3", "C4", "C5", "C9", "C10"):
+        assert conformance["capabilities"][capability]["verdict"] == "fulfilled", (scenario, capability)
+    assert conformance["is_behavioral_qualification"] is False
