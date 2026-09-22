@@ -1502,6 +1502,16 @@ class TestDidYouMean:
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
+    def test_helper_does_not_suggest_exact_match(self) -> None:
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("eval", ["list", "eval", "env"]) == ""
+
+    def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
+
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
         monkeypatch.setattr(sys, "argv", ["gym", *argv])
