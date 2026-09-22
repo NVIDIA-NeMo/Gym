@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -234,6 +234,12 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = 900.0
     sandbox_runner_poll_seconds: float = 0.25
     session_close_timeout_seconds: float = 30.0
+    session_close_retry_window_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
+    )
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -272,6 +278,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
+        self._expire_closed_agent_sessions()
         agent_session_id = body.agent_session_id
         request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
         lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
@@ -292,6 +299,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: AgentCloseSessionRequest,
     ) -> AgentCloseSessionResponse:
+        self._expire_closed_agent_sessions()
         agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
         if body.agent_session_id != agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -304,19 +312,31 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if body.episode_id != state.request.episode_id:
             raise HTTPException(409, "episode_id does not match the seeded agent session")
         async with state.close_lock:
+            self._expire_closed_agent_sessions()
             closed = self._closed_agent_sessions.get(agent_session_id)
             if closed is not None:
                 return closed[1]
+            state = self._require_agent_session(agent_session_id)
             state.closing = True
             observations = await self._close_agent_session_state(state)
             result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
             del self._agent_sessions[agent_session_id]
             # Keep the cookie as a tombstone so later activations cannot fall back
-            # to host execution. Receipts support immediate retries, not crash recovery.
-            self._closed_agent_sessions[agent_session_id] = (body.episode_id, result)
-            while len(self._closed_agent_sessions) > 64:
-                self._closed_agent_sessions.popitem(last=False)
+            # to host execution. Other sessions must not shorten the retry window.
+            self._closed_agent_sessions[agent_session_id] = (
+                body.episode_id,
+                result,
+                monotonic() + self.config.session_close_retry_window_seconds,
+            )
             return result
+
+    def _expire_closed_agent_sessions(self) -> None:
+        """Prune receipts by close time, never by traffic or retry access order."""
+        now = monotonic()
+        while self._closed_agent_sessions:
+            if next(iter(self._closed_agent_sessions.values()))[2] > now:
+                break
+            self._closed_agent_sessions.popitem(last=False)
 
     def _require_agent_session(self, agent_session_id: str) -> HermesAgentSessionState:
         try:
@@ -395,7 +415,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self._agent_sessions: dict[str, HermesAgentSessionState] = {}
         self._agent_session_locks: dict[str, asyncio.Lock] = {}
         self._closed_agent_session_ids: set[str] = set()
-        self._closed_agent_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse]] = OrderedDict()
+        self._closed_agent_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = (
+            OrderedDict()
+        )
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend

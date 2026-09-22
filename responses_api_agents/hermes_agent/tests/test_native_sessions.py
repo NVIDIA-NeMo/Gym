@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -103,6 +105,84 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
     assert agent._run_sandbox_episode.await_count == 1
     state.sandbox.disconnect.assert_awaited_once()
     state.sandbox.stop.assert_not_awaited()
+
+
+def test_http_close_retry_survives_other_session_closes(agent, state, monkeypatch):
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: 100.0)
+
+    async def initialize(agent_session_id, body):
+        return replace(state, request=body, close_lock=asyncio.Lock())
+
+    agent._initialize_agent_session_state = AsyncMock(side_effect=initialize)
+    with TestClient(agent.setup_webserver()) as client:
+
+        def seed_and_close(index):
+            client.cookies.clear()
+            body = state.request.model_dump(mode="json")
+            body["episode_id"] = {"rollout_id": f"episode-{index}"}
+            seed = client.post("/v1/agent_sessions", json=body)
+            assert seed.status_code == 200
+            cookies = dict(client.cookies)
+            close = {"agent_session_id": seed.json()["agent_session_id"], "episode_id": body["episode_id"]}
+            result = client.post("/v1/agent_sessions/close", json=close)
+            assert result.status_code == 200
+            return cookies, close, result.json()
+
+        cookies, close, first = seed_and_close(0)
+        # A's close succeeds, but its caller loses the reply while unrelated sessions finish.
+        for index in range(1, 66):
+            seed_and_close(index)
+        client.cookies.clear()
+        client.cookies.update(cookies)
+        retry = client.post("/v1/agent_sessions/close", json=close)
+        assert retry.status_code == 200
+        assert retry.json() == first
+    assert state.sandbox.disconnect.await_count == 66  # No second cleanup for A.
+
+
+async def test_close_receipt_expires_without_extending_on_retry(agent, state, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    agent._agent_sessions["session"] = state
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+    first = await agent.close_agent_session(request(state), close)
+    clock[0] = 109.0
+    assert await agent.close_agent_session(request(state), close) == first
+    clock[0] = 110.0
+    with pytest.raises(HTTPException) as error:
+        await agent.close_agent_session(request(state), close)
+    assert error.value.status_code == 409
+    assert not agent._closed_agent_sessions
+    agent._create_episode = AsyncMock(side_effect=AssertionError("host fallback"))
+    with pytest.raises(HTTPException) as error:
+        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == 409
+    state.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_close_retry_window_starts_after_cleanup(agent, state, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    agent._agent_sessions["session"] = state
+
+    async def disconnect():
+        clock[0] = 200.0  # Cleanup itself takes longer than the retry window.
+
+    state.sandbox.disconnect.side_effect = disconnect
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+    first = await agent.close_agent_session(request(state), close)
+    clock[0] = 209.0
+    assert await agent.close_agent_session(request(state), close) == first
+    state.sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("window", [0, -1, float("inf")])
+def test_close_retry_window_must_be_positive_and_finite(agent, window):
+    config = agent.config.model_dump() | {"session_close_retry_window_seconds": window}
+    with pytest.raises(ValidationError, match="session_close_retry_window_seconds"):
+        HermesAgentConfig.model_validate(config)
 
 
 async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
