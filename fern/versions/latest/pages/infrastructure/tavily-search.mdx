@@ -116,6 +116,12 @@ harnesses when `expose_tools_over_mcp: true`. Credentials remain in the resource
 process. `tavily_api_key` accepts one key, a list, or a comma-separated pool;
 requests and retries rotate through the pool.
 
+Search defaults to 10 results, advanced search, and 2,000-character snippets,
+configured through `max_results`, `search_depth`, and `max_result_chars`.
+Exclusion JSON uses `notices[].properties[]` entries of type `domain` or
+`url_substring`; domain matches include subdomains. Provider error bodies are
+neither forwarded to models nor logged.
+
 These changes apply to existing Tavily configurations as well as HLE:
 
 - Search requests disable Tavily's aggregate answer, and returned aggregate answers
@@ -132,7 +138,8 @@ These changes apply to existing Tavily configurations as well as HLE:
   SDK timeout takes precedence. Exhaustion raises a tool-service error instead of
   returning an empty search. Under sustained rate limits, reduce concurrency or
   explicitly increase the attempt budget.
-- The page cache is bounded by `max_cached_pages` (default 128); zero disables it.
+- The page cache evicts the least recently used page at `max_cached_pages`
+  (default 128); zero disables it.
   `max_cached_page_chars` limits stored page content and applies only when caching
   is enabled (including the initial response). `max_scroll_words` caps each response
   independently of caching.

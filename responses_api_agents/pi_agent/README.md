@@ -3,7 +3,7 @@
 Runs the [pi](https://github.com/earendil-works/pi) CLI (`pi --print --mode json --no-session`). 
 pi runs its own tools internally. Resources server for verifier.
 
-Minimal, meant to be modified if needed, and currently eval-only. Token IDs and logprobs are not wired up.
+This adapter supports evaluation; token IDs and logprobs are not captured.
 
 ## Quick start
 

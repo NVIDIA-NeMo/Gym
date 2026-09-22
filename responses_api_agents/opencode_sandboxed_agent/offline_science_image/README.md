@@ -23,8 +23,7 @@ The image contains three independent toolchains:
   source dependencies. Compiled caches are fetched during the build, then
   `lake build Mathlib` fills any missing entries before the image is exported.
 
-OpenCode stays at 1.17.11 so changing scientific tools does not also change the
-agent harness. Base images are digest-pinned and Debian uses a dated snapshot.
+OpenCode is pinned to 1.17.11. Base images are digest-pinned and Debian uses a dated snapshot.
 Input locks, the Mathlib manifest/commit and installed package inventories are
 preserved in `/opt/image-provenance/`. [Tool usage](tools.md) is also installed at
 `/opt/science/README.md` inside each sandbox.
@@ -35,10 +34,9 @@ are not generally included. No credentials, benchmark datasets or reference
 answers are included. OpenSandbox injects execd; network policy is configured by
 the sandbox caller, not by the image.
 
-The package list covers scientific computation, CPU ML, image/PDF
-and spreadsheet support; unrelated web-service clients and dataset downloaders
-are not part of this image. TensorFlow is not installed; CPU JAX and PyTorch are.
-Python-MIP is also excluded: its bundled CBC library conflicts with OR-Tools in
+The package list covers scientific computation, CPU ML (JAX and PyTorch),
+image/PDF and spreadsheet support. Python-MIP is excluded because its bundled
+CBC library conflicts with OR-Tools in
 the same Python process. Use OR-Tools or CVXPY/HiGHS for integer optimization.
 OR-Tools and `highspy` are pinned together because their wheels share a native
 HiGHS library name. Updating them requires solving a problem with both import
@@ -80,8 +78,7 @@ targets when resolving for heterogeneous sandbox workers.
 ## Validation and publishing
 
 Run representative computations with Docker `--network=none`, including Sage
-algebra and a new Lean proof importing Mathlib. Image validation scripts and
-registry-specific receipts belong to the deployment workflow, outside Gym.
+algebra and a new Lean proof importing Mathlib.
 
 Push to the authorized registry, then test a fresh sandbox pull and offline
 execution before adopting the immutable image digest in benchmark recipes.
