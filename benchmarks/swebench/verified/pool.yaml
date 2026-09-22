@@ -25,4 +25,4 @@ swebench_verified_pool_sandboxed_agent:
           type: benchmark
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
-          num_repeats: 1
+          num_repeats: 3
