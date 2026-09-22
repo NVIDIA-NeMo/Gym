@@ -19,6 +19,15 @@ One process supports one live session on one X display. Scale by launching
 isolated replicas with distinct `DISPLAY` values. The runtime image must
 provide Xvfb, Chromium, `xclip`, and the benchmark fonts.
 
+Visual-runtime provider plugins use the
+`nemo_gym.web_browser_session_providers` entry-point group and the lease types
+in `nemo_gym.web.browser_session`. The `interactive_browser` component owns the
+separate `nemo_gym.browser_session_providers` group for its CDP session contract.
+These handles are not interchangeable. Existing visual-provider plugins must
+move their registration to the visual group; the built-in `local_process`
+provider and benchmark configuration are unchanged. A remote lease still
+requires a matching visual driver and provider-side expiry/cleanup.
+
 Runtime credentials are read from the environment:
 
 - `WA_BROWSER_PROXY_SERVER`

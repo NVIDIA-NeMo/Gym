@@ -56,6 +56,7 @@ Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-he
 
 Health checks read each rollout record and its standard `ng_trajectory` attachment. `ng_trajectory` combines the agent turns,
 model-call evidence, explicit model-call references, and observation gaps produced during collection. Refer to the
+[rollout-evidence guide](/main/observability/rollout-evidence) for the complete source and projection model, the
 [trajectory capability matrix](/main/reference/trajectory-capabilities) for producer coverage and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
@@ -136,6 +137,12 @@ because each evaluates one call or one explicit reference independently. `rollou
 `task_no_successful_model_calls` use only turn-owned calls. These aggregate checks require per-turn placement: an invocation can
 also own support calls that should be inspected individually but must not satisfy a trajectory-level token total or successful-call
 claim.
+
+The producer gap `turn_model_call_scope_incomplete` means that turn references do not establish the complete call
+scope needed for aggregate checks. For example, invocation usage may include summarization calls outside the recorded
+task turns, or a failed attempt may lack an exact turn reference. This gap makes `rollout_token_count_mismatch` and
+`task_no_successful_model_calls` unobserved. Checks on recorded turn content and individually owned model calls still
+evaluate; the gap does not suppress evidence of failed calls or hollow turns.
 
 <Note>
   The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is

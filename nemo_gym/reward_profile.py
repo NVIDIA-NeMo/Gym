@@ -832,6 +832,122 @@ class AggregateMetricsMixin:
         return {k: v for k, v in agent_metrics.items() if k.startswith(MEAN_PREFIX)}
 
 
+# The field name on `BaseVerifyResponse`. Kept as a literal so this module does not have
+# to import the server module it is imported by.
+MASK_SAMPLE_FIELD = "mask_sample"
+
+
+def _partition_on_mask(
+    verify_responses: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split into the samples whose reward is a valid measurement, and the rest."""
+    scored, masked = [], []
+    for vr in verify_responses:
+        (masked if vr.get(MASK_SAMPLE_FIELD) else scored).append(vr)
+    return scored, masked
+
+
+def _rollout_key(row: Dict[str, Any]) -> Tuple[Any, Any]:
+    return row.get(TASK_INDEX_KEY_NAME, 0), row.get(ROLLOUT_INDEX_KEY_NAME, 0)
+
+
+def select_measured(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Narrow a rollout set to what quality metrics may be computed from.
+
+    Both the aggregation path and ``gym eval profile`` go through here, so the same saved
+    rollouts produce the same quality numbers whichever view you look at.
+
+    Three things happen. Masked samples leave the quality set, because their reward is not
+    a measurement of the evaluated system. The flag itself is stripped from what remains:
+    it is a flag, not a measurement, and the profiler would otherwise coerce it to an int
+    and publish `mean/mask_sample` alongside real metrics. And the input rows of exactly
+    those masked results are dropped with them, so the two stay aligned -- a masked rollout
+    is absent from the quality set but was never missing from the collection, and must not
+    be reported as an incomplete run or require ``allow_partial_rollouts`` to profile.
+
+    Only the masked pairs are removed, never "keep what was scored": a row whose result is
+    genuinely missing has to survive into the quality set so alignment still reports the
+    collection as partial. This function narrows what is measured; it does not decide
+    whether the collection was complete, and callers that enforce completeness must
+    validate the original rows and results before calling it.
+
+    Masked rows are returned rather than discarded: completion and coverage accounting
+    still has to see them.
+    """
+    scored, masked = _partition_on_mask(results)
+    coverage = _coverage_metrics(results, scored, masked)
+    measured_results = [{k: v for k, v in vr.items() if k != MASK_SAMPLE_FIELD} for vr in scored]
+
+    if not masked:
+        return rows, measured_results, masked, coverage
+
+    masked_keys = {_rollout_key(vr) for vr in masked}
+    measured_rows = [row for row in rows if _rollout_key(row) not in masked_keys]
+    return measured_rows, measured_results, masked, coverage
+
+
+def coverage_by_agent(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Coverage for each agent, computed from that agent's own records.
+
+    A run-wide coverage block copied onto every agent tells each of them how much *the run*
+    masked, which reads as that agent's own loss. An agent that masked nothing would carry
+    another agent's count.
+
+    Agents are keyed by name; an agent whose every result was masked still gets an entry,
+    so a caller can keep reporting it after the quality metrics drop it.
+    """
+    agent_of_key = {
+        _rollout_key(row): (row.get("agent_ref") or {}).get("name")
+        for row in rows
+        if (row.get("agent_ref") or {}).get("name") is not None
+    }
+
+    per_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for vr in results:
+        name = agent_of_key.get(_rollout_key(vr))
+        if name is not None:
+            per_agent[name].append(vr)
+
+    coverage: Dict[str, Dict[str, Any]] = {}
+    for name, records in per_agent.items():
+        scored, masked = _partition_on_mask(records)
+        agent_coverage = _coverage_metrics(records, scored, masked)
+        if agent_coverage:
+            coverage[name] = agent_coverage
+    return coverage
+
+
+def _coverage_metrics(
+    all_responses: List[Dict[str, Any]],
+    scored: List[Dict[str, Any]],
+    masked: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """How much of the run the quality metrics above were actually computed from.
+
+    Empty when nothing was masked, so a run that reports no masking publishes exactly the
+    keys it published before.
+    """
+    if not masked:
+        return {}
+    tasks_total = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in all_responses}
+    tasks_measured = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored}
+    return {
+        # Deliberately not `coverage/scored`: collection already exports that for how many
+        # rollouts reached the score at all (#2883). These say how many of those the score
+        # was actually computed from, which is smaller as soon as an environment masks.
+        "coverage/measured_rollouts": len(scored),
+        "coverage/masked_rollouts": len(masked),
+        "coverage/measured_tasks": len(tasks_measured),
+        "coverage/fully_masked_tasks": len(tasks_total - tasks_measured),
+    }
+
+
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Group verify responses by task index, returning a list of per-task rollout lists."""
     groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -957,19 +1073,37 @@ def compute_aggregate_metrics(
     if not verify_responses:
         return AggregateMetrics()
 
+    # A masked sample is a completed rollout whose reward is not a valid measurement of
+    # the evaluated system. Averaging it in would publish a quality score the run never
+    # measured, so quality metrics are computed from the scored subset only. The masked
+    # rows stay in `verify_responses` and are reported as coverage below.
+    scored, masked = _partition_on_mask(verify_responses)
+    coverage = _coverage_metrics(verify_responses, scored, masked)
+
+    # Observability coverage is measured over every rollout that ran, masked or not: a
+    # masked sample still executed and still reported its own latency.
+    perf_summary = compute_perf_summary(
+        [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
+        total_rollouts=len(verify_responses),
+    )
+
+    if not scored:
+        # Every rollout was masked. Publishing means over an empty set would invent a
+        # zero; report what happened instead.
+        return AggregateMetrics(agent_metrics=dict(coverage), key_metrics=dict(coverage), perf_summary=perf_summary)
+
     rp = RewardProfiler()
 
-    rows = []
-    results = []
-    for vr in verify_responses:
-        rows.append(
-            {
-                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
-                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
-                "agent_ref": {"name": "agent"},
-            }
-        )
-        results.append(vr if "response" in vr else {**vr, "response": {}})
+    synthetic_rows = [
+        {
+            TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
+            ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
+            "agent_ref": {"name": "agent"},
+        }
+        for vr in verify_responses
+    ]
+    filled = [vr if "response" in vr else {**vr, "response": {}} for vr in verify_responses]
+    rows, results, _, _ = select_measured(synthetic_rows, filled)
 
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 
@@ -988,15 +1122,16 @@ def compute_aggregate_metrics(
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
-    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
+    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored})
     for group, task_idx in zip(serialized_group, sorted_task_indices):
         group[TASK_INDEX_KEY_NAME] = task_idx
 
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
+    serialized_agent.update(coverage)
 
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
+        tasks = _group_by_task(scored)
         custom = compute_metrics_fn(tasks)
 
         # Merge per_task_metrics into group_level_metrics (keyed by task_index)
@@ -1017,14 +1152,17 @@ def compute_aggregate_metrics(
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(MEAN_PREFIX)}
-
-    ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
+    # Stays out of the headline set unless something was actually masked, so a run that
+    # masks nothing publishes exactly the keys it published before.
+    key_metrics.update(coverage)
 
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
-        perf_summary=compute_perf_summary(ng_perf_records, total_rollouts=len(verify_responses)),
+        perf_summary=perf_summary,
+        # Repeat-level variability is a quality statistic, so it comes from the scored
+        # subset like the rest: `profile_from_data` above is already given only those.
         repeat_level_metrics=serialized_repeat_level_metrics,
     )
 

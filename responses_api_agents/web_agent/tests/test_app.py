@@ -977,6 +977,49 @@ def test_context_error_wording_does_not_override_authentication_or_request_error
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["insufficient_quota", "budget_exceeded", "rate_limit_exceeded", None])
+async def test_model_quota_failure_stops_outer_retries_but_transient_429_remains_retryable(code):
+    agent = _agent(model_turn_max_retries=1, model_retry_delay_secs=0)
+    calls = []
+    failure = ClientResponseError(request_info=MagicMock(), history=(), status=429, message="model unavailable")
+    failure.response_content = json.dumps({"error": {"code": code, "message": "quota exceeded"}}).encode()
+
+    async def post_json(*, url_path, **kwargs):
+        calls.append(url_path)
+        if url_path == "/seed_session":
+            payload = _seed()
+        elif url_path == "/v1/responses":
+            raise failure
+        elif url_path == "/close":
+            payload = {"closed": True, "session_id": "session-a"}
+        else:
+            raise AssertionError(f"unexpected request: {url_path}")
+        response = _FakeHttpResponse(payload)
+        return response, await response.json()
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": "Solve"},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+
+    permanent = code in {"insufficient_quota", "budget_exceeded"}
+    assert calls.count("/v1/responses") == (1 if permanent else 2)
+    assert calls[-1] == "/close"
+    assert result.mask_sample is True
+    assert result.model_dump()["_ng_failure_class"] == (
+        "configuration_error" if permanent else "retryable_infrastructure"
+    )
+    if permanent:
+        assert result.failure_kind == "model_quota_exhausted"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 500])
 @pytest.mark.parametrize("benchmark", [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA])
 @pytest.mark.parametrize("score", [0.0, 1.0])

@@ -280,9 +280,11 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
-        await eval_sandbox.start(eval_sandbox_spec)
 
-        await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, eval_sandbox)
+        async def _run_setup(sandbox: AsyncSandbox) -> None:
+            await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, sandbox)
+
+        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
 
         return eval_sandbox
 

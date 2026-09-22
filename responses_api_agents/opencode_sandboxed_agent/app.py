@@ -58,6 +58,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -69,6 +70,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -86,7 +88,9 @@ def _milliseconds(value: Any) -> Optional[float]:
     return float(value) / 1000
 
 
-def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
+def parse_opencode_observations(
+    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
         return AgentObservationBundle(
@@ -372,6 +376,9 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     if not invocations:
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
+
+    if trajectory is not None:
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
 
     return AgentObservationBundle(
         source="opencode",
@@ -696,6 +703,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
+        trajectory = (
+            TrajectoryRecord(task_id="unscoped", rollout_id=observation_invocation_id)
+            if collect_observations
+            else None
+        )
         xdg_home_str = ""
         remote_data_home = None
         if collect_observations:
@@ -800,9 +812,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError("OpenCode database snapshot failed")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
-                observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
+                observations = parse_opencode_observations(
+                    observations_local_fpath, observation_invocation_id, trajectory
+                )
             except Exception:
                 print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
+                trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                 observations = AgentObservationBundle(
                     source="opencode",
                     records=[AgentInvocation(invocation_id=observation_invocation_id)],
@@ -868,6 +883,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
+            run_result["_ng_trajectory"] = trajectory
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         return NeMoGymResponse(
@@ -941,6 +957,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         response_dict = await get_response_json(verify_response)
         run_result = self._sandbox_id_to_run_result.pop(session_key)
+        trajectory = run_result.pop("_ng_trajectory", None)
+        if trajectory is not None and rollout_id is not None:
+            response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id).model_dump(
+                mode="json"
+            )
         response_dict |= run_result
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
         response_dict["responses_create_params"]["input"].insert(

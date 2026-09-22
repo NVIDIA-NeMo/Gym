@@ -944,6 +944,45 @@ def test_call_failures_and_token_mismatches_have_separate_check_ids(tmp_path: Pa
     assert failed.detail == {"status": 500, "error_category": "upstream", "terminal": True}
 
 
+@pytest.mark.parametrize("gap", [None, "tool_timing_unavailable", "turn_model_call_scope_incomplete"])
+def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap: str | None) -> None:
+    # The reported usage includes an invocation-owned helper that is not a task turn.
+    record = _record(0, 0, answer=None, usage={"input_tokens": 8, "output_tokens": 5})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "kind": "agent_invocation",
+            "invocation_id": "root",
+            "model_calls": [{"model_call_id": "c1"}, {"model_call_id": "helper"}],
+        }
+    ]
+    if gap is not None:
+        record["ng_trajectory"]["gaps"] = [{"code": gap, "invocation_id": "root"}]
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                record,
+                [
+                    _call(status_code=500, error_category="upstream"),
+                    _call(model_call_id="helper", response_id="helper-response", tokens_in=5, tokens_out=3),
+                ],
+            )
+        ],
+    )
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+    checks = {finding.check for finding in digest.findings}
+    incomplete = gap == "turn_model_call_scope_incomplete"
+    assert set(digest.unobserved) == ({"rollout_token_count_mismatch"} if incomplete else set())
+    assert ("rollout_token_count_mismatch" in checks) is not incomplete
+    assert {"agent_turn_hollow", "model_call_failed"} <= checks
+    assert digest.policy_calls_observed is not incomplete
+    coverage = result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"]
+    assert coverage == {"evaluated": int(not incomplete), "unobserved": int(incomplete), "ignored": 0}
+    assert ("task_no_successful_model_calls" in result.summary["tasks"]["0"]["flags"]) is not incomplete
+
+
 def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) -> None:
     duplicate = _record(7, 0, usage={"input_tokens": 3, "output_tokens": 2})
     rollout_path = _write_fixture(

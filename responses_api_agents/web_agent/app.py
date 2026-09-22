@@ -25,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    _error_body_is_permanent_quota,
     accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
@@ -307,6 +308,13 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
         metadata["error_kind"] = error_kind
     else:
         error_kind = None
+
+    # Model servers preserve the HTTP body across RPC, not the Python
+    # PermanentEndpointError subclass. Reuse the model client's exact spent-key
+    # classification so the outer policy loop does not retry a tripped client.
+    if exc.status == 429 and _error_body_is_permanent_quota(json.dumps(payload)):
+        metadata["error_kind"] = "model_quota_exhausted"
+        return "configuration_error", True, "model_quota_exhausted", metadata
 
     if retryable is False:
         terminal = True

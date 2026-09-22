@@ -1,0 +1,18 @@
+Read this json object:
+{{
+  task_prompt: {task_prompt},
+  response: {response},
+  criteria: {criterion},
+}}
+
+Score the response based on the criteria.
+If the response perfectly satisfies the criteria, give it a score of "1".
+If it does not satisfy the criteria at all, give it a score of "0".
+Return the score and rationale in a JSON object with two keys, 'score' and 'rationale'.
+'score' should be a string that's either "0" or "1".
+'rationale' should be a description of why you gave the response that score.
+
+Here are some examples of how to score a response:
+{{ score: "1", rationale: "The response is a perfect match for the criteria." }}
+{{ score: "0", rationale: "The response does not satisfy the criteria at all." }}
+Unlike these examples, when you create a rationale, be specific and detailed. Give reasons specific to this response and criteria. Don't be generic.

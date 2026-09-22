@@ -16,6 +16,7 @@ import json
 import shlex
 import sys
 import tomllib
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from subprocess import TimeoutExpired
@@ -705,7 +706,8 @@ class TestOnboardingCommandAdapters:
         finalizer.assert_called_once_with(self._ENTRY, validation, verifier)
         assert json.loads(capsys.readouterr().out)["status"] == "experimental"
 
-    def test_publish_human_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+    @pytest.mark.parametrize("status", ["experimental", None])
+    def test_publish_human_output(self, monkeypatch: MonkeyPatch, capsys, status: str | None) -> None:
         monkeypatch.setattr(
             nemo_gym.cli.env,
             "_command_overrides",
@@ -718,14 +720,17 @@ class TestOnboardingCommandAdapters:
             kind="environment",
             name="alpha",
             version="1.0.0",
-            status="experimental",
+            status=status,
             verifier_cases=3,
         )
         monkeypatch.setattr(nemo_gym.cli.env, "finalize_publication", MagicMock(return_value=report))
 
         nemo_gym.cli.env.publish_environment_manifest()
 
-        assert "Publication checks passed for environment alpha 1.0.0" in capsys.readouterr().out
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Publication checks passed for environment alpha 1.0.0" in out
+        assert ("catalog status=" in out) is (status is not None)
+        assert "None" not in out
 
     @pytest.mark.parametrize("editable_install", [True, False])
     def test_manifest_fixture_runs_in_the_server_environment(
@@ -904,6 +909,21 @@ class TestListEnvironments:
 
         assert "1 catalog entry has no modality metadata" in capsys.readouterr().err
 
+    def test_experimental_filter_excludes_unannotated_entries_without_warning(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"status": "experimental", "json": True},
+            entries=(self._ALPHA, replace(self._ALPHA, name="gamma", status=None)),
+        )
+
+        list_environments()
+
+        captured = capsys.readouterr()
+        assert [entry["name"] for entry in json.loads(captured.out)] == ["alpha"]
+        assert not captured.err
+
     def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, *, json_output: bool = False) -> None:
         self._mock_catalog(
             monkeypatch,
@@ -936,6 +956,35 @@ class TestListEnvironments:
         assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
         assert "datasets: train, example" in out
         assert "gym env start --environment alpha --model-type vllm_model" in out
+
+    @pytest.mark.parametrize("view", ["list", "search", "inspect"])
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_omits_absent_status_annotation(
+        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path, view: str, json_output: bool
+    ) -> None:
+        self._mock_inspect_alpha(monkeypatch, json_output=json_output)
+        overrides = {"json": json_output}
+        if view == "inspect":
+            overrides["component_name"] = "alpha"
+        elif view == "search":
+            overrides["query"] = "alpha"
+        entry = replace(
+            self._ALPHA, status=None, config_path=tmp_path / "config.yaml", manifest_path=tmp_path / "manifest.yaml"
+        )
+        self._mock_catalog(monkeypatch, overrides=overrides, entries=(entry,))
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "alpha" in out
+        if json_output:
+            payload = json.loads(out)
+            details = payload["details"] if view == "inspect" else payload[0]
+            assert "status" not in details
+        else:
+            assert "experimental" not in out
+            assert "status:" not in out
+            assert "None" not in out
 
     def test_inspect_folds_value_into_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_inspect_alpha(monkeypatch, json_output=True)
