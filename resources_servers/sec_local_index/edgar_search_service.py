@@ -26,7 +26,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Literal, Optional, Protocol
 
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarRequest, normalize_request
 
@@ -34,6 +34,21 @@ from resources_servers.sec_local_index.local_edgar_search import LocalEdgarReque
 logger = logging.getLogger(__name__)
 
 COLLECTION_ARGUMENTS = ("form_types", "ciks")
+
+SecMode = Literal["live", "local"]
+
+
+def resolve_sec_mode(configured: Optional[str], local_index_path: Optional[str]) -> SecMode:
+    """Choose a backend, falling back to whatever the configured artifacts imply.
+
+    Inferring keeps configurations written before sec_mode existed working
+    unchanged: those turned the local index on by setting its path alone.
+    """
+    if configured is not None:
+        if configured not in ("live", "local"):
+            raise ValueError(f"sec_mode must be 'live' or 'local', got {configured!r}")
+        return configured
+    return "local" if local_index_path else "live"
 
 
 class EdgarSearchBackend(Protocol):

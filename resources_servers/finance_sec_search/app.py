@@ -58,7 +58,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
-from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
+from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService, resolve_sec_mode
+from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     canonical_url_key,
@@ -165,9 +166,19 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         description="Per-rollout wall-clock time budget in seconds. When exceeded, tool calls return an error "
         "asking the model to submit immediately. Set to None to disable.",
     )
+    sec_mode: Optional[Literal["live", "local"]] = Field(
+        default=None,
+        description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
+        "'local' reads local_edgar_index_path and makes no network call, which is what training throughput "
+        "requires. Left unset, it follows local_edgar_index_path: local when one is configured, live otherwise.",
+    )
+    sec_api_key: Optional[str] = Field(
+        default=None,
+        description="sec-api.io key for edgar_search in live mode. Unused when sec_mode is 'local'.",
+    )
     local_edgar_index_path: Optional[str] = Field(
         default=None,
-        description="Read-only SQLite FTS5 index used by edgar_search.",
+        description="Read-only SQLite FTS5 index used by edgar_search in local mode.",
     )
     local_edgar_metrics_dir: Optional[str] = Field(
         default=None,
@@ -494,25 +505,44 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         self._local_edgar_search: Optional[LocalEdgarSearch] = None
         self._edgar_search_service: Optional[EdgarSearchService] = None
-        if self.config.local_edgar_index_path:
+        cutoff = self.config.max_end_date or DEFAULT_MAX_END_DATE
+        self._sec_mode = resolve_sec_mode(self.config.sec_mode, self.config.local_edgar_index_path)
+        if self._sec_mode == "local":
+            if not self.config.local_edgar_index_path:
+                raise ValueError(
+                    "sec_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search entirely from that index; without it every search would fail mid-rollout."
+                )
             self._local_edgar_search = LocalEdgarSearch(
                 self.config.local_edgar_index_path,
-                max_end_date=self.config.max_end_date or DEFAULT_MAX_END_DATE,
+                max_end_date=cutoff,
                 metrics_dir=self.config.local_edgar_metrics_dir,
                 metadata_path=self.config.local_edgar_metadata_path,
             )
             self._edgar_search_service = EdgarSearchService(
                 self._local_edgar_search,
-                max_end_date=self.config.max_end_date or DEFAULT_MAX_END_DATE,
+                max_end_date=cutoff,
                 on_results=self._record_dump_paths,
             )
             logger.info(
-                "Local EDGAR search initialized from %s (metadata sidecar: %s)",
+                "edgar_search: local mode, index %s (metadata sidecar: %s, coverage %s)",
                 self.config.local_edgar_index_path,
                 self._local_edgar_search.metadata_path or "none",
+                self._local_edgar_search.coverage,
             )
+        elif self.config.sec_api_key:
+            self._edgar_search_service = EdgarSearchService(
+                LiveEdgarSearch(
+                    self.config.sec_api_key,
+                    session_provider=self._get_session,
+                    max_retries=self.config.max_retries,
+                    request_timeout=self.config.request_timeout,
+                ),
+                max_end_date=cutoff,
+            )
+            logger.info("edgar_search: live mode against sec-api.io")
         else:
-            logger.info("local_edgar_index_path is not configured — edgar_search will be unavailable")
+            logger.info("edgar_search: unavailable — sec_mode is 'live' but sec_api_key is not configured")
 
     def _get_session_storage(self, session_id: str) -> Dict[str, str]:
         """Get or create the data storage dict for a session."""
@@ -1046,15 +1076,13 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # ========================================================================
 
     async def edgar_search(self, request: Request, body: EdgarSearchRequest) -> EdgarSearchResponse:
-        """Search the local SQLite EDGAR full-text index."""
+        """Full-text search EDGAR, from the local index or sec-api.io."""
         if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return EdgarSearchResponse(results=timeout_msg)
 
         if self._edgar_search_service is None:
             return EdgarSearchResponse(
-                results=json.dumps(
-                    {"error": "edgar_search is not available. local_edgar_index_path is not configured."}
-                )
+                results=json.dumps({"error": "edgar_search is not available. sec_api_key is not configured."})
             )
 
         return EdgarSearchResponse(results=await self._edgar_search_service.run(body.model_dump()))

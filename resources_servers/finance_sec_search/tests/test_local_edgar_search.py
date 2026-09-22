@@ -35,6 +35,8 @@ from resources_servers.finance_sec_search.scripts.convert_questions import (
     convert_entry,
 )
 from resources_servers.sec_local_index import local_edgar_search
+from resources_servers.sec_local_index.edgar_search_service import resolve_sec_mode
+from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     OutOfCoverageError,
@@ -236,6 +238,60 @@ def test_max_end_date_has_no_default(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match="max_end_date"):
         normalize_request("quantum pineapple")
+
+
+@pytest.mark.parametrize(
+    ("configured", "index_path", "expected"),
+    [
+        (None, None, "live"),
+        (None, "/some/index.sqlite", "local"),
+        ("live", "/some/index.sqlite", "live"),
+        ("local", None, "local"),
+    ],
+)
+def test_sec_mode_defaults_to_the_configured_artifacts(configured, index_path, expected) -> None:
+    """An index path alone selected local mode before sec_mode existed, so it
+    still has to."""
+    assert resolve_sec_mode(configured, index_path) == expected
+
+
+def test_sec_mode_rejects_an_unknown_value() -> None:
+    with pytest.raises(ValueError, match="sec_mode must be"):
+        resolve_sec_mode("offline", None)
+
+
+def test_local_mode_without_an_index_fails_at_startup(tmp_path: Path) -> None:
+    """Refused at boot rather than per search, which would surface as a rollout
+    of failed tool calls."""
+    with pytest.raises(ValueError, match="local_edgar_index_path is not set"):
+        FinanceAgentResourcesServer(
+            config=_server_config(tmp_path, sec_mode="local"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+
+def test_live_mode_is_selected_when_a_key_is_present(tmp_path: Path) -> None:
+    server = FinanceAgentResourcesServer(
+        config=_server_config(tmp_path, sec_mode="live", sec_api_key="test-key"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    assert isinstance(server._edgar_search_service._backend, LiveEdgarSearch)
+
+
+def test_live_mode_wins_over_a_configured_index(tmp_path: Path) -> None:
+    """Eval against sec-api.io while the training index stays configured."""
+    server = FinanceAgentResourcesServer(
+        config=_server_config(
+            tmp_path,
+            sec_mode="live",
+            sec_api_key="test-key",
+            local_edgar_index_path=str(_index(tmp_path / "index.sqlite")),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    assert isinstance(server._edgar_search_service._backend, LiveEdgarSearch)
 
 
 def test_coverage_reports_the_indexed_span(tmp_path: Path) -> None:
@@ -592,4 +648,4 @@ async def test_edgar_search_requires_local_index_configuration(tmp_path: Path) -
         EdgarSearchRequest(search_query="revenue"),
     )
 
-    assert "local_edgar_index_path is not configured" in response.results
+    assert "sec_api_key is not configured" in response.results
