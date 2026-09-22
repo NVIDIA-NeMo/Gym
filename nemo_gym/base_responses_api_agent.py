@@ -72,7 +72,6 @@ from nemo_gym.server_utils import (
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
-from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 class AgentSeedSessionRequest(BaseModel):
