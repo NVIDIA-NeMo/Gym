@@ -43,7 +43,11 @@ from starlette.routing import Mount
 
 pytest.importorskip("mcp")
 
-from nemo_gym._checkpoint import CHECKPOINT_CONTROL_TOKEN_ENV, ResourceSnapshot  # noqa: E402
+from nemo_gym._checkpoint import (  # noqa: E402
+    CHECKPOINT_CONTROL_TOKEN_ENV,
+    RESOURCE_REQUEST_ID_HEADER,
+    ResourceSnapshot,
+)
 from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -259,7 +263,11 @@ def test_stateful_mcp_dispatch_uses_signed_execution_identity(monkeypatch):
     server = _server(CheckpointStore)
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
-    identity_headers = {ROLLOUT_ID_HEADER: "rollout-a", ATTEMPT_INDEX_HEADER: "0"}
+    identity_headers = {
+        ROLLOUT_ID_HEADER: "rollout-a",
+        ATTEMPT_INDEX_HEADER: "0",
+        RESOURCE_REQUEST_ID_HEADER: "seed-1",
+    }
 
     with TestClient(app) as client:
         seed = client.post("/seed_session", headers=identity_headers, json={})
