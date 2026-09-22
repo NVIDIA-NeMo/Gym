@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare pinned Indic GPQA Diamond data with the original zero-shot protocol."""
+"""Prepare pinned Indic GPQA Diamond data with Gym's English GPQA pipeline."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
-import random
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -15,13 +14,14 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 
+from benchmarks.gpqa.prepare import build_row
+
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_ID = "anushakamathofficial/Indic_GPQA_Diamond"
 SOURCE_REVISION = "1a56d82dd1aa89b6f270b2cccaa541be4a8b07d6"
 CANONICAL_SOURCE_ID = "Idavidrein/gpqa"
 CANONICAL_SOURCE_REVISION = "633f5ee89ab8ad4522a9f850766b73f62147ffdd"
-UPSTREAM_REVISION = "56686c06f5e19865c153de0fdb11be3890014df7"
 LANGUAGES = {
     "en": "English",
     "as": "Assamese",
@@ -42,7 +42,6 @@ LANGUAGES = {
 DEFAULT_LANGUAGES = tuple(language for language in LANGUAGES if language != "en")
 EXPECTED_ROWS = 198
 TEXT_FIELDS = ("Question", "Correct Answer", "Incorrect Answer 1", "Incorrect Answer 2", "Incorrect Answer 3")
-CHOICE_FIELDS = ("Incorrect Answer 1", "Incorrect Answer 2", "Incorrect Answer 3", "Correct Answer")
 SOURCE_FIELDS = {*TEXT_FIELDS, "language", "language_code", "judge_pass_stage"}
 QUALITY_STAGES = {
     "english_source",
@@ -71,29 +70,22 @@ def _validate_records(records: Sequence[Mapping[str, Any]], *, language: str | N
             raise ValueError(f"GPQA {language}/{index}: incorrect translation status")
 
 
-def render_prompt(question: str, choices: Sequence[str]) -> str:
-    """Reproduce the upstream zero_shot_prompt without normalizing whitespace."""
-    options = "\n".join(f"({letter}) {choice}" for letter, choice in zip("ABCD", choices, strict=True))
-    return (
-        f"What is the correct answer to this question: {question}\n\nChoices:\n{options}"
-        '\n\nFormat your response as follows: "The correct answer is (insert answer here)"'
-    )
-
-
 def build_rows(
     records: Sequence[Mapping[str, Any]],
     *,
     language: str,
     canonical_ids: Sequence[str],
-    shuffle_seed: int = 0,
+    canonical_questions: Sequence[str],
     question_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Shuffle all rows in source order before applying an optional subset."""
+    """Reuse English GPQA formatting and aligned choice positions across languages."""
     if language not in LANGUAGES:
         raise ValueError(f"Unsupported GPQA language: {language}")
     _validate_records(records, language=language)
-    if type(shuffle_seed) is not int:
-        raise ValueError("shuffle_seed must be an integer")
+    if len(canonical_questions) != len(records) or any(
+        not isinstance(value, str) or not value.strip() for value in canonical_questions
+    ):
+        raise ValueError("Canonical questions must be nonempty and cover every row")
     if (
         len(canonical_ids) != len(records)
         or any(not isinstance(value, str) or not value for value in canonical_ids)
@@ -111,22 +103,13 @@ def build_rows(
         raise ValueError("question_ids must contain unique existing string row indices")
     wanted = set(question_ids) if question_ids is not None else known_ids
 
-    rng = random.Random(shuffle_seed)
     result = []
     for index, row in enumerate(records):
-        source_order = list(range(4))
-        rng.shuffle(source_order)
-        choices = [row[CHOICE_FIELDS[position]] for position in source_order]
-        gold = "ABCD"[choices.index(row["Correct Answer"])]
         if str(index) not in wanted:
             continue
         result.append(
             {
-                "prompt": render_prompt(row["Question"], choices),
-                "responses_create_params": {},
-                "options": [{letter: text} for letter, text in zip("ABCD", choices, strict=True)],
-                "expected_answer": gold,
-                "grading_mode": "strict_single_letter_boxed",
+                **build_row(row, shuffle_question=canonical_questions[index]),
                 "uuid": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
@@ -140,13 +123,10 @@ def build_rows(
                     "task_id": str(index),
                     "canonical_record_id": canonical_ids[index],
                     "source_row_index": index,
-                    "choice_source_order": source_order,
-                    "shuffle_seed": shuffle_seed,
                     "judge_pass_stage": row["judge_pass_stage"],
-                    "duplicate_choice_text": len(set(choices)) != 4,
+                    "duplicate_choice_text": len({row[field] for field in TEXT_FIELDS[1:]}) != 4,
                     "source_revision": SOURCE_REVISION,
                     "canonical_source_revision": CANONICAL_SOURCE_REVISION,
-                    "upstream_revision": UPSTREAM_REVISION,
                 },
             }
         )
@@ -176,7 +156,6 @@ def prepare(
     *,
     languages: Sequence[str] | None = None,
     question_ids: Sequence[str] | None = None,
-    shuffle_seed: int = 0,
 ) -> Path:
     """Prepare selected languages and verify exact English-to-canonical alignment."""
     if isinstance(languages, str):
@@ -219,7 +198,7 @@ def prepare(
                 records,
                 language=language,
                 canonical_ids=canonical_ids,
-                shuffle_seed=shuffle_seed,
+                canonical_questions=[row["Question"] for row in canonical],
                 question_ids=question_ids,
             )
         )
@@ -236,7 +215,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--languages", nargs="+", choices=list(LANGUAGES))
     parser.add_argument("--question-ids", nargs="+")
-    parser.add_argument("--shuffle-seed", type=int, default=0)
     parser.add_argument("--output-path", type=Path)
     args = parser.parse_args()
     print(
@@ -244,7 +222,6 @@ def main() -> None:
             args.output_path,
             languages=args.languages,
             question_ids=args.question_ids,
-            shuffle_seed=args.shuffle_seed,
         )
     )
 
