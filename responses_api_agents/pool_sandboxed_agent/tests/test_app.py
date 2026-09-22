@@ -87,9 +87,27 @@ def test_build_command_installs_and_runs_pool_outside_the_workdir() -> None:
     assert "POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_DIR=/tmp/nemo-gym-pool-x/bin" in command
     assert 'sh "$installer" v1.0.16' in command
     assert "POOLSIDE_STANDALONE_BASE_URL=http://gym:8000/ng-rollout/r1/v1" in command
-    assert "POOLSIDE_STANDALONE_MODEL=dummy_model" in command
+    assert "--agent-config-file /tmp/nemo-gym-pool-x/agent_config.json" in command
     assert "POOLSIDE_STANDALONE_CONTEXT_LENGTH=1234" in command
     assert "XDG_STATE_HOME=/tmp/nemo-gym-pool-x/state" in command
     assert "pool exec -o json --sandbox disabled --unsafe-auto-allow" in command
     assert "-f /tmp/nemo-gym-pool-x/prompt.txt --verbose > /tmp/nemo-gym-pool-x/events.jsonl" in command
     assert 'echo "pool run finished rc=$?"' in command
+
+
+def test_pool_agent_config_is_non_streaming_and_points_at_gym() -> None:
+    agent = PoolSandboxedAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    agent.config.pool_agent_config = {"model": {"max_completion_retries": 5}}
+
+    config = agent._pool_agent_config("http://gym:8000/ng-rollout/r1/v1")
+
+    openai = config["model"]["provider"]["openai"]
+    assert openai == {
+        "base_url": "http://gym:8000/ng-rollout/r1/v1",
+        "api_key": "dummy_key",  # pragma: allowlist secret
+        "model_id": "dummy_model",
+        "use_streaming": False,
+    }
+    assert config["model"]["max_completion_retries"] == 5
+    assert config["model"]["exit_tool_on_stop"] is True
+    assert "exit" in config["enabled_tools"]

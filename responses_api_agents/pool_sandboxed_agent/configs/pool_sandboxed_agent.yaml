@@ -23,6 +23,8 @@ pool_sandboxed_agent:
       pool_max_context_window: 262144
       pool_extra_args: []
       pool_env: {}
+      # Deep-merged over the generated pool agent config (non-streaming OpenAI-compatible provider).
+      pool_agent_config: {}
       sandbox_model_base_url: null
 
       sandbox_timeout: 10800  # 3hr default for harness execution

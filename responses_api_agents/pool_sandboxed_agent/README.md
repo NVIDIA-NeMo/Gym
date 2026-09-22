@@ -33,15 +33,12 @@ gym eval run --no-serve \
 
 ## How pool is configured
 
-`pool` runs in standalone mode, driven entirely by environment variables, so no login or
-credentials file is needed:
-
-| Variable | Value |
-| --- | --- |
-| `POOLSIDE_STANDALONE_BASE_URL` | Gym model server URL for this rollout, with `/v1` |
-| `POOLSIDE_API_KEY` | dummy; the Gym proxy does not check it |
-| `POOLSIDE_STANDALONE_MODEL` | `pool_model` (default `dummy_model`; the proxy substitutes the policy model) |
-| `POOLSIDE_STANDALONE_CONTEXT_LENGTH` | `pool_max_context_window` |
+`pool` runs with a generated agent config file (`pool exec --agent-config-file`) that mirrors its
+built-in defaults and sets an OpenAI-compatible provider pointing at Gym's per-rollout model URL
+with a dummy API key and `pool_model` as the model id (the proxy substitutes the policy model).
+Streaming is disabled (`use_streaming: false`) because token ids and logprobs are only returned
+on non-streaming responses. Use `pool_agent_config` to deep-merge overrides into that file.
+`POOLSIDE_API_KEY` is set so pool skips its login bootstrap; no credentials file is needed.
 
 `HOME` and the XDG directories are redirected to `/tmp/nemo-gym-pool-<id>` so pool's config,
 state and trajectories never land in the repo workdir, where the resources server runs `git diff`.
