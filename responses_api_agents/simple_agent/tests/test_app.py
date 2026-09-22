@@ -1309,16 +1309,18 @@ class TestApp:
         responses = [
             (
                 {
-                    "id": "response-reasoning",
+                    "id": "response-tool-call",
                     "created_at": 1.0,
                     "model": "model",
                     "object": "response",
                     "output": [
                         {
-                            "id": "reasoning-1",
-                            "summary": [{"text": "thinking", "type": "summary_text"}],
+                            "id": "fc-1",
+                            "call_id": "tool-1",
+                            "name": "lookup",
+                            "arguments": "{}",
                             "status": "completed",
-                            "type": "reasoning",
+                            "type": "function_call",
                         }
                     ],
                     "parallel_tool_calls": True,
@@ -1348,11 +1350,16 @@ class TestApp:
         ]
 
         async def post(server_name, url_path, **_kwargs):
-            assert server_name == "model"
-            assert url_path == "/v1/responses"
-            payload, headers = responses.pop(0)
-            response = _mock_response(payload)
-            response.headers = headers
+            if server_name == "model":
+                assert url_path == "/v1/responses"
+                payload, headers = responses.pop(0)
+                response = _mock_response(payload)
+                response.headers = headers
+                return response
+            assert server_name == "resources"
+            assert url_path == "/lookup"
+            response = _mock_response(content="tool-result")
+            response.headers = {"x-nemo-gym-resource-state-revision": "1"}
             return response
 
         client.post = AsyncMock(side_effect=post)
@@ -1370,6 +1377,7 @@ class TestApp:
         assert responses == []
         assert [boundary.boundary_kind for boundary in boundaries] == [
             AgentBoundaryKind.PENDING_MODEL,
+            AgentBoundaryKind.PENDING_MODEL,
             AgentBoundaryKind.TURN_COMPLETE,
             AgentBoundaryKind.TURN_COMPLETE,
         ]
@@ -1377,9 +1385,11 @@ class TestApp:
             "captured-call-1",
             "captured-call-1",
             "captured-call-1",
+            "captured-call-1",
         ]
         assert boundaries[0].pending_model.model_call_id == "captured-call-1"
-        assert boundaries[1].pending_model is None
+        assert boundaries[1].pending_model.model_call_id == "captured-call-1"
+        assert boundaries[2].pending_model is None
 
     async def test_capture_failure_does_not_create_a_checkpoint_boundary(self) -> None:
         server, client = _make_agent(observability_enabled=False)

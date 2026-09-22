@@ -37,6 +37,7 @@ from nemo_gym._checkpoint import (
     CheckpointArtifactReference,
     ControlCapabilities,
     ControlFence,
+    ExternalStorageReference,
     GenerationCutCoordinatorProof,
     GenerationCutFrozenTicket,
     GenerationCutInventory,
@@ -44,7 +45,6 @@ from nemo_gym._checkpoint import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
     GenerationCutWorkerProof,
-    ExternalStorageReference,
     LedgerMismatchError,
     MultiProcessCapability,
     StaleAttemptError,
@@ -549,9 +549,10 @@ def test_generation_cut_receipt_is_bound_to_ledger_commit_and_restore(tmp_path) 
         checkpoint_id="checkpoint-1",
         tombstones=[],
         generation_cut_receipt=receipt,
+        continuation_roots=[_continuation_root("rollout-a")],
     )
     manifest = json.loads((checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).read_text())
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert "generation_cut_receipt" in manifest
     assert "generation_cut_ack" not in manifest
     assert committed["generation_cut_receipt"] == receipt.model_dump(mode="json")
@@ -565,6 +566,7 @@ def test_generation_cut_receipt_is_bound_to_ledger_commit_and_restore(tmp_path) 
             checkpoint_id="checkpoint-1",
             tombstones=[],
             generation_cut_receipt=changed,
+            continuation_roots=[_continuation_root("rollout-a")],
         )
 
 
@@ -574,6 +576,7 @@ def test_restore_rejects_legacy_generation_cut_ack_manifest_with_migration_guida
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
+        continuation_roots=[],
     )
     manifest_path = checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text())
@@ -594,6 +597,7 @@ def test_restore_rejects_legacy_generation_cut_sidecar_with_migration_guidance(t
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
+        continuation_roots=[],
     )
     ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
     manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
@@ -612,14 +616,30 @@ def test_restore_rejects_legacy_generation_cut_sidecar_with_migration_guidance(t
 
 
 def test_restore_keeps_legacy_cut_free_ledger_compatibility(tmp_path) -> None:
-    source = tmp_path / "source"
-    _write_custody(source, "rollout-a")
     checkpoint = tmp_path / "checkpoint"
-    CaptureLedgerCheckpointer(source).commit(checkpoint, checkpoint_id="checkpoint-1", tombstones=[])
-    manifest_path = checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME
-    manifest = json.loads(manifest_path.read_text())
-    manifest["schema_version"] = 1
-    manifest_path.write_text(json.dumps(manifest))
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    expected = _write_custody(ledger_dir, "rollout-a")
+    storage_reference_index = write_jsonl_artifact(
+        checkpoint,
+        ledger_dir.relative_to(checkpoint) / "storage-references.jsonl",
+        [],
+    )
+    manifest = {
+        "schema_version": 1,
+        "checkpoint_id": "checkpoint-1",
+        "server_name": None,
+        "rollouts": {
+            "rollout-a": {
+                "files": {"rollout-a.lineage.jsonl": hashlib.sha256(expected).hexdigest()},
+                "rows": 2,
+                "bytes": len(expected),
+            }
+        },
+        "storage_reference_index": storage_reference_index.model_dump(mode="json"),
+        "tombstones": [],
+        "source_attempts": [],
+    }
+    (ledger_dir / LEDGER_MANIFEST_NAME).write_text(json.dumps(manifest))
 
     restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
     assert restored["checkpoint_id"] == "checkpoint-1"
@@ -696,6 +716,7 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
         checkpoint_id="checkpoint-1",
         tombstones=[],
         generation_cut_proof=proof,
+        continuation_roots=[],
     )
     assert committed["generation_cut_proof"] == proof.model_dump(mode="json")
     restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
@@ -708,6 +729,7 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
             checkpoint_id="checkpoint-1",
             tombstones=[],
             generation_cut_proof=omitted,
+            continuation_roots=[],
         )
 
     mismatched_worker = GenerationCutWorkerProof.build(
@@ -725,6 +747,7 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
             checkpoint_id="checkpoint-1",
             tombstones=[],
             generation_cut_proof=mismatched,
+            continuation_roots=[],
         )
 
     replacement_worker = GenerationCutWorkerProof.build(
@@ -742,6 +765,7 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
             checkpoint_id="checkpoint-1",
             tombstones=[],
             generation_cut_proof=replaced,
+            continuation_roots=[],
         )
 
     client, _ = _participant(
@@ -754,7 +778,7 @@ def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) 
     route_checkpoint = tmp_path / "route-checkpoint"
     committed = client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
-        json={**control, "checkpoint_dir": str(route_checkpoint)},
+        json={**control, "checkpoint_dir": str(route_checkpoint), "continuation_indexes": []},
         headers=AUTH_HEADERS,
     )
     assert committed.status_code == 200
@@ -835,7 +859,7 @@ def test_multi_worker_commit_without_coordinator_proof_fails_closed(tmp_path) ->
 
     commit = client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
-        json={**control, "checkpoint_dir": str(tmp_path / "checkpoint")},
+        json={**control, "checkpoint_dir": str(tmp_path / "checkpoint"), "continuation_indexes": []},
         headers=AUTH_HEADERS,
     )
     assert commit.status_code == 409
@@ -887,7 +911,7 @@ def test_generation_cut_receipt_is_final_before_ledger_commit(tmp_path) -> None:
 
     committed = client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
-        json={**pause_body, "checkpoint_dir": str(tmp_path / "checkpoint")},
+        json={**pause_body, "checkpoint_dir": str(tmp_path / "checkpoint"), "continuation_indexes": []},
         headers=AUTH_HEADERS,
     )
     assert committed.status_code == 200

@@ -379,11 +379,8 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         completion_receipt = receipt_response.json()
         acknowledgement = await _post_control(
             source_clients["agent.test"],
-            f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed",
-            {
-                "schema_version": 1,
-                "executions": [completion_receipt],
-            },
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge",
+            completion_receipt,
         )
         assert acknowledgement.status_code == 200
 

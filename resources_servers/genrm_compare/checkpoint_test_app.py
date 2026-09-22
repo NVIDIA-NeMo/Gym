@@ -85,11 +85,7 @@ class CheckpointTestGenRMResourcesServer(GenRMCompareResourcesServer):
                     "reward_computed",
                     prompt_key=prompt_key,
                     cohort_size=len(ready),
-                    capture_rollout_ids=sorted(
-                        rollout_id
-                        for _, _, rollout_id in ready
-                        if rollout_id is not None
-                    ),
+                    capture_rollout_ids=sorted(rollout_id for _, _, rollout_id in ready if rollout_id is not None),
                 )
                 for _, waiter, _ in ready:
                     waiter.set_result(1.0)
@@ -98,11 +94,7 @@ class CheckpointTestGenRMResourcesServer(GenRMCompareResourcesServer):
                     "verify_waiting",
                     prompt_key=prompt_key,
                     cohort_size=len(cohort),
-                    capture_rollout_ids=sorted(
-                        rollout_id
-                        for _, _, rollout_id in cohort
-                        if rollout_id is not None
-                    ),
+                    capture_rollout_ids=sorted(rollout_id for _, _, rollout_id in cohort if rollout_id is not None),
                 )
 
         reward = await future
