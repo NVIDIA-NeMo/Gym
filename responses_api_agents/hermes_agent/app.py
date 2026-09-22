@@ -752,7 +752,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
                 state_name = (status.stdout or "").strip()
                 if state_name == "running" and state.runner_exit_task is not None and state.runner_exit_task.done():
-                    state_name = "exited"
+                    # Output can be published after the remote probe but before
+                    # its reply arrives. Once the runner exits, check once more
+                    # before treating a stale "running" snapshot as missing output.
+                    status = await state.sandbox.exec(
+                        f"if [ -f {quote(output_path)} ]; then echo output; else echo exited; fi",
+                        cwd=state.workdir,
+                        timeout_s=30,
+                    )
+                    state_name = (status.stdout or "").strip()
                 if state_name == "request":
                     model_request = await self._download_json(state.sandbox, request_path)
                     for client_option in ("extra_headers", "extra_query", "timeout"):

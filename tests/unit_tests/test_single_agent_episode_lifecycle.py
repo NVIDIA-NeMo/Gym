@@ -15,6 +15,7 @@ from environment_servers.single_agent.app import (
     SingleAgentEnvironmentServerConfig,
     _is_retryable_dependency_error,
 )
+from nemo_gym.base_resources_server import ResourcesVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -366,18 +367,98 @@ async def test_admission_timeout_is_retryable_without_starting_sessions() -> Non
     assert client.calls == []
 
 
-async def test_resources_close_failure_is_not_a_successful_score() -> None:
+@pytest.mark.parametrize(("reward", "evaluation_completed"), [(0.0, True), (1.0, True), (0.0, False)])
+@pytest.mark.parametrize("mask_sample", [False, True])
+@pytest.mark.parametrize("retry_fails", [False, True], ids=["retry-recovers", "retry-also-fails"])
+async def test_resources_close_failure_preserves_verification(
+    reward: float,
+    evaluation_completed: bool,
+    mask_sample: bool,
+    retry_fails: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     environment, client = _environment()
+    observations = AgentObservationBundle.model_validate(
+        {
+            "source": "hermes",
+            "records": [
+                {"kind": "agent_invocation", "invocation_id": "root", "status": "completed"},
+            ],
+        }
+    )
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["agent_observations"] = observations.model_dump(mode="json")
+    client.responses[3] = _Response(close_body)
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(reward=reward, mask_sample=mask_sample, evaluation_completed=evaluation_completed)
+    client.responses[4] = _Response(verification)
     responses = client.responses
-    client.responses = [*responses[:5], RuntimeError("resources close failed"), responses[5]]
+    retry_response = RuntimeError("resources close still fails") if retry_fails else responses[5]
+    client.responses = [*responses[:5], RuntimeError("resources close failed"), retry_response]
 
     result = await environment.run_request(_request())
+    result = SingleAgentEpisodeResponse.model_validate_json(result.model_dump_json())
 
-    assert result.result is None
-    assert result.failure.stage == "cleanup"
-    assert result.failure.terminal is True
-    assert result.failure.partial_response == _agent_response()
+    assert result.failure is None
+    assert result.episode_id == _request().episode_id
+    assert result.task_id == _request().task.task_id
+    assert result.result.verification == ResourcesVerifyResponse.model_validate(verification)
+    assert result.result.agent_observations == observations
     assert [path for _, path, _ in client.calls][-3:] == ["/verify", "/close_session", "/close_session"]
+    assert client.calls[-1][2]["cookies"] == {"session": "resources-updated"}
+    assert "resources close failed" in caplog.text
+    if retry_fails:
+        assert "resources close still fails" in caplog.text
+    assert not client.responses
+
+
+async def test_resources_close_timeout_preserves_verification(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    environment, client = _environment()
+    environment.config.cleanup_timeout_seconds = 0.02
+    close_cancelled = asyncio.Event()
+    original_post = _Client.post
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path == "/close_session":
+            self.calls.append((server_name, url_path, kwargs))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                close_cancelled.set()
+        return await original_post(self, server_name, url_path, **kwargs)
+
+    monkeypatch.setattr(_Client, "post", post)
+    result = await asyncio.wait_for(environment.run_request(_request()), timeout=1)
+
+    assert result.failure is None
+    assert result.result.verification.reward == 1.0
+    assert result.result.verification.response == _agent_response()
+    assert close_cancelled.is_set()
+    assert "Episode cleanup timed out" in caplog.text
+    assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
+
+
+async def test_post_verification_cleanup_uses_cleanup_not_episode_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment, client = _environment()
+    environment.config.default_episode_timeout_seconds = 0.05
+    environment.config.cleanup_timeout_seconds = 1
+    original_post = _Client.post
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path == "/close_session":
+            await asyncio.sleep(0.1)
+        return await original_post(self, server_name, url_path, **kwargs)
+
+    monkeypatch.setattr(_Client, "post", post)
+    result = await asyncio.wait_for(environment.run_request(_request()), timeout=1)
+
+    assert result.failure is None
+    assert result.result.verification.reward == 1.0
+    assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
     assert not client.responses
 
 
