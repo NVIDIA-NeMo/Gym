@@ -24,6 +24,7 @@ from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psutil
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -50,6 +51,12 @@ from responses_api_agents.openclaw_agent.app import (
     parse_openclaw_session_events,
     parse_openclaw_session_items,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_host_install():
+    with patch("responses_api_agents.openclaw_agent.app.ensure_openclaw"):
+        yield
 
 
 class _FakeResponse:
@@ -80,9 +87,7 @@ def _config(**kwargs) -> OpenClawAgentConfig:
 
 
 def _make_agent(**kwargs) -> OpenClawAgent:
-    with patch("responses_api_agents.openclaw_agent.app.OpenClawAgent.model_post_init"):
-        agent = OpenClawAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenClawAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     return agent
 
 
@@ -834,7 +839,7 @@ class TestSigtermSalvage:
             for _ in range(100):
                 if signal.SIGTERM in registered:
                     break
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.01)
             assert signal.SIGTERM in registered, "SIGTERM handler was never installed"
             registered[signal.SIGTERM](signal.SIGTERM, None)
             return await task
@@ -896,7 +901,7 @@ class TestSigtermSalvage:
                     for _ in range(100):
                         if len(agent.sigterm_events) == 2:
                             break
-                        await asyncio.sleep(0)
+                        await asyncio.sleep(0.01)
                     assert len(agent.sigterm_events) == 2
                     os.kill(os.getpid(), signal.SIGTERM)
                     return await asyncio.gather(task_a, task_b)
