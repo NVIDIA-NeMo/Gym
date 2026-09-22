@@ -45,6 +45,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     _is_in_process_retryable,
     _partial_stage_outcome,
     _prepare_resume,
+    _require_final_stage_rows,
     aggregate_metrics_path_for,
     append_journal_record,
     build_file_resume,
@@ -356,6 +357,69 @@ def _fake_run_rollouts_factory(target_elo: float = 1300.0):
         return pairs
 
     return fake_run_rollouts
+
+
+class TestFinalStageIsTerminal:
+    """A coverage-rejected run that never reached its final stage must fail."""
+
+    @staticmethod
+    def _summary(stage_index: int, **extra: Any) -> Dict[str, Any]:
+        return {"stage_index": stage_index, **extra}
+
+    def test_coverage_rejected_empty_final_stage_raises(self) -> None:
+        # Stage 0 was rejected on coverage with nothing left to retry, so stage 1
+        # was never planned and the declared final stage has no rows.
+        with pytest.raises(RuntimeError, match="produced no rows for it"):
+            _require_final_stage_rows(
+                [{"stage_index": 0}],
+                2,
+                [self._summary(0, incomplete=True, coverage_blocked=True)],
+            )
+
+    def test_retryable_stop_does_not_raise(self) -> None:
+        """Rows still retryable: a resume continues the run, so this is not terminal."""
+        _require_final_stage_rows(
+            [{"stage_index": 0}],
+            2,
+            [self._summary(0, incomplete=True, coverage_blocked=False)],
+        )
+
+    def test_final_stage_with_some_rows_does_not_raise(self) -> None:
+        """The legitimate degraded case: a partial final stage is scored, not fatal."""
+        _require_final_stage_rows(
+            [{"stage_index": 0}, {"stage_index": 1}],
+            2,
+            [self._summary(0), self._summary(1, incomplete=True, coverage_blocked=True)],
+        )
+
+    def test_complete_run_does_not_raise(self) -> None:
+        _require_final_stage_rows(
+            [{"stage_index": 0}, {"stage_index": 1}],
+            2,
+            [self._summary(0), self._summary(1)],
+        )
+
+    async def test_coverage_rejection_marks_the_stage_summary(self) -> None:
+        """The loop itself still returns; it only records why it stopped."""
+        task_ids = [f"t{i}" for i in range(4)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}).stages,
+            seed=0,
+        )
+
+        async def no_battle_evidence(rows_in: List[Dict[str, Any]]):
+            return [(row, {"task_id": row["task_id"], "per_reference": {}}) for row in rows_in]
+
+        all_results, summaries = await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, no_battle_evidence
+        )
+
+        assert not any(row.get("stage_index") == 1 for row in all_results)
+        assert summaries[-1]["coverage_blocked"] is True
+        with pytest.raises(RuntimeError, match="produced no rows for it"):
+            _require_final_stage_rows(all_results, len(cfg.stages), summaries)
 
 
 class TestRunStages:
