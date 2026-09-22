@@ -231,7 +231,7 @@ class NeMoGymResponseReasoningItem(BaseModel):
 
 class NeMoGymResponseOutputText(BaseModel):
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
-    annotations: List[Annotation]
+    annotations: List[Annotation] = Field(default_factory=list)
     text: str
     type: Literal["output_text"] = "output_text"
     logprobs: Optional[List[Logprob]] = None

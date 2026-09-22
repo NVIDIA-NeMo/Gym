@@ -100,6 +100,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
@@ -553,6 +554,28 @@ class TestTokenMetadataValidation:
                 NeMoGymResponseCreateParamsNonStreaming(input=[item])
             else:
                 NeMoGymResponse.model_validate(_response_with_output([item]))
+
+
+def test_response_output_text_defaults_annotations_without_sharing_lists() -> None:
+    first = NeMoGymResponseOutputText(type="output_text", text="first")
+    second = NeMoGymResponseOutputText(type="output_text", text="second")
+    citation = {
+        "type": "url_citation",
+        "start_index": 0,
+        "end_index": 5,
+        "url": "https://example.com",
+        "title": "Example",
+    }
+    explicit = NeMoGymResponseOutputText(type="output_text", text="cited", annotations=[citation])
+
+    first.annotations.append(citation)
+
+    assert second.annotations == []
+    assert explicit.annotations == [citation]
+    with pytest.raises(ValidationError):
+        NeMoGymResponseOutputText(type="output_text", text="bad", annotations=[{}])
+    with pytest.raises(ValidationError):
+        NeMoGymResponseOutputText(type="output_text")
 
 
 class TestDiscriminatedResponseItems:

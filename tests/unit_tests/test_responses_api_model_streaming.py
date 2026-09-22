@@ -493,6 +493,50 @@ class TestSanitizeStreamingBody:
         assert body["tools"] == [NAMESPACE_TOOL]
         assert body["stream"] is True
 
+    def test_replays_assistant_text_without_annotations_around_tool_turns(self) -> None:
+        body = {
+            "stream": True,
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_commentary",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "working"}],
+                },
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+                {
+                    "type": "message",
+                    "id": "msg_final",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+            ],
+        }
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        params = validate_streaming_responses_params(cleaned)
+
+        assert [(item.type, getattr(item, "id", None)) for item in params.input] == [
+            ("message", "msg_commentary"),
+            ("function_call", "fc_1"),
+            ("function_call_output", None),
+            ("message", "msg_final"),
+        ]
+        assert params.input[0].phase == "commentary"
+        assert params.input[0].content[0].text == "working"
+        assert params.input[-1].phase == "final_answer"
+        assert params.input[-1].content[0].text == "done"
+        assert [
+            (item["id"], item["phase"], item["content"][0]["text"])
+            for item in params.model_dump(mode="json")["input"]
+            if item.get("type") == "message"
+        ] == [
+            ("msg_commentary", "commentary", "working"),
+            ("msg_final", "final_answer", "done"),
+        ]
+
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:

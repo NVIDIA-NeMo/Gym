@@ -984,6 +984,24 @@ def test_responses_to_chat_completion_rejects_message_phase(converter: Responses
         converter.responses_to_chat_completion_create_params(params)
 
 
+def test_responses_to_chat_completion_preserves_phase_free_replayed_text(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "message",
+                    "id": "msg_replayed",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "replayed text"}],
+                }
+            ]
+        )
+    )
+
+    assert params.messages == [{"role": "assistant", "content": "replayed text"}]
+
+
 def test_responses_to_chat_completion_rejects_function_namespace(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(
         input=[
