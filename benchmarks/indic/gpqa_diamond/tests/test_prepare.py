@@ -14,17 +14,40 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 
 
 def record(index=0, language="en", **extra):
-    return {
+    row = {
+        "Record ID": f"record-{index}",
         "Question": f"Synthetic question {index}?",
         "Correct Answer": "right ",
         "Incorrect Answer 1": "one",
         "Incorrect Answer 2": "two",
         "Incorrect Answer 3": "three",
-        "language": module.LANGUAGES[language],
-        "language_code": language,
-        "judge_pass_stage": "english_source" if language == "en" else "first_judge_pass",
+        "Explanation": "DO NOT INCLUDE IN MODEL INPUT",
         **extra,
     }
+    if language != "en":
+        row.update(
+            {
+                f"{field}_{module.LANGUAGES[language]}_translation": "अनुवाद " + row[field]
+                for field in module.TEXT_FIELDS
+            }
+        )
+    return row
+
+
+@pytest.fixture
+def english_rows(tmp_path, monkeypatch):
+    import datasets
+
+    monkeypatch.setattr(english_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(english_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(english_module, "OUTPUT_FPATH", tmp_path / "english.jsonl")
+
+    def prepare(records):
+        monkeypatch.setattr(datasets, "load_dataset", lambda *args, **kwargs: records)
+        with english_module.prepare().open() as handle:
+            return [json.loads(line) for line in handle]
+
+    return prepare
 
 
 def build(records, **kwargs):
@@ -37,11 +60,12 @@ def build(records, **kwargs):
     )
 
 
-def test_exact_shuffle_prompt_and_subset_stability(monkeypatch):
+def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
     monkeypatch.setattr(module, "EXPECTED_ROWS", 3)
     records = [record(index) for index in range(3)]
     random_state = random.getstate()
     full = build(records)
+    expected_english = english_rows(records)
 
     assert random.getstate() == random_state
     for index, row in enumerate(full):
@@ -52,16 +76,13 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch):
         assert row["problem"] == records[index]["Question"] + "\n" + "\n".join(
             f"{letter}: {text}" for letter, text in zip("ABCD", expected)
         )
-        english = english_module.build_row(records[index])
+        english = expected_english[index]
         assert {key: row[key] for key in english if key != "uuid"} == {
             key: value for key, value in english.items() if key != "uuid"
         }
     assert build(records, question_ids=["2"]) == full[2:]
 
-    translated = [
-        record(index, "hi", **{field: "अनुवाद " + records[index][field] for field in module.TEXT_FIELDS})
-        for index in range(3)
-    ]
+    translated = [record(index, "hi") for index in range(3)]
     hindi = module.build_rows(
         translated,
         language="hi",
@@ -82,16 +103,16 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch):
     assert [message["role"] for message in rendered["responses_create_params"]["input"]] == ["user"]
     assert (
         rendered["responses_create_params"]["input"]
-        == apply_prompt_to_row(english_module.build_row(records[0]), prompt)["responses_create_params"]["input"]
+        == apply_prompt_to_row(expected_english[0], prompt)["responses_create_params"]["input"]
     )
 
 
-def test_duplicate_text_behavior_and_row_69_are_upstream_compatible():
+def test_duplicate_text_behavior_and_row_69_are_upstream_compatible(english_rows):
     records = [record(index) for index in range(198)]
     records[0]["Incorrect Answer 3"] = records[0]["Correct Answer"]
     rows = build(records)
 
-    assert rows[0]["expected_answer"] == english_module.build_row(records[0])["expected_answer"]
+    assert rows[0]["expected_answer"] == english_rows(records)[0]["expected_answer"]
     assert rows[0]["metadata"]["duplicate_choice_text"]
     assert rows[69]["metadata"]["task_id"] == "69"
     assert len(rows) == 198
@@ -105,7 +126,7 @@ def test_invalid_question_ids(question_ids):
 
 @pytest.mark.parametrize(
     "extra",
-    [{"Question": ""}, {"unexpected": 1}, {"language": "Hindi"}, {"judge_pass_stage": "unknown"}],
+    [{"Question": ""}, {"Question": None}, {"Correct Answer": " "}, {"Incorrect Answer 1": 2}],
 )
 def test_invalid_source_rows(extra):
     records = [record(index) for index in range(198)]
@@ -116,11 +137,10 @@ def test_invalid_source_rows(extra):
 
 def test_prepare_uses_pins_and_checks_canonical_alignment(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "EXPECTED_ROWS", 2)
-    english = [record(index) for index in range(2)]
-    hindi = [record(index, "hi") for index in range(2)]
+    records = [record(index, "hi") for index in range(2)]
     canonical = [
         {**{field: row[field] for field in module.TEXT_FIELDS}, "Record ID": f"record-{index}"}
-        for index, row in enumerate(english)
+        for index, row in enumerate(records)
     ]
     monkeypatch.setattr(module, "_read_canonical", lambda: canonical)
 
@@ -128,20 +148,22 @@ def test_prepare_uses_pins_and_checks_canonical_alignment(tmp_path, monkeypatch)
 
     def read_parquet(*, repo_id, revision, filename):
         calls.append((repo_id, revision, filename))
-        return english if filename == "data/en/train.parquet" else hindi
+        return records[::-1]
 
     monkeypatch.setattr(module, "_read_parquet", read_parquet)
-    output = module.prepare(tmp_path / "prepared.jsonl", languages=["hi"], question_ids=["1"])
+    output = module.prepare(tmp_path / "prepared.jsonl", languages=["en", "hi"], question_ids=["1"])
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
-    assert len(rows) == 1
+    assert len(rows) == 2
+    assert rows[1]["question"] == "अनुवाद Synthetic question 1?"
+    assert "DO NOT INCLUDE" not in output.read_text()
+    assert rows[1]["metadata"]["source_id"] == "ai4bharat/indic-gpqa"
     assert rows[0]["metadata"]["canonical_record_id"] == "record-1"
     assert calls == [
-        (module.SOURCE_ID, module.SOURCE_REVISION, "data/en/train.parquet"),
-        (module.SOURCE_ID, module.SOURCE_REVISION, "data/hi/train.parquet"),
+        (module.SOURCE_ID, module.SOURCE_REVISION, "train.parquet"),
     ]
 
-    english[0]["Question"] = "changed"
+    records[0]["Question"] = "changed"
     with pytest.raises(ValueError, match="differs from the pinned canonical"):
         module.prepare(tmp_path / "invalid.jsonl", languages=["hi"])
 
@@ -164,20 +186,32 @@ def test_config_matches_english_pipeline():
     assert set(config) == {"config_paths", "indic_gpqa_diamond_resources_server", "indic_gpqa_diamond_agent"}
 
 
-def test_english_prepare_retains_row_format(tmp_path, monkeypatch):
-    import datasets
-
-    records = [record(index) for index in range(3)]
-    monkeypatch.setattr(datasets, "load_dataset", lambda *args, **kwargs: records)
-    monkeypatch.setattr(english_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(english_module, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(english_module, "OUTPUT_FPATH", tmp_path / "english.jsonl")
-    rows = [json.loads(line) for line in english_module.prepare().read_text().splitlines()]
-    assert rows == [english_module.build_row(row) for row in records]
-
-
 @pytest.mark.parametrize("questions", [[], [""], [None]])
 def test_invalid_canonical_questions(monkeypatch, questions):
     monkeypatch.setattr(module, "EXPECTED_ROWS", 1)
     with pytest.raises(ValueError, match="Canonical questions"):
         module.build_rows([record()], language="en", canonical_ids=["id"], canonical_questions=questions)
+
+
+@pytest.mark.parametrize("value", [None, "", "record-1", "unknown"])
+def test_prepare_rejects_invalid_source_ids(value, tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "EXPECTED_ROWS", 2)
+    canonical = [record(index) for index in range(2)]
+    source = [record(index, "hi") for index in range(2)]
+    source[0]["Record ID"] = value
+    monkeypatch.setattr(module, "_read_canonical", lambda: canonical)
+    monkeypatch.setattr(module, "_read_parquet", lambda **kwargs: source)
+    with pytest.raises(ValueError, match="Source GPQA Record IDs"):
+        module.prepare(tmp_path / "invalid.jsonl", languages=["hi"])
+    assert not (tmp_path / "invalid.jsonl").exists()
+
+
+@pytest.mark.parametrize("value", [None, "", " "])
+def test_missing_translation_does_not_fall_back_to_english(value, monkeypatch):
+    monkeypatch.setattr(module, "EXPECTED_ROWS", 1)
+    source = record(language="hi")
+    source["Question_Hindi_translation"] = value
+    with pytest.raises(ValueError, match="GPQA hi/0"):
+        module.build_rows(
+            [source], language="hi", canonical_ids=["record-0"], canonical_questions=[source["Question"]]
+        )

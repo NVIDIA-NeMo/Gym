@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: indic/gpqa_diamond
-version: 2.0.0
+version: 2.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: Indic GPQA Diamond using Gym's English GPQA prompt, agent, and MCQA verifier.
 modality: text
-licensing: CC-BY-4.0
+licensing: Apache-2.0 AND CC-BY-4.0
 authors: [NVIDIA NeMo Gym contributors]
 reward:
   range: [0, 1]
