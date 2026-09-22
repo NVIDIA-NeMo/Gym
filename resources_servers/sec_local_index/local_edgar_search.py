@@ -37,7 +37,6 @@ from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 logger = logging.getLogger(__name__)
 
 DEFAULT_START_DATE = "1900-01-01"
-MAX_END_DATE = "2025-04-07"
 PAGE_SIZE = 100
 TOKEN_RE = re.compile(r'"(?:[^"]|"")*"|\S+')
 BAREWORD_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -221,14 +220,14 @@ def _optional_strings(name: str, value: Any) -> tuple[str, ...] | None:
 
 def normalize_request(
     search_query: str,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = MAX_END_DATE,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     top_n_results: int = PAGE_SIZE,
     page: int = 1,
     form_types: Optional[list[str]] = None,
     ciks: Optional[list[str]] = None,
     *,
-    max_end_date: str = MAX_END_DATE,
+    max_end_date: str,
 ) -> LocalEdgarRequest:
     if not isinstance(search_query, str) or not search_query.strip():
         raise ValueError(
@@ -269,7 +268,7 @@ class LocalEdgarSearch:
         self,
         index_path: str | Path,
         *,
-        max_end_date: str = MAX_END_DATE,
+        max_end_date: str,
         metrics_dir: str | Path | None = None,
         metadata_path: str | Path | None = None,
     ):
@@ -422,8 +421,8 @@ class LocalEdgarSearch:
     def search(
         self,
         search_query: str,
-        start_date: str = DEFAULT_START_DATE,
-        end_date: str = MAX_END_DATE,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         top_n_results: int = PAGE_SIZE,
         page: int = 1,
         form_types: Optional[list[str]] = None,

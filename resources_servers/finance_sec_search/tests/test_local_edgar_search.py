@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.finance_sec_search.app import (
+    DEFAULT_MAX_END_DATE,
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
@@ -46,6 +47,10 @@ from resources_servers.sec_local_index.scripts.build_local_edgar_metadata import
 
 # Indexed paths are container-absolute; only the part below data/ is portable.
 DUMP_PREFIX = "/workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download/data"
+
+# finance_agent.tools.MAX_END_DATE, which finance_agent_v2 runs against. Restated
+# here because the upstream package is only installed in that server's venv.
+UPSTREAM_MAX_END_DATE = "2026-03-01"
 
 
 def _index(path: Path) -> Path:
@@ -173,7 +178,7 @@ def test_query_language_translation() -> None:
 
 
 def test_search_contract_filters_and_cutoff(tmp_path: Path) -> None:
-    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=DEFAULT_MAX_END_DATE)
 
     results = search.search(
         "quantum pineapple",
@@ -198,7 +203,7 @@ def test_search_contract_filters_and_cutoff(tmp_path: Path) -> None:
 
 
 def test_match_all_and_filtered_browse_fallback(tmp_path: Path) -> None:
-    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=DEFAULT_MAX_END_DATE)
 
     match_all = search.search("*", form_types=["10-K"], ciks=["0000320193"])
     fallback = search.search(
@@ -211,12 +216,33 @@ def test_match_all_and_filtered_browse_fallback(tmp_path: Path) -> None:
     assert fallback[0]["accessionNo"] == "0000320193-24-000001"
 
 
+def test_cutoff_comes_from_the_caller(tmp_path: Path) -> None:
+    """One engine, two lineages: the sap-500 fixture holds an 8-K filed 2025-04-08,
+    one day past V1's cutoff and well inside V2's."""
+    index = _index(tmp_path / "index.sqlite")
+
+    v1 = LocalEdgarSearch(index, max_end_date=DEFAULT_MAX_END_DATE)
+    v2 = LocalEdgarSearch(index, max_end_date=UPSTREAM_MAX_END_DATE)
+
+    assert [row["ticker"] for row in v1.search("quantum pineapple")] == ["AAPL"]
+    assert sorted(row["ticker"] for row in v2.search("quantum pineapple")) == ["AAPL", "MSFT"]
+
+
+def test_max_end_date_has_no_default(tmp_path: Path) -> None:
+    """Omitting it must fail loudly rather than inherit the other lineage's cutoff."""
+    with pytest.raises(TypeError, match="max_end_date"):
+        LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+
+    with pytest.raises(TypeError, match="max_end_date"):
+        normalize_request("quantum pineapple")
+
+
 def test_index_schema_is_validated_at_startup(tmp_path: Path) -> None:
     path = tmp_path / "invalid.sqlite"
     sqlite3.connect(path).close()
 
     with pytest.raises(ValueError, match="documents"):
-        LocalEdgarSearch(path)
+        LocalEdgarSearch(path, max_end_date=DEFAULT_MAX_END_DATE)
 
 
 @pytest.mark.parametrize(
@@ -232,7 +258,7 @@ def test_index_schema_is_validated_at_startup(tmp_path: Path) -> None:
 )
 def test_request_validation(kwargs: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        normalize_request(**kwargs)
+        normalize_request(**kwargs, max_end_date=DEFAULT_MAX_END_DATE)
 
 
 @pytest.mark.asyncio
@@ -287,7 +313,7 @@ def test_canonical_url_key_normalizes_cik_and_filename(url: str, expected: str |
 
 
 def test_dump_paths_cover_primary_documents_and_exhibits(tmp_path: Path) -> None:
-    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=DEFAULT_MAX_END_DATE)
 
     resolved = search.dump_paths_for_urls(
         [
@@ -305,7 +331,9 @@ def test_dump_paths_cover_primary_documents_and_exhibits(tmp_path: Path) -> None
 
 def test_dump_paths_are_unavailable_without_the_columns(tmp_path: Path) -> None:
     """An index built before source_path existed degrades instead of erroring."""
-    search = LocalEdgarSearch(_varied_index(tmp_path / "legacy.sqlite", documents=4))
+    search = LocalEdgarSearch(
+        _varied_index(tmp_path / "legacy.sqlite", documents=4), max_end_date=DEFAULT_MAX_END_DATE
+    )
 
     assert search.supports_dump_paths is False
     assert search.dump_paths_for_urls(["https://www.sec.gov/Archives/edgar/data/1/2/a.htm"]) == {}
@@ -406,14 +434,14 @@ def test_sidecar_beside_the_index_is_discovered(tmp_path: Path) -> None:
     index = _varied_index(tmp_path / "index.sqlite")
     build(index, default_sidecar_path(index))
 
-    assert LocalEdgarSearch(index).metadata_path == default_sidecar_path(index)
+    assert LocalEdgarSearch(index, max_end_date=DEFAULT_MAX_END_DATE).metadata_path == default_sidecar_path(index)
 
 
 def test_configured_sidecar_must_exist(tmp_path: Path) -> None:
     index = _index(tmp_path / "index.sqlite")
 
     with pytest.raises(FileNotFoundError, match="sidecar"):
-        LocalEdgarSearch(index, metadata_path=tmp_path / "absent.metadata")
+        LocalEdgarSearch(index, max_end_date=DEFAULT_MAX_END_DATE, metadata_path=tmp_path / "absent.metadata")
 
 
 def test_sidecar_built_from_another_index_is_rejected(tmp_path: Path) -> None:
@@ -422,7 +450,7 @@ def test_sidecar_built_from_another_index_is_rejected(tmp_path: Path) -> None:
     build(other, default_sidecar_path(other))
 
     with pytest.raises(ValueError, match="covers 200 documents"):
-        LocalEdgarSearch(index, metadata_path=default_sidecar_path(other))
+        LocalEdgarSearch(index, max_end_date=DEFAULT_MAX_END_DATE, metadata_path=default_sidecar_path(other))
 
 
 def test_sidecar_is_rejected_when_the_index_changed_underneath_it(tmp_path: Path) -> None:
@@ -484,7 +512,7 @@ def test_index_missing_a_metadata_column_is_rejected(tmp_path: Path) -> None:
     connection.close()
 
     with pytest.raises(ValueError, match="missing required columns"):
-        LocalEdgarSearch(path)
+        LocalEdgarSearch(path, max_end_date=DEFAULT_MAX_END_DATE)
 
 
 def test_server_refuses_to_boot_on_a_malformed_index(tmp_path: Path) -> None:
