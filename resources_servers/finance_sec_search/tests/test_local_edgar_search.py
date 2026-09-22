@@ -37,6 +37,7 @@ from resources_servers.finance_sec_search.scripts.convert_questions import (
 from resources_servers.sec_local_index import local_edgar_search
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
+    OutOfCoverageError,
     canonical_url_key,
     default_sidecar_path,
     normalize_request,
@@ -235,6 +236,36 @@ def test_max_end_date_has_no_default(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match="max_end_date"):
         normalize_request("quantum pineapple")
+
+
+def test_coverage_reports_the_indexed_span(tmp_path: Path) -> None:
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=UPSTREAM_MAX_END_DATE)
+
+    assert search.coverage == ("2024-11-01", "2025-04-08")
+
+
+def test_window_outside_the_corpus_is_an_error_not_an_empty_list(tmp_path: Path) -> None:
+    """An empty list reads as 'nothing matched', which sends the model looking for
+    a better query when the corpus simply does not reach that far."""
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=UPSTREAM_MAX_END_DATE)
+
+    with pytest.raises(OutOfCoverageError, match="2024-11-01 through 2025-04-08"):
+        search.search("quantum pineapple", start_date="2019-01-01", end_date="2019-12-31")
+
+
+def test_window_inside_the_corpus_still_returns_an_empty_list(tmp_path: Path) -> None:
+    """Only coverage is special-cased; a genuine miss stays a miss."""
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=UPSTREAM_MAX_END_DATE)
+
+    assert search.search("nonexistent terminology") == []
+
+
+def test_partial_overlap_with_the_corpus_is_served(tmp_path: Path) -> None:
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"), max_end_date=UPSTREAM_MAX_END_DATE)
+
+    results = search.search("quantum pineapple", start_date="1900-01-01", end_date="2024-12-31")
+
+    assert [row["ticker"] for row in results] == ["AAPL"]
 
 
 def test_index_schema_is_validated_at_startup(tmp_path: Path) -> None:

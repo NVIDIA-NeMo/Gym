@@ -41,6 +41,8 @@ PAGE_SIZE = 100
 TOKEN_RE = re.compile(r'"(?:[^"]|"")*"|\S+')
 BAREWORD_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+_COVERAGE_UNSET = object()
+
 SIDECAR_SCHEMA_VERSION = 1
 SIDECAR_SUFFIX = ".metadata"
 SIDECAR_ALIAS = "meta"
@@ -137,6 +139,14 @@ class LocalEdgarRequest:
     end_date: str
     page: int
     top_n_results: int
+
+
+class OutOfCoverageError(ValueError):
+    """The requested window lies wholly outside the filings held locally.
+
+    Has no live equivalent: sec-api.io serves the whole of EDGAR, so there an
+    empty result only ever means the query matched nothing.
+    """
 
 
 def _quote_fts(value: str) -> str:
@@ -279,6 +289,7 @@ class LocalEdgarSearch:
         self.metadata_path = self._resolve_metadata_path(metadata_path)
         self._require_usable_metadata_source()
         self.max_end_date = _date_value("max_end_date", max_end_date)
+        self._coverage: tuple[str, str] | None | object = _COVERAGE_UNSET
         self.metrics_path: Path | None = None
         self._metrics_lock = threading.Lock()
         self._local = threading.local()
@@ -291,6 +302,22 @@ class LocalEdgarSearch:
     @property
     def uses_metadata_sidecar(self) -> bool:
         return self.metadata_path is not None
+
+    @property
+    def coverage(self) -> tuple[str, str] | None:
+        """Earliest and latest filing_date held locally, or None for an empty index.
+
+        Read from the sidecar when there is one: the same query against the index
+        is a full scan over the filing bodies and costs seconds rather than
+        milliseconds.
+        """
+        if self._coverage is _COVERAGE_UNSET:
+            table = SIDECAR_TABLE if self.metadata_path is not None else "documents"
+            earliest, latest = (
+                self._session().execute(f"SELECT MIN(filing_date), MAX(filing_date) FROM {table}").fetchone()
+            )
+            self._coverage = None if earliest is None or latest is None else (str(earliest), str(latest))
+        return self._coverage
 
     def _resolve_metadata_path(self, metadata_path: str | Path | None) -> Path | None:
         """Locate the metadata sidecar, requiring it to match the index if present.
@@ -447,6 +474,7 @@ class LocalEdgarSearch:
         Callers that normalize elsewhere use this so a request is not validated
         and clamped twice.
         """
+        self._require_coverage(request)
         started = time.perf_counter()
         match_all = request.search_query.strip() == "*"
         results = self._execute(request, match_all=match_all)
@@ -461,6 +489,18 @@ class LocalEdgarSearch:
             filter_browse_fallback=filter_browse_fallback,
         )
         return results
+
+    def _require_coverage(self, request: LocalEdgarRequest) -> None:
+        coverage = self.coverage
+        if coverage is None:
+            return
+        earliest, latest = coverage
+        if request.start_date > latest or request.end_date < earliest:
+            raise OutOfCoverageError(
+                f"No filings are indexed between {request.start_date} and {request.end_date}. "
+                f"This local corpus covers {earliest} through {latest}. "
+                f"Search within that range."
+            )
 
     def _execute(
         self,
