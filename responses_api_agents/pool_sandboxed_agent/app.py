@@ -126,7 +126,7 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
     unanswered_call_ids: List[str] = []
     errors: List[str] = []
 
-    def emit_output(output: str) -> None:
+    def emit_tool_output(output: str) -> None:
         call_id = unanswered_call_ids.pop(0) if unanswered_call_ids else f"call-{uuid4().hex[:8]}"
         output_items.append(
             NeMoGymFunctionCallOutput(type="function_call_output", call_id=call_id, output=output, status="completed")
@@ -181,18 +181,18 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
                     )
                 )
             case {"type": "toolCallResult", "err": err}:
-                emit_output(f"[error] {err}")
+                emit_tool_output(f"[error] {err}")
             case {"type": "toolCallResult", "entries": list(entries)}:
-                emit_output("\n".join(entries))
+                emit_tool_output("\n".join(entries))
             case {"type": "toolCallResult"}:
-                emit_output(str(event.get("result") or ""))
+                emit_tool_output(str(event.get("result") or ""))
             case {"type": "error"} | {"error": _}:
                 errors.append(str(event.get("error") or "unknown error"))
             case _:
                 raise NotImplementedError(event)
 
     while unanswered_call_ids:
-        emit_output("")
+        emit_tool_output("")
     return output_items, ({"errors": errors} if errors else {})
 
 
