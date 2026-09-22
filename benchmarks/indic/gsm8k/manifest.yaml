@@ -1,0 +1,30 @@
+name: indic/gsm8k
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Five-shot grade-school math evaluation in 14 Indic languages.
+modality: text
+licensing: MIT
+authors:
+  - anushak
+reward:
+  range:
+    - 0.0
+    - 1.0
+  higher_is_better: true
+determinism: seeded
+resources_server: gsm8k_reference
+agent_server: simple_agent
+datasets:
+  - name: indic-gsm8k
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/gsm8k/data/indic_gsm8k_benchmark.jsonl
+    prepare_script: benchmarks/indic/gsm8k/prepare.py
+    prompt_config: benchmarks/indic/gsm8k/prompts/default.yaml
+    num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/indic/gsm8k/prompts/default.yaml
+lifecycle: active
