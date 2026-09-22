@@ -17,6 +17,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
@@ -42,7 +43,11 @@ from nemo_gym.sandbox.providers import (
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
-from nemo_gym.telemetry.gym_metrics import record_sandbox_active
+from nemo_gym.telemetry.gym_metrics import (
+    record_sandbox_active,
+    record_sandbox_exec_duration,
+    record_sandbox_startup,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -374,6 +379,11 @@ class SandboxPty:
         )
 
 
+def _sandbox_id(handle: Any) -> str | None:
+    """The provider-neutral id of a handle, or None for a handle-less test double."""
+    return getattr(handle, "sandbox_id", None)
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -422,13 +432,18 @@ class AsyncSandbox:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            provider_name = self._telemetry_provider_name()
+            started = time.perf_counter()
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
-            ):
+                **{"nemo.gym.sandbox.provider": provider_name},
+            ) as span:
                 handle = await self._provider.create(requested_spec)
-            record_sandbox_active(1, provider=self._telemetry_provider_name())
+                if span is not None:
+                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
+            record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
+            record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
         else:
             handle = await self._provider.create(requested_spec)
@@ -484,21 +499,25 @@ class AsyncSandbox:
         # (`safe_set_span_attributes` would redact a key named `command`, not a value that
         # happens to be one). Provider, exit code and duration are the useful,
         # content-free parts.
+        provider_name = self._telemetry_provider_name()
+        started = time.perf_counter()
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            **{"nemo.gym.sandbox.provider": provider_name},
         ) as span:
             result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
             if span is not None:
                 safe_set_span_attributes(
                     span,
                     {
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                         "nemo.gym.sandbox.return_code": result.return_code,
                         "nemo.gym.sandbox.error_type": result.error_type,
                     },
                 )
-            return result
+        record_sandbox_exec_duration((time.perf_counter() - started) * 1000.0, provider=provider_name)
+        return result
 
     async def _exec_uninstrumented(
         self,
@@ -581,7 +600,18 @@ class AsyncSandbox:
         try:
             if self._handle is not None and not self._stopped:
                 try:
-                    await self._provider.close(self._handle)
+                    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                        with managed_span(
+                            GymSpanGroup.SANDBOX,
+                            "gym.sandbox.stop",
+                            **{
+                                "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                                "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                            },
+                        ):
+                            await self._provider.close(self._handle)
+                    else:
+                        await self._provider.close(self._handle)
                 finally:
                     self._stopped = True
                     if self._counted_active:
