@@ -1,0 +1,6 @@
+*train.jsonl
+training.jsonl
+*validation.jsonl
+*_prepare.jsonl
+*_prepare.*.jsonl
+cache/
