@@ -94,7 +94,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         seed = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
         assert seed.status_code == 200
         assert state.phase is SessionPhase.READY
-        assert state.runner_cleanup is RunnerCleanup.NOT_LAUNCHED
+        assert state.runner_cleanup is RunnerCleanup.IDLE
         assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 409
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         assert client.post(path, json={"input": "task"}).status_code == 200
@@ -261,7 +261,7 @@ async def test_close_failure_keeps_session_for_retry(
         await agent.close_agent_session(request(state), close)
     assert agent._agent_sessions["session"] is state
     assert state.phase is SessionPhase.CLOSING
-    assert state.runner_cleanup is (RunnerCleanup.CONFIRMED if runner_started else RunnerCleanup.NOT_LAUNCHED)
+    assert state.runner_cleanup is (RunnerCleanup.CONFIRMED if runner_started else RunnerCleanup.IDLE)
     assert state.runner_session is None
     state.sandbox.disconnect.assert_not_awaited()
     with pytest.raises(HTTPException):
