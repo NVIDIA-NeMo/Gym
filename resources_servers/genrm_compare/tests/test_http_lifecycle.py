@@ -175,6 +175,65 @@ async def run(services, index, *, group="group", attempt=0):
     return result.status, await result.json()
 
 
+async def test_conversion_failure_keeps_http_peer_waiting_for_valid_replacement(services, monkeypatch):
+    async def verify(index):
+        payload = member(index).model_dump(mode="json", by_alias=True)
+        payload["response"]["output"] = [
+            {
+                "id": f"message-{index}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "4", "annotations": []}],
+            }
+        ]
+        result = await services.client.post(server_name="resource", url_path="/verify", json=payload)
+        return result.status, await result.json()
+
+    # These direct verify requests use fixed IDs, so fault injection targets one member.
+    original = services.resource._comparison_response
+    first = asyncio.create_task(verify(0))
+    await until(lambda: bool(services.resource._verify_cohorts))
+    cohort = next(iter(services.resource._verify_cohorts.values()))
+    assert list(cohort.members) == [0] and len(cohort.members[0].waiters) == 1
+
+    def fail_one(response):
+        if response.id == "answer-1":
+            raise ValueError("injected conversion failure")
+        return original(response)
+
+    monkeypatch.setattr(services.resource, "_comparison_response", fail_one)
+    status, _ = await verify(1)
+    assert status == 500
+    assert cohort.phase == "collecting" and list(cohort.members) == [0] and not first.done()
+    monkeypatch.setattr(services.resource, "_comparison_response", original)
+    results = await asyncio.gather(first, *(verify(i) for i in range(1, 4)))
+    assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
+    assert services.judge_calls == 4
+
+
+async def test_judge_task_start_failure_releases_all_http_waiters(services, monkeypatch):
+    create_task = asyncio.create_task
+    failures = []
+
+    def fail_judging(coro, **kwargs):
+        if kwargs.get("name", "").startswith("genrm-cohort-evaluation"):
+            failures.append(kwargs["name"])
+            raise RuntimeError("injected task startup failure")
+        return create_task(coro, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_task", fail_judging)
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    # SimpleAgent translates the resources server's 503 into a failed /run (500).
+    for status, body in results:
+        assert status == 500 and "reward" not in body
+        assert "GenRM cohort task startup failed: RuntimeError: injected task startup failure" in body
+    assert len(failures) == 1 and services.judge_calls == 0
+    cohort = next(iter(services.resource._verify_cohorts.values()))
+    assert cohort.phase == "failed" and not services.resource._active_group_cohorts
+    assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
+
+
 async def test_incomplete_run_fails_without_reward(services):
     services.resource.config.cohort_collection_timeout_s = 0.05
     status, body = await run(services, 0)

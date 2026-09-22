@@ -897,33 +897,35 @@ class TestGenRMCompareResourcesServer:
         assert cohort.phase == "failed"
         assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
-    async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
+    async def test_input_materialization_failure_preserves_registered_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock()
+        run_compare = AsyncMock(return_value=([1.0, 2.0], {}, [], []))
         monkeypatch.setattr(server, "_run_compare", run_compare)
         monkeypatch.setattr(server, "_response_digest", lambda response: response.id)
+
+        first = asyncio.create_task(server.verify(self._verify_request(0, task_index=26)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert list(cohort.members) == [0]
+        assert len(cohort.members[0].waiters) == 1 and not first.done()
+        convert = server._comparison_response
 
         def fail_model_dump(*args, **kwargs):
             raise ValueError("response conversion failed")
 
         monkeypatch.setattr(server, "_comparison_response", fail_model_dump)
-        results = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=26)),
-            server.verify(self._verify_request(1, task_index=26)),
-            return_exceptions=True,
-        )
-
-        assert all(
-            isinstance(result, HTTPException)
-            and result.status_code == 503
-            and "response conversion failed" in str(result.detail)
-            for result in results
-        )
+        with pytest.raises(ValueError, match="response conversion failed"):
+            await server.verify(self._verify_request(1, task_index=26))
         run_compare.assert_not_awaited()
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
+        assert cohort.phase == "collecting" and list(cohort.members) == [0]
+        assert cohort.collection_timeout_task is not None
+        assert not first.done() and not cohort.members[0].waiters[0].done()
+
+        monkeypatch.setattr(server, "_comparison_response", convert)
+        second = await server.verify(self._verify_request(1, task_index=26))
+        assert [(await first).reward, second.reward] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})

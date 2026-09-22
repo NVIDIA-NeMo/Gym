@@ -318,7 +318,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     _closed: bool = PrivateAttr(default=False)
 
     def _own_task(self, coro, *, name: str) -> asyncio.Task:
-        task = asyncio.create_task(coro, name=name, context=Context())
+        try:
+            task = asyncio.create_task(coro, name=name, context=Context())
+        except BaseException:
+            coro.close()
+            raise
         self._cohort_tasks.add(task)
         task.add_done_callback(self._cohort_tasks.discard)
         return task
@@ -346,6 +350,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         rollout_index = body.rollout_index
         assert rollout_index is not None  # Validated above; keeps the type narrow below.
         response_digest = self._response_digest(body.response)
+        # Prepare request-local data before registering or superseding a group.
+        # A conversion failure must not strand a timer-less cohort or retire peers.
+        response_obj = self._comparison_response(body.response)
+        conversation_history = _input_to_conversation_history(input_messages)
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
         cohort_identity = body.task_index if body.task_index is not None else body.group_id
 
@@ -354,56 +362,53 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             prompt_key=prompt_key,
             prompt_digest=prompt_digest,
         )
-        try:
-            async with cohort.lock:
-                if cohort.prompt_digest != prompt_digest:
+        startup_error = None
+        async with cohort.lock:
+            if cohort.prompt_digest != prompt_digest:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"GenRM cohort {prompt_key!r} received inconsistent prompt or principle content"),
+                )
+            if cohort.phase == "failed":
+                self._raise_cohort_failure(body, cohort)
+            member = cohort.members.get(rollout_index)
+            if member is not None:
+                if member.response_digest != response_digest:
                     raise HTTPException(
                         status_code=409,
-                        detail=(f"GenRM cohort {prompt_key!r} received inconsistent prompt or principle content"),
+                        detail=(
+                            f"GenRM cohort {prompt_key!r} already has a different response for "
+                            f"rollout_index={rollout_index}"
+                        ),
                     )
-                if cohort.phase == "failed":
-                    self._raise_cohort_failure(body, cohort)
-                member = cohort.members.get(rollout_index)
-                if member is not None:
-                    if member.response_digest != response_digest:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                f"GenRM cohort {prompt_key!r} already has a different response for "
-                                f"rollout_index={rollout_index}"
-                            ),
-                        )
-                    if cohort.phase == "completed":
-                        reward = cohort.rewards[rollout_index]
-                        return self._verify_response(body, reward)
-                    member.waiters.append(future)
-                else:
-                    if cohort.phase != "collecting":
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                f"GenRM cohort {prompt_key!r} is already {cohort.phase}; "
-                                f"rollout_index={rollout_index} cannot be added"
-                            ),
-                        )
-                    if not cohort.members:
-                        cohort.conversation_history = _input_to_conversation_history(input_messages)
-                        cohort.principle = principle
-                    cohort.members[rollout_index] = _CohortMember(
-                        response_obj=self._comparison_response(body.response),
-                        response_digest=response_digest,
-                        waiters=[future],
+                if cohort.phase == "completed":
+                    reward = cohort.rewards[rollout_index]
+                    return self._verify_response(body, reward)
+                member.waiters.append(future)
+            else:
+                if cohort.phase != "collecting":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"GenRM cohort {prompt_key!r} is already {cohort.phase}; "
+                            f"rollout_index={rollout_index} cannot be added"
+                        ),
                     )
-                    if cohort.collection_timeout_task is None:
-                        cohort.collection_timeout_task = self._own_task(
-                            self._expire_collecting_cohort(
-                                prompt_key,
-                                cohort,
-                                cfg.cohort_collection_timeout_s,
-                            ),
-                            name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
-                        )
+                if not cohort.members:
+                    cohort.conversation_history = conversation_history
+                    cohort.principle = principle
+                cohort.members[rollout_index] = _CohortMember(
+                    response_obj=response_obj,
+                    response_digest=response_digest,
+                    waiters=[future],
+                )
 
+            try:
+                if cohort.collection_timeout_task is None and cohort.phase == "collecting":
+                    cohort.collection_timeout_task = self._own_task(
+                        self._expire_collecting_cohort(prompt_key, cohort, cfg.cohort_collection_timeout_s),
+                        name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
+                    )
                 if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
                     cohort.phase = "evaluating"
                     if cohort.collection_timeout_task is not None:
@@ -414,18 +419,22 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         self._evaluate_verify_cohort(prompt_key, cohort, members),
                         name=f"genrm-cohort-evaluation-{cohort_identity}",
                     )
-        except (HTTPException, JudgeError):
-            raise
-        except Exception as error:
-            logger.exception("GenRM cohort registration failed for %s", prompt_key)
-            if cohort.phase not in ("collecting", "evaluating"):
-                raise
+            except Exception as error:
+                logger.exception("GenRM cohort task startup failed for %s", prompt_key)
+                startup_error = error
+                startup_phase = cohort.phase
+
+        # Duplicate requests need no extra copy while waiting. The group owns
+        # the first member's prompt and each accepted compact response.
+        del response_obj, conversation_history
+        if startup_error is not None:
             await self._fail_verify_cohort(
                 cohort,
-                f"GenRM cohort registration failed: {type(error).__name__}: {str(error)[:1000]}",
-                expected_phase=cohort.phase,
+                f"GenRM cohort task startup failed: {type(startup_error).__name__}: {str(startup_error)[:1000]}",
+                expected_phase=startup_phase,
             )
-            self._raise_cohort_failure(body, cohort)
+            # Consume this request's registered future through the same path as
+            # its peers, including when startup failed before the first await.
 
         # A disconnected request must not cancel the shared cohort result.
         try:
@@ -549,7 +558,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> None:
         """Release waiters and payloads owned by older active attempts."""
         cohort = self._active_group_cohorts.get(group_id)
-        if cohort is not None and cohort.group_attempt < new_attempt:
+        if cohort is not None and cohort.group_attempt < new_attempt and cohort.phase in ("collecting", "evaluating"):
             old_phase = cohort.phase
             evaluation_task = cohort.evaluation_task
             failed = await self._fail_verify_cohort(
@@ -596,7 +605,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _comparison_response(response: NeMoGymResponse) -> Dict[str, Any]:
-        """Copy scoring inputs once, excluding training tokens and unrelated response fields.
+        """Copy scoring inputs once per arrival, excluding training tokens and unrelated response fields.
 
         The response digest still covers the complete validated payload. Keep both
         reasoning summaries and answer text: length/style adjustments use them even
@@ -775,7 +784,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         limit = self.config.max_terminal_cohorts
         while self._terminal_cohorts:
             key, cohort = next(iter(self._terminal_cohorts.items()))
-            assert cohort.terminal_at is not None
+            if cohort.terminal_at is None:
+                logger.error("Discarding non-terminal GenRM cohort from terminal index: %r", key)
+                self._terminal_cohorts.popitem(last=False)
+                continue
             expired = ttl is not None and now - cohort.terminal_at >= ttl
             if not expired and len(self._terminal_cohorts) <= limit:
                 break
@@ -783,17 +795,27 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if self._verify_cohorts.get(key) is cohort:
                 self._verify_cohorts.pop(key)
 
-        excess = len(self._latest_group_attempts) - limit
+        watermarks = self._latest_group_attempts
+        active = self._active_group_cohorts
+        # Active group IDs are a subset of the retained watermarks. If none are
+        # removable, even an over-cap or expired active prefix needs no scan.
+        prunable = len(watermarks) - len(active)
+        if prunable <= 0:
+            return
+        excess = len(watermarks) - limit
         evicted = []
-        for group_id, watermark in self._latest_group_attempts.items():
+        for group_id, watermark in watermarks.items():
             expired = ttl is not None and now - watermark.updated_at >= ttl
             if not expired and excess <= 0:
                 break
-            if group_id not in self._active_group_cohorts:
+            if group_id not in active:
                 evicted.append(group_id)
                 excess -= 1
+                prunable -= 1
+                if prunable == 0:
+                    break
         for group_id in evicted:
-            self._latest_group_attempts.pop(group_id)
+            watermarks.pop(group_id)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
