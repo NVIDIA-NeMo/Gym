@@ -95,6 +95,7 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [ifbench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | IFBench with 57 instruction types (AllenAI library) | LLM judge | ✓ |
 | [inverse_if](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/inverse_if) | Inverse instruction-following benchmark — instructions that counter conventional expectations | LLM judge (per-task) | ✓ |
 | [structured_outputs](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | Schema adherence across structured output formats | Rule-based (schema validation) | ✓ |
+| [asb](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/asb) | Agent Security Bench: prompt injection, observation injection, memory poisoning, mixed attacks and plan-of-thought backdoors against tool-using agents, each against its public defenses (27 conditions) | Rule-based (attack goal, task achievement) + LLM judge (refusal) | ✓ |
 | [indirect_prompt_injection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/indirect_prompt_injection) | Resistance to injected instructions in tool-use trajectories | Rule-based (attack detection) | ✓ |
 | [jailbreak_detection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection) | Jailbreak resistance with Nemotron judge | LLM judge | ✓ |
 | [xstest](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xstest) | Over-refusal calibration (XSTest) | Rule-based | ✓ |
