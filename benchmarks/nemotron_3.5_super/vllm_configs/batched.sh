@@ -2,28 +2,51 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Serving flags from the batch pilots: use a compatible Super 3.5 vLLM image.
-# Sourced in both containers; only the evaluation container installs Gym dependencies.
+# Sourced in both containers; only the evaluation container checks Gym dependencies.
 if [[ -n "${ROUTER_NODE:-}" ]]; then
     : "${GYM_BATCH_ARGS:?Submit with benchmarks/nemotron_3.5_super/submit_batch.sh.}"
-    export UV_CACHE_DIR="/tmp/gym-batch-uv-${SLURM_JOB_ID:?Missing Slurm job ID.}"
-    uv sync --active --frozen --inexact --no-dev
     source /opt/Gym_venv/bin/activate
-    python -c 'import nemo_gym.cli.eval, nemo_gym.cli.env, ray'
 
     # submit_batch.sh encodes each original argument with printf %q, including overrides.
-    # Decode only that generated string so prefetch and evaluation see identical settings.
+    # Decode only that generated string so the check sees the evaluation's server list.
     eval "batch_args=($GYM_BATCH_ARGS)"
-    gym env prefetch \
-        "${batch_args[@]}" \
-        --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
-        --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
-        ++uv_venv_dir=/opt/uv_venvs \
-        ++skip_venv_if_present=false \
-        ++dry_run=false \
-        "++nemo_gym_log_dir=results/$EXPERIMENT_NAME/setup/logs" \
-        "++policy_base_url=http://$ROUTER_NODE:8000/v1" \
-        ++policy_api_key=dummy_api_key \
-        "++policy_model_name=$MODEL_NAME"
+    if ! python - "${batch_args[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+import nemo_gym.cli.eval
+import nemo_gym.cli.env
+import ray
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+paths, overrides = [], []
+args = iter(sys.argv[1:])
+for arg in args:
+    if arg == '--config':
+        paths.append(next(args))
+    else:
+        overrides.append(arg)
+paths += ['benchmarks/nemotron_3.5_super/sandbox_utils.yaml',
+          'benchmarks/nemotron_3.5_super/policy_model_override.yaml']
+sys.argv = ['gym', '+config_paths=' + json.dumps(paths), *overrides]
+parser = GlobalConfigDictParser()
+config = parser.parse(GlobalConfigDictParserConfig(
+    initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, offline=True,
+))
+venvs = {
+    Path('/opt/uv_venvs', server.SERVER_TYPE, next(iter(getattr(server, server.SERVER_TYPE))), '.venv')
+    for server in parser.filter_for_server_instance_configs(config)
+}
+missing = sorted(str(venv) for venv in venvs
+                 if not all((venv / name).exists() for name in ('bin/python', 'bin/activate')))
+if missing:
+    raise SystemExit('Missing prebuilt server environments:\n' + '\n'.join(missing))
+print(f'PASS: prebuilt Gym imports and {len(venvs)} server environment paths checked; no packages installed.')
+PY
+    then
+        echo 'Prebuilt dependency check failed. Rebuild CONTAINER with benchmarks/nemotron_3.5_super/build_eval_container.sh for this checkout and batch config.' >&2
+        return 1
+    fi
 fi
 
 # Sampling is in batch_configs/*.yaml so CLI overrides remain effective.

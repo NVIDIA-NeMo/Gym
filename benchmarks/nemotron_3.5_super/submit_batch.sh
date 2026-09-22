@@ -60,7 +60,8 @@ for required in "$MODEL/config.json" "$MODEL/chat_template.jinja" "$MODEL/ultra_
     [[ -r $required ]] || { echo "Missing or unreadable: $required" >&2; exit 1; }
 done
 run_dir="$repo_root/results/$EXPERIMENT_NAME"
-export MOUNTS="$repo_root:$repo_root,$repo_root:/opt/Gym,$MODEL:$MODEL:ro,$run_dir/uv_venvs:/opt/uv_venvs${MOUNTS:+,$MOUNTS}"
+# Keep /opt/uv_venvs from the image; an empty host mount would hide its dependencies.
+export MOUNTS="$repo_root:$repo_root,$repo_root:/opt/Gym,$MODEL:$MODEL:ro${MOUNTS:+,$MOUNTS}"
 [[ ! $MOUNTS =~ [^a-zA-Z0-9_./,:=-] ]] || { echo 'MOUNTS must not contain spaces or shell metacharacters.' >&2; exit 2; }
 
 # Use the checkout's installed Gym, without installing packages or contacting services.
@@ -101,8 +102,8 @@ printf 'Batch: %s; nodes: %s+%s; walltime: %s; account: %s; partition: %s\n' \
     "$batch" "$NUM_PREFILL_NODES" "$NUM_DECODE_NODES" "$SBATCH_TIME" "$SBATCH_ACCOUNT" "$SBATCH_PARTITION"
 if (( check_only )); then exit 0; fi
 
-mkdir -p "$run_dir/uv_venvs" slurm-logs
-# Preserve each argument through the launcher's generated shell and through prefetch.
+mkdir -p "$run_dir" slurm-logs
+# Preserve each argument through the launcher's generated shell and dependency check.
 # Only this printf-produced, shell-escaped string is decoded by batched.sh.
 printf -v GYM_BATCH_ARGS '%q ' "${gym_args[@]}"
 export GYM_BATCH_ARGS

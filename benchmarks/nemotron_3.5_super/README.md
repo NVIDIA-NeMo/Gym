@@ -49,7 +49,7 @@ Several benchmarks can share one model-serving deployment while retaining separa
 
 The SWE batch shares 4 nodes (16 GPUs), compared with 8 nodes (32 GPUs) when running Verified and Multilingual as separate 4-node jobs at the same time.
 
-The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) retain the pilot's global concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials. The completed core pilots also used per-agent collection caps, which have since been removed; GPU validation of the global-only core recipe is pending. Existing judge/model-service request limits are unchanged.
+The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) retain the pilot's global concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials. The completed core pilots also used per-agent collection caps, which have since been removed. The current global-only recipes passed prebuilt-image GPU smoke tests (26 core attempts; six SWE attempts), but full matched standalone-versus-batch score validation remains pending. Existing judge/model-service request limits are unchanged.
 
 The prepared SWE inputs already include three copies of each task. Use `num_repeats=1` and `num_repeats_add_seed=false` during collection so Gym doesn’t add more repeats or sampling seeds.
 
@@ -72,7 +72,7 @@ Submit either full batch with [benchmarks/nemotron_3.5_super/submit_batch.sh](su
 
 For Gym-only submission, install the checkout with `uv sync --frozen --extra dev` and make the required benchmark data available in that checkout. The checkout is mounted over the container's `/opt/Gym`, so data available only in the image will be hidden. Configure `sandbox.opensandbox.connection` in the untracked `env.yaml`, or export `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`. Core also needs `nv_inference_api_key` in `env.yaml` or an exported `NV_INFERENCE_API_KEY` for the recipe's NVIDIA-hosted judge and simulated-user endpoints. Never commit credentials. The SWE recipe uses the remote OpenCode assets configured in [benchmarks/nemotron_3.5_super/sandbox_utils.yaml](sandbox_utils.yaml); those must be available to your sandboxes.
 
-Replace the paths and account below with your own. The image must provide `/opt/Gym_venv`, `uv`, and vLLM compatible with [benchmarks/nemotron_3.5_super/vllm_configs/batched.sh](vllm_configs/batched.sh). This serving config retains the pilot's flags and requires `config.json`, `chat_template.jinja`, and `ultra_v3_reasoning_parser.py` in the checkpoint directory. A different container/checkpoint combination needs validation. These examples request 20 hours on `batch_long` to allow for setup and the core batch's measured runtime; choose a partition and limit supported by your cluster.
+Replace the paths and account below with your own. The image must provide `/opt/Gym_venv`, all required server environments under `/opt/uv_venvs`, and vLLM compatible with [benchmarks/nemotron_3.5_super/vllm_configs/batched.sh](vllm_configs/batched.sh). Follow [Batch builds](#batch-builds) to include the additional core-suite dependencies; evaluation jobs reuse the installed dependencies. This serving config retains the pilot's flags and requires `config.json`, `chat_template.jinja`, and `ultra_v3_reasoning_parser.py` in the checkpoint directory. A different container/checkpoint combination needs validation. These examples request 20 hours on `batch_long` to accommodate the core batch's measured runtime; choose a partition and limit supported by your cluster.
 
 ```bash
 # Full core batch
@@ -81,7 +81,10 @@ CONTAINER=/shared/containers/super35-gym.sqsh \
 SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch_long \
 SBATCH_TIME=20:00:00 \
-bash benchmarks/nemotron_3.5_super/submit_batch.sh core
+EXPERIMENT_NAME=super35-core-run1 \
+ROLLOUTS_FPATH=results/super35-core-run1/rollouts.jsonl \
+bash benchmarks/nemotron_3.5_super/submit_batch.sh core \
+   ++resume_from_cache=true
 
 # Full SWE-bench Verified + Multilingual batch
 MODEL=/shared/checkpoints/super35/hf \
@@ -89,12 +92,15 @@ CONTAINER=/shared/containers/super35-gym.sqsh \
 SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch_long \
 SBATCH_TIME=20:00:00 \
-bash benchmarks/nemotron_3.5_super/submit_batch.sh swe
+EXPERIMENT_NAME=super35-swe-run1 \
+ROLLOUTS_FPATH=results/super35-swe-run1/rollouts.jsonl \
+bash benchmarks/nemotron_3.5_super/submit_batch.sh swe \
+   ++resume_from_cache=true
 ```
 
-Append `--check` to either command to check local paths and resolve configuration without submitting a job, installing dependencies, or checking live services. Append `--config path/to/overrides.yaml` or Hydra overrides such as `++num_samples_in_parallel=256` to customize the recipe. The same arguments reach dependency setup and evaluation. Keep extra config files in the checkout, or expose their paths through `MOUNTS`. `MODEL_NAME`, `SBATCH_QOS`, and the node counts are optional environment overrides; `GYM_PYTHON` can select a local Python environment instead of `.venv/bin/python`.
+Append `--check` to either command to check local paths and resolve configuration without submitting a job, opening the container, installing dependencies, or checking live services. Append `--config path/to/overrides.yaml` or Hydra overrides such as `++num_samples_in_parallel=256` to customize the recipe. The same arguments reach the in-container dependency check and evaluation. Keep extra config files in the checkout, or expose their paths through `MOUNTS`. `MODEL_NAME`, `SBATCH_QOS`, and the node counts are optional environment overrides; `GYM_PYTHON` can select a local Python environment instead of `.venv/bin/python`.
 
-The launcher mounts the checkout and checkpoint automatically, creates per-experiment server environments, and installs dependencies before evaluation. It does not depend on any root-level pilot helpers or earlier jobs. Dependency setup uses allocated walltime. `--check` and local regression tests do not establish that a new container or recipe will run successfully on GPUs.
+The launcher mounts the checkout and checkpoint automatically but preserves the image's `/opt/uv_venvs`; do not mount an empty host directory over it. Before preparation, it checks Gym imports and the required server environment paths. Missing environments stop the job with a rebuild instruction instead of triggering installation. These checks do not verify every installed package or live service, and GPU smoke tests are still required for a new image. The launcher does not depend on root-level pilot helpers or earlier jobs.
 
 By default, each submission gets a fresh experiment name and timestamped output. To resume, use the same checkpoint and evaluation settings, set `EXPERIMENT_NAME` and `ROLLOUTS_FPATH` to the original name and saved output, and append `++resume_from_cache=true` to the command. For requeue recovery, supply the explicit output path and override on the initial submission. The experiment name alone does not enable resume; without the override, Gym clears existing output at an explicitly selected path. Preserve the materialized inputs and wait for the preceding job and cleanup to finish before manually resubmitting.
 
@@ -234,7 +240,9 @@ fingerprint above instead.
 
 
 ### Build eval container
+
 Example run:
+
 ```bash
 SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch \
@@ -246,6 +254,29 @@ GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
 sbatch --gres=gpu:4 \
   benchmarks/nemotron_3.5_super/build_eval_container.sh
 ```
+
+
+#### Batch builds
+
+For one image covering both core and SWE batches, reuse the shared build config and add `--config benchmarks/nemotron_3.5_super/core_text.yaml` after the script name. The suite adds the LMArena, LiveCodeBench, IFBench, and APEX dependencies missing from the shared config; it does not select which batch runs afterward.
+
+```bash
+mkdir -p results/containers slurm-logs
+INPUT_CONTAINER=/shared/containers/super35-vllm-base.sqsh \
+OUTPUT_CONTAINER="$PWD/results/containers/super35-gym.sqsh" \
+VLLM_ROUTER_WHEEL=/shared/wheels/vllm_router-0.1.15-cp38-abi3-linux_aarch64.whl \
+MOUNTS="$PWD:/build-source:ro" \
+NEMO_GYM_GIT_URL=/build-source \
+NEMO_GYM_GIT_REF="$(git rev-parse HEAD)" \
+GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
+SKIP_PREPARE=1 \
+sbatch --account=my-slurm-account --partition=cpu \
+  --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=32G --time=02:00:00 \
+  benchmarks/nemotron_3.5_super/build_eval_container.sh \
+  --config benchmarks/nemotron_3.5_super/core_text.yaml
+```
+
+Set `CONTAINER` in both batch run commands to the resulting image. The batch launcher reuses its installed environments rather than installing dependencies during evaluation. Keep benchmark data in the checkout mounted by the launcher.
 
 
 ### Launch vLLM

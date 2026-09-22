@@ -3,6 +3,7 @@
 """Exercise the real launch scripts without Slurm jobs, installs, or model calls."""
 
 import os
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = Path("benchmarks/nemotron_3.5_super")
 SUBMIT = BENCHMARK / "submit_batch.sh"
 SERVING = BENCHMARK / "vllm_configs/batched.sh"
+BUILDER = BENCHMARK / "build_eval_container.sh"
 
 
 def run_shell(script: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -45,6 +47,7 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     for path in (
         SUBMIT,
         SERVING,
+        BUILDER,
         BENCHMARK / "sbatch_external_vllm.sh",
         BENCHMARK / "batch_configs/core.yaml",
         BENCHMARK / "batch_configs/swe.yaml",
@@ -102,12 +105,16 @@ source() {
     if [[ "$1" != /opt/Gym_venv/bin/activate ]]; then builtin source "$@"; fi
 }
 cd() { if [[ "$1" != /opt/Gym ]]; then builtin cd "$@"; fi; }
-uv() { echo UV_SYNC; return "${UV_STATUS:-0}"; }
-python() { echo DRIVER_CHECK; return "${DRIVER_STATUS:-0}"; }
+uv() { echo UNEXPECTED_INSTALL; return 99; }
+python() {
+    printf '%s\0' "$@" > "$CAPTURE/dependency-check-args"
+    cat > "$CAPTURE/dependency-check.py"
+    return "${DRIVER_STATUS:-0}"
+}
 getent() { printf '127.0.0.1 router\n'; }
 gym() {
     printf '%s\0' "$@" > "$CAPTURE/$2-args"
-    if [[ "$1 $2" == 'env prefetch' ]]; then return "${PREFETCH_STATUS:-0}"; fi
+    if [[ "$1 $2" == 'env prefetch' ]]; then return 99; fi
 }
 """
 
@@ -129,7 +136,7 @@ def run_evaluation(root: Path, env: dict[str, str], **settings: str) -> subproce
 
 
 @pytest.mark.parametrize("batch", ["core", "swe"])
-def test_submit_forwards_settings_to_prefetch_prepare_and_run(checkout, batch: str) -> None:
+def test_submit_forwards_settings_to_dependency_check_prepare_and_run(checkout, batch: str) -> None:
     """The full path uses caller settings and preserves Hydra argument boundaries."""
     root, env = checkout
     env.update(ROLLOUTS_FPATH="results/existing.jsonl", MOUNTS="/shared/data:/shared/data:ro")
@@ -150,23 +157,24 @@ def test_submit_forwards_settings_to_prefetch_prepare_and_run(checkout, batch: s
     assert "--nodes=4" in read_args(root / "sbatch-args")
     account, partition, model, name, mounts, serving, output = read_args(root / "launch-env")
     assert (account, partition, model, name) == ("test-account", "batch_long", env["MODEL"], "test-model")
-    assert mounts == (
-        f"{root}:{root},{root}:/opt/Gym,{model}:{model}:ro,"
-        f"{root}/results/batch-test/uv_venvs:/opt/uv_venvs,/shared/data:/shared/data:ro"
-    )
+    assert mounts == f"{root}:{root},{root}:/opt/Gym,{model}:{model}:ro,/shared/data:/shared/data:ro"
+    assert not (root / "results/batch-test/uv_venvs").exists()
     assert serving == str(root / SERVING)
     assert output == "results/existing.jsonl"
     result = run_evaluation(root, env)
     assert result.returncode == 0, result.stderr
     for name, prefix in (
-        ("prefetch", ["env", "prefetch"]),
         ("prepare", ["eval", "prepare"]),
         ("run", ["eval", "run"]),
     ):
         captured = read_args(root / f"{name}-args")
         assert captured[: 2 + len(args)] == [*prefix, *args]
     assert "++output_jsonl_fpath=results/existing.jsonl" in read_args(root / "run-args")
-    assert "++skip_venv_if_present=false" in read_args(root / "prefetch-args")
+    assert read_args(root / "dependency-check-args") == ["-", *args]
+    assert "+uv_venv_dir=/opt/uv_venvs" in read_args(root / "run-args")
+    assert "+skip_venv_if_present=true" in read_args(root / "run-args")
+    assert not (root / "prefetch-args").exists()
+    assert "UNEXPECTED_INSTALL" not in result.stdout
     assert not (root / "INJECTED").exists()
 
 
@@ -224,14 +232,14 @@ def test_preflight_failure_does_not_submit_or_create_run(checkout) -> None:
     assert not (root / "results").exists()
 
 
-@pytest.mark.parametrize("failure", ["UV_STATUS", "DRIVER_STATUS", "PREFETCH_STATUS"])
-def test_dependency_failure_prevents_evaluation(checkout, failure: str) -> None:
-    """Never evaluate using partially installed parent or server environments."""
+def test_dependency_failure_prevents_evaluation(checkout) -> None:
+    """An unusable prebuilt image fails before preparation; it is not repaired in the job."""
     root, env = checkout
     result = run_shell(f"bash {SUBMIT} swe", root, env)
     assert result.returncode == 0, result.stderr
-    result = run_evaluation(root, env, **{failure: "43"})
-    assert result.returncode == 43
+    result = run_evaluation(root, env, DRIVER_STATUS="43")
+    assert result.returncode == 1
+    assert "Rebuild CONTAINER" in result.stderr
     assert not (root / "prepare-args").exists()
     assert not (root / "run-args").exists()
 
@@ -247,9 +255,48 @@ def test_serving_workers_do_not_install_gym_dependencies(checkout) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.count("--tensor-parallel-size 4") == 2
-    assert "UV_SYNC" not in result.stdout
-    assert "DRIVER_CHECK" not in result.stdout
+    assert "UNEXPECTED_INSTALL" not in result.stdout
+    assert not (root / "dependency-check-args").exists()
     assert not (root / "prefetch-args").exists()
+
+
+@pytest.mark.parametrize("batch, expected_venvs", [("core", 14), ("swe", 3)])
+@pytest.mark.parametrize("missing_file", [None, "bin/python", "bin/activate"])
+def test_prebuilt_check_uses_resolved_server_environments(
+    checkout, monkeypatch, capsys, batch: str, expected_venvs: int, missing_file: str | None
+) -> None:
+    """Check the real recipes' deduplicated image paths, rejecting absent or incomplete venvs."""
+    root, env = checkout
+    result = run_shell(f"bash {SUBMIT} {batch}", root, env)
+    assert result.returncode == 0, result.stderr
+    result = run_evaluation(root, env)
+    assert result.returncode == 0, result.stderr
+
+    (root / "env.yaml").write_text("{}\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN", "sandbox.example")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "fixture-key")
+    monkeypatch.setenv("NV_INFERENCE_API_KEY", "fixture-key")
+    monkeypatch.setattr(sys, "argv", read_args(root / "dependency-check-args"))
+    image_root = Path("/opt/uv_venvs")
+    missing_venv = image_root / "responses_api_models/vllm_model/.venv"
+    checked = set()
+    original_exists = Path.exists
+
+    def image_file_exists(path: Path) -> bool:
+        if path.is_relative_to(image_root):
+            checked.add(path.parent.parent)
+            return missing_file is None or path != missing_venv / missing_file
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", image_file_exists)
+    if missing_file:
+        with pytest.raises(SystemExit, match=f"Missing prebuilt server environments:\\n{missing_venv}"):
+            runpy.run_path(str(root / "dependency-check.py"), run_name="__main__")
+    else:
+        runpy.run_path(str(root / "dependency-check.py"), run_name="__main__")
+        assert f"{expected_venvs} server environment paths checked; no packages installed" in capsys.readouterr().out
+    assert len(checked) == expected_venvs
 
 
 @pytest.mark.parametrize("batch", ["core", "swe"])
@@ -337,3 +384,97 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
             config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server.name
             == "Qwen3-235B-A22B-Instruct-2507-FP8"
         )
+
+
+def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch) -> None:
+    """Existing build settings plus the core suite cover both recipes without a new inventory."""
+    monkeypatch.chdir(ROOT)
+    parser = GlobalConfigDictParser()
+    components = {}
+    paths_by_recipe = {
+        "core": [str(BENCHMARK / "batch_configs/core.yaml")],
+        "swe": [str(BENCHMARK / "batch_configs/swe.yaml")],
+        "container": [str(BENCHMARK / "core_text.yaml"), str(BENCHMARK / "eval_container_config.yaml")],
+    }
+    for recipe, paths in paths_by_recipe.items():
+        config = parser.parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    {
+                        "config_paths": paths,
+                        "nv_inference_api_key": "fixture-key",
+                    },
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        components[recipe] = {
+            (server.SERVER_TYPE, next(iter(getattr(server, server.SERVER_TYPE))))
+            for server in parser.filter_for_server_instance_configs(config)
+        }
+        if recipe == "container":
+            # Build-time interpolation must work without an endpoint or credentials.
+            OmegaConf.to_container(config, resolve=True)
+    assert components["core"] | components["swe"] <= components["container"]
+    assert len(components["core"] | components["swe"]) == 16
+
+
+@pytest.mark.parametrize("extra_configs", [[], ["extra with spaces.yaml", "literal $(touch INJECTED).yaml"]])
+@pytest.mark.parametrize("skip_prepare", ["0", "1"])
+def test_container_builder_forwards_configs_to_prepare_and_setup(checkout, extra_configs, skip_prepare: str) -> None:
+    """Builds preserve config arguments and install dependencies without starting servers."""
+    root, env = checkout
+    wheel = root / "router.whl"
+    wheel.touch()
+    env.update(
+        INPUT_CONTAINER="base.sqsh",
+        OUTPUT_CONTAINER=str(root / "built.sqsh"),
+        MOUNTS="",
+        GYM_CONFIG="base with spaces.yaml",
+        VLLM_ROUTER_WHEEL=str(wheel),
+        SKIP_PREPARE=skip_prepare,
+    )
+    extras = [arg for path in extra_configs for arg in ("--config", path)]
+    # Capture the actual generated container script without allocating nodes or building an image.
+    capture = 'srun() { cat > "$CAPTURE/build-command"; touch "$OUTPUT_CONTAINER.partial"; }\n'
+    result = run_shell(capture + shlex.join(["source", str(BUILDER), *extras]), root, env)
+    assert result.returncode == 0, result.stderr
+    # Execute that script with system changes stubbed; only Gym argument recording has effects.
+    stubs = "\n".join(
+        f"{command}() {{ :; }}"
+        for command in ("source", "cd", "uv", "git", "apt-get", "gdown", "python3", "mkdir", "rm")
+    )
+    stubs += '\ngym() { printf "%s\\0" "$@" > "$CAPTURE/$2-args"; }\n'
+    result = run_shell(stubs + (root / "build-command").read_text(), root, env)
+    assert result.returncode == 0, result.stderr
+    configs = [*extras, "--config", env["GYM_CONFIG"]]
+    assert read_args(root / "prefetch-args") == [
+        "env",
+        "prefetch",
+        *configs,
+        "++uv_venv_dir=/opt/uv_venvs",
+    ]
+    assert not (root / "start-args").exists()
+    if skip_prepare == "0":
+        assert read_args(root / "prepare-args") == ["eval", "prepare", "+num_prepare_benchmark_processes=4", *configs]
+    else:
+        assert not (root / "prepare-args").exists()
+    assert not (root / "INJECTED").exists()
+
+
+@pytest.mark.parametrize("args", [["--config"], ["--unexpected", "config.yaml"]])
+def test_container_builder_rejects_invalid_config_arguments(checkout, args: list[str]) -> None:
+    """Malformed extra configs fail before launching a build or touching existing output."""
+    root, env = checkout
+    env.update(
+        INPUT_CONTAINER="base.sqsh", OUTPUT_CONTAINER=str(root / "built.sqsh"), MOUNTS="", GYM_CONFIG="base.yaml"
+    )
+    output = root / "built.sqsh"
+    output.write_text("existing image")
+    result = run_shell(shlex.join(["bash", str(BUILDER), *args]), root, env)
+    assert result.returncode == 2
+    assert "Usage:" in result.stderr
+    assert output.read_text() == "existing image"
