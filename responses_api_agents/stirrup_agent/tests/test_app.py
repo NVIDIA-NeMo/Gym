@@ -14,6 +14,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,6 +37,7 @@ from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapperConfig,
     StirrupRunRequest,
     TaskPerAttemptTimeoutError,
+    _classify_rollout_failure,
     _classify_verify_failure,
     _has_real_deliverable,
     _load_task_registry,
@@ -1094,6 +1096,67 @@ class TestReuseCachedDeliverable:
         assert result["response"]["id"] == "gdpval-task-1"
         assert result["response"]["metadata"] is None
         assert result["response"]["output"][0]["content"][0]["text"] == "done"
+
+
+class TestRolloutFailureClassification:
+    """A 5xx from the served policy model must be retryable/waivable."""
+
+    @staticmethod
+    def _aiohttp_error(status: int):
+        from aiohttp import ClientResponseError
+
+        return ClientResponseError(
+            request_info=MagicMock(real_url="http://policy/v1/chat/completions"),
+            history=(),
+            status=status,
+            message="upstream error",
+        )
+
+    def test_policy_endpoint_500_is_transient(self) -> None:
+        assert _classify_rollout_failure(self._aiohttp_error(500)) == "transient"
+
+    def test_policy_endpoint_503_is_transient(self) -> None:
+        assert _classify_rollout_failure(self._aiohttp_error(503)) == "transient"
+
+    def test_status_code_attribute_is_found(self) -> None:
+        """OpenAI SDK / httpx spell it ``status_code``, not ``status``."""
+
+        class _SdkError(Exception):
+            status_code = 502
+
+        assert _classify_rollout_failure(_SdkError("bad gateway")) == "transient"
+
+    def test_status_on_attached_response_is_found(self) -> None:
+        class _WithResponse(Exception):
+            response = SimpleNamespace(status_code=500)
+
+        assert _classify_rollout_failure(_WithResponse("boom")) == "transient"
+
+    def test_wrapped_5xx_is_transient(self) -> None:
+        """Ray re-raises worker failures wrapped; the status must still surface."""
+        inner = self._aiohttp_error(500)
+        outer = RuntimeError("rollout failed")
+        outer.__cause__ = inner
+        assert _classify_rollout_failure(outer) == "transient"
+
+    def test_client_error_is_not_transient(self) -> None:
+        assert _classify_rollout_failure(self._aiohttp_error(400)) == "legitimate"
+
+    def test_model_refusal_is_not_reclassified(self) -> None:
+        assert _classify_rollout_failure(ValueError("the model declined to answer")) == "legitimate"
+
+    def test_malformed_output_is_not_reclassified(self) -> None:
+        assert _classify_rollout_failure(KeyError("tool_calls")) == "legitimate"
+
+    def test_timeout_still_wins_over_status(self) -> None:
+        exc = TaskPerAttemptTimeoutError("per-attempt timeout")
+        exc.__cause__ = self._aiohttp_error(500)
+        assert _classify_rollout_failure(exc) == "timeout_exceeded"
+
+    def test_skip_still_wins_over_status(self) -> None:
+        exc = TaskSampleSkipError("skip")
+        exc.__cause__ = self._aiohttp_error(500)
+        assert _classify_rollout_failure(exc) == "skipped"
 
 
 class TestVerifyFailureClassification:

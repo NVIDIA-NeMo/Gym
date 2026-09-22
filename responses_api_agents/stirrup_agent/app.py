@@ -269,17 +269,51 @@ def _has_user_code_frame(exc: BaseException) -> bool:
     return _walk(exc)
 
 
+def _http_status_from_exception(exc: BaseException) -> Optional[int]:
+    """Return the HTTP status carried by *exc* or anything in its chain.
+
+    Clients disagree on where the status lives: ``aiohttp`` puts it on
+    ``status``, the OpenAI SDK and ``httpx`` on ``status_code`` (sometimes only
+    on an attached ``response``). Ray re-raises a worker failure with the
+    original exception on ``cause``. Walk all of them rather than isinstance-ing
+    against libraries this module does not import.
+    """
+    seen: set[int] = set()
+    queue: List[Any] = [exc]
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        for holder in (current, getattr(current, "response", None)):
+            if holder is None:
+                continue
+            for attr in ("status", "status_code"):
+                value = getattr(holder, attr, None)
+                if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+                    return value
+        queue.extend([current.__cause__, current.__context__, getattr(current, "cause", None)])
+    return None
+
+
 def _classify_rollout_failure(exc: BaseException) -> str:
     """Classify an exception raised by ``self.responses(...)``.
 
-    Returns one of: 'kill_shaped', 'timeout_exceeded', 'skipped', 'legitimate'.
-    The 'transient' class only applies to verify-side failures and is
-    produced by :func:`_classify_verify_failure`.
+    Returns one of: 'kill_shaped', 'timeout_exceeded', 'skipped', 'transient',
+    'legitimate'.
     """
     if isinstance(exc, TaskPerAttemptTimeoutError):
         return "timeout_exceeded"
     if isinstance(exc, TaskSampleSkipError):
         return "skipped"
+    # A 5xx from the served policy model is the server failing to answer, not
+    # the model answering badly: retrying the rollout is the correct response,
+    # and only a retryable class is eligible for in-process retry or for
+    # waiving. Refusals and malformed output arrive as a 200 (or as a parse
+    # error with no status attached) and keep their existing class.
+    status = _http_status_from_exception(exc)
+    if status is not None and 500 <= status < 600:
+        return "transient"
     try:
         from ray.exceptions import (
             LocalRayletDiedError,
