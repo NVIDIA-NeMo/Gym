@@ -69,7 +69,7 @@ class PoolSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
-    # `latest` or a release such as 1.0.16; ignored when remote_pool_binary_path is set.
+    # `latest` or a release tag such as v1.0.16; ignored when remote_pool_binary_path is set.
     pool_version: str = "latest"
     remote_pool_binary_path: Optional[str] = None
     # Model name pool sends to the Gym model proxy, which substitutes the configured policy model.

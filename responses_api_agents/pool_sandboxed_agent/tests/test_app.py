@@ -47,7 +47,7 @@ def _config() -> PoolSandboxedAgentConfig:
         name="pool_sandboxed_agent",
         resources_server=ResourcesServerRef(type="resources_servers", name=""),
         model_server=ModelServerRef(type="responses_api_models", name=""),
-        pool_version="1.0.16",
+        pool_version="v1.0.16",
         pool_max_context_window=1234,
         pool_extra_args=["--verbose"],
         sandbox_provider="",
@@ -85,7 +85,7 @@ def test_build_command_installs_and_runs_pool_outside_the_workdir() -> None:
     command = agent._build_command("/tmp/nemo-gym-pool-x", "http://gym:8000/ng-rollout/r1/v1")
 
     assert "POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_DIR=/tmp/nemo-gym-pool-x/bin" in command
-    assert 'sh "$installer" 1.0.16' in command
+    assert 'sh "$installer" v1.0.16' in command
     assert "POOLSIDE_STANDALONE_BASE_URL=http://gym:8000/ng-rollout/r1/v1" in command
     assert "POOLSIDE_STANDALONE_MODEL=dummy_model" in command
     assert "POOLSIDE_STANDALONE_CONTEXT_LENGTH=1234" in command
