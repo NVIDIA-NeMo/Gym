@@ -149,6 +149,49 @@ async def test_native_execution_preserves_settings_timing_and_verification(agent
     assert _RUN.get() is None
 
 
+@pytest.mark.parametrize(
+    "failure,tail,recover",
+    [
+        ("exit", '[14.0, {"type":', True),
+        ("timeout", '[14.0, {"type":', True),
+        ("exit", '[14.0, {"type":\n', False),
+        ("exit", '[14.0, {"type":\n[15.0, {}]\n', False),
+        (None, '[14.0, {"type":', False),
+    ],
+)
+async def test_partial_event_tail_only_recovers_failed_execution(agent, failure, tail, recover, caplog):
+    server, sandbox = agent
+    download = sandbox.download.side_effect
+
+    async def download_with_partial_tail(remote, local):
+        await download(remote, local)
+        if remote.endswith("events.jsonl"):
+            with local.open("a") as stream:
+                stream.write("\n" + tail)
+
+    sandbox.download.side_effect = download_with_partial_tail
+    if failure:
+        sandbox.exec.side_effect = [
+            SimpleNamespace(return_code=0, error_type=None),
+            TimeoutError() if failure == "timeout" else SimpleNamespace(return_code=137, error_type=None),
+        ]
+    if recover:
+        result = await server.run(SimpleNamespace(cookies={}), request_body())
+        assert result.reward == 0 and result.pi_failed
+        assert result.pi_exit_code == (137 if failure == "exit" else None)
+        assert result.pi_error_type == ("TimeoutError" if failure == "timeout" else None)
+        tool = next(r for r in result.ng_agent_observations.records if isinstance(r, ToolCallObservation))
+        assert tool.started_at == 10 and tool.completed_at == 11
+        assert (Path(result.pi_results_dir) / "events.jsonl").read_text().endswith(tail)
+        assert "Ignoring incomplete trailing Pi event" in caplog.text
+    else:
+        with pytest.raises(json.JSONDecodeError):
+            await server.run(SimpleNamespace(cookies={}), request_body())
+    assert server.server_client.post.await_count == 1  # Never send failed/corrupt captures to the judge.
+    sandbox.stop.assert_awaited_once()
+    assert _RUN.get() is None
+
+
 @pytest.mark.parametrize("failure", ["exit", "timeout", "export", "cancel", "judge"])
 async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure):
     server, sandbox = agent

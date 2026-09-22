@@ -196,9 +196,21 @@ class PiSandboxedAgent(PiAgent):
         await sandbox.download(stderr_path, root / "stderr.log")
         await sandbox.download(remote + "/events.jsonl", root / "events.jsonl")
         stdout = (root / "stdout.jsonl").read_text(errors="replace")
-        events = [json.loads(line) for line in (root / "events.jsonl").read_text().split("\n") if line.strip()]
         error_type = error_type or getattr(result, "error_type", None)
         return_code = getattr(result, "return_code", None)
+        events = []
+        lines = (root / "events.jsonl").read_text().split("\n")
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                # A killed capture process may leave its last write incomplete. Keep the
+                # raw artifact, but only tolerate an unterminated tail on failed execution.
+                if index != len(lines) - 1 or (not error_type and return_code == 0):
+                    raise
+                LOG.warning("Ignoring incomplete trailing Pi event after failed execution: %s", root / "events.jsonl")
         if error_type or return_code != 0:
             events.append(
                 (
