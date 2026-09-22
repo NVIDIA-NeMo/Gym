@@ -1,7 +1,10 @@
 # sec_local_index
 
-Shared SEC search code. This is a library, not a resources server: it has no
-`configs/` directory and nothing starts it. Two servers import it.
+Shared SEC search code. This is a library, not a resources server: nothing
+starts it, and `entrypoint: local_edgar_search.py` in its config exists only
+because every module under `resources_servers/` declares one, the same way
+`resources_servers/gymnasium` does. `data/` holds the five smoke rows the module
+test gate requires; no agent runs them. Two servers import this package.
 
 `finance_sec_search` and `finance_agent_v2` both expose an `edgar_search` tool
 and both can answer it either from sec-api.io or from a local corpus. Without a
@@ -20,6 +23,9 @@ without anyone noticing.
 | `sec_urls.py` | Parsing SEC Archives URLs into CIK, accession and document parts |
 | `cache.py` | `ToolCache`, the disk-backed tool response cache |
 | `scripts/build_local_edgar_metadata.py` | Builds the metadata sidecar beside an index |
+
+`tests/index_fixtures.py` builds indexes in the shape the builder produces. Both
+servers' suites import it, so a schema change is felt in one place.
 
 ## Choosing a mode
 
