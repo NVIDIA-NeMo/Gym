@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -35,9 +36,20 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+import requests
+
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
+from responses_api_agents.osworld_agent.rollout_outcome import (
+    RUNTIME_ADMISSION_POLICY_ID,
+    RolloutOutcomeFacts,
+    classify_rollout_outcome,
+)
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.runtime_errors import (
+    OSWorldActionTimeoutError,
+    OSWorldModelTimeoutError,
+)
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -48,9 +60,64 @@ SANDBOX_POINTER_DESKTOP_ENV_CLASS = "responses_api_agents.osworld_agent.sandbox_
 # Sentinel actions OSWorld recognises in step().
 _TERMINAL_ACTIONS = {"DONE", "FAIL"}
 
+_IDLE_INHIBITOR_OK = "OSWORLD_IDLE_INHIBITOR_OK"
+_IDLE_INHIBITOR_SCRIPT = rf"""
+set -eu
 
-class _EvaluatorScoreZero(BaseException):
-    """Control signal for declarative evaluator setup that proves a zero score."""
+runtime_dir="${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
+bus_path="$runtime_dir/bus"
+test -S "$bus_path" || {{ echo "user DBus socket not found: $bus_path" >&2; exit 20; }}
+export XDG_RUNTIME_DIR="$runtime_dir"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+
+command -v gnome-session-inhibit >/dev/null 2>&1 || {{
+    echo "gnome-session-inhibit is unavailable" >&2
+    exit 21
+}}
+command -v gdbus >/dev/null 2>&1 || {{ echo "gdbus is unavailable" >&2; exit 22; }}
+
+log_path=/tmp/nemo-gym-osworld-idle-inhibitor.log
+pid_path=/tmp/nemo-gym-osworld-idle-inhibitor.pid
+nohup gnome-session-inhibit \
+    --app-id org.nvidia.nemo-gym.osworld \
+    --reason "OSWorld rollout in progress" \
+    --inhibit idle \
+    --inhibit-only >"$log_path" 2>&1 &
+inhibitor_pid=$!
+printf '%s\n' "$inhibitor_pid" >"$pid_path"
+
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+    kill -0 "$inhibitor_pid" 2>/dev/null || {{
+        cat "$log_path" >&2 || true
+        echo "idle inhibitor exited before registration" >&2
+        exit 23
+    }}
+    if inhibited="$(gdbus call --session \
+        --dest org.gnome.SessionManager \
+        --object-path /org/gnome/SessionManager \
+        --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null)"; then
+        case "$inhibited" in
+            *true*) echo "{_IDLE_INHIBITOR_OK}"; exit 0 ;;
+        esac
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+kill "$inhibitor_pid" 2>/dev/null || true
+cat "$log_path" >&2 || true
+echo "idle inhibitor did not register with GNOME SessionManager" >&2
+exit 24
+"""
+
+
+class _PointerRetryDeadline(BaseException):
+    """Exit Pointer's nested retry loops at the Gym rollout boundary."""
+
+    def __init__(self, message: str, *, task_deadline: bool = False) -> None:
+        super().__init__(message)
+        self.task_deadline = task_deadline
 
 
 @dataclass
@@ -61,6 +128,8 @@ class StepRecord:
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
+    state: Dict[str, Any] = field(default_factory=dict)
+    next_state: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -70,15 +139,59 @@ class RolloutResult:
     steps: List[StepRecord]
     error: Optional[str] = None
     finished: bool = False  # True iff the loop ended on DONE/FAIL or env.done
-    # NeMo-RL drops the gradient for this sample when reward is unreliable. True iff:
-    #  • error is set (model/evaluator/timeout), or
-    #  • loop exhausted max_steps without DONE/FAIL (finished=False), or
-    #  • task_timeout tripped.
-    mask_sample: bool = False
+    horizon_reached: bool = False
+    evaluation_completed: bool = False
+    # Runtime admission is intentionally narrower than trainer admission.  It
+    # says only whether execution/evaluation is trustworthy; exact trace and
+    # loss-token admission remain trainer-owned.
+    runtime_eligible: bool = False
+    runtime_admission_reason: str = "evaluation_incomplete"
+    runtime_admission_policy_id: str = RUNTIME_ADMISSION_POLICY_ID
+    # Backward-compatible NeMo-RL carrier. Internal constructors keep this
+    # equal to ``not runtime_eligible``.
+    mask_sample: bool = True
     # Absolute path to the per-task log and artifact directory when
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
     termination_reason: Optional[str] = None
+    # Resolved Gym-owned model/history behavior. It is deliberately distinct
+    # from request-owned sampling parameters and infrastructure provenance.
+    agent_contract: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "finished",
+            "horizon_reached",
+            "evaluation_completed",
+            "runtime_eligible",
+            "mask_sample",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"RolloutResult.{field_name} must be boolean")
+        if self.mask_sample == self.runtime_eligible:
+            raise ValueError("RolloutResult.mask_sample must equal not runtime_eligible")
+        if self.runtime_eligible and not self.evaluation_completed:
+            raise ValueError("RolloutResult cannot be runtime-eligible before evaluation completes")
+        for field_name in ("runtime_admission_reason", "runtime_admission_policy_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"RolloutResult.{field_name} must be a non-empty string")
+        if self.termination_reason == "max_steps" and not self.horizon_reached:
+            raise ValueError("RolloutResult max_steps termination requires horizon_reached")
+
+
+def _assert_observed_agent_contract(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> None:
+    """Verify that the instantiated adapter honored both independent axes."""
+
+    for field in ("model_protocol", "history_policy", "agent_options"):
+        if expected.get(field) != observed.get(field):
+            raise ValueError(
+                f"Instantiated OSWorld agent {field} disagrees with the resolved contract: "
+                f"expected={expected.get(field)!r}, observed={observed.get(field)!r}"
+            )
 
 
 @dataclass
@@ -164,6 +277,30 @@ def _merge_consecutive_pyautogui_actions(actions: List[Any]) -> List[Any]:
     if pending:
         merged.append("\n".join(pending))
     return merged
+
+
+def _install_guest_idle_inhibitor(setup_controller: Any, logger: logging.Logger) -> None:
+    """Prevent idle locking without changing benchmark-visible GNOME settings."""
+
+    execute_setup = getattr(setup_controller, "_execute_setup", None)
+    if not callable(execute_setup):
+        raise RuntimeError("OSWorld setup controller cannot install the idle inhibitor")
+
+    result = execute_setup(
+        ["/bin/bash", "-c", _IDLE_INHIBITOR_SCRIPT],
+        expected_returncodes=[0],
+    )
+    if not isinstance(result, Mapping):
+        raise RuntimeError(f"idle inhibitor returned an invalid response: {result!r}")
+
+    output = str(result.get("output") or "").strip()
+    error_output = str(result.get("error") or "").strip()
+    returncode = result.get("returncode")
+    if returncode != 0 or _IDLE_INHIBITOR_OK not in output.splitlines():
+        detail = error_output or output or "no guest output"
+        raise RuntimeError(f"idle inhibitor failed (returncode={returncode!r}): {detail}")
+
+    logger.info("Guest idle inhibitor registered")
 
 
 def _model_response_content(response: Any) -> str:
@@ -281,13 +418,8 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_
     return linked
 
 
-def _patch_setup_execute_contract() -> None:
-    """Support optional return-code policies used by newer OSWorld tasks.
-
-    The pinned upstream method remains untouched for existing tasks. The
-    compatibility path runs only when a task explicitly supplies
-    ``expected_returncodes`` or ``on_nonzero``.
-    """
+def _patch_chrome_setup_cdp_lifecycle() -> None:
+    """Backport tab setup lifecycle fixes when the installed OSWorld lacks them."""
 
     try:
         from desktop_env.controllers import setup as setup_module  # type: ignore
@@ -295,110 +427,67 @@ def _patch_setup_execute_contract() -> None:
         return
 
     controller_class = setup_module.SetupController
-    current = controller_class._execute_setup
-    if getattr(current, "_nemo_gym_returncode_contract", False):
-        return
-    try:
-        parameters = inspect.signature(current).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    if {"expected_returncodes", "on_nonzero"}.issubset(parameters):
+    open_tabs = controller_class._chrome_open_tabs_setup
+    close_tabs = controller_class._chrome_close_tabs_setup
+    if callable(getattr(setup_module, "_connect_chrome_over_cdp", None)) or (
+        getattr(open_tabs, "_nemo_gym_cdp_lifecycle", False) and getattr(close_tabs, "_nemo_gym_cdp_lifecycle", False)
+    ):
         return
 
-    requests = setup_module.requests
-
-    def execute_setup(
-        self: Any,
-        command: List[str] | str,
-        stdout: str = "",
-        stderr: str = "",
-        shell: bool = False,
-        until: Optional[Dict[str, Any]] = None,
-        expected_returncodes: List[int] | int | None = None,
-        on_nonzero: str | None = None,
-    ) -> Any:
-        if expected_returncodes is None and on_nonzero is None:
-            return current(self, command, stdout=stdout, stderr=stderr, shell=shell, until=until)
-        if not command:
-            raise RuntimeError("Empty setup command")
-        if expected_returncodes is None:
-            expected_returncodes = [int(until["returncode"])] if until and "returncode" in until else [0]
-        elif isinstance(expected_returncodes, int):
-            expected_returncodes = [expected_returncodes]
-        allowed = {int(code) for code in expected_returncodes}
-        if not allowed:
-            raise ValueError("expected_returncodes must not be empty")
-        if on_nonzero not in {None, "score_zero"}:
-            raise ValueError(f"unsupported on_nonzero policy: {on_nonzero!r}")
-
-        replacements = {
-            "{CLIENT_PASSWORD}": self.client_password,
-            "{SCREEN_WIDTH_HALF}": str(self.screen_width // 2),
-            "{SCREEN_HEIGHT_HALF}": str(self.screen_height // 2),
-            "{SCREEN_WIDTH}": str(self.screen_width),
-            "{SCREEN_HEIGHT}": str(self.screen_height),
-        }
-        rendered = [command] if isinstance(command, str) else list(command)
-        for index, item in enumerate(rendered):
-            for old, new in replacements.items():
-                item = item.replace(old, new)
-            rendered[index] = item
-        rendered_command: List[str] | str = rendered[0] if isinstance(command, str) else rendered
-        payload = json.dumps({"command": rendered_command, "shell": shell})
-        headers = {"Content-Type": "application/json"}
-        until = until or {}
-        failures = 0
-
-        while True:
-            result = None
+    def connect_with_retry(playwright: Any, remote_debugging_url: str) -> Any:
+        for attempt in range(15):
             try:
-                response = requests.post(
-                    self.http_server + "/setup/execute",
-                    headers=headers,
-                    data=payload,
-                    timeout=130,
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    if "returncode" not in result:
-                        raise RuntimeError("setup response omitted returncode")
-                    if stdout:
-                        with open(os.path.join(self.cache_dir, stdout), "w", encoding="utf-8") as handle:
-                            handle.write(result.get("output", ""))
-                    if stderr:
-                        with open(os.path.join(self.cache_dir, stderr), "w", encoding="utf-8") as handle:
-                            handle.write(result.get("error", ""))
-                else:
-                    failures += 1
-            except requests.exceptions.RequestException:
-                failures += 1
-            if failures >= 5:
-                raise RuntimeError(f"setup command failed after five request attempts: {rendered_command!r}")
-            if result is None:
-                continue
+                return playwright.chromium.connect_over_cdp(remote_debugging_url, timeout=30_000)
+            except Exception as exc:  # noqa: BLE001 - preserve upstream retry behavior.
+                if attempt == 14:
+                    raise
+                setup_module.logger.error("CDP connection attempt %d failed: %s", attempt + 1, exc)
+                setup_module.time.sleep(5)
 
-            returncode = int(result["returncode"])
-            command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
-            if returncode not in allowed:
-                if on_nonzero == "score_zero" and returncode not in {126, 127}:
-                    raise _EvaluatorScoreZero(
-                        f"evaluator command established score zero with return code {returncode}: {command_text}"
-                    )
-                raise RuntimeError(
-                    f"setup command returned {returncode}; expected {sorted(allowed)}: {command_text}; "
-                    f"stdout={result.get('output', '')!r}; stderr={result.get('error', '')!r}"
-                )
-            if (
-                not until
-                or ("returncode" in until and returncode == int(until["returncode"]))
-                or ("stdout" in until and str(until["stdout"]) in result.get("output", ""))
-                or ("stderr" in until and str(until["stderr"]) in result.get("error", ""))
-            ):
-                return result
-            time.sleep(0.3)
+    def open_tabs_setup(self: Any, urls_to_open: List[str]) -> None:
+        remote_debugging_url = f"http://{self.vm_ip}:{self.chromium_port}"
+        setup_module.logger.info("Connect to Chrome @: %s", remote_debugging_url)
 
-    execute_setup._nemo_gym_returncode_contract = True  # type: ignore[attr-defined]
-    controller_class._execute_setup = execute_setup
+        with setup_module.sync_playwright() as playwright:
+            browser = connect_with_retry(playwright, remote_debugging_url)
+            if not browser:
+                return
+            try:
+                setup_module.logger.info("Opening %s...", urls_to_open)
+                context = browser.contexts[0]
+                for index, url in enumerate(urls_to_open):
+                    page = context.new_page()
+                    try:
+                        page.goto(url, timeout=60000, wait_until="commit")
+                    except Exception:  # noqa: BLE001 - a slow site must not abort task setup.
+                        setup_module.logger.warning("Opening %s exceeds time limit", url)
+                    if index == 0:
+                        context.pages[0].close()
+            finally:
+                browser.close()
+
+    def close_tabs_setup(self: Any, urls_to_close: List[str]) -> None:
+        setup_module.time.sleep(5)
+        remote_debugging_url = f"http://{self.vm_ip}:{self.chromium_port}"
+
+        with setup_module.sync_playwright() as playwright:
+            browser = connect_with_retry(playwright, remote_debugging_url)
+            if not browser:
+                return
+            try:
+                context = browser.contexts[0]
+                for url in urls_to_close:
+                    for page in context.pages:
+                        if setup_module.compare_urls(page.url, url):
+                            page.close()
+                            break
+            finally:
+                browser.close()
+
+    open_tabs_setup._nemo_gym_cdp_lifecycle = True  # type: ignore[attr-defined]
+    close_tabs_setup._nemo_gym_cdp_lifecycle = True  # type: ignore[attr-defined]
+    controller_class._chrome_open_tabs_setup = open_tabs_setup
+    controller_class._chrome_close_tabs_setup = close_tabs_setup
 
 
 def _configure_docker_port_lock_timeout(timeout: float) -> None:
@@ -740,6 +829,71 @@ def _pointer_anthropic_client_options(base_url: str, api_key: Optional[str] = No
     }
 
 
+def _pointer_budget_retry(
+    role: str,
+    deadline_monotonic: float,
+    call_timeout: float = 120.0,
+) -> Callable[[Any, Callable[[Any], Any]], Any]:
+    """Retry structured InferenceHub budget responses within rollout bounds."""
+
+    def retry(request: Any, call_next: Callable[[Any], Any]) -> Any:
+        if str(request.url).split("?", 1)[0] != "/v1/messages":
+            return call_next(request)
+
+        started = None
+        attempt = 0
+        while True:
+            now = time.monotonic()
+            if now >= deadline_monotonic:
+                raise _PointerRetryDeadline(
+                    f"[{role}] Provider request skipped after task deadline.",
+                    task_deadline=True,
+                )
+            if started is not None and now >= started + 900.0:
+                raise _PointerRetryDeadline(f"[{role}] Provider quota retry window exhausted.")
+
+            bounded_request = request
+            copy_request = getattr(request, "copy", None)
+            if callable(copy_request):
+                bounded_request = copy_request(timeout=min(call_timeout, deadline_monotonic - now))
+            response = call_next(bounded_request)
+            if response.status_code not in {400, 429}:
+                return response
+            try:
+                body = response.json()
+            except Exception:  # noqa: BLE001 - let the SDK handle malformed errors.
+                return response
+            detail = body.get("error") if isinstance(body, Mapping) else None
+            if response.status_code == 400 and isinstance(detail, Mapping):
+                code = str(detail.get("code", "")).lower()
+                message = str(detail.get("message", "")).lower()
+                if code == "content_length_limit" or "content length exceeded" in message:
+                    response.http_response.status_code = 413
+                    return response
+            if not isinstance(detail, Mapping) or detail.get("type") != "budget_exceeded":
+                return response
+
+            response.close()
+            now = time.monotonic()
+            started = now if started is None else started
+            stop = min(deadline_monotonic, started + 900.0)
+            if now >= stop:
+                task_deadline = deadline_monotonic <= started + 900.0
+                reason = (
+                    "Provider request stopped at task deadline."
+                    if task_deadline
+                    else "Provider quota retry window exhausted."
+                )
+                raise _PointerRetryDeadline(f"[{role}] {reason}", task_deadline=task_deadline)
+            cap = min(300.0, 60.0 * (2**attempt))
+            delay = min(cap * (0.5 + random.random() / 2.0), stop - now)
+            LOG.warning("Pointer %s provider budget pause; retrying in %.1fs", role, delay)
+            time.sleep(max(0.0, min(delay, stop - time.monotonic())))
+            attempt += 1
+
+    return retry
+
+
 @dataclass
 class _PointerModelIOContext:
     """Task-scoped destination and identity for Pointer's direct model calls."""
@@ -918,7 +1072,7 @@ class _PointerMessagesProxy:
             LOG.exception("Failed to serialize Pointer model request for call %s", call_id)
         try:
             response = self._target.create(*args, **kwargs)
-        except Exception as exc:
+        except (Exception, _PointerRetryDeadline) as exc:
             finished_ns = time.time_ns()
             try:
                 _append_pointer_io_event(
@@ -1028,7 +1182,7 @@ def _pointer_model_io_context(
     )
 
 
-def _patch_pointer_anthropic_client(base_url: str) -> None:
+def _patch_pointer_anthropic_client(base_url: str, *, deadline_monotonic: float) -> None:
     """Make Pointer's Anthropic SDK client honor the configured base URL."""
 
     if not base_url:
@@ -1052,7 +1206,17 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         if provider == pointer_utils.APIProvider.ANTHROPIC:
             from anthropic import Anthropic  # noqa: PLC0415
 
-            client = Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
+            client_options = _pointer_anthropic_client_options(base_url, self.api_key)
+            client = Anthropic(
+                **client_options,
+                middleware=(
+                    _pointer_budget_retry(
+                        str(getattr(self, "name", "pointer")),
+                        deadline_monotonic,
+                        float(client_options["timeout"]),
+                    ),
+                ),
+            )
             context = _POINTER_MODEL_IO_CONTEXT.get()
             if context is None:
                 return client
@@ -1343,10 +1507,13 @@ def _finalize_task_artifacts(
 
     try:
         artifacts.task_logger.info(
-            "OSWorld rollout finished: score=%s reward=%s finished=%s mask_sample=%s error=%r",
+            "OSWorld rollout finished: score=%s reward=%s finished=%s horizon_reached=%s "
+            "runtime_eligible=%s mask_sample=%s error=%r",
             result.score,
             result.reward,
             result.finished,
+            result.horizon_reached,
+            result.runtime_eligible,
             result.mask_sample,
             result.error,
         )
@@ -1360,6 +1527,11 @@ def _finalize_task_artifacts(
                 "reward": result.reward,
                 "score": result.score,
                 "finished": result.finished,
+                "horizon_reached": result.horizon_reached,
+                "evaluation_completed": result.evaluation_completed,
+                "runtime_eligible": result.runtime_eligible,
+                "runtime_admission_reason": result.runtime_admission_reason,
+                "runtime_admission_policy_id": result.runtime_admission_policy_id,
                 "mask_sample": result.mask_sample,
                 "error": result.error,
                 "termination_reason": result.termination_reason,
@@ -1481,13 +1653,9 @@ def _evaluate_osworld_env(
             params = inspect.signature(evaluate).parameters
         except (TypeError, ValueError):
             params = {}
-        try:
-            if not params:
-                return float(evaluate())
-            return float(evaluate(eval_logger))
-        except _EvaluatorScoreZero as exc:
-            eval_logger.info("OSWorld evaluator setup established score zero: %s", exc)
-            return 0.0
+        if not params:
+            return float(evaluate())
+        return float(evaluate(eval_logger))
     finally:
         if disable_gpu:
             if easyocr_module is not None and original_easyocr_reader is not None:
@@ -1509,7 +1677,13 @@ def run_osworld_task(
     require_a11y_tree: bool = False,
     client_password: str = "password",
     enable_proxy: bool = False,
+    allow_direct_proxy_tasks: bool = True,
     proxy_config_file: Optional[str] = None,
+    resources_server_url: str = "",
+    resources_server_auth_token: str = "",
+    resources_request_timeout: float = 900.0,
+    resources_connect_timeout: float = 10.0,
+    resources_request_retries: int = 3,
     sandbox_provider_config: Optional[Dict[str, Any]] = None,
     sandbox_spec: Optional[Dict[str, Any]] = None,
     vm_path: Optional[str] = None,
@@ -1524,8 +1698,9 @@ def run_osworld_task(
     cache_dir: str = "cache",
     setup_cache_dir: Optional[str] = None,
     mem_limit_mb: int = 0,
-    step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
-    task_timeout: int = 1800,  # wall-clock cap on the whole rollout
+    step_timeout: float = 60.0,  # per-action backend timeout where supported
+    model_timeout: float = 900.0,
+    task_timeout: int = 1800,  # cooperative deadline checked between steps and by Pointer model calls
     docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
     action_space: Optional[str] = None,
@@ -1533,6 +1708,9 @@ def run_osworld_task(
     env_class_path: Optional[str] = None,
     agent_class_path: Optional[str] = None,
     agent_kwargs: Optional[Dict[str, Any]] = None,
+    history_policy: Optional[Mapping[str, Any]] = None,
+    model_protocol_id: Optional[str] = None,
+    agent_contract: Optional[Mapping[str, Any]] = None,
     messages_model_fn: Optional[MessagesModelFn] = None,
     policy_base_url: str = "",
     policy_api_key: str = "",
@@ -1552,29 +1730,61 @@ def run_osworld_task(
     """
     if reward_mode not in {"raw", "binary"}:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
+    if step_timeout <= 0:
+        raise ValueError("step_timeout must be positive")
+    if model_timeout <= 0:
+        raise ValueError("model_timeout must be positive")
+    effective_agent_contract = dict(agent_contract) if agent_contract is not None else None
 
     def proxy_precondition_failure(reason: str, message: str) -> RolloutResult:
         LOG.error("OSWorld proxy precondition failed for task %s: %s", _safe_task_id(task_config), message)
+        outcome = classify_rollout_outcome(
+            RolloutOutcomeFacts(
+                evaluation_completed=False,
+                infrastructure_failure_reason=reason,
+            )
+        )
         return RolloutResult(
             reward=0.0,
             score=0.0,
             steps=[],
             error=message,
             finished=False,
-            mask_sample=True,
-            termination_reason=reason,
+            horizon_reached=outcome.horizon_reached,
+            evaluation_completed=outcome.evaluation_completed,
+            runtime_eligible=outcome.runtime_eligible,
+            runtime_admission_reason=outcome.runtime_admission_reason,
+            runtime_admission_policy_id=outcome.runtime_admission_policy_id,
+            mask_sample=outcome.mask_sample,
+            termination_reason=outcome.termination_reason,
+            agent_contract=effective_agent_contract,
         )
 
     try:
         requires_proxy = task_requires_proxy(task_config)
     except ValueError as exc:
         return proxy_precondition_failure("proxy_configuration_error", f"ProxyConfigurationError: {exc}")
+    use_remote_resources = bool(resources_server_url.strip())
     use_gym_sandbox = sandbox_provider_config is not None
+    if use_remote_resources and use_gym_sandbox:
+        raise ValueError("resources_server and sandbox_provider are mutually exclusive OSWorld backends")
     if vm_path and sandbox_vm_path and os.path.realpath(vm_path) != os.path.realpath(sandbox_vm_path):
         raise ValueError("vm_path and deprecated sandbox_vm_path refer to different qcow2 files")
     effective_vm_path = vm_path or sandbox_vm_path
+    if use_remote_resources and effective_vm_path:
+        raise ValueError("vm_path is only valid for local OSWorld providers")
     proxy_info = None
-    if requires_proxy and enable_proxy:
+    if requires_proxy and not enable_proxy and not allow_direct_proxy_tasks:
+        return proxy_precondition_failure(
+            "proxy_required_but_disabled",
+            "ProxyRequiredButDisabled: task requires a proxy, but proxy support is disabled",
+        )
+    if requires_proxy and not enable_proxy and allow_direct_proxy_tasks and use_remote_resources:
+        return proxy_precondition_failure(
+            "proxy_configuration_error",
+            "ProxyConfigurationError: direct proxy task mode is not supported by the remote Resources Server",
+        )
+    if requires_proxy and enable_proxy and not use_remote_resources:
         try:
             proxy_info = inspect_proxy_config_file(proxy_config_file)
         except ValueError as exc:
@@ -1608,7 +1818,11 @@ def run_osworld_task(
         agent_class_path=agent_class_path,
         agent_kwargs=agent_kwargs,
     )
-    if use_gym_sandbox:
+    if use_remote_resources:
+        from responses_api_agents.osworld_agent.remote_environment import RemoteDesktopEnv
+
+        env_cls = RemoteDesktopEnv
+    elif use_gym_sandbox:
         sandbox_env_class = {
             "desktop_env.desktop_env.DesktopEnv": SANDBOX_DESKTOP_ENV_CLASS,
             "desktop_env.desktop_env_pointer.DesktopEnv": SANDBOX_POINTER_DESKTOP_ENV_CLASS,
@@ -1621,9 +1835,10 @@ def run_osworld_task(
         env_cls = load_attr(sandbox_env_class or runner_spec.env_class_path)
     else:
         env_cls = load_attr(runner_spec.env_class_path)
-    _patch_setup_execute_contract()
-    if provider_name == "docker" and not use_gym_sandbox:
-        _configure_docker_port_lock_timeout(docker_port_lock_timeout)
+    if not use_remote_resources:
+        _patch_chrome_setup_cdp_lifecycle()
+        if provider_name == "docker" and not use_gym_sandbox:
+            _configure_docker_port_lock_timeout(docker_port_lock_timeout)
     instruction = task_config.get("instruction", "")
     event_context = dict(log_context or {})
     event_context.update(
@@ -1636,8 +1851,9 @@ def run_osworld_task(
         }
     )
     event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
-    _patch_extension_name_aliases()
-    _patch_pdf_image_evaluator_cleanup()
+    if not use_remote_resources:
+        _patch_extension_name_aliases()
+        _patch_pdf_image_evaluator_cleanup()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []
@@ -1646,8 +1862,12 @@ def run_osworld_task(
     finished = False
     final_score = 0.0
     timed_out = False
-    setup_score_zero = False
+    horizon_reached = False
+    evaluation_completed = False
     agent_terminal_action: Optional[str] = None
+    agent_stop_reason: Optional[str] = None
+    agent_model_call_completed: Optional[bool] = None
+    operation_failure_reason: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
     rollout_phase = "before_environment"
@@ -1663,15 +1883,30 @@ def run_osworld_task(
             "observation_type": runner_spec.observation_type,
             "provider_name": provider_name,
             "container_image": container_image,
-            "execution_backend": "gym_sandbox" if use_gym_sandbox else "osworld_provider",
+            "execution_backend": (
+                "gym_sandbox"
+                if use_gym_sandbox
+                else ("resources_server" if use_remote_resources else "osworld_provider")
+            ),
             "sandbox_provider": (next(iter(sandbox_provider_config)) if sandbox_provider_config else None),
             "sandbox_image": (sandbox_spec or {}).get("image") if use_gym_sandbox else None,
             "headless": headless,
             "screen_size": list(screen_size),
             "max_steps": max_steps,
             "max_trajectory_length": max_trajectory_length,
+            "agent_contract_id": (
+                effective_agent_contract.get("agent_contract_id") if effective_agent_contract is not None else None
+            ),
+            "history_policy_id": (
+                (effective_agent_contract.get("history_policy") or {}).get("history_policy_id")
+                if effective_agent_contract is not None
+                else None
+            ),
+            "model_protocol_id": model_protocol_id,
             "sleep_after_execution": sleep_after_execution,
             "task_timeout": task_timeout,
+            "step_timeout": step_timeout,
+            "model_timeout": model_timeout,
             "model_name": policy_model_name,
             "max_tokens": policy_max_tokens,
             "temperature": policy_temperature,
@@ -1679,9 +1914,11 @@ def run_osworld_task(
             "reward_mode": reward_mode,
             "proxy_required": requires_proxy,
             "proxy_enabled": enable_proxy,
+            "allow_direct_proxy_tasks": allow_direct_proxy_tasks,
             "proxy_config_file": proxy_info.path if proxy_info is not None else None,
             "proxy_config_sha256": proxy_info.sha256 if proxy_info is not None else None,
             "proxy_config_entry_count": proxy_info.entry_count if proxy_info is not None else 0,
+            "resources_server_url": resources_server_url or None,
         },
     )
     task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
@@ -1714,7 +1951,18 @@ def run_osworld_task(
             "cache_dir": cache_dir,
             "enable_proxy": enable_proxy,
         }
-        if use_gym_sandbox:
+        if use_remote_resources:
+            env_kwargs.update(
+                {
+                    "resources_server_url": resources_server_url,
+                    "auth_token": resources_server_auth_token,
+                    "request_timeout": resources_request_timeout,
+                    "connect_timeout": resources_connect_timeout,
+                    "request_retries": resources_request_retries,
+                    "action_timeout": step_timeout,
+                }
+            )
+        elif use_gym_sandbox:
             effective_sandbox_spec = dict(sandbox_spec or {})
             sandbox_provider_name = str(next(iter(sandbox_provider_config or {}), "")).lower().strip()
             if sandbox_provider_name == "docker":
@@ -1728,18 +1976,20 @@ def run_osworld_task(
                     "sandbox_ready_poll_s": sandbox_ready_poll_s,
                 }
             )
-        if effective_vm_path:
+        if not use_remote_resources and effective_vm_path:
             env_kwargs["path_to_vm"] = effective_vm_path
         env = env_cls(
             **env_kwargs,
         )
-        linked_cache_files = _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
+        linked_cache_files = 0 if use_remote_resources else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
+        if use_gym_sandbox and runner_spec.kind == "pointer_agent":
+            _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"
         native_agent = None
         pointer_agent = None
@@ -1789,11 +2039,28 @@ def run_osworld_task(
                 "observation_type": runner_spec.observation_type,
                 "screen_size": screen_size,
                 "client_password": client_password,
-                "max_image_history_length": max_trajectory_length,
             }
+            if history_policy is None:
+                nemotron_kwargs["max_image_history_length"] = max_trajectory_length
+            else:
+                nemotron_kwargs["history_policy"] = dict(history_policy)
+            if model_protocol_id is not None:
+                nemotron_kwargs["model_protocol_id"] = model_protocol_id
             nemotron_kwargs.update(runner_spec.agent_kwargs)
             nemotron_kwargs["log_context"] = event_context
             native_agent = agent_cls(**nemotron_kwargs)
+            observed_agent_contract = getattr(native_agent, "agent_contract", None)
+            if effective_agent_contract is not None:
+                if not isinstance(observed_agent_contract, Mapping):
+                    raise ValueError(
+                        "Configured OSWorld agent contract requires the instantiated adapter "
+                        "to expose agent_contract evidence"
+                    )
+                _assert_observed_agent_contract(effective_agent_contract, observed_agent_contract)
+            elif isinstance(observed_agent_contract, Mapping):
+                # Direct library callers do not need to construct the outer
+                # app contract merely to use the adapter.
+                effective_agent_contract = dict(observed_agent_contract)
 
             def _call_nemotron_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> Any:
                 return messages_model_fn(payload["messages"], payload)
@@ -1916,7 +2183,10 @@ def run_osworld_task(
             agent_cls = load_attr(runner_spec.agent_class_path)
             _sync_pointer_config(policy_model_name)
             _patch_pointer_optional_parallel_tools(disable_parallel_tools)
-            _patch_pointer_anthropic_client(anthropic_base_url)
+            _patch_pointer_anthropic_client(
+                anthropic_base_url,
+                deadline_monotonic=task_start + task_timeout,
+            )
             pointer_agent = agent_cls(
                 env=env,
                 screen_size=screen_size,
@@ -2034,6 +2304,7 @@ def run_osworld_task(
                 )
                 break
             _current_step[0] = step_idx + 1
+            step_state = _observation_identity(obs)
             obs_entry = {
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
@@ -2057,6 +2328,22 @@ def run_osworld_task(
                         agent_step_info = prediction[2]
                     model_text = strip_thinking(_model_response_content(model_text))
                     actions = _flatten_actions(actions)
+                    stop_rollout = agent_step_info.get("stop_rollout", False)
+                    if not isinstance(stop_rollout, bool):
+                        raise TypeError("Native OSWorld agent stop_rollout fact must be boolean")
+                    if stop_rollout:
+                        raw_outcome = agent_step_info.get("agent_outcome")
+                        if not isinstance(raw_outcome, str) or not raw_outcome:
+                            raise ValueError("Native OSWorld agent stop_rollout requires agent_outcome")
+                        raw_model_call_completed = agent_step_info.get("model_call_completed")
+                        if not isinstance(raw_model_call_completed, bool):
+                            raise TypeError(
+                                "Native OSWorld agent stop_rollout requires boolean model_call_completed evidence"
+                            )
+                        if actions:
+                            raise ValueError("Native OSWorld agent cannot request stop_rollout and return actions")
+                        agent_stop_reason = raw_outcome
+                        agent_model_call_completed = raw_model_call_completed
                     if runner_spec.kind == "qwen3_omni_agent":
                         actions = _merge_consecutive_pyautogui_actions(actions)
                     if runner_spec.action_space == "computer_13":
@@ -2065,10 +2352,24 @@ def run_osworld_task(
                     model_text = model_fn(system_prompt, instruction, history_window + [obs_entry])
                     model_text = strip_thinking(model_text or "")
                     actions = parse_actions(model_text)
-            except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
+            except (Exception, _PointerRetryDeadline) as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
+                if isinstance(exc, _PointerRetryDeadline) and exc.task_deadline:
+                    timed_out = True
+                if isinstance(exc, OSWorldModelTimeoutError):
+                    operation_failure_reason = "model_timeout"
                 error = f"agent/model call failed at step {step_idx}: {exc}"
                 task_logger.exception("Agent/model call failed at step %d", step_idx)
-                steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
+                steps.append(
+                    StepRecord(
+                        step=step_idx,
+                        model_text="",
+                        actions=[],
+                        reward=0.0,
+                        done=False,
+                        state=step_state,
+                        next_state=_observation_identity(obs),
+                    )
+                )
                 screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
                 _append_task_trajectory(
                     task_artifacts,
@@ -2099,6 +2400,8 @@ def run_osworld_task(
                         reward=0.0,
                         done=False,
                         info={"agent": agent_step_info} if agent_step_info else {},
+                        state=step_state,
+                        next_state=_observation_identity(obs),
                     )
                 )
                 obs_history.append(obs_entry)
@@ -2117,6 +2420,14 @@ def run_osworld_task(
                         **_observation_identity(obs),
                     },
                 )
+                if agent_stop_reason is not None:
+                    if agent_model_call_completed is False:
+                        parse_failure = agent_step_info.get("parse_failure")
+                        failure_message = (
+                            parse_failure.get("last_error") if isinstance(parse_failure, Mapping) else None
+                        )
+                        error = f"model call failed at step {step_idx}: {failure_message or model_text}"
+                    break
                 continue
 
             step_done = False
@@ -2130,6 +2441,8 @@ def run_osworld_task(
                 try:
                     obs, reward, done, info = env.step(action, sleep_after_execution)
                 except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
+                    if isinstance(exc, (OSWorldActionTimeoutError, TimeoutError, requests.Timeout)):
+                        operation_failure_reason = "action_timeout"
                     error = f"env.step() failed at step {step_idx}: {exc}"
                     task_logger.exception("Environment step failed at step %d for action %r", step_idx, action)
                     break
@@ -2153,6 +2466,8 @@ def run_osworld_task(
                     reward=step_reward,
                     done=step_done,
                     info=step_info,
+                    state=step_state,
+                    next_state=_observation_identity(obs),
                 )
             )
             obs_history.append(obs_entry)
@@ -2186,12 +2501,16 @@ def run_osworld_task(
             if error:
                 break
 
+        else:
+            horizon_reached = True
+
         # Let the VM settle before scoring, mirroring lib_run_single.py.
         time.sleep(2)
         rollout_error_before_evaluation = error
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
             final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
+            evaluation_completed = True
         except Exception as exc:  # noqa: BLE001
             evaluation_error = f"env.evaluate() failed: {exc}"
             error = evaluation_error
@@ -2225,16 +2544,10 @@ def run_osworld_task(
             except Exception:  # noqa: BLE001 - usage logging should not fail the rollout.
                 LOG.exception("PointerAgent.log_usage() failed")
 
-    except _EvaluatorScoreZero as exc:
-        setup_score_zero = True
-        finished = True
-        final_score = 0.0
-        error = None
-        task_logger.info("OSWorld setup established score zero before evaluation: %s", exc)
-        _append_task_trajectory(
-            task_artifacts,
-            {"event": "evaluation", "score": 0.0, "status": "completed", "reason": "setup_score_zero"},
-        )
+    except _PointerRetryDeadline as exc:
+        timed_out = exc.task_deadline
+        error = f"{type(exc).__name__}: {exc}"
+        task_logger.exception("Pointer provider retry stopped outside an agent step")
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
@@ -2271,25 +2584,48 @@ def run_osworld_task(
         reward = float(final_score)
     else:
         reward = 1.0 if final_score >= 1.0 else 0.0
-    # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
-    # or (c) loop exhausted max_steps without the model emitting DONE/FAIL.
-    mask_sample = bool(error) or timed_out or not finished
+
     if timed_out:
-        termination_reason = "timeout"
-    elif setup_score_zero:
-        termination_reason = "setup_score_zero"
+        infrastructure_failure_reason = "timeout"
+    elif operation_failure_reason is not None:
+        infrastructure_failure_reason = operation_failure_reason
     elif evaluation_error:
-        termination_reason = "evaluator_error"
+        infrastructure_failure_reason = "evaluator_error"
     elif proxy_setup_error:
-        termination_reason = "proxy_setup_error"
+        infrastructure_failure_reason = "proxy_setup_error"
+    elif agent_stop_reason is not None and agent_model_call_completed is False:
+        infrastructure_failure_reason = "model_call_failed"
     elif error:
-        termination_reason = "rollout_error"
-    elif agent_terminal_action is not None:
-        termination_reason = f"agent_{agent_terminal_action.lower()}"
-    elif finished:
-        termination_reason = "environment_done"
+        infrastructure_failure_reason = "rollout_error"
     else:
-        termination_reason = "max_steps"
+        infrastructure_failure_reason = None
+
+    outcome = classify_rollout_outcome(
+        RolloutOutcomeFacts(
+            evaluation_completed=evaluation_completed,
+            infrastructure_failure_reason=infrastructure_failure_reason,
+            terminal_action=agent_terminal_action,
+            environment_done=finished and agent_terminal_action is None,
+            horizon_reached=horizon_reached,
+            policy_stop_reason=agent_stop_reason,
+        )
+    )
+
+    if outcome.mask_sample:
+        task_logger.warning(
+            "OSWORLD_RUNTIME_ADMISSION|eligible=false|reason=%s|termination=%s|finished=%s|error=%r",
+            outcome.runtime_admission_reason,
+            outcome.termination_reason,
+            finished,
+            error,
+        )
+    else:
+        task_logger.info(
+            "OSWORLD_RUNTIME_ADMISSION|eligible=true|reason=%s|termination=%s|horizon_reached=%s",
+            outcome.runtime_admission_reason,
+            outcome.termination_reason,
+            outcome.horizon_reached,
+        )
 
     result = RolloutResult(
         reward=reward,
@@ -2297,9 +2633,15 @@ def run_osworld_task(
         steps=steps,
         error=error,
         finished=finished,
-        mask_sample=mask_sample,
+        horizon_reached=outcome.horizon_reached,
+        evaluation_completed=outcome.evaluation_completed,
+        runtime_eligible=outcome.runtime_eligible,
+        runtime_admission_reason=outcome.runtime_admission_reason,
+        runtime_admission_policy_id=outcome.runtime_admission_policy_id,
+        mask_sample=outcome.mask_sample,
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
-        termination_reason=termination_reason,
+        termination_reason=outcome.termination_reason,
+        agent_contract=effective_agent_contract,
     )
     _finalize_task_artifacts(
         task_artifacts,
