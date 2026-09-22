@@ -32,6 +32,6 @@ canonical_split: combibench_with_solution
 standard_prompt_config: benchmarks/combibench/prompt.yaml
 adopted_from:
   source: https://github.com/MoonshotAI/CombiBench
-  ref: c67e4213597b1477351d9ef5ca37fb622084cc78
+  ref: c67e4213597b1477351d9ef5ca37fb622084cc78  # pragma: allowlist secret
   reconciled: 2026-09-16
 lifecycle: active

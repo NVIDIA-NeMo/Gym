@@ -57,7 +57,7 @@ Rows are flat task fields; `prompt.yaml` builds the messages at rollout time.
   "source": "https://www.hackmath.net/en/word-math-problems/combinatorics",
   "split": "test",
   "dataset_source": "github",
-  "dataset_revision": "c67e4213597b1477351d9ef5ca37fb622084cc78"
+  "dataset_revision": "c67e4213597b1477351d9ef5ca37fb622084cc78"  # pragma: allowlist secret
 }
 ```
 
