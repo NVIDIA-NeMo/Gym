@@ -60,18 +60,18 @@ def _agent() -> PoolSandboxedAgent:
     return PoolSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def test_parse_pool_events_keeps_reasoning_in_order_and_pairs_tool_calls() -> None:
+def test_parse_pool_events_emits_reasoning_items_in_order_and_pairs_tool_calls() -> None:
     items, metadata = parse_pool_events(EVENTS)
 
     assert [item.type for item in items] == [
-        "message",
+        "reasoning",
         "function_call",
         "function_call_output",
         "function_call",
         "function_call_output",
         "message",
     ]
-    assert items[0].content[0].text == "<think>\nLook at the file first.\n</think>"
+    assert items[0].summary[0].text == "Look at the file first."
     assert items[1].name == "read" and json.loads(items[1].arguments) == {"path": "/testbed/a.py"}
     assert items[2].call_id == items[1].call_id and items[2].output == "print('hi')"
     assert items[4].output == "[error] boom"
