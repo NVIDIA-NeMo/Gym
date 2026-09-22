@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
@@ -130,7 +131,24 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
 
 def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
     """Create a SWEBenchWrapper with all setup calls mocked."""
-    monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+    global_config = OmegaConf.create(
+        {
+            "test_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "host": "test-host",
+                        "port": 12345,
+                        "model": "test-model",
+                    }
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(
+        swe_app,
+        "get_global_config_dict",
+        MagicMock(return_value=global_config),
+    )
     monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
 
     config = _minimal_server_config()
@@ -156,6 +174,7 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
         concurrency=1,
         ng_global_config_dict_str="'{}'",
         model_server_name="test_model",
+        model_server_base_url="http://test-host:12345",
         openhands_setup_dir=Path(tmpdir) / "openhands",
         swebench_setup_dir=Path(tmpdir) / "swebench",
         swebench_multilingual_setup_dir=Path(tmpdir) / "swebench_multilingual",
@@ -333,6 +352,7 @@ class TestSWEBenchWrapperServerConfig:
         config = SWEBenchWrapperServerConfig(
             ng_global_config_dict_str="'{}'",
             model_server_name="test_model",
+            model_server_base_url="http://test-host:12345",
             openhands_setup_dir=Path("/tmp/openhands"),
             swebench_setup_dir=Path("/tmp/swebench"),
             r2e_gym_setup_dir=Path("/tmp/r2e"),
@@ -942,10 +962,17 @@ class TestSweBenchDatasetProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _minimal_server_config()
 
-            with patch.object(
-                BaseDatasetHarnessProcessor,
-                "setup_root",
-                new_callable=lambda: property(lambda self: Path(tmpdir)),
+            with (
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "setup_root",
+                    new_callable=lambda: property(lambda self: Path(tmpdir)),
+                ),
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "_cache_dir_is_default",
+                    return_value=False,
+                ),
             ):
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"
                 setup_dir.mkdir()
@@ -1041,7 +1068,27 @@ class TestOpenHandsHarnessProcessor:
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
-            assert "LOG_LEVEL=DEBUG" in self._read_agent_script(config)
+            script = self._read_agent_script(config)
+            assert "LOG_LEVEL=DEBUG" in script
+            assert "NEMO_GYM_MODEL_SERVER_BASE_URL" not in script
+            assert "nemo_gym_capture_overlay" not in script
+
+    def test_get_run_command_routes_capture_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
+                install_openhands_capture_overlay=True,
+            )
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            script = self._read_agent_script(config)
+            assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture/v1" in script
+            assert (
+                "NEMO_GYM_MODEL_SERVER_BASE_URL="
+                "http://test-host:12345/ng-rollout/rollout-1/training-token-capture" in script
+            )
+            assert "export PYTHONPATH=/nemo_gym_capture_overlay:${PYTHONPATH:-}" in script
 
     def test_get_run_command_nv_internal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1275,7 +1322,7 @@ class TestOpenCodeHarnessProcessor:
 
         def _fake(_global, name):
             assert name == "test_model"
-            return type("Cfg", (), {"host": "test-host", "port": 12345})()
+            return type("Cfg", (), {"host": "test-host", "port": 12345, "model": "test-model"})()
 
         monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
         monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
@@ -1306,6 +1353,19 @@ class TestOpenCodeHarnessProcessor:
             assert config.problem_info["instance_id"] in script
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
+
+    def test_get_run_command_routes_capture_when_enabled(
+        self,
+        _stub_model_server_lookup,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
+            )
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture" in script
 
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1742,7 +1802,7 @@ class TestGetOpenhandsTrajectoryFromCompletions:
         )
 
         w = self._wrapper(tmp_path)
-        messages, tools, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        messages, tools, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
         # The final assistant message of the main session ("MAIN") should ride
         # along; the subagent's content should NOT be in the returned messages.
         joined = json.dumps(messages)
@@ -1766,12 +1826,12 @@ class TestGetOpenhandsTrajectoryFromCompletions:
                 )
             )
         w = self._wrapper(tmp_path)
-        messages, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        messages, _, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
         assert any("LAST" in json.dumps(m) for m in messages)
 
     def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
         w = self._wrapper(tmp_path)
-        msgs, tools, _ = w.get_openhands_trajectory_from_completions(tmp_path, "no-such-instance")
+        msgs, tools, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, "no-such-instance")
         assert msgs == [] and tools == []
 
 
@@ -2299,7 +2359,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
     def test_basic_command(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            params = _make_instance_config(tmpdir)
+            params = _make_instance_config(tmpdir, install_openhands_capture_overlay=True)
             params.persistent_dir.mkdir(parents=True, exist_ok=True)
             (params.persistent_dir / "container_scripts").mkdir(parents=True, exist_ok=True)
 
@@ -2320,6 +2380,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
             assert params.container in result
+            assert f"src={swe_app.OPENHANDS_CAPTURE_OVERLAY_DIR},dst=/nemo_gym_capture_overlay,ro" in result
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2520,7 +2581,6 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
                 "provider_specific_fields": {
                     "prompt_token_ids": [1, 2],
                     "generation_token_ids": [3, 4],
-                    "routed_experts": [[[0, 1]], [[2, 3]], [[4, 5]], [[6, 7]]],
                 },
                 "response": {
                     "choices": [
@@ -2536,22 +2596,16 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 3  # system, user, assistant
             assert messages[2]["role"] == "assistant"
             assert messages[2]["prompt_token_ids"] == [1, 2]
-            assert messages[2]["routed_experts"] == [
-                [[0, 1]],
-                [[2, 3]],
-                [[4, 5]],
-                [[6, 7]],
-            ]
             assert len(tools) == 1
 
     def test_no_completions_dir(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
             assert messages == []
             assert tools == []
 
@@ -2562,7 +2616,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             completions_dir = Path(tmpdir) / instance_id / "llm_completions" / instance_id
             completions_dir.mkdir(parents=True)
 
-            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert messages == []
             assert tools == []
 
@@ -2589,7 +2643,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 1  # only user, assistant not appended
 
 
@@ -2632,6 +2686,64 @@ class TestSWEBenchWrapperSetupParams:
             assert params.eval_command is not None
             assert params.agent_command is not None
             assert params.metrics_fpath.exists()
+
+    def test_token_capture_flag_rides_setup_params(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            with rollout_context("rollout-1"):
+                params, _ = wrapper._setup_params(body)
+
+            assert params.install_openhands_capture_overlay is True
+            assert params.model_server_base_url.endswith("/ng-rollout/rollout-1/training-token-capture")
+            # The sandboxed agent reaches the model through the capture-prefixed URL.
+            assert "/training-token-capture/" in params.agent_script
+
+    def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            # No rollout_context: the request carries no rollout id.
+            with pytest.raises(RuntimeError, match="no rollout id"):
+                wrapper._setup_params(body)
 
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2781,7 +2893,8 @@ class TestSWEBenchWrapperResponses:
             )
 
             with patch.object(wrapper, "_inner_responses", new_callable=AsyncMock, return_value=mock_response):
-                result = await wrapper.responses(body)
+                with rollout_context("rollout-1"):
+                    result = await wrapper.responses(body)
                 assert result.id == "swebench-django__django-12345"
 
     @pytest.mark.asyncio
@@ -2816,7 +2929,8 @@ class TestSWEBenchWrapperResponses:
                 side_effect=RuntimeError("test error"),
             ):
                 with pytest.raises(RuntimeError, match="test error"):
-                    await wrapper.responses(body)
+                    with rollout_context("rollout-1"):
+                        await wrapper.responses(body)
 
 
 class TestSWEBenchWrapperRun:

@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     create_provider,
@@ -62,14 +63,20 @@ def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable
 
 
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
-    """Run ``command`` in a live session, delimited by a unique marker."""
+    """Run ``command`` in a live session, delimited by unique markers."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
-    # The marker is assembled from two literals so the shell's echo of this
-    # line cannot itself match the marker we scan for. The brace group keeps
-    # shell state while putting stdin at EOF: the session's stdin never ends,
-    # so a stdin-reading command would block forever and eat the marker line.
+    # The markers are split across two printf arguments so the shell's echo of
+    # these lines can never match them. Both printfs run inside the brace
+    # group: all echoed input and prompts appear before the start marker, and
+    # the exit-status marker directly follows the output, so the slice between
+    # the markers is the command's output alone. The group also puts stdin at
+    # EOF — the session's stdin never ends, so a stdin-reading command would
+    # otherwise block forever.
     await session.write(
-        f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+        f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+        f"{command}\n"
+        f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+        f"}} </dev/null\n".encode()
     )
 
     needle = f"{token}:".encode()
@@ -81,6 +88,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
+    # Drop the echoed input and prompts: real output starts on the line after
+    # the start marker.
+    _, seen_start, after_start = stdout.partition(f"{token}S".encode())
+    if seen_start:
+        stdout = after_start.partition(b"\n")[2]
     while b"\n" not in trailing:
         # The status digits can straddle the chunk that carried the marker.
         chunk = await session.read()
@@ -362,14 +374,21 @@ class SandboxPty:
 
 
 class AsyncSandbox:
-    """Async sandbox object backed by a runtime provider."""
+    """Async sandbox object backed by a runtime provider.
+
+    With ``owns_provider=False``, the caller closes the shared provider after
+    all of its sandboxes have stopped.
+    """
 
     def __init__(
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
+        *,
+        owns_provider: bool = True,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._owns_provider = owns_provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
         self._stopped = True
@@ -459,6 +478,9 @@ class AsyncSandbox:
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
         else:
             handle = await self._provider.create(requested_spec)
+        self._handle = handle
+        self._spec = requested_spec
+        self._stopped = False
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -467,15 +489,28 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
+        except BaseException:
+            await self.stop()
             raise
 
-        self._spec = requested_spec
-        self._handle = handle
-        self._stopped = False
+        return self
+
+    async def start_with_setup(
+        self,
+        spec: SandboxSpec | None,
+        setup: Callable[["AsyncSandbox"], Awaitable[None]],
+    ) -> "AsyncSandbox":
+        """Start the sandbox, then run ``setup`` against it.
+
+        If ``setup`` raises, the sandbox is stopped before the exception
+        propagates.
+        """
+        await self.start(spec)
+        try:
+            await setup(self)
+        except BaseException:
+            await self.stop()
+            raise
         return self
 
     async def exec(
@@ -609,16 +644,44 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def pause(self) -> None:
+        """Pause this sandbox while preserving its state.
+
+        Open PTY sessions are detached; whether processes survive and sessions
+        can be re-attached after ``resume()`` depends on the provider backend.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.pause(handle)
+
+    async def resume(self) -> None:
+        """Resume this sandbox and wait until it is ready.
+
+        On timeout the server-side state is unknown: reconnect and check
+        ``status()`` before retrying.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.resume(handle)
+
     async def stop(self) -> None:
         if self._closed:
             return
         try:
             if self._handle is not None and not self._stopped:
-                self._stopped = True
                 await self._provider.close(self._handle)
+                self._stopped = True
         finally:
-            await self._provider.aclose()
-            self._closed = True
+            if self._owns_provider:
+                await self._provider.aclose()
+                self._closed = True
+        self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.
@@ -637,10 +700,14 @@ class AsyncSandbox:
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
         if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
             descriptor = {**descriptor, "workdir": self._spec.workdir}
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
+            descriptor = {**descriptor, "ports": list(self._spec.ports)}
         return descriptor
 
     @classmethod
-    async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
+    async def connect(
+        cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
+    ) -> "AsyncSandbox":
         """Rebuild a sandbox in this process from a descriptor produced by
         :meth:`serialize`, using ``provider`` (which must support connect)."""
         if not isinstance(provider, ConnectableProvider):
@@ -650,7 +717,8 @@ class AsyncSandbox:
             descriptor = descriptor.to_dict()
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
-        sandbox = cls(provider, SandboxSpec(workdir=workdir))
+        ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
         return sandbox
@@ -808,6 +876,12 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
+
+    def pause(self) -> None:
+        self._runner.run("pause", self._async_sandbox.pause)
+
+    def resume(self) -> None:
+        self._runner.run("resume", self._async_sandbox.resume)
 
     def stop(self) -> None:
         if self._closed:

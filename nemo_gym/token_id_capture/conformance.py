@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageStore, TokenSink, TokenSource
+from nemo_gym.token_id_capture.protocols import LineageResolver, TokenSink, TokenSource
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
@@ -91,7 +91,7 @@ _REQUEST = [{"role": "user", "content": "What is the weather in Paris?"}]
 async def run_conformance(
     sink_factory: Callable[[], TokenSink],
     source_factory: Callable[[], TokenSource],
-    lineage_factory: Callable[[], LineageStore] | None = None,
+    lineage_factory: Callable[[], LineageResolver] | None = None,
     *,
     rollout_id: str = "conformance-rollout",
 ) -> list[str]:
@@ -114,7 +114,7 @@ async def run_conformance(
         closables.append(instance)
         return instance
 
-    def lineage() -> LineageStore:
+    def lineage() -> LineageResolver:
         assert lineage_factory is not None
         instance = lineage_factory()
         closables.append(instance)
@@ -265,7 +265,7 @@ async def _check_conditional_retirement(sink: TokenSink, src: TokenSource, rollo
 
 async def _check_lineage_visibility(
     sink: TokenSink,
-    lineage_factory: Callable[[], LineageStore],
+    lineage_factory: Callable[[], LineageResolver],
     rollout_id: str,
     *,
     fresh_client: bool,

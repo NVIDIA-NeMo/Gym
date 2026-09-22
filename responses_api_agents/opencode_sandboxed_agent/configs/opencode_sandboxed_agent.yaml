@@ -5,7 +5,7 @@ opencode_sandboxed_agent:
       num_workers: 4
       resources_server:
         type: resources_servers
-        name: swebench_resources_server
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model
@@ -147,6 +147,10 @@ opencode_sandboxed_agent:
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
         resources:
           cpu: 0.25
           memory_mib: 512

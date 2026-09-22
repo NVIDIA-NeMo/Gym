@@ -446,6 +446,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             # gym.tool.call_duration_ms reading -- same tradeoff RolloutContextMiddleware
             # already makes above, for the same reason (no HTTP request to instrument).
             continue
+        if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
+            continue  # Direct MCP dispatch has no client connection to monitor.
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware

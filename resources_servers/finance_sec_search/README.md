@@ -2,7 +2,7 @@
 
 Financial information retrieval using SEC EDGAR filings with optional web search via Tavily.
 
-**Only companies listed in the [SEC company tickers file](https://www.sec.gov/files/company_tickers.json) are supported.** Questions about companies not in this list will fail at the ticker lookup step.
+**Companies listed in the [SEC company tickers file](https://www.sec.gov/files/company_tickers.json) are supported.** Set `supplementary_tickers_fpath` (and pass `--supplementary_tickers` to prefetch) to overlay extra ticker→CIK mappings that live SEC has dropped.
 
 ## Tools
 
@@ -85,15 +85,57 @@ enable offline operation after the first fetch. Caching is opt-in.
 | `false` (default) | The on-disk cache is fully bypassed — no cache directories are created and **every request fetches fresh filings live**. |
 | `true` | The on-disk cache under `cache_dir` is read and written: ticker mappings, filing metadata, and parsed filing content are cached and reused across requests/runs. |
 
-Keep `use_cache: false` (the default) for **eval**
+Keep `use_cache: false` (the default) for **eval**, so every rollout is scored
+against current filings. Set it to `true` for **training**, where thousands of
+concurrent rollouts would otherwise be rate-limited by SEC.gov.
+
+### Settings for training runs
+
+Training needs more than `use_cache`. The full set, with the eval default shown
+for contrast:
+
+| Setting | Eval default | Training | Why |
+|---------|--------------|----------|-----|
+| `use_cache` | `false` | `true` | Serve filings from `cache_dir` instead of live SEC.gov. |
+| `cache_dir` | `~/.cache/...` | shared absolute path | Must be visible from every rollout worker. |
+| `supplementary_tickers_fpath` | `null` | path to the overlay JSON | Resolve filers that live SEC no longer lists. |
+| `max_end_date` | `null` | dataset cutoff | Latest filing date any date-filtered tool returns. |
+| `reward_mode` | `binary` | `scaled` | Partial credit: `[[1]]` scores 0.5 instead of 0.0. |
+| `max_rollout_time_seconds` | `null` | e.g. `1800` | Without it a stalled rollout blocks the batch. |
+
+Set `max_end_date` to the date the dataset's prompts were written against.
+Leaving it `null` lets the agent retrieve filings published after that date. It
+also matters for `edgar_search`, which falls back to an internal default when
+`max_end_date` is unset — searches are then silently capped at that date rather
+than at your dataset's cutoff.
+
+One agent-side setting lives in the `responses_api_agents` block rather than
+here:
+
+```yaml
+responses_api_agents:
+  finance_agent:
+    continue_if_not_tool_call: false
+```
+
+Eval leaves this `true`, so a text-only turn gets a nudge and the episode
+continues. Training sets it `false` because RL trainers require each turn's
+prompt tokens to extend the previous turn's. The consequence is that a
+text-only turn ends the episode before `submit_final_result`, which scores 0 —
+so track how many rollouts never submit, not just mean reward.
+
+With a local corpus or index available, also set `sec_dump_path` and
+`local_edgar_index_path` (see [Local EDGAR index](#local-edgar-index)).
 
 ### What is cached
 
 | Directory | Contents |
 |-----------|----------|
 | `filings_metadata/{CIK}.json` | Filing metadata (accession numbers, dates, forms) per company |
-| `filings/{CIK}/{accession}.txt` | Parsed filing content (HTML to text) |
+| `filings/{CIK}/{accession}/{document}.txt` | Parsed filing content (HTML to text) |
 | `tickers.json` | SEC ticker-to-CIK mapping |
+
+Prefetch writes `tickers.json` and `filings_metadata/` only. Filing bodies under `filings/` are written by the resource server on the first `parse_html_page` of an EDGAR URL when `use_cache: true`.
 
 ### Cache location
 
@@ -121,22 +163,53 @@ same `cache_dir` for the resource server so rollouts read the prefetched files.
 dependencies). Internet access to SEC.gov is required. No GPU, no model server,
 and no running Gym server needed.
 
+`--cache_dir` must be the same absolute path the resource server will use. On a
+shared filesystem (for example Lustre), put it on that mount so every node sees
+the files. `~/.cache/...` is not shared across Slurm jobs.
+
 ```bash
 # Prefetch for specific tickers:
 python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
-    --cache_dir /path/to/cache \
+    --cache_dir /shared/cache/finance_sec_search \
     --tickers AAPL MSFT NVDA GOOG AMZN
 
 # Or with a YAML ticker list (expects a 'tickers' key with a list):
 python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
-    --cache_dir /path/to/cache \
+    --cache_dir /shared/cache/finance_sec_search \
     --ticker_config /path/to/tickers.yaml
+
+# Overlay extra ticker→CIK mappings (Vals v1 names dropped from live SEC).
+# The overlay path is repo-root relative. Overlay CIKs are prefetched in
+# addition to --tickers, so RDFN/SAVE/X are covered even if not listed.
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+    --cache_dir /shared/cache/finance_sec_search \
+    --tickers AAPL MSFT \
+    --supplementary_tickers benchmarks/finance_sec_search/data/supplementary_tickers.json
 
 # Force refresh (re-fetch even if cached):
 python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
-    --cache_dir /path/to/cache \
+    --cache_dir /shared/cache/finance_sec_search \
     --tickers AAPL --force
 ```
+
+Start the server against that directory (eval configs leave `use_cache` false
+unless you override it):
+
+```bash
+gym env start \
+    --model-type vllm_model \
+    --benchmark finance_sec_search/config_no_web_search \
+    +use_cache=true \
+    +cache_dir=/shared/cache/finance_sec_search
+```
+
+The first rollout still downloads filing bodies and writes them under `filings/`.
+A second identical run should log `SEC filing reads by source: cache=N ...`
+instead of `live=N` for those same EDGAR URLs.
+
+`cache_dir` also relocates Gym's `uv` cache to `{cache_dir}/uv`, so pointing it
+at a fresh directory rebuilds every server virtualenv on startup. Reuse one
+path across runs.
 
 The script is **idempotent**: it skips companies whose cache file already exists
 (unless `--force` is used).

@@ -23,6 +23,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -39,6 +40,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     max_concurrent_requests: Optional[int] = Field(
         default=None,
@@ -68,6 +70,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            max_http_attempts=self.config.max_http_attempts,
         )
         self._semaphore = (
             TimedSemaphore(self.config.max_concurrent_requests, site="model.openai_model")

@@ -167,6 +167,12 @@ def _load_e2b_provider() -> ProviderClass:
     return E2BProvider
 
 
+def _load_local_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.local import LocalProvider
+
+    return LocalProvider
+
+
 def _load_openshell_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.openshell import OpenShellProvider
 
@@ -179,5 +185,6 @@ _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["e2b"] = _load_e2b_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
+_BUILTIN_PROVIDER_LOADERS["local"] = _load_local_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
 _BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider

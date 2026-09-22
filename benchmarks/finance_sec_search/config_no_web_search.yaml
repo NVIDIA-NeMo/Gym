@@ -5,12 +5,16 @@ config_paths:
 # Isolated copy of the resource server for this benchmark
 finance_sec_search_benchmark_resources_server:
   _inherit_from: finance_sec_search_resources_server
+  resources_servers:
+    finance_sec_search:
+      supplementary_tickers_fpath: ../../benchmarks/finance_sec_search/data/supplementary_tickers.json
 
 # Benchmark agent — inherits from finance_agent, overrides datasets
 finance_sec_search_benchmark_agent:
   _inherit_from: finance_agent
   responses_api_agents:
     finance_agent:
+      continue_if_not_tool_call: true
       resources_server:
         name: finance_sec_search_benchmark_resources_server
       datasets:
@@ -19,4 +23,4 @@ finance_sec_search_benchmark_agent:
         jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl
         prompt_config: null
         prepare_script: benchmarks/finance_sec_search/prepare.py
-        num_repeats: 1
+        num_repeats: 3

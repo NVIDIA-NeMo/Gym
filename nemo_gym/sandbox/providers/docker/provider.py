@@ -373,6 +373,49 @@ class DockerProvider:
             raise
         return handle
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a descriptor for reattaching to this container by id.
+
+        Docker recovers image and shell from the running container on connect,
+        and ``docker exec`` runs inside the container's own environment, so the
+        id alone is enough; ``AsyncSandbox.serialize()`` layers the declared
+        ports on top. ``scope`` is unused by the Docker provider.
+        """
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Create a handle for an existing running container, rediscovering its
+        image and shell via the Docker CLI.
+
+        ``sandbox_id`` is required. ``AsyncSandbox.serialize()`` adds a
+        top-level ``ports`` key from the original spec; read it back here so
+        ``endpoint()`` still works after reconnecting.
+        """
+        name = descriptor.get("sandbox_id")
+        if not name:
+            raise DockerCreateError("docker connect requires a sandbox_id")
+
+        code, out, err = await self._run(
+            [self._binary, "inspect", "--format", "{{.State.Running}}\t{{.Config.Image}}", str(name)],
+            timeout_s=self._exec_config.default_timeout_s,
+        )
+        if code != 0:
+            raise DockerCreateError(f"cannot connect to container {name!r}: {err.strip() or out.strip()}")
+        running, _, image = out.strip().partition("\t")
+        if running != "true":
+            raise DockerCreateError(f"cannot connect to container {name!r}: it is not running")
+
+        return SandboxHandle(
+            sandbox_id=str(name),
+            provider_name=self.name,
+            raw=_DockerContainer(
+                name=str(name),
+                image=image,
+                shell=await self._resolve_shell(str(name)),
+                published_ports=tuple(descriptor.get("ports") or ()),
+            ),
+        )
+
     async def _resolve_shell(self, name: str) -> str:
         """Configured exec shell, else bash when the image has it (for conda `source`), else sh."""
         if self._exec_config.exec_shell:

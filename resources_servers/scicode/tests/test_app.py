@@ -110,6 +110,25 @@ def test_run_substep_timeout():
 # server
 # ----------------------------
 class TestApp:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_solution", [False, True])
+    async def test_verify_preserves_step_usage(self, has_solution):
+        request_json = _request(solutions={"1.1": "a"} if has_solution else None).model_dump()
+        request_json["token_usage_version"] = 1
+        request_json["step_usage"] = [
+            {
+                "step_number": "1.1",
+                "status": "generated" if has_solution else "skipped",
+                "usage": None,
+            }
+        ]
+        request = ScicodeVerifyRequest.model_validate(request_json)
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+            result = (await _server(h5.name).verify(request)).model_dump()
+        assert result["token_usage_version"] == 1
+        assert result["step_usage"] == request_json["step_usage"]
+        assert result["reward"] == float(has_solution)
+
     def test_sanity(self):
         _server()
 

@@ -20,7 +20,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Request
@@ -58,10 +58,10 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -70,6 +70,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -87,7 +88,9 @@ def _milliseconds(value: Any) -> Optional[float]:
     return float(value) / 1000
 
 
-def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
+def parse_opencode_observations(
+    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
         return AgentObservationBundle(
@@ -373,7 +376,9 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     if not invocations:
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-    gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
+
+    if trajectory is not None:
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
 
     return AgentObservationBundle(
         source="opencode",
@@ -457,22 +462,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._sandbox_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
+        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(
-        self, sandbox_id: Optional[str] = None, pty_session_id: Optional[str] = None
-    ) -> Tuple[AsyncSandbox, SandboxPtySession]:
+    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         )
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
-        if sandbox_id and pty_session_id:
+        if sandbox_id:
             sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
-            return sandbox, pty_session
+            return sandbox
 
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
@@ -480,6 +482,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
         # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
         env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
+        env |= dict(self.config.sandbox_config.get("env", {}))  # explicit keys win over the derived caps
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
@@ -502,9 +505,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
-        pty_session = await sandbox.pty.create()
-
-        return sandbox, pty_session
+        return sandbox
 
     def _agent_sandbox_observation(
         self,
@@ -656,7 +657,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        sandbox, pty_session = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -702,6 +703,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
+        trajectory = (
+            TrajectoryRecord(task_id="unscoped", rollout_id=observation_invocation_id)
+            if collect_observations
+            else None
+        )
         xdg_home_str = ""
         remote_data_home = None
         if collect_observations:
@@ -729,9 +735,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await sandbox.pty.exec(
+            result = await sandbox.exec(
                 command=command,
-                session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
             )
         except Exception as exc:
@@ -755,10 +760,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
             )
             if session_list_result.return_code != 0:
-                raise RuntimeError(
-                    "Failed to list OpenCode sessions: "
-                    f"{(session_list_result.stderr or session_list_result.stdout or '').strip()}"
-                )
+                raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
@@ -777,13 +779,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if self.config.debug:
-            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-        try:
-            await sandbox.download(export_remote_fpath, results_local_fpath)
-        except:
-            print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-            if export_result:
+        if export_result is not None and export_result.return_code == 0:
+            if self.config.debug:
+                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+            try:
+                await sandbox.download(export_remote_fpath, results_local_fpath)
+            except:
+                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
                 print("Export stdout:\n", export_result.stdout, file=sys.stderr)
                 print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
@@ -810,9 +812,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError("OpenCode database snapshot failed")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
-                observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
+                observations = parse_opencode_observations(
+                    observations_local_fpath, observation_invocation_id, trajectory
+                )
             except Exception:
                 print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
+                trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                 observations = AgentObservationBundle(
                     source="opencode",
                     records=[AgentInvocation(invocation_id=observation_invocation_id)],
@@ -878,6 +883,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
+            run_result["_ng_trajectory"] = trajectory
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         return NeMoGymResponse(
@@ -911,11 +917,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
-        sandbox, pty_session = await self._start_sandbox(
+        sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
-            pty_session_id=seed_session_result.get("pty_session_id"),
         )
-        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = (sandbox, pty_session)
+        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
         # Propagating the sandbox handle
         cookies["sandbox_id"] = session_key
@@ -941,7 +946,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
 
         try:
-            await pty_session.close()
             await sandbox.stop()
         except Exception:
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
@@ -953,6 +957,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         response_dict = await get_response_json(verify_response)
         run_result = self._sandbox_id_to_run_result.pop(session_key)
+        trajectory = run_result.pop("_ng_trajectory", None)
+        if trajectory is not None and rollout_id is not None:
+            response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id).model_dump(
+                mode="json"
+            )
         response_dict |= run_result
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
         response_dict["responses_create_params"]["input"].insert(

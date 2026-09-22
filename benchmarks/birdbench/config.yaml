@@ -7,6 +7,14 @@
 config_paths:
   - resources_servers/bird_sql/configs/bird_sql.yaml
 
+# Forwarded as kwargs to benchmarks/birdbench/prepare.py's prepare(). Pre-declared here (rather
+# than left implicit) to document the default; still needs the Hydra `+` prefix to override from
+# the CLI, e.g. `+prepare_script_args.include_evidence=false`, since `--config` merges this file
+# in via `+config_paths=[...]` rather than as Hydra's primary/root config.
+prepare_script_args:
+  include_evidence: true
+  dscp: name_or_col_dscp
+
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:
   _inherit_from: bird_sql_resources_server

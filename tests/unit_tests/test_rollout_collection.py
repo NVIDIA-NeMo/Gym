@@ -17,7 +17,7 @@ import json
 import pickle
 import warnings
 from asyncio import Future
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
@@ -29,6 +29,7 @@ import pytest
 import yaml
 from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnectedError
 from omegaconf import DictConfig, OmegaConf
+from pydantic import ValidationError
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
@@ -61,10 +62,12 @@ from nemo_gym.rollout_collection import (
     _benchmark_name_for_agent,
     _build_ng_perf,
     _build_trajectory_record,
+    _CompletedRollout,
     _expand_input_glob,
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _masking_step_metrics,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -733,7 +736,6 @@ class TestRolloutCollection:
 
     def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
         result = {
-            "_ng_rollout_latency_ms": 42.0,
             NG_TRAJECTORY_KEY: {
                 "task_id": "t",
                 "rollout_id": "t-0",
@@ -741,14 +743,12 @@ class TestRolloutCollection:
             },
         }
 
-        _attach_ng_perf(result, observability_enabled=False)
+        _attach_ng_perf(result, observability_enabled=False, rollout_latency_ms=42.0)
 
         assert NG_PERF_KEY not in result
-        assert "_ng_rollout_latency_ms" not in result
 
     def test_attach_ng_perf_sets_ng_perf_when_enabled(self) -> None:
         result = {
-            "_ng_rollout_latency_ms": 42.0,
             NG_TRAJECTORY_KEY: {
                 "task_id": "t",
                 "rollout_id": "t-0",
@@ -756,7 +756,7 @@ class TestRolloutCollection:
             },
         }
 
-        _attach_ng_perf(result, observability_enabled=True)
+        _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=42.0)
 
         assert result[NG_PERF_KEY] == {
             "num_turns": 1,
@@ -764,17 +764,15 @@ class TestRolloutCollection:
             "token_observability_coverage": 0.0,
             "total_latency_ms": 42.0,
         }
-        assert "_ng_rollout_latency_ms" not in result
 
     def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
-        result = {"_ng_rollout_latency_ms": 42.0, NG_TRAJECTORY_KEY: {}}
+        result = {NG_TRAJECTORY_KEY: {}}
         monkeypatch.setattr(nemo_gym.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
 
-        _attach_ng_perf(result, observability_enabled=True)
+        _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=42.0)
 
         assert NG_PERF_KEY not in result
-        assert "_ng_rollout_latency_ms" not in result
 
     async def test_run_examples_logs_failed_run(
         self,
@@ -1231,7 +1229,8 @@ class TestRolloutCollection:
         merged = [orjson.loads(line) for line in merged_fpath.read_bytes().splitlines()]
         assert [row["reward"] for row in merged] == [1.0]
 
-    async def test_run_examples_stamps_independent_rollout_latency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_run_examples_never_leaks_rollout_latency_into_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Direct callers (e.g. NeMo-RL) get exactly the raw /run result, with no Gym-private fields."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
@@ -1245,10 +1244,35 @@ class TestRolloutCollection:
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
 
-        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
 
-        assert isinstance(result["_ng_rollout_latency_ms"], float)
-        assert result["_ng_rollout_latency_ms"] >= 0
+        assert returned_row is row
+        assert result == {"response": {}}
+        assert "_ng_rollout_latency_ms" not in result
+
+    async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Internal callers get the timing via _CompletedRollout, never through the result dict."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
+
+        assert completed.row is row
+        assert completed.result == {"response": {}}
+        assert isinstance(completed.rollout_latency_ms, float)
+        assert completed.rollout_latency_ms >= 0
 
     async def test_run_from_config_does_not_route_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -1294,14 +1318,20 @@ class TestRolloutCollection:
         output_jsonl_fpath = tmp_path / "output.jsonl"
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
                 assert kwargs["route_failures_to_sidecar"] is False
                 futures = []
                 for example in examples:
                     future = Future()
                     scored = {"reward": 1.0}
                     judge_failed = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "error": "judge 503"}
-                    future.set_result((example, scored if example["x"] == 0 else judge_failed))
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result=scored if example["x"] == 0 else judge_failed,
+                            rollout_latency_ms=None,
+                        )
+                    )
                     futures.append(future)
                 return futures
 
@@ -1350,7 +1380,7 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
                 assert examples == []
                 return []
 
@@ -1784,7 +1814,7 @@ class TestRolloutCollection:
         )
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(
+            def _run_examples_with_metadata(
                 self,
                 examples: list[dict],
                 *args,
@@ -1794,7 +1824,11 @@ class TestRolloutCollection:
                 for example in examples:
                     future = Future()
                     # (row, result)
-                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example, result={"response": {"usage": {"abc usage": 1}}}, rollout_latency_ms=None
+                        )
+                    )
                     futures.append(future)
 
                 return futures
@@ -1933,13 +1967,19 @@ class TestRolloutCollection:
             return float(task_idx + rollout_idx)
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
                 futures = []
                 for example in examples:
                     future = Future()
                     task_idx = example[TASK_INDEX_KEY_NAME]
                     rollout_idx = example[ROLLOUT_INDEX_KEY_NAME]
-                    future.set_result((example, {"response": {}, "reward": reward_for(task_idx, rollout_idx)}))
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result={"response": {}, "reward": reward_for(task_idx, rollout_idx)},
+                            rollout_latency_ms=None,
+                        )
+                    )
                     futures.append(future)
                 return futures
 
@@ -2012,11 +2052,13 @@ class TestRolloutCollection:
         )
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
                 futures = []
                 for example in examples:
                     future = Future()
-                    future.set_result((example, {"response": {}, "reward": 1.0}))
+                    future.set_result(
+                        _CompletedRollout(row=example, result={"response": {}, "reward": 1.0}, rollout_latency_ms=None)
+                    )
                     futures.append(future)
                 return futures
 
@@ -2073,9 +2115,9 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 future = Future()
-                future.set_result((examples[0], {"reward": 1.0}))
+                future.set_result(_CompletedRollout(row=examples[0], result={"reward": 1.0}, rollout_latency_ms=None))
                 return [future]
 
         await Helper().run_from_config(config)
@@ -2106,11 +2148,15 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 futures = []
                 for example in examples:
                     future = Future()
-                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example, result={"response": {"usage": {"abc usage": 1}}}, rollout_latency_ms=None
+                        )
+                    )
                     futures.append(future)
                 return futures
 
@@ -2161,7 +2207,7 @@ class TestRolloutCollection:
         store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 [example] = examples
                 assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
                 assert store.read("0-0") == []
@@ -2179,7 +2225,7 @@ class TestRolloutCollection:
                         "rollout_id": "0-0",
                         "gaps": [{"code": "multimodal_history_redacted"}],
                     }
-                future.set_result((example, result))
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
                 return [future]
 
         results = await Helper().run_from_config(config)
@@ -2230,14 +2276,16 @@ class TestRolloutCollection:
         store = CaptureStore(capture_dir)
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 [example] = examples
                 store.record(
                     "step7.0-0",
                     {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
                 )
                 future = Future()
-                future.set_result((example, {"response": {"usage": {}}}))
+                future.set_result(
+                    _CompletedRollout(row=example, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                )
                 return [future]
 
         results = await Helper().run_from_config(config)
@@ -2278,10 +2326,14 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 [example] = examples
                 future = Future()
-                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                future.set_result(
+                    _CompletedRollout(
+                        row=example, result={"response": {"output": [], "usage": {}}}, rollout_latency_ms=None
+                    )
+                )
                 return [future]
 
         [result] = await Helper().run_from_config(config)
@@ -2323,7 +2375,7 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 raise AssertionError("Dispatch must not start without a TokenSource.")
 
         with pytest.raises(ValueError, match="rollout-collector process"):
@@ -2383,10 +2435,14 @@ class TestRolloutCollection:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 [example] = examples
                 future = Future()
-                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                future.set_result(
+                    _CompletedRollout(
+                        row=example, result={"response": {"output": [], "usage": {}}}, rollout_latency_ms=None
+                    )
+                )
                 return [future]
 
         with pytest.warns(UserWarning, match="capture contains no token records"):
@@ -2411,7 +2467,7 @@ class TestRolloutCollection:
         )
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(
+            def _run_examples_with_metadata(
                 self,
                 examples: list[dict],
                 *args,
@@ -2421,7 +2477,11 @@ class TestRolloutCollection:
                 for example in examples:
                     future = Future()
                     # (row, result)
-                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example, result={"response": {"usage": {"abc usage": 1}}}, rollout_latency_ms=None
+                        )
+                    )
                     futures.append(future)
 
                 # Reverse!
@@ -2496,7 +2556,7 @@ class TestRolloutCollection:
         captured: dict[str, list[dict]] = {}
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(
+            def _run_examples_with_metadata(
                 self,
                 examples: list[dict],
                 *args,
@@ -2513,7 +2573,7 @@ class TestRolloutCollection:
                         result[NG_FAILURE_CLASS_KEY] = "verify_failed"
                     elif example["x"] == 2:
                         result[NG_NO_PERSIST_KEY] = True
-                    future.set_result((example, result))
+                    future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
                     futures.append(future)
                 return futures
 
@@ -2572,10 +2632,10 @@ class TestRolloutCollection:
         captured: dict[str, list[dict]] = {}
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
                 [example] = examples
                 future = Future()
-                future.set_result((example, {"case": "new"}))
+                future.set_result(_CompletedRollout(row=example, result={"case": "new"}, rollout_latency_ms=None))
                 return [future]
 
             async def _call_aggregate_metrics(self, results, rows, output_fpath):
@@ -2678,7 +2738,10 @@ class TestRolloutCollection:
                 TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 "reward": 1.0,
-                "response": {"usage": {"tokens": 10}},
+                "response": {
+                    "usage": {"tokens": 10},
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
                 "ng_trajectory": {"model_calls": [{"request": "large"}]},
@@ -2715,6 +2778,7 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+        assert sent_data[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
     async def test_call_aggregate_metrics_includes_perf_summary_when_present(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2970,11 +3034,13 @@ class TestDisableAggregationAndCallerTaskIndex:
         )
 
         class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 futures = []
                 for ex in examples:
                     fut = Future()
-                    fut.set_result((ex, {"response": {"usage": {}}}))
+                    fut.set_result(
+                        _CompletedRollout(row=ex, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                    )
                     futures.append(fut)
                 return futures
 
@@ -3474,6 +3540,20 @@ class TestE2EInputJsonlFpathRejected:
                 }
             )
 
+    def test_e2e_config_rejects_input_jsonl_fpath_from_dictconfig(self) -> None:
+        # The CLI passes an OmegaConf DictConfig (a Mapping, not a dict). An isinstance(dict)
+        # check silently let input_jsonl_fpath through on the real path — pin the Mapping match.
+        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
+            E2ERolloutCollectionConfig.model_validate(
+                DictConfig(
+                    {
+                        "output_jsonl_fpath": "out.jsonl",
+                        "split": "train",
+                        "input_jsonl_fpath": "my_data.jsonl",
+                    }
+                )
+            )
+
     def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
         config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
         assert config.split == "train"
@@ -3483,6 +3563,17 @@ class TestE2EInputJsonlFpathRejected:
             {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
         )
         assert config.input_jsonl_fpath == "my_data.jsonl"
+
+
+class TestE2EExampleSplitRejected:
+    @pytest.mark.parametrize("wrap", [dict, DictConfig])
+    def test_example_split_gets_actionable_error_not_literal_error(self, wrap) -> None:
+        with pytest.raises(ConfigError, match=r"--no-serve --agent <agent> --input"):
+            E2ERolloutCollectionConfig.model_validate(wrap({"output_jsonl_fpath": "out.jsonl", "split": "example"}))
+
+    def test_other_invalid_splits_still_fail_literal_validation(self) -> None:
+        with pytest.raises(ValidationError, match=r"split"):
+            E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "test"})
 
 
 class TestAgentMapRouting:
@@ -3885,9 +3976,9 @@ class TestTaskSourcePreprocess:
             def setup_server_client(self, head_server_config=None):
                 return mock_client
 
-            def run_examples(self, examples, *args, **kwargs):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 future = Future()
-                future.set_result((examples[0], {"response": {}}))
+                future.set_result(_CompletedRollout(row=examples[0], result={"response": {}}, rollout_latency_ms=None))
                 return [future]
 
         await Helper().run_from_config(config)
@@ -4014,3 +4105,99 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+class TestMaskingStepMetrics:
+    """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
+
+    def test_a_healthy_run_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", Counter({"reward": 2.0, "count": 4}), Counter()) == {}
+
+    def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
+        # 10 persisted, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", Counter({"reward": 4.0, "count": 8, "masked": 2}), Counter())
+
+        assert metrics == {
+            "progress/my_agent/masked_pct": 20.0,
+            "progress/my_agent/reward_unmasked": 50.0,
+        }
+
+    def test_every_persisted_rollout_masked_publishes_no_score(self) -> None:
+        """No unmasked rollout means no honest average to publish."""
+        assert _masking_step_metrics("my_agent", Counter({"masked": 6}), Counter()) == {
+            "progress/my_agent/masked_pct": 100.0
+        }
+
+    def test_failed_and_omitted_attempts_do_not_enter_the_quality_average(self) -> None:
+        """A sidecar row and a kill-shaped one are counted, never averaged as a zero."""
+        metrics = _masking_step_metrics(
+            "my_agent",
+            Counter({"reward": 4.0, "count": 4}),
+            Counter({"failed": 3, "omitted": 2}),
+        )
+
+        assert metrics == {
+            "progress/my_agent/reward_unmasked": 100.0,
+            "progress/my_agent/failed": 3,
+            "progress/my_agent/omitted": 2,
+        }
+
+
+class TestAnAgentThatOnlyEverFails:
+    """The wiring case: a total failure must not fall out of the export.
+
+    `_masking_step_metrics` is correct on its own Counters; what this covers is the loop
+    that feeds it. An agent whose every request returns no result never lands in
+    `agent_name_to_counts`, so iterating that dict would drop exactly the agent whose
+    failure the series exists to surface.
+    """
+
+    def _exported_agents(self, scored: dict, dropped: dict) -> set:
+        """Reproduce the export loop's selection over the two counter dicts."""
+        agent_name_to_scored = defaultdict(Counter, {k: Counter(v) for k, v in scored.items()})
+        agent_name_to_dropped = defaultdict(Counter, {k: Counter(v) for k, v in dropped.items()})
+
+        step_metrics: dict = {}
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            step_metrics.update(
+                _masking_step_metrics(
+                    agent_name,
+                    agent_name_to_scored.get(agent_name, Counter()),
+                    agent_name_to_dropped.get(agent_name, Counter()),
+                )
+            )
+        return {key.split("/")[1] for key in step_metrics}
+
+    def test_an_agent_with_no_successful_result_still_reports_its_failures(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert "broken_agent" in exported
+
+    def test_the_healthy_agent_is_not_lost_in_the_process(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4, "masked": 1}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert exported == {"healthy_agent", "broken_agent"}
+
+    def test_a_run_with_nothing_wrong_still_exports_nothing(self) -> None:
+        """The series stays empty on a healthy run, as before."""
+        assert self._exported_agents(scored={"healthy_agent": {"reward": 3.0, "count": 4}}, dropped={}) == set()
+
+    def test_the_counters_are_not_grown_by_being_read(self) -> None:
+        agent_name_to_scored: dict = defaultdict(Counter, {"healthy_agent": Counter({"count": 1})})
+        agent_name_to_dropped: dict = defaultdict(Counter, {"broken_agent": Counter({"failed": 1})})
+
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            _masking_step_metrics(
+                agent_name,
+                agent_name_to_scored.get(agent_name, Counter()),
+                agent_name_to_dropped.get(agent_name, Counter()),
+            )
+
+        assert set(agent_name_to_scored) == {"healthy_agent"}
+        assert set(agent_name_to_dropped) == {"broken_agent"}
