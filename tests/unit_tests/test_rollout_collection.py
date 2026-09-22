@@ -1189,6 +1189,37 @@ class TestRolloutCollection:
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
 
+    async def test_coverage_is_exported_when_aggregation_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """disable_aggregation skips the branch that counts imputed rows; the export still runs."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        exported: dict[str, float] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            return FakeResponse(200, {"reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr("nemo_gym.rollout_collection.get_exporters", lambda: ["any"])
+        monkeypatch.setattr(
+            "nemo_gym.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
+        )
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            count_missing_rollouts_as_zero=True,
+            disable_aggregation=True,
+            disable_health_check=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert exported["coverage/imputed"] == 0
+
     @pytest.mark.parametrize(
         ("counted_classes", "expected_scored", "expected_mean"),
         [([], 1, 1.0), ([AGENT_RUN_ERROR_FAILURE_CLASS], 2, 0.5)],

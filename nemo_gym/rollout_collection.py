@@ -1710,6 +1710,7 @@ class RolloutCollectionHelper(BaseModel):
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
         counted: List[Dict] = []
+        missing: List[Dict[str, Any]] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1728,7 +1729,6 @@ class RolloutCollectionHelper(BaseModel):
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
-            missing: List[Dict[str, Any]] = []
             if config.count_missing_rollouts_as_zero:
                 scored_keys |= {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in counted}
                 missing = _missing_rollout_rows_counted_as_zero(
