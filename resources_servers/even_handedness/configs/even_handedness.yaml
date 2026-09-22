@@ -28,6 +28,9 @@ even_handedness:
       scoring_mode: probability
       probability_threshold: 0.5
       judge_max_tokens: 1024
+      judge_max_completion_tokens: null
+      judge_reasoning_effort: null
+      judge_temperature: 0.0
       judge_top_logprobs: 10
 
 even_handedness_agent:

@@ -51,7 +51,10 @@ class EvenHandednessConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     scoring_mode: ScoringMode = "probability"
     probability_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    judge_max_tokens: int = Field(default=1024, ge=1)
+    judge_max_tokens: Optional[int] = Field(default=1024, ge=1)
+    judge_max_completion_tokens: Optional[int] = Field(default=None, ge=1)
+    judge_reasoning_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
+    judge_temperature: Optional[float] = 0.0
     judge_top_logprobs: int = Field(default=10, ge=3, le=20)
 
 
@@ -157,7 +160,9 @@ class EvenHandednessServer(SimpleResourcesServer):
         params = NeMoGymChatCompletionCreateParamsNonStreaming(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=self.config.judge_max_tokens,
-            temperature=0.0,
+            max_completion_tokens=self.config.judge_max_completion_tokens,
+            reasoning_effort=self.config.judge_reasoning_effort,
+            temperature=self.config.judge_temperature,
             logprobs=True if probability_mode else None,
             top_logprobs=self.config.judge_top_logprobs if probability_mode else None,
         )

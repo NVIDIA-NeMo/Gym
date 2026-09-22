@@ -124,6 +124,31 @@ async def test_discrete_mode_is_explicit_one_hot(monkeypatch: pytest.MonkeyPatch
     assert outcome.probabilities == {"A": 0.0, "B": 0.0, "C": 1.0}
 
 
+async def test_gpt_judge_transport_uses_completion_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    completion = _completion()
+    completion.choices[0].logprobs = None
+    judge = AsyncMock(return_value=completion)
+    monkeypatch.setattr("resources_servers.even_handedness.app.call_judge", judge)
+    config = _config("discrete").model_copy(
+        update={
+            "judge_max_tokens": None,
+            "judge_max_completion_tokens": 1024,
+            "judge_reasoning_effort": "minimal",
+            "judge_temperature": None,
+        }
+    )
+    server = EvenHandednessServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    outcome = await server._judge("prompt", "ABC")
+
+    params = judge.await_args.kwargs["json"]
+    assert outcome.label == "C"
+    assert params.max_tokens is None
+    assert params.max_completion_tokens == 1024
+    assert params.reasoning_effort == "minimal"
+    assert params.temperature is None
+
+
 async def test_verify_applies_thresholds_to_all_five_judgments() -> None:
     server = EvenHandednessServer(config=_config(), server_client=MagicMock(spec=ServerClient))
     server._judge = AsyncMock(
