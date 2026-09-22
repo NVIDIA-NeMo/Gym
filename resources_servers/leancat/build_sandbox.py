@@ -13,32 +13,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Build LeanCat's Lean 4.19.0 / Mathlib v4.19.0 environment and snapshot it.
+"""Build a Lean + Mathlib sandbox environment and snapshot it.
 
-**This is the recipe for the environment every LeanCat number depends on.** Run it once;
-it prints a snapshot id that every later run boots from in seconds via
-``LEANCAT_SANDBOX_SNAPSHOT_ID``. Nobody runs it again unless the snapshot is lost.
+**This is the recipe for the environment every LeanCat number depends on.** Run it once; it
+prints a snapshot id that later runs boot from in seconds via ``LEANCAT_SANDBOX_SNAPSHOT_ID``.
+Nobody runs it again unless the snapshot is lost.
 
-Why a snapshot and not an image: LeanCat's upstream publishes no container, and there is no
-published image at Mathlib v4.19.0 -- ``leanprovercommunity/mathlib`` ships only
-``latest``/``gitpod``/``debian``, and NeMo-Skills' sandbox image is pinned to v4.12.0 (a
-sandbox on which 36 of the 100 reference statements fail to compile with their ``sorry``
-still intact, silently capping any score at 64/100). Building inside a sandbox and
-snapshotting needs no docker, no registry and no push.
+The version is an argument, so this also builds the environment for any other Lean benchmark:
+LeanCat needs v4.19.0, while minif2f, proofnet, putnam_bench and math_formal_lean are written
+against v4.12.0. One snapshot per version; they are not interchangeable. On v4.12.0, 36 of
+LeanCat's 100 reference statements fail to compile with their ``sorry`` still intact, which
+silently caps any score at 64/100 and skews it by difficulty.
 
-The base image is NeMo-Skills' published sandbox: it already carries elan, lake and a
-Mathlib project at /lean4/my_project, so this only has to move the pins and refetch the
-cache. Any image with that layout works.
+Why a snapshot rather than an image: LeanCat's upstream publishes no container, and no
+published image carries Mathlib v4.19.0 -- ``leanprovercommunity/mathlib`` ships only
+``latest``/``gitpod``/``debian``, and NeMo-Skills' sandbox image is pinned to v4.12.0.
+Building inside a sandbox and snapshotting needs no docker, no registry and no push.
+
+The base is a slim Debian image, not the NeMo-Skills sandbox: that one is
+``uwsgi-nginx-flask`` plus pypy and a large Python stack, all of it there to serve the HTTP
+``/execute`` API this server no longer uses -- roughly 15 GB that would be pulled on every
+start and stored in every snapshot. Its prebuilt Mathlib does not help either, since oleans
+do not carry across versions and the cache is refetched regardless.
 
 A snapshot is an opaque blob tied to one cell, so treat it as a cache and this script as the
-source of truth: if the snapshot is lost or the cell is retired, re-run this.
+source of truth: if the snapshot is lost or the cell retired, re-run this.
 
 Usage:
     export OPENSANDBOX_DOMAIN=https://<cell-endpoint>
     export OPENSANDBOX_API_KEY=<key>
-    python build_sandbox.py                      # build, verify, snapshot
-    python build_sandbox.py --keep               # leave the sandbox running for debugging
-    python build_sandbox.py --no-snapshot        # build and verify only
+    python build_sandbox.py                          # v4.19.0, for LeanCat
+    python build_sandbox.py --lean-version v4.12.0   # the other Lean benchmarks
+    python build_sandbox.py --no-snapshot --keep     # build only, leave it up to inspect
 """
 
 import argparse
@@ -54,40 +60,61 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config
 
 
-# Published, and already Lean-shaped: elan + lake + a Mathlib project at LEAN_PROJECT_DIR.
-BASE_IMAGE = "igitman/nemo-skills-sandbox:0.7.2"
+# Slim base: this script installs elan and Mathlib itself, so nothing unused is inherited.
+BASE_IMAGE = "debian:bookworm-slim"
 LEAN_PROJECT_DIR = "/lean4/my_project"
 
-# What LeanCat's statements are written against (upstream configs/evaluation_protocol.json).
-LEAN_VERSION = "v4.19.0"
-MATHLIB_VERSION = "v4.19.0"
+# LeanCat's pin (upstream configs/evaluation_protocol.json). Override for other benchmarks.
+DEFAULT_LEAN_VERSION = "v4.19.0"
 
-# Repin the project and refetch Mathlib. `lake exe cache get` downloads prebuilt olean files,
-# which is what keeps this minutes rather than the hours a from-source Mathlib build takes.
-BUILD_SCRIPT = f"""set -euo pipefail
+
+def build_script(lean_version: str, mathlib_version: str) -> str:
+    """Install elan, create a lake project pinned to `lean_version`, and fetch Mathlib.
+
+    `lake exe cache get` downloads prebuilt oleans, which is what keeps this minutes rather
+    than the hours a from-source Mathlib build takes. `lake build` afterwards is a no-op when
+    the cache is complete and a fallback when it is not.
+    """
+    return f"""set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends curl git ca-certificates build-essential
+rm -rf /var/lib/apt/lists/*
+
+curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+  | sh -s -- -y --default-toolchain leanprover/lean4:{lean_version}
+export PATH="/root/.elan/bin:$PATH"
+
+mkdir -p {LEAN_PROJECT_DIR}
 cd {LEAN_PROJECT_DIR}
-elan toolchain install leanprover/lean4:{LEAN_VERSION}
-elan override set leanprover/lean4:{LEAN_VERSION}
-echo 'leanprover/lean4:{LEAN_VERSION}' > lean-toolchain
+echo 'leanprover/lean4:{lean_version}' > lean-toolchain
 cat > lakefile.lean <<'LAKEFILE'
 import Lake
 open Lake DSL
 
 package «my_project» where
 
-require mathlib from git "https://github.com/leanprover-community/mathlib4" @ "{MATHLIB_VERSION}"
-
-@[default_target]
-lean_lib «MyProject» where
+require mathlib from git "https://github.com/leanprover-community/mathlib4" @ "{mathlib_version}"
 LAKEFILE
-rm -f lake-manifest.json
+
+# elan only exports PATH through ~/.profile, which the non-login shells that `exec` spawns
+# never read -- and the server runs `lake env lean` through exactly such a shell. Symlink the
+# binaries somewhere already on PATH so the environment works without a login shell.
+ln -sf /root/.elan/bin/lake /usr/local/bin/lake
+ln -sf /root/.elan/bin/lean /usr/local/bin/lean
+ln -sf /root/.elan/bin/elan /usr/local/bin/elan
+
 lake update
 lake exe cache get
 lake build
+
+# Prove the binaries resolve the way the server will call them: no PATH, no login shell.
+env -i /usr/local/bin/lake --version
 """
 
+
 # The check that decides whether the environment is usable at all.
-PROBE = "import Mathlib\\n#eval Lean.versionString\\n"
+PROBE = "import Mathlib\n#eval Lean.versionString"
 
 
 def _api(path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -141,6 +168,12 @@ async def run(sandbox: AsyncSandbox, command: str, timeout_s: float, label: str)
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-image", default=BASE_IMAGE)
+    parser.add_argument(
+        "--lean-version",
+        default=DEFAULT_LEAN_VERSION,
+        help="Lean toolchain tag. Mathlib is pinned to the same tag unless --mathlib-version is given.",
+    )
+    parser.add_argument("--mathlib-version", default=None, help="Defaults to --lean-version.")
     parser.add_argument("--cpu", type=float, default=8, help="Build is CPU-bound; more is faster.")
     parser.add_argument("--memory-mib", type=int, default=32768)
     parser.add_argument("--disk-gib", type=int, default=60, help="Mathlib's oleans are tens of GB.")
@@ -148,6 +181,8 @@ async def main() -> int:
     parser.add_argument("--keep", action="store_true", help="Leave the sandbox running.")
     parser.add_argument("--no-snapshot", action="store_true", help="Build and verify only.")
     args = parser.parse_args()
+
+    mathlib_version = args.mathlib_version or args.lean_version
 
     for name in ("OPENSANDBOX_DOMAIN", "OPENSANDBOX_API_KEY"):
         if not os.environ.get(name):
@@ -165,12 +200,20 @@ async def main() -> int:
             resources=SandboxResources.from_mapping(
                 {"cpu": args.cpu, "memory_mib": args.memory_mib, "disk_gib": args.disk_gib}
             ),
-            metadata={"benchmark": "leancat", "purpose": "build-mathlib-environment"},
+            metadata={
+                "purpose": "build-mathlib-environment",
+                "lean-version": args.lean_version,
+            },
         )
     )
 
     try:
-        await run(sandbox, BUILD_SCRIPT, args.build_timeout, f"building Mathlib {MATHLIB_VERSION}")
+        await run(
+            sandbox,
+            build_script(args.lean_version, mathlib_version),
+            args.build_timeout,
+            f"installing Lean {args.lean_version} and Mathlib {mathlib_version}",
+        )
 
         # Prove the toolchain is the one the statements need before anything is snapshotted.
         output = await run(
@@ -179,10 +222,10 @@ async def main() -> int:
             600,
             "probing the Lean version",
         )
-        if LEAN_VERSION.lstrip("v") not in output:
+        if args.lean_version.lstrip("v") not in output:
             print(output[-2000:], file=sys.stderr)
-            raise SystemExit(f"FAIL: sandbox does not report Lean {LEAN_VERSION}. Not snapshotting.")
-        print(f"    Lean {LEAN_VERSION} confirmed")
+            raise SystemExit(f"FAIL: sandbox does not report Lean {args.lean_version}. Not snapshotting.")
+        print(f"    Lean {args.lean_version} confirmed")
 
         if args.no_snapshot:
             print("--no-snapshot: stopping here.")
@@ -191,7 +234,11 @@ async def main() -> int:
         handle = await sandbox.serialize()
         sandbox_id = handle.get("sandbox_id") or handle.get("id")
         print(f"==> snapshotting sandbox {sandbox_id}")
-        snapshot = _api(f"/sandboxes/{sandbox_id}/snapshots", method="POST", body={})
+        snapshot = _api(
+            f"/sandboxes/{sandbox_id}/snapshots",
+            method="POST",
+            body={"metadata": {"lean-version": args.lean_version, "mathlib-version": mathlib_version}},
+        )
         snapshot_id = snapshot.get("id") or snapshot.get("snapshotId")
 
         print(f"\nSnapshot: {snapshot_id}\n")
