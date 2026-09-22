@@ -87,3 +87,45 @@ def test_spawn_error_is_not_success(tmp_path):
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] != 0
+
+
+def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
+    # Deliver SIGTERM after the real child exists but before Popen returns to run().
+    # Isolate signal handlers/subreaper state from pytest, and always reap the test child.
+    driver = """
+import json, os, runpy, signal, subprocess, sys
+runner = runpy.run_path(sys.argv[1])
+spawn = subprocess.Popen
+children = []
+def interrupted_spawn(*args, **kwargs):
+    child = spawn(*args, **kwargs)
+    children.append(child)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return child
+subprocess.Popen = interrupted_spawn
+try:
+    summary = runner['run']({
+        'directory': sys.argv[2], 'cwd': sys.argv[2], 'env': {}, 'prompt': 'task',
+        'command': [sys.executable, '-c', 'import time; time.sleep(60)'],
+        'timeout': 5, 'cleanup_timeout': 2,
+    })
+    summary['child_alive'] = any(child.poll() is None for child in children)
+    print(json.dumps(summary))
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["timed_out"] is True
+    assert summary["cleanup_confirmed"] is True
+    assert summary["child_alive"] is False

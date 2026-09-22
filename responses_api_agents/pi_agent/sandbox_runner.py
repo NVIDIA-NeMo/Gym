@@ -51,9 +51,12 @@ def run(params: dict) -> dict:
     timed_out = False
     cleanup_confirmed = False
     capture_errors = []
+    stopping = False
 
     def interrupt(*_):
-        raise InterruptedError("Pi sandbox runner interrupted")
+        nonlocal stopping
+        # Do not interrupt Popen between process creation and handle assignment.
+        stopping = True
 
     def capture(stream) -> None:
         try:
@@ -86,9 +89,12 @@ def run(params: dict) -> dict:
             )
             reader = threading.Thread(target=capture, args=(process.stdout,), daemon=True)
             reader.start()
-            process.wait(timeout=params["timeout"])
-        except (subprocess.TimeoutExpired, InterruptedError):
-            timed_out = True
+            deadline = monotonic() + params["timeout"]
+            while process.poll() is None:
+                if stopping or monotonic() >= deadline:
+                    timed_out = True
+                    break
+                sleep(0.05)
         except Exception as exc:
             error = str(exc)
         finally:

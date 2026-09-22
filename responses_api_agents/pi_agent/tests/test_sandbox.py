@@ -8,9 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -300,6 +301,19 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
     sandbox.pty.create.assert_not_awaited()
 
 
+def test_rejected_request_does_not_consume_activation(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/pi-smoke-a2/v1/responses"
+        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        sandbox.pty.create.assert_not_awaited()
+        accepted = client.post(path, json={"input": "task"})
+        assert accepted.status_code == 200, accepted.text
+        assert client.post(path, json={"input": "task"}).status_code == 409
+    sandbox.pty.create.assert_awaited_once()
+
+
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_episode", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
@@ -420,6 +434,117 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
     sandbox.disconnect.assert_awaited_once()
+
+
+def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
+    agent, sandbox = setup
+    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: 100.0)
+    with TestClient(agent.setup_webserver()) as client:
+
+        def seed_and_close(index):
+            client.cookies.clear()
+            body = seed().model_dump(mode="json")
+            body["episode_id"] = {"rollout_id": f"episode-{index}"}
+            created = client.post("/v1/agent_sessions", json=body)
+            assert created.status_code == 200
+            cookies = dict(client.cookies)
+            close = {"agent_session_id": created.json()["agent_session_id"], "episode_id": body["episode_id"]}
+            result = client.post("/v1/agent_sessions/close", json=close)
+            assert result.status_code == 200
+            return cookies, close, result.json()
+
+        cookies, close, first = seed_and_close(0)
+        for index in range(1, 66):
+            seed_and_close(index)
+        client.cookies.clear()
+        client.cookies.update(cookies)
+        retry = client.post("/v1/agent_sessions/close", json=close)
+        assert retry.status_code == 200
+        assert retry.json() == first
+    assert sandbox.disconnect.await_count == 66
+
+
+async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    request = Request({"type": "http", "session": {}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    close = AgentCloseSessionRequest(**close_body(session_id))
+    first = await agent.close_agent_session(request, close)
+    clock[0] = 109.0
+    assert await agent.close_agent_session(request, close) == first
+    clock[0] = 110.0
+    with pytest.raises(HTTPException) as error:
+        await agent.close_agent_session(request, close)
+    assert error.value.status_code == 409
+    assert not agent._closed_sandbox_sessions
+    with patch.object(agent, "_create_episode", AsyncMock(side_effect=AssertionError("host fallback"))):
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert error.value.status_code == 409
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    request = Request({"type": "http", "session": {}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+
+    async def disconnect():
+        clock[0] = 200.0
+
+    sandbox.disconnect.side_effect = disconnect
+    close = AgentCloseSessionRequest(**close_body(session_id))
+    first = await agent.close_agent_session(request, close)
+    clock[0] = 209.0
+    assert await agent.close_agent_session(request, close) == first
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_concurrent_closes_share_receipt(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def disconnect():
+        entered.set()
+        await release.wait()
+
+    sandbox.disconnect.side_effect = disconnect
+    close = AgentCloseSessionRequest(**close_body(session_id))
+    first = asyncio.create_task(agent.close_agent_session(request, close))
+    await asyncio.wait_for(entered.wait(), 2)
+    second = asyncio.create_task(agent.close_agent_session(request, close))
+    await asyncio.sleep(0)
+    release.set()
+    first_result, second_result = await asyncio.wait_for(asyncio.gather(first, second), 2)
+    assert first_result is second_result
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+    agent, _ = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
+    request = Request({"type": "http", "session": {}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    clock[0] += agent.config.session_close_retry_window_seconds
+    await agent.seed_agent_session(request, seed())
+    assert not agent._closed_sandbox_sessions
+
+
+@pytest.mark.parametrize("window", [0, -1, float("inf")])
+def test_close_retry_window_must_be_positive_and_finite(setup, window):
+    agent, _ = setup
+    with pytest.raises(ValidationError):
+        PiAgentConfig(**(agent.config.model_dump() | {"session_close_retry_window_seconds": window}))
 
 
 async def test_unknown_launch_outcome_fails_closed(setup):
