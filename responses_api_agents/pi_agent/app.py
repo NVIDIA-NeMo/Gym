@@ -25,7 +25,7 @@ from asyncio import Semaphore
 from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -441,6 +441,12 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     pi_version: Optional[str] = None
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
     session_close_timeout_seconds: float = Field(default=60, gt=0)
+    session_close_retry_window_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
+    )
 
     @property
     def command_parts(self) -> list[str]:
@@ -467,13 +473,14 @@ class PiAgent(SimpleResponsesAPIAgent):
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _sandbox_sessions: dict[str, PiSandboxSession] = PrivateAttr(default_factory=dict)
-    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse]] = PrivateAttr(
+    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
         default_factory=OrderedDict
     )
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Borrow the Resources-owned task sandbox and install a pinned Pi runtime inside it."""
+        self._expire_closed_agent_sessions()
         if request.session.get(_SANDBOX_SESSION_KEY) in self._sandbox_sessions:
             raise HTTPException(409, "Pi session already exists")
         session_id = f"pi-{uuid4().hex}"
@@ -535,6 +542,7 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
         """Confirm Pi teardown before allowing verification; never destroy the borrowed sandbox."""
+        self._expire_closed_agent_sessions()
         session_id = request.session.get(_SANDBOX_SESSION_KEY)
         closed = self._closed_sandbox_sessions.get(session_id)
         if closed is not None and body.agent_session_id == session_id and body.episode_id == closed[0]:
@@ -543,21 +551,38 @@ class PiAgent(SimpleResponsesAPIAgent):
         if state is None or body.agent_session_id != session_id or body.episode_id != state.seed.episode_id:
             raise HTTPException(409, "Pi close does not match the seeded session and episode")
         await state.close(self.config.session_close_timeout_seconds)
+        # Another close may have completed while this caller waited for the
+        # session's cleanup lock. Reuse its receipt without renewing its expiry.
+        self._expire_closed_agent_sessions()
+        closed = self._closed_sandbox_sessions.get(session_id)
+        if closed is not None:
+            return closed[1]
+        if self._sandbox_sessions.get(session_id) is not state:
+            raise HTTPException(409, "Pi close receipt has expired")
         observations = state.observations or AgentObservationBundle(
             source="pi", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         self._sandbox_sessions.pop(session_id, None)
         result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
-        # Bound retry receipts in memory; keep the cookie so stale activations
-        # cannot silently fall back to host execution after a successful close.
-        self._closed_sandbox_sessions[session_id] = (body.episode_id, result)
-        while len(self._closed_sandbox_sessions) > 64:
-            self._closed_sandbox_sessions.popitem(last=False)
+        # Keep the cookie as a tombstone so later activations cannot fall back
+        # to host execution. Other sessions must not shorten the retry window.
+        self._closed_sandbox_sessions[session_id] = (
+            body.episode_id,
+            result,
+            monotonic() + self.config.session_close_retry_window_seconds,
+        )
         return result
 
-    async def _sandbox_response(
-        self, state: PiSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> NeMoGymResponse:
+    def _expire_closed_agent_sessions(self) -> None:
+        """Prune receipts by close time, never by traffic or retry access order."""
+        now = monotonic()
+        while self._closed_sandbox_sessions:
+            if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
+                break
+            self._closed_sandbox_sessions.popitem(last=False)
+
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        """Validate and normalize input before consuming the session's activation."""
         unsupported = (
             "temperature",
             "top_p",
@@ -594,6 +619,16 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(422, "Native Pi only supports text input")
         prompt, input_system = _extract_instruction(items)
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        return prompt, system
+
+    async def _sandbox_response(
+        self,
+        state: PiSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+    ) -> NeMoGymResponse:
         # Native sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
@@ -946,8 +981,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
             if state.activated or state.closing:
                 raise HTTPException(409, "Pi sandbox sessions support one activation")
+            prompt, system = self._sandbox_input(body)
             state.activated = True
-            state.task = asyncio.create_task(self._sandbox_response(state, body))
+            state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
             try:
                 return await asyncio.shield(state.task)
             except asyncio.CancelledError:

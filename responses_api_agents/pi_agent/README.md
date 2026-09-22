@@ -124,9 +124,11 @@ Benchmark selection and evaluation settings belong in that environment/run confi
 not a Pi-specific benchmark preset. Pi's own `resources_server` setting is needed only for
 its existing `/run`; omit it for native sessions. Native seed rejects `pi_version: latest`.
 
-Supported task images are Linux x86_64/aarch64 glibc with Python 3.9+, bash, curl, tar/xz,
-and SHA-256 utilities. The provider must implement PTY process sessions, including exit
-acknowledgement and signalling. Installation needs network access to nodejs.org and npm.
+Supported task images are Linux x86_64/aarch64 glibc with Python 3.9+, bash, tar/xz,
+and SHA-256 utilities. The installer reuses curl, or installs it with CA certificates on
+root Debian/Ubuntu images; other images must provide curl. The provider must implement PTY
+process sessions, including exit acknowledgement and signalling. Installation needs network
+access to nodejs.org and npm.
 Musl/Alpine images are not supported.
 
 The Node runtime, Pi package, and isolated HOME are outside the task repository. Pi's
@@ -150,10 +152,11 @@ curl --fail-with-body -H 'Content-Type: application/json' \
 ```
 
 Input is one text user message, optionally preceded by a system message. The adapter also
-applies `instructions` and its configured system prompt. It honors `max_output_tokens`
-through Pi's model configuration. Unsupported sampling, history, and tool-policy overrides
-are rejected rather than silently ignored; configure sampling and chat-template settings
-on the Gym model server.
+applies `instructions` and its configured system prompt. It forwards `max_output_tokens`
+to Pi's model configuration, but Pi 0.80.2 has been observed to omit the limit from inference
+requests. Do not rely on this field for enforcement yet; configure a limit on the model server.
+Unsupported sampling, history, and tool-policy overrides are rejected rather than silently
+ignored; configure sampling and chat-template settings on the Gym model server.
 
 ### Results and limitations
 
@@ -167,7 +170,9 @@ the pinned Pi version. Model-call references and tool observations are returned 
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
 is explicitly marked as gaps.
 
-Cleanup is cooperative, not a security boundary against hostile sandbox code. The worker
-retains the last 64 close receipts for immediate retries, not durable recovery. Agent sessions
-are process-local and do not survive server crashes. Resources and the sandbox provider
-retain responsibility for owner-side cleanup and expiry.
+Cleanup is cooperative, not a security boundary against hostile sandbox code. Like Hermes,
+successful close receipts are retained for `session_close_retry_window_seconds` (default 300),
+starting after cleanup. Set it to cover the caller's retry horizon. Other sessions and retries
+do not shorten or extend that window. Expired receipts are pruned on seed/close activity;
+stale activations still cannot fall back to the host. Sessions and receipts are process-local,
+not durable recovery. Resources and the sandbox provider own sandbox cleanup and expiry.
