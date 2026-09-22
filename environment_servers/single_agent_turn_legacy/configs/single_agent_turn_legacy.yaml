@@ -1,6 +1,6 @@
-single_agent_legacy_environment_server:
+single_agent_turn_legacy:
   environment_servers:
-    single_agent_legacy:
+    single_agent_turn_legacy:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -8,7 +8,6 @@ single_agent_legacy_environment_server:
       agent_server:
         type: responses_api_agents
         name: ???
-      task_input_contract: nemo_gym.single_agent.v1
       max_concurrent_episodes: null
       queue_timeout_seconds: null
       default_episode_timeout_seconds: 21600
