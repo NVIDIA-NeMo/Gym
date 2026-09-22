@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import random
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -14,12 +16,10 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 
-from benchmarks.gpqa.prepare import build_row
-
 
 DIRECTORY = Path(__file__).resolve().parent
-SOURCE_ID = "anushakamathofficial/Indic_GPQA_Diamond"
-SOURCE_REVISION = "1a56d82dd1aa89b6f270b2cccaa541be4a8b07d6"
+SOURCE_ID = "ai4bharat/indic-gpqa"
+SOURCE_REVISION = "c3c32b0a0ec7aeebe884c4c55c46730b4274a612"
 CANONICAL_SOURCE_ID = "Idavidrein/gpqa"
 CANONICAL_SOURCE_REVISION = "633f5ee89ab8ad4522a9f850766b73f62147ffdd"
 LANGUAGES = {
@@ -42,32 +42,16 @@ LANGUAGES = {
 DEFAULT_LANGUAGES = tuple(language for language in LANGUAGES if language != "en")
 EXPECTED_ROWS = 198
 TEXT_FIELDS = ("Question", "Correct Answer", "Incorrect Answer 1", "Incorrect Answer 2", "Incorrect Answer 3")
-SOURCE_FIELDS = {*TEXT_FIELDS, "language", "language_code", "judge_pass_stage"}
-QUALITY_STAGES = {
-    "english_source",
-    "first_judge_pass",
-    "passed_after_correction",
-    "failed_after_correction_review_needed",
-    "not_judged_review_needed",
-    "failed_first_judge_review_needed",
-}
 
 
 def _validate_records(records: Sequence[Mapping[str, Any]], *, language: str | None) -> None:
     if len(records) != EXPECTED_ROWS:
         raise ValueError(f"GPQA {language or 'canonical'}: expected {EXPECTED_ROWS} rows")
+    suffix = f"_{LANGUAGES[language]}_translation" if language not in (None, "en") else ""
+    fields = [f"{field}{suffix}" for field in TEXT_FIELDS]
     for index, row in enumerate(records):
-        if any(not isinstance(row.get(field), str) or not row[field].strip() for field in TEXT_FIELDS):
+        if any(not isinstance(row.get(field), str) or not row[field].strip() for field in fields):
             raise ValueError(f"GPQA {language or 'canonical'}/{index}: all text fields must be nonempty")
-        if language is None:
-            continue
-        if set(row) != SOURCE_FIELDS:
-            raise ValueError(f"GPQA {language}/{index}: unexpected source schema")
-        if row["language_code"] != language or row["language"] != LANGUAGES[language]:
-            raise ValueError(f"GPQA {language}/{index}: incorrect language metadata")
-        stage = row["judge_pass_stage"]
-        if stage not in QUALITY_STAGES or (stage == "english_source") != (language == "en"):
-            raise ValueError(f"GPQA {language}/{index}: incorrect translation status")
 
 
 def build_rows(
@@ -78,7 +62,7 @@ def build_rows(
     canonical_questions: Sequence[str],
     question_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Reuse English GPQA formatting and aligned choice positions across languages."""
+    """Match English GPQA formatting and align choice positions across languages."""
     if language not in LANGUAGES:
         raise ValueError(f"Unsupported GPQA language: {language}")
     _validate_records(records, language=language)
@@ -103,13 +87,25 @@ def build_rows(
         raise ValueError("question_ids must contain unique existing string row indices")
     wanted = set(question_ids) if question_ids is not None else known_ids
 
+    suffix = f"_{LANGUAGES[language]}_translation" if language != "en" else ""
     result = []
     for index, row in enumerate(records):
         if str(index) not in wanted:
             continue
+        example = {field: row[f"{field}{suffix}"] for field in TEXT_FIELDS}
+        choices = [example[field] for field in TEXT_FIELDS[1:]]
+        # Canonical English seeds preserve paired choice positions across translations.
+        seed = int(hashlib.md5(canonical_questions[index].encode()).hexdigest(), 16)
+        random.Random(seed).shuffle(choices)
+        options = [{letter: text} for letter, text in zip("ABCD", choices, strict=True)]
+        options_text = "\n".join(f"{letter}: {text}" for letter, text in zip("ABCD", choices, strict=True))
         result.append(
             {
-                **build_row(row, shuffle_question=canonical_questions[index]),
+                "question": example["Question"],
+                "options_text": options_text,
+                "problem": f"{example['Question']}\n{options_text}",
+                "options": options,
+                "expected_answer": "ABCD"[choices.index(example["Correct Answer"])],
                 "uuid": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
@@ -123,8 +119,8 @@ def build_rows(
                     "task_id": str(index),
                     "canonical_record_id": canonical_ids[index],
                     "source_row_index": index,
-                    "judge_pass_stage": row["judge_pass_stage"],
-                    "duplicate_choice_text": len({row[field] for field in TEXT_FIELDS[1:]}) != 4,
+                    "duplicate_choice_text": len({example[field] for field in TEXT_FIELDS[1:]}) != 4,
+                    "source_id": SOURCE_ID,
                     "source_revision": SOURCE_REVISION,
                     "canonical_source_revision": CANONICAL_SOURCE_REVISION,
                 },
@@ -157,7 +153,7 @@ def prepare(
     languages: Sequence[str] | None = None,
     question_ids: Sequence[str] | None = None,
 ) -> Path:
-    """Prepare selected languages and verify exact English-to-canonical alignment."""
+    """Prepare selected languages, aligning source records to canonical English IDs."""
     if isinstance(languages, str):
         raise ValueError("languages must be a list of language codes")
     selected = list(DEFAULT_LANGUAGES if languages is None else languages)
@@ -172,27 +168,27 @@ def prepare(
     ):
         raise ValueError("Canonical GPQA Record IDs must be nonempty and unique")
 
-    english = _read_parquet(
+    records = _read_parquet(
         repo_id=SOURCE_ID,
         revision=SOURCE_REVISION,
-        filename="data/en/train.parquet",
+        filename="train.parquet",
     )
-    _validate_records(english, language="en")
-    for index, (published, original) in enumerate(zip(english, canonical, strict=True)):
+    _validate_records(records, language="en")
+    source_ids = [row.get("Record ID") for row in records]
+    if (
+        any(not isinstance(value, str) or not value for value in source_ids)
+        or len(set(source_ids)) != len(source_ids)
+        or set(source_ids) != set(canonical_ids)
+    ):
+        raise ValueError("Source GPQA Record IDs must be unique and match the canonical records")
+    by_id = {row["Record ID"]: row for row in records}
+    records = [by_id[record_id] for record_id in canonical_ids]
+    for index, (published, original) in enumerate(zip(records, canonical, strict=True)):
         if any(published[field] != original[field] for field in TEXT_FIELDS):
             raise ValueError(f"GPQA English row {index} differs from the pinned canonical source")
 
     rows = []
     for language in selected:
-        records = (
-            english
-            if language == "en"
-            else _read_parquet(
-                repo_id=SOURCE_ID,
-                revision=SOURCE_REVISION,
-                filename=f"data/{language}/train.parquet",
-            )
-        )
         rows.extend(
             build_rows(
                 records,
