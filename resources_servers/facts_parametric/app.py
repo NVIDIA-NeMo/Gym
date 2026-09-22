@@ -45,6 +45,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.facts_parametric.verifier_fixture import create_fixture_server
 
 
 GRADER_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "grader_template.txt"
@@ -348,6 +350,13 @@ class FACTSParametricResourcesServer(SimpleResourcesServer):
             "mean/output_tokens",
         )
         return {key: agent_metrics[key] for key in keys if key in agent_metrics}
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_fixture_server,
+    request_model=FACTSParametricVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

@@ -39,9 +39,12 @@ empty grader reply is labelled UNKNOWN as the starter does and counted in `judge
 ## Tests
 
 ```bash
-gym env test --resources-server facts_parametric
+gym env validate facts_parametric
+gym env test facts_parametric
+gym env publish facts_parametric
 ```
 
 Covers both label parsers, prompt construction against the pinned template, verify paths (full/mixed/zero reward,
 empty and truncated generations, empty grader replies, transport failures), aggregate metrics, the verifier-fixture
-contract (`tests/verifier_cases.jsonl`), the prepare script, and the reporting toolchain.
+contract (`tests/verifier_cases.jsonl`), the prepare script, and the reporting toolchain. The workload manifest declares
+the public 1,052-row benchmark composition and is checked against the resolved Gym configuration.

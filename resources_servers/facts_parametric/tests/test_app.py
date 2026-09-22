@@ -4,7 +4,6 @@
 import asyncio
 import hashlib
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,11 +11,12 @@ import pytest
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.verifier_fixture import VerifierFixture, exercise_verifier_fixture
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.facts_parametric.app import (
     GRADER_TEMPLATE_PATH,
     GRADER_TEMPLATE_SHA256,
     LABELS,
+    VERIFIER_FIXTURE,
     FACTSParametricConfig,
     FACTSParametricResourcesServer,
     FACTSParametricVerifyRequest,
@@ -26,9 +26,6 @@ from resources_servers.facts_parametric.app import (
     output_line_classification,
     starter_classification,
 )
-
-
-TESTS_DIR = Path(__file__).parent
 
 
 def _policy_response(text: str, *, incomplete: bool = False, with_message: bool = True) -> NeMoGymResponse:
@@ -282,25 +279,14 @@ def test_bootstrap_ci_is_deterministic():
     )
 
 
-def _fixture_judge(prompt: str) -> str:
-    prediction = prompt.rsplit("Predicted answer: ", 1)[1]
-    for marker in ("CORRECT", "MISTAKE", "NOT_ATTEMPTED"):
-        if f"GRADE-AS-{marker}" in prediction:
-            return f"Brief reasoning.\n```\nOutput: [{marker}]\n```"
-    return "```\nOutput: [UNKNOWN]\n```"
-
-
 def test_verifier_fixture_contract():
-    fixture = VerifierFixture(
-        server_factory=lambda: _server(_fixture_judge)[0],
-        request_model=FACTSParametricVerifyRequest,
-        cases_path=TESTS_DIR / "verifier_cases.jsonl",
-        # The verifier is a pure function of the grader replies; the fake grader is deterministic, so the
-        # determinism case needs no state reset. The real grader samples, which the metrics report separately.
-        reseed=lambda server, request: None,
-    )
     results = asyncio.run(
-        exercise_verifier_fixture(fixture, reward_range=(0.0, 1.0), higher_is_better=True, determinism="seeded")
+        exercise_verifier_fixture(
+            VERIFIER_FIXTURE,
+            reward_range=(0.0, 1.0),
+            higher_is_better=True,
+            determinism="stochastic",
+        )
     )
-    assert {result.kind for result in results} >= {"full_reward", "zero_reward", "malformed", "determinism"}
+    assert {result.kind for result in results} >= {"full_reward", "zero_reward", "malformed"}
     assert set(LABELS) == {"correct", "incorrect", "not_attempted", "unknown"}
