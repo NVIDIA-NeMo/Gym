@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - responses_api_agents/matharena_aime/configs/matharena_aime.yaml
+matharena_aime:
+  resources_servers:
+    matharena_aime:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Pinned MathArena AIME parsing, format-check endpoint, and auditable pass@4 scoring.
+      value: Evaluate integer-answer competition mathematics without a model judge.
+      parser_timeout_seconds: 5.0
+      parser_max_concurrency: 8
+      expected_num_repeats: ${oc.select:num_repeats,4}
+matharena_aime_agent:
+  responses_api_agents:
+    matharena_aime:
+      datasets:
+        - name: synthetic_example
+          type: example
+          jsonl_fpath: resources_servers/matharena_aime/data/example.jsonl
+          license: Apache 2.0
