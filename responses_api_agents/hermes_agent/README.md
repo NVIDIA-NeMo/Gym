@@ -10,7 +10,13 @@ sandbox with PTY process support. Existing calls without an agent session keep t
 Each native session accepts one activation. Repeated activations and stale session cookies return
 409. Close stops the active invocation and requires a supervisor receipt confirming that tool
 descendants have exited before verification can proceed. Unknown launch outcomes or missing
-receipts fail close. Successful close receipts are cached for immediate retries, not crash recovery.
+receipts fail close. Successful close receipts remain available for
+`session_close_retry_window_seconds` (default: 300 seconds), measured from successful cleanup.
+Other sessions cannot evict them early, and retries do not extend expiry. Set the window to cover
+the caller's full close-retry horizon, including response timeouts and backoff. After expiry, close
+returns 409; the stale cookie still cannot activate the host path. Expired receipts are pruned on
+session seed/close activity. Receipt memory scales with the close rate and window; this is not
+durable storage across agent-server restarts.
 
 Native input may be a string or text history ending in a user message, optionally starting with
 a system message. Configured system text, request `instructions`, and input system text are combined.
