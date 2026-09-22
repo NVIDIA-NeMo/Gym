@@ -37,8 +37,9 @@ Tool families in the bvstyle tool-call data:
 
 import json
 import logging
+import math
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict
@@ -50,6 +51,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.string_match.app import _answers_match, _extract_answer
 
 
 # Reuse the exact parser and IoU the image-tools agent uses at rollout time, so
@@ -319,6 +321,10 @@ def compute_argument_score(
 # ---------------------------------------------------------------------------
 
 
+# Sentinel tool name marking a terminal (answer) expectation.
+_ANSWER_ACTION = "__answer__"
+
+
 class FailureCode(str, Enum):
     NONE = "none"
     EXPECTED_ACTION_INVALID = "expected_action_invalid"
@@ -326,6 +332,9 @@ class FailureCode(str, Enum):
     TOOL_NAME_MISMATCH = "tool_name_mismatch"
     TARGET_MISMATCH = "target_mismatch"
     ARGUMENT_BELOW_THRESHOLD = "argument_below_threshold"
+    TOOL_CALL_WHEN_ANSWER_EXPECTED = "tool_call_when_answer_expected"
+    ANSWER_MISSING = "answer_missing"
+    ANSWER_INCORRECT = "answer_incorrect"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -360,6 +369,8 @@ class ImageToolsPivotRunRequest(BaseRunRequest):
     uuid: Optional[str | int] = None
     expected_action: Optional[dict[str, Any]] = None
     expected_answer: Optional[str] = None
+    extraction_mode: Literal["boxed", "final_answer", "last_line", "full_response"] = "final_answer"
+    case_sensitive: bool = False
     metadata: Optional[dict[str, Any]] = None
 
 
@@ -472,6 +483,45 @@ class ImageToolsPivotResourcesServer(SimpleResourcesServer):
             text = extract_assistant_text(body.response)
             rollout_calls = parse_image_tool_calls(text)
             state["num_rollout_tool_calls"] = len(rollout_calls)
+
+            # --- terminal rows: the demonstration ANSWERED here rather than
+            # calling another tool. Reward is conditional on the answer being
+            # right; rewarding any message (as the generic pivot server does)
+            # would pay the model to stop investigating and guess.
+            if expected.get("name") == _ANSWER_ACTION:
+                state["tool_family"] = "answer"
+                state["expected_tool_name"] = _ANSWER_ACTION
+                gold = expected["arguments"].get("answer")
+                # Validate before coercion: None and empty answers must never
+                # become rewardable targets. Numeric zero remains a valid answer.
+                if (
+                    not isinstance(gold, (str, int, float))
+                    or isinstance(gold, bool)
+                    or (isinstance(gold, float) and not math.isfinite(gold))
+                    or not str(gold).strip()
+                ):
+                    state["failure_reason"] = FailureCode.EXPECTED_ACTION_INVALID
+                    return self._build(body, state)
+                gold = str(gold)
+                state["expected_answer_text"] = gold
+                if rollout_calls:
+                    state["reward"] = 0.0
+                    state["failure_reason"] = FailureCode.TOOL_CALL_WHEN_ANSWER_EXPECTED
+                    state["model_output"] = f"{rollout_calls[0].get('name')}(...)"
+                    return self._build(body, state)
+                # Keep reasoning out of the final answer, while using the same
+                # extraction modes and grading as the answer-based environment.
+                tail = text.rsplit("</think>", 1)[-1]
+                got = _extract_answer(tail, body.extraction_mode)
+                state["model_output"] = got if got is not None else text[-300:]
+                if got is None or not got.strip():
+                    state["reward"] = 0.0
+                    state["failure_reason"] = FailureCode.ANSWER_MISSING
+                else:
+                    state["reward"] = _answers_match(got, gold, body.case_sensitive)
+                    if state["reward"] == 0.0:
+                        state["failure_reason"] = FailureCode.ANSWER_INCORRECT
+                return self._build(body, state)
 
             if not rollout_calls:
                 state["failure_reason"] = FailureCode.NO_TOOL_CALL_IN_ROLLOUT
