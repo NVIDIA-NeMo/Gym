@@ -39,13 +39,14 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 import yaml
 from fastapi import Body, FastAPI
 
 # Upstream Vals finance-agent-v2 tool classes (installed via requirements.txt).
 from finance_agent.tools import (
+    MAX_END_DATE,
     Calculator,
     EDGARSearch,
     ParseHtmlPage,
@@ -74,7 +75,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
 from resources_servers.sec_local_index.cache import ToolCache
+from resources_servers.sec_local_index.edgar_search_service import resolve_sec_mode
+from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
 
 # Support both package import (tests: resources_servers.finance_agent_v2.app) and flat
@@ -114,6 +118,29 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     # --- Tool API keys (external services the upstream tools call) -----------
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for the web_search tool.")
     sec_api_key: Optional[str] = Field(default=None, description="sec-api.io API key for the edgar_search tool.")
+
+    # --- SEC data source -----------------------------------------------------
+    sec_mode: Optional[Literal["live", "local"]] = Field(
+        default=None,
+        description="Where edgar_search and SEC parse_html_page reads come from. 'live' uses sec-api.io and "
+        "sec.gov. 'local' uses local_edgar_index_path and local_sec_corpus_path and makes no network call, "
+        "which is what training throughput requires. Unset follows local_edgar_index_path.",
+    )
+    local_edgar_index_path: Optional[str] = Field(
+        default=None,
+        description="Read-only SQLite FTS5 index backing edgar_search in local mode.",
+    )
+    local_edgar_metadata_path: Optional[str] = Field(
+        default=None,
+        description="Metadata sidecar for the local index, built by "
+        "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
+        "plus '.metadata' when that file exists. Searches are far slower without it.",
+    )
+    local_sec_corpus_path: Optional[str] = Field(
+        default=None,
+        description="Root of the downloaded filing corpus that parse_html_page reads in local mode. "
+        "URLs it does not hold still fall back to the network.",
+    )
     pricing_data_api_key: Optional[str] = Field(default=None, description="Tiingo API key for the price_history tool.")
 
     # --- Retrieval model (powers retrieve_information) -----------------------
@@ -411,6 +438,25 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
                 self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
 
+        self._sec_mode = resolve_sec_mode(self.config.sec_mode, self.config.local_edgar_index_path)
+        self._local_edgar: Optional[LocalEdgarSearch] = None
+        if self._sec_mode == "local":
+            if not self.config.local_edgar_index_path:
+                raise ValueError(
+                    "sec_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search entirely from that index; without it every search would fail mid-rollout."
+                )
+            self._local_edgar = LocalEdgarSearch(
+                self.config.local_edgar_index_path,
+                max_end_date=MAX_END_DATE,
+                metadata_path=self.config.local_edgar_metadata_path,
+            )
+            logger.info(
+                "edgar_search: local mode, index %s (coverage %s)",
+                self.config.local_edgar_index_path,
+                self._local_edgar.coverage,
+            )
+
         self._tools = self._build_tools()
 
     # ------------------------------------------------------------------
@@ -429,8 +475,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # No-key tools: always available. parse_html_page is cached (sec.gov docs
         # only) when the cache is on; behavior/output is otherwise identical.
         tools["calculator"] = Calculator()
-        tools["parse_html_page"] = CachedParseHtmlPage(cache) if cache.enabled else ParseHtmlPage()
         tools["submit_final_result"] = SubmitFinalResult()
+
+        if self._local_edgar is not None and self.config.local_sec_corpus_path:
+            tools["parse_html_page"] = LocalParseHtmlPage(self._local_edgar, self.config.local_sec_corpus_path)
+        else:
+            tools["parse_html_page"] = CachedParseHtmlPage(cache) if cache.enabled else ParseHtmlPage()
 
         # Gated on the configured key so availability is deterministic: upstream
         # TavilyWebSearch otherwise falls back to os.getenv and becomes env-dependent.
@@ -441,8 +491,13 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             logger.info("No tavily_api_key configured — web_search will be unavailable")
             tools["web_search"] = None
 
-        # edgar_search (sec-api.io).
-        if self.config.sec_api_key:
+        # edgar_search: local index, or sec-api.io.
+        if self._local_edgar is not None:
+            tools["edgar_search"] = self._try_build(
+                "edgar_search",
+                lambda: LocalEDGARSearch(self._local_edgar, max_end_date=MAX_END_DATE),
+            )
+        elif self.config.sec_api_key:
             tools["edgar_search"] = self._try_build(
                 "edgar_search",
                 lambda: (

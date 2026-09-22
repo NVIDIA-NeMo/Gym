@@ -36,7 +36,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 import yaml
-from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
@@ -59,6 +58,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService, resolve_sec_mode
+from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
@@ -1094,14 +1094,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     @staticmethod
     def _parse_html_to_text(html_content: str) -> str:
         """Extract plain text from HTML."""
-        soup = BeautifulSoup(html_content, "html.parser")
-        for script_or_style in soup(["script", "style"]):
-            _ = script_or_style.extract()
-
-        text = soup.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        return "\n".join(chunk for chunk in chunks if chunk)
+        return html_to_text(html_content)
 
     async def _parse_html_page(self, url: str) -> str:
         """Fetch a URL and extract plain text, reusing the shared session."""
