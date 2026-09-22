@@ -134,6 +134,13 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                # Codex 0.144.4 replays complete reasoning content without its ID.
+                # Supply only that missing identifier; retain malformed reasoning
+                # for strict request validation instead of losing model history.
+                item.setdefault("id", f"rs_{uuid4().hex}")
+                kept_items.append(item)
+                continue
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the

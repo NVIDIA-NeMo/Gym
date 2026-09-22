@@ -620,6 +620,30 @@ def test_responses_to_chat_completion_reasoning_without_summary_is_noop(converte
     assert params.messages[0]["content"] == "the answer"
 
 
+@pytest.mark.parametrize(
+    "extra_content",
+    [
+        {"encrypted_content": "opaque-content"},
+        {"content": [{"type": "reasoning_text", "text": "Do not discard this reasoning"}]},
+    ],
+)
+def test_reasoning_content_without_chat_representation_is_rejected(
+    converter: ResponsesConverter, extra_content: dict
+) -> None:
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Keep this summary too"}],
+                **extra_content,
+            }
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="reasoning content/encrypted_content cannot be preserved"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
 def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
