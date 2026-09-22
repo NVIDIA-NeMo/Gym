@@ -127,6 +127,7 @@ class AdmissionCoordinator:
         self._tombstones: list[dict[str, Any]] = []
         self._server: Optional[asyncio.base_events.Server] = None
         self._changed = asyncio.Condition()
+        self._broadcast_lock = asyncio.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -248,13 +249,14 @@ class AdmissionCoordinator:
             "state": self._state.value,
             "checkpoint_id": self._checkpoint_id,
             "frozen_worker_ids": self._frozen_worker_ids,
-            "tombstones": self._tombstones,
+            "tombstones": tuple(self._tombstones),
         }
 
-    async def _broadcast(self) -> None:
+    async def _broadcast_locked(self) -> None:
+        """Publish one state revision while ``_broadcast_lock`` is held."""
         self._seq += 1
         message = self._state_message()
-        for record in self._workers.values():
+        for record in tuple(self._workers.values()):
             if record.connected:
                 try:
                     await _write_message(record.writer, message)
@@ -262,32 +264,35 @@ class AdmissionCoordinator:
                     record.connected = False
 
     async def close_admission(self, checkpoint_id: str) -> None:
-        connected = tuple(sorted(record.worker_id for record in self._workers.values() if record.connected))
-        if len(connected) != self.expected_workers:
-            raise MissingWorkersError(
-                f"cannot freeze checkpoint worker membership: expected {self.expected_workers}, "
-                f"found {len(connected)} connected workers"
-            )
-        self._state = AdmissionState.DRAINING
-        self._checkpoint_id = checkpoint_id
-        self._frozen_worker_ids = connected
-        for record in self._workers.values():
-            record.cut_proof = None
-            record.proof_error = None
-        await self._broadcast()
+        async with self._broadcast_lock:
+            connected = tuple(sorted(record.worker_id for record in self._workers.values() if record.connected))
+            if len(connected) != self.expected_workers:
+                raise MissingWorkersError(
+                    f"cannot freeze checkpoint worker membership: expected {self.expected_workers}, "
+                    f"found {len(connected)} connected workers"
+                )
+            self._state = AdmissionState.DRAINING
+            self._checkpoint_id = checkpoint_id
+            self._frozen_worker_ids = connected
+            for record in self._workers.values():
+                record.cut_proof = None
+                record.proof_error = None
+            await self._broadcast_locked()
 
     async def resume_admission(self) -> None:
-        self._state = AdmissionState.ACCEPTING
-        self._checkpoint_id = None
-        self._frozen_worker_ids = ()
-        for record in self._workers.values():
-            record.cut_proof = None
-            record.proof_error = None
-        await self._broadcast()
+        async with self._broadcast_lock:
+            self._state = AdmissionState.ACCEPTING
+            self._checkpoint_id = None
+            self._frozen_worker_ids = ()
+            for record in self._workers.values():
+                record.cut_proof = None
+                record.proof_error = None
+            await self._broadcast_locked()
 
     async def add_tombstone(self, rollout_id: str, attempt_index: int) -> None:
-        self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
-        await self._broadcast()
+        async with self._broadcast_lock:
+            self._tombstones.append({"rollout_id": rollout_id, "attempt_index": attempt_index})
+            await self._broadcast_locked()
 
     # -- aggregation ---------------------------------------------------------
 
@@ -440,8 +445,11 @@ class WorkerAdmissionAgent:
     async def _apply_state_message(self, message: dict[str, Any]) -> None:
         if message.get("type") != "state":
             return
+        message_sequence = int(message["seq"])
+        if message_sequence < self._coordinator_sequence:
+            return
         state = AdmissionState(message["state"])
-        self._coordinator_sequence = int(message["seq"])
+        self._coordinator_sequence = message_sequence
         self._checkpoint_id = message.get("checkpoint_id")
         if state == AdmissionState.ACCEPTING:
             self.limiter.resume()
@@ -461,7 +469,7 @@ class WorkerAdmissionAgent:
             self._writer,
             {
                 "type": "ack",
-                "seq": message["seq"],
+                "seq": message_sequence,
                 "inflight": self.limiter.counts()["inflight_total"],
                 "generation_pending": self.limiter.counts()["generation_pending_total"],
                 **self._generation_cut_proof_payload(),
