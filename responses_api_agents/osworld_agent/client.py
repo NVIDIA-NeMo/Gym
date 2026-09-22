@@ -487,7 +487,7 @@ def _patch_pdf_image_evaluator_cleanup() -> None:
 
 
 def _configure_wallpaper_evaluator(env: Any, task_config: Mapping[str, Any]) -> None:
-    """Preserve wallpaper retrieval and cache failures as evaluator errors."""
+    """Recover encoded wallpaper paths while preserving evaluator errors."""
     evaluator = task_config.get("evaluator", {})
     result = evaluator.get("result", {})
     if (
@@ -501,6 +501,29 @@ def _configure_wallpaper_evaluator(env: Any, task_config: Mapping[str, Any]) -> 
         try:
             content = environment.controller.get_vm_wallpaper()
             # The pinned controller returns bytes on HTTP 200 and None after failed retries.
+            if content is None:
+                # The guest /wallpaper endpoint does not decode file URI escapes.
+                response = environment.controller.run_python_script(
+                    "import ast, base64, subprocess\n"
+                    "from pathlib import Path\n"
+                    "from urllib.parse import unquote, urlsplit\n"
+                    "uri = ast.literal_eval(subprocess.check_output(\n"
+                    "    ['gsettings', 'get', 'org.gnome.desktop.background', 'picture-uri'],\n"
+                    "    text=True, timeout=10))\n"
+                    "uri = urlsplit(uri)\n"
+                    "if (uri.scheme != 'file' or uri.netloc not in ('', 'localhost')\n"
+                    "        or not uri.path.startswith('/') or uri.query or uri.fragment):\n"
+                    "    raise ValueError('Unsupported wallpaper URI')\n"
+                    "content = Path(unquote(uri.path, errors='strict')).read_bytes()\n"
+                    "print(base64.b64encode(content).decode('ascii'))\n"
+                )
+                if not isinstance(response, dict):
+                    raise RuntimeError("Failed to retrieve VM wallpaper: no URI recovery response")
+                if response.get("status") != "success" or response.get("return_code") != 0:
+                    raise RuntimeError(
+                        f"Failed to retrieve VM wallpaper: {response.get('error', 'URI recovery failed')}"
+                    )
+                content = base64.b64decode(response["output"].strip(), validate=True)
             if not isinstance(content, bytes):
                 raise RuntimeError("Failed to retrieve VM wallpaper: controller returned no image bytes")
             path = os.path.join(environment.cache_dir, config["dest"])

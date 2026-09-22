@@ -1270,11 +1270,25 @@ def test_pdf_evaluator_cleanup_patch_reraises_unrelated_missing_file(monkeypatch
         "fetch_type",
         "cache_missing",
         "cache_permission",
+        "recover_spaces",
+        "recover_apostrophe",
+        "recover_unicode",
+        "recover_missing",
+        "recover_permission",
+        "recover_invalid",
+        "recover_unsupported_uri",
+        "recover_bad_base64",
+        "recover_nonzero",
+        "reference_invalid",
+        "comparison_failure",
     ],
 )
 def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result_kind: str) -> None:
+    import base64
     import builtins
-    from io import BytesIO
+    import subprocess
+    from contextlib import redirect_stdout
+    from io import BytesIO, StringIO
 
     from PIL import Image
 
@@ -1291,6 +1305,16 @@ def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result
     content = {"empty": b"", "invalid": b"not an image", "fetch_none": None, "fetch_type": "bad response"}.get(
         result_kind, content
     )
+    recovering = result_kind.startswith("recover_")
+    source_path = tmp_path / {
+        "recover_spaces": "Screenshot from 2026-09-01.png",
+        "recover_apostrophe": "wallpaper's copy.png",
+        "recover_unicode": "café.png",
+    }.get(result_kind, "wallpaper.png")
+    if recovering and result_kind != "recover_missing":
+        source_path.write_bytes(b"invalid image" if result_kind == "recover_invalid" else content)
+    if result_kind == "reference_invalid":
+        gold_path.write_bytes(b"invalid reference")
     file_open = builtins.open
 
     def open_file(path, mode="r", *args, **kwargs):
@@ -1301,10 +1325,44 @@ def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result
     monkeypatch.setattr(builtins, "open", open_file)
     calls = []
     fetches = []
+    recoveries = []
 
     def fetch_wallpaper():
         fetches.append(True)
-        return content
+        return None if recovering else content
+
+    def run_python_script(script):
+        recoveries.append(True)
+        if result_kind == "fetch_none":
+            return None
+        if result_kind in ("recover_bad_base64", "recover_nonzero"):
+            encoded = base64.b64encode(content).decode()
+            return {
+                "status": "success",
+                "return_code": 1 if result_kind == "recover_nonzero" else 0,
+                "output": encoded + ("!" if result_kind == "recover_bad_base64" else ""),
+            }
+
+        def gsettings(command, **kwargs):
+            assert command == ["gsettings", "get", "org.gnome.desktop.background", "picture-uri"]
+            uri = source_path.as_uri()
+            if result_kind == "recover_unsupported_uri":
+                uri = uri.replace("file://", "https://example.com")
+            return repr(uri) + "\n"
+
+        def read_bytes(path):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        # Execute the actual guest script, substituting only the desktop setting.
+        with monkeypatch.context() as guest, redirect_stdout(StringIO()) as output:
+            guest.setattr(subprocess, "check_output", gsettings)
+            if result_kind == "recover_permission":
+                guest.setattr(Path, "read_bytes", read_bytes)
+            try:
+                exec(script, {})
+            except Exception as exc:
+                return {"status": "error", "return_code": 1, "output": "", "error": str(exc)}
+        return {"status": "success", "return_code": 0, "output": output.getvalue()}
 
     def get_result(env, config):
         # Reproduce the pinned upstream getter's loss of retrieval-failure information.
@@ -1315,6 +1373,8 @@ def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result
 
     def compare_images(image1_path, image2_path, **options):
         calls.append((image1_path, image2_path, options))
+        if result_kind == "comparison_failure":
+            raise RuntimeError("unrelated comparison failure")
         with Image.open(image1_path) as image:
             image.convert("L")
         with Image.open(image2_path) as image:
@@ -1327,6 +1387,7 @@ def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result
             self.metric = compare_images
             self.result_getter = get_result
             self.controller.get_vm_wallpaper = fetch_wallpaper
+            self.controller.run_python_script = run_python_script
             return super().reset(task_config)
 
         def evaluate(self):
@@ -1351,19 +1412,30 @@ def test_wallpaper_evaluator_result_handling(monkeypatch, tmp_path: Path, result
         task_timeout=10,
     )
     assert result.finished is True
-    assert result.mask_sample is (result_kind != "valid")
+    success = result_kind in ("valid", "recover_spaces", "recover_apostrophe", "recover_unicode")
+    assert result.mask_sample is not success
     if result.mask_sample:
         assert result.termination_reason == "evaluator_error"
         assert result.error
     else:
         assert result.error is None
-    assert result.score == result.reward == (0.4 if result_kind == "valid" else 0.0)
+    assert result.score == result.reward == (0.4 if success else 0.0)
+    if success:
+        assert result_path.read_bytes() == content
     if result_kind in ("fetch_none", "fetch_type"):
         assert "Failed to retrieve VM wallpaper" in result.error
         assert not result_path.exists()
-    called = result_kind in ("valid", "empty", "invalid", "truncated")
+    called = success or result_kind in (
+        "empty",
+        "invalid",
+        "truncated",
+        "recover_invalid",
+        "reference_invalid",
+        "comparison_failure",
+    )
     assert calls == ([(str(result_path), gold_path, {"reference_base_result": 0.11})] if called else [])
     assert fetches == [True]
+    assert recoveries == ([True] if recovering or result_kind == "fetch_none" else [])
     assert FakeEnv.instances[-1].metric is compare_images
 
 
