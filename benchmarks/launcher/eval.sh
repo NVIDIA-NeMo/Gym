@@ -12,7 +12,9 @@ export VLLM_CONTAINER=${VLLM_CONTAINER:-registry-1.docker.io#vllm/vllm-openai:v0
 checkpoint=""
 profile=""
 smoke=false
-usage() { echo "Usage: eval.sh --profile PATH --checkpoint PATH [--smoke]"; }
+run_name=""
+restarts=1
+usage() { echo "Usage: eval.sh --profile PATH --checkpoint PATH [--smoke] [--name NAME [--restarts N]]"; }
 while (( $# )); do
     case "$1" in
         --profile)
@@ -25,6 +27,8 @@ while (( $# )); do
             shift 2
             ;;
         --smoke) smoke=true; shift ;;
+        --name) run_name=${2:?--name requires a run name}; shift 2 ;;
+        --restarts) restarts=${2:?--restarts requires a count}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -70,6 +74,14 @@ gym_run_args=(
     ++policy_model_name=$MODEL_NAME
     ++upload_rollouts=false
 )
+# Named run: fixed directory $RUNS_DIR/NAME shared by all restarts; each hop resumes from the cached rollouts
+# (Gym skips resume when no cache exists yet, so the first hop is a normal run).
+if [[ -n $run_name ]]; then
+    export RUN_NAME=$run_name
+    gym_run_args+=(++resume_from_cache=true)
+elif (( restarts > 1 )); then
+    echo '--restarts requires --name' >&2; exit 2
+fi
 printf -v GYM_RUN_ARGS '%q ' "${gym_run_args[@]}"
 export GYM_RUN_ARGS
 
@@ -88,6 +100,9 @@ if [[ $smoke == true ]]; then
 fi
 
 printf 'Profile: %s\nCheckpoint: %s\n' "$profile" "$checkpoint"
+# With --restarts N, N identical jobs are queued under one job name with --dependency=singleton:
+# they run one after another, each resuming the same run dir, and exit immediately once results exist.
+for ((hop = 1; hop <= restarts; hop++)); do
 bash "$launcher_dir/sbatch.sh" \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config "$config" \
@@ -95,3 +110,4 @@ bash "$launcher_dir/sbatch.sh" \
     ++num_samples_in_parallel="$concurrency" \
     ++observability_enabled="${OBSERVABILITY_ENABLED:-true}" \
     "${BENCHMARK_EXTRA_ARGS[@]}"
+done

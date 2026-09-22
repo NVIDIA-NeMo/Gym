@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      max_turns: 250
+      sandbox_timeout: 3600
+      model_output_limit: 49152

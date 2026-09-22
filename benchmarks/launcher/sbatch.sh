@@ -31,7 +31,7 @@ source "$VLLM_CONFIG"
 host=$(hostname)
 IFS=, read -r -a gpus <<< "${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 (( ${#gpus[@]} >= REPLICAS_PER_NODE )) || { echo "Not enough visible GPUs for replicas" >&2; exit 1; }
-logs="$RUN_DIR/inference"
+logs="$RUN_DIR/inference${RUN_NAME:+-$SLURM_JOB_ID}"
 mkdir -p "$logs"
 pids=()
 cleanup() {
@@ -100,6 +100,8 @@ if [[ -d /mnt/gym-dev ]]; then
         --exclude=cache --exclude=.cache --exclude=logs --exclude=results \
         --exclude=runs --exclude=wandb --exclude='swe_*_setup' \
         -cf - . | tar -C /opt/nemo-gym -xf -
+    # setup.cfg uses egg_base=cache; the exclude above drops that dir and the editable install fails without it
+    mkdir -p /opt/nemo-gym/cache
 fi
 
 source /opt/nemo_gym_venv/bin/activate
@@ -144,8 +146,13 @@ EVAL
 # 4) Slurm job — run inference, router, and Gym; stop all when any exits.
 export batch_command=$(cat <<'BATCH'
 set -euo pipefail
-export RUN_DIR="$RUNS_DIR/$SLURM_JOB_ID-$BENCHMARK"
-mkdir -p "$RUN_DIR/inference"
+export RUN_DIR="${RUN_NAME:+$RUNS_DIR/$RUN_NAME}"
+: "${RUN_DIR:=$RUNS_DIR/$SLURM_JOB_ID-$BENCHMARK}"
+if [[ -f "$RUN_DIR/rollouts_aggregate_metrics.json" ]]; then
+    echo "Run $RUN_DIR already has final metrics; nothing to do."
+    exit 0
+fi
+mkdir -p "$RUN_DIR/inference${RUN_NAME:+-$SLURM_JOB_ID}"
 nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export ALL_NODES="${nodes[*]}" ROUTER_NODE="${nodes[0]}"
 container_args=(
@@ -170,7 +177,7 @@ srun --overlap --exact --nodes=1 --ntasks=1 --gpus=0 \
     --cpus-per-task=8 --nodelist="$ROUTER_NODE" \
     --container-image="$ROUTER_CONTAINER" --container-workdir=/ \
     --no-container-mount-home --no-container-entrypoint bash -c "$router_command" \
-    > "$RUN_DIR/inference/router.log" 2>&1 &
+    > "$RUN_DIR/inference${RUN_NAME:+-$SLURM_JOB_ID}/router.log" 2>&1 &
 pids+=("$!")
 
 srun --overlap --exact --nodes=1 --ntasks=1 --gpus=0 \
@@ -192,20 +199,34 @@ BATCH
 # Allocate four GPUs per node, independently of replica count.
 # Hold briefly so the output directory exists before Slurm opens its log.
 NUM_NODES=${NUM_NODES:-1}
+if [[ -n ${RUN_NAME:-} ]]; then
+    # Named run: one shared directory, one Slurm job name, jobs serialized with singleton.
+    run_dir="$RUNS_DIR/$RUN_NAME"
+    mkdir -p "$run_dir"
+    naming=(--job-name="gym-$RUN_NAME-$USER" --dependency=singleton --output="$run_dir/slurm-%j.log")
+else
+    naming=(--job-name="gym-$EXPERIMENT_NAME-$USER" --output="$RUNS_DIR/%j-$BENCHMARK/slurm.log")
+fi
 job=$(sbatch --hold --parsable --nodes="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node=4 \
     --exclusive --segment="$NUM_NODES" --time=04:00:00 \
-    --job-name="gym-$EXPERIMENT_NAME-$USER" --output="$RUNS_DIR/%j-$BENCHMARK/slurm.log" \
+    "${naming[@]}" \
     --wrap 'exec bash -c "$batch_command"')
 job=${job%%;*}
-run_dir="$RUNS_DIR/$job-$BENCHMARK"
-mkdir -p "$run_dir" || { scancel "$job"; exit 1; }
+if [[ -z ${RUN_NAME:-} ]]; then
+    run_dir="$RUNS_DIR/$job-$BENCHMARK"
+    mkdir -p "$run_dir" || { scancel "$job"; exit 1; }
+fi
 printf 'Submitted eval job %s\nLogs and results: %s\n' "$job" "$run_dir"
 
 # 5) Sandbox cleanup — also runs if the GPU job fails or is cancelled.
 export CLEANUP_RUN_ID="$job"
 export cleanup_command=$(cat <<'CLEANUP'
 set -euo pipefail
-exec /opt/nemo_gym_venv/bin/python /opt/nemo-gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
+# The base image may predate cleanup_sandboxes.py; prefer the mounted dev checkout when present.
+script=/opt/nemo-gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py
+[[ -f /mnt/gym-dev/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py ]] \
+    && script=/mnt/gym-dev/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py
+exec /opt/nemo_gym_venv/bin/python "$script" \
     --domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" \
     --run-id "$CLEANUP_RUN_ID" --user "$NEMO_GYM_USER" --reap
 CLEANUP
@@ -215,7 +236,7 @@ if ! sbatch --parsable --dependency="afterany:$job" \
     --partition=cpu --qos=cpu-normal --gres=none --gpus-per-node=0 \
     --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=4G --time=00:30:00 \
     --job-name="gym-cleanup-$job" --output="$run_dir/cleanup.log" \
-    --wrap 'exec srun --container-image="$GYM_CONTAINER" --container-workdir=/opt/nemo-gym --no-container-mount-home --no-container-entrypoint bash -c "$cleanup_command"'; then
+    --wrap 'exec srun --container-image="$GYM_CONTAINER" ${GYM_DEV_CHECKOUT:+--container-mounts=$GYM_DEV_CHECKOUT:/mnt/gym-dev:ro} --container-workdir=/opt/nemo-gym --no-container-mount-home --no-container-entrypoint bash -c "$cleanup_command"'; then
     scancel "$job"
     echo "Cancelled held eval job $job: sandbox cleanup could not be scheduled." >&2
     exit 1
