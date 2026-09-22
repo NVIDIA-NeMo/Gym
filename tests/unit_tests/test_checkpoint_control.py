@@ -143,6 +143,154 @@ async def test_fence_coalesces_concurrent_duplicates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fence_serializes_resume_before_delayed_commit() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "prepared"}
+
+    await fence.run_operation("ckpt-1", "pause", run=prepare, **_prepare_kwargs())
+    resume_started = asyncio.Event()
+    release_resume = asyncio.Event()
+    commit_started = asyncio.Event()
+
+    async def resume() -> dict:
+        resume_started.set()
+        await release_resume.wait()
+        return {"state": "resumed"}
+
+    async def commit() -> dict:
+        commit_started.set()
+        return {"state": "committed"}
+
+    resume_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "resume",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=None,
+            phase_after=CheckpointPhase.IDLE,
+            run=resume,
+            retire_outcome="resumed",
+        )
+    )
+    await resume_started.wait()
+    commit_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=commit,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not commit_started.is_set()
+
+    release_resume.set()
+    assert await resume_task == {"state": "resumed"}
+    with pytest.raises(StaleCheckpointError):
+        await commit_task
+    assert not commit_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_fence_serializes_commit_before_resume() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "prepared"}
+
+    await fence.run_operation("ckpt-1", "pause", run=prepare, **_prepare_kwargs())
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+    resume_started = asyncio.Event()
+    operation_order: list[str] = []
+
+    async def commit() -> dict:
+        operation_order.append("commit")
+        commit_started.set()
+        await release_commit.wait()
+        return {"state": "committed"}
+
+    async def resume() -> dict:
+        operation_order.append("resume")
+        resume_started.set()
+        assert fence.phase == CheckpointPhase.COMMITTED_PAUSED
+        return {"state": "resumed"}
+
+    commit_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=commit,
+        )
+    )
+    await commit_started.wait()
+    resume_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "resume",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED, CheckpointPhase.COMMITTED_PAUSED}),
+            phase_during=None,
+            phase_after=CheckpointPhase.IDLE,
+            run=resume,
+            retire_outcome="resumed",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not resume_started.is_set()
+
+    release_commit.set()
+    assert await commit_task == {"state": "committed"}
+    assert await resume_task == {"state": "resumed"}
+    assert operation_order == ["commit", "resume"]
+    assert fence.phase == CheckpointPhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_fence_phase_preserving_operation_keeps_live_phase_update() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "preparing"}
+
+    await fence.run_operation(
+        "ckpt-1",
+        "pause",
+        run=prepare,
+        **_prepare_kwargs(phase_after=CheckpointPhase.PREPARING),
+    )
+    operation_started = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def preserve_phase() -> dict:
+        operation_started.set()
+        await release_operation.wait()
+        return {}
+
+    operation = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "abort-inflight",
+            allowed_phases=frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            phase_during=None,
+            phase_after=None,
+            run=preserve_phase,
+        )
+    )
+    await operation_started.wait()
+    fence.mark_prepared("ckpt-1")
+    release_operation.set()
+    await operation
+    assert fence.phase == CheckpointPhase.PREPARED
+
+
+@pytest.mark.asyncio
 async def test_fence_rejects_conflicting_checkpoint() -> None:
     fence = ControlFence()
 
@@ -152,6 +300,25 @@ async def test_fence_rejects_conflicting_checkpoint() -> None:
     await fence.run_operation("ckpt-1", "pause", run=run, **_prepare_kwargs())
     with pytest.raises(CheckpointConflictError):
         await fence.run_operation("ckpt-2", "pause", run=run, **_prepare_kwargs())
+
+
+@pytest.mark.asyncio
+async def test_fence_rejects_conflicting_checkpoint_while_operation_runs() -> None:
+    fence = ControlFence()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def run() -> dict:
+        started.set()
+        await release.wait()
+        return {}
+
+    active = asyncio.create_task(fence.run_operation("ckpt-1", "pause", run=run, **_prepare_kwargs()))
+    await started.wait()
+    with pytest.raises(CheckpointConflictError):
+        await fence.run_operation("ckpt-2", "pause", run=run, **_prepare_kwargs())
+    release.set()
+    await active
 
 
 @pytest.mark.asyncio

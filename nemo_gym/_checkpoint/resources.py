@@ -1227,7 +1227,7 @@ def install_resources_checkpoint(
                     CheckpointPhase.RESTORED_PAUSED,
                 }
             ),
-            phase_during=fence.phase,
+            phase_during=None,
             phase_after=CheckpointPhase.IDLE,
             run=run,
             retire_outcome="resumed",

@@ -213,9 +213,10 @@ class ControlFence:
     One fence guards all control routes of a server. Operations run through
     ``run_operation``, which provides idempotent replay, duplicate-call
     coalescing, stale-id rejection, cross-checkpoint conflict rejection, and
-    phase validation. State transitions commit only when the operation
-    succeeds; a failed operation restores the entry phase so the coordinator
-    can retry or abort.
+    phase validation. Mutating operations are serialized for the lifetime of
+    their work. State transitions commit only when the operation succeeds; a
+    failed operation restores the entry phase so the coordinator can retry or
+    abort.
     """
 
     def __init__(self) -> None:
@@ -226,6 +227,7 @@ class ControlFence:
         self._inflight: dict[tuple[str, str], asyncio.Future] = {}
         self._retired: dict[str, str] = {}
         self._retired_results: dict[tuple[str, str], dict[str, Any]] = {}
+        self._operation_lock = asyncio.Lock()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -271,8 +273,8 @@ class ControlFence:
         operation: str,
         *,
         allowed_phases: frozenset[CheckpointPhase],
-        phase_during: CheckpointPhase,
-        phase_after: CheckpointPhase,
+        phase_during: Optional[CheckpointPhase],
+        phase_after: Optional[CheckpointPhase],
         run: Callable[[], Awaitable[dict[str, Any]]],
         deadline: Optional[Deadline] = None,
         retire_outcome: Optional[str] = None,
@@ -284,7 +286,8 @@ class ControlFence:
         recorded result; a concurrent duplicate awaits the in-flight run
         instead of starting a second one. ``retire_outcome`` marks the
         checkpoint finished after this operation (resume or abort): the fence
-        returns to ``IDLE`` and the id becomes stale forever.
+        returns to ``IDLE`` and the id becomes stale forever. A ``None`` phase
+        leaves the live phase unchanged.
         """
         key = (checkpoint_id, operation)
         if checkpoint_id in self._retired:
@@ -298,39 +301,58 @@ class ControlFence:
         inflight = self._inflight.get(key)
         if inflight is not None:
             return await asyncio.shield(inflight)
+        if self.active_checkpoint_id not in (None, checkpoint_id):
+            # Preserve the fail-fast cross-checkpoint contract while allowing
+            # operations for the same checkpoint to queue behind one another.
+            self._validate(checkpoint_id, allowed_phases)
 
-        self._validate(checkpoint_id, allowed_phases)
+        async with self._operation_lock:
+            # Another operation may have completed while this request waited
+            # for the mutation lock. Recheck every replay and validation rule
+            # against the state that this operation will actually mutate.
+            if checkpoint_id in self._retired:
+                final_result = self._retired_results.get(key)
+                if final_result is not None:
+                    return final_result
+                self._validate(checkpoint_id, allowed_phases)
+            recorded = self._results.get(key)
+            if recorded is not None:
+                return recorded
 
-        entry_phase = self.phase
-        entry_deadline = self.deadline
-        self.active_checkpoint_id = checkpoint_id
-        self.phase = phase_during
-        if deadline is not None:
-            self.deadline = deadline
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._inflight[key] = future
-        try:
-            result = await run()
-        except BaseException as e:
-            self.phase = phase_on_failure or entry_phase
-            self.deadline = entry_deadline
-            if entry_phase == CheckpointPhase.IDLE and phase_on_failure is None:
-                self.active_checkpoint_id = None
-            future.set_exception(e)
-            # A coalesced duplicate re-raises through the shielded await;
-            # nothing may be left awaiting silently.
-            if not future.cancelled():
-                future.exception()
-            raise
-        finally:
-            self._inflight.pop(key, None)
+            self._validate(checkpoint_id, allowed_phases)
 
-        self.phase = phase_after
-        self._results[key] = result
-        if retire_outcome is not None:
-            self._retire(checkpoint_id, retire_outcome, final_key=key)
-        future.set_result(result)
-        return result
+            entry_phase = self.phase
+            entry_deadline = self.deadline
+            self.active_checkpoint_id = checkpoint_id
+            if phase_during is not None:
+                self.phase = phase_during
+            if deadline is not None:
+                self.deadline = deadline
+            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            self._inflight[key] = future
+            try:
+                result = await run()
+            except BaseException as e:
+                self.phase = phase_on_failure or entry_phase
+                self.deadline = entry_deadline
+                if entry_phase == CheckpointPhase.IDLE and phase_on_failure is None:
+                    self.active_checkpoint_id = None
+                future.set_exception(e)
+                # A coalesced duplicate re-raises through the shielded await;
+                # nothing may be left awaiting silently.
+                if not future.cancelled():
+                    future.exception()
+                raise
+            finally:
+                self._inflight.pop(key, None)
+
+            if phase_after is not None:
+                self.phase = phase_after
+            self._results[key] = result
+            if retire_outcome is not None:
+                self._retire(checkpoint_id, retire_outcome, final_key=key)
+            future.set_result(result)
+            return result
 
     def _retire(self, checkpoint_id: str, outcome: str, *, final_key: tuple[str, str]) -> None:
         self._retired[checkpoint_id] = outcome
