@@ -26,6 +26,13 @@ The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that
 requires token IDs needs a compatible training model server.
 
+The five public reference solutions passed A-to-B verification, and all five null
+controls scored zero. `data/example_rollouts.jsonl` contains one GLM-5.3/OpenCode
+attempt per example (three passes, two genuine failures). It retains the source
+task input and unchanged Gym-converted model/tool output, not raw per-turn model
+requests. Each row records the runtime commit and exported prompt quoting;
+operational logs, sandbox handles and the reconstructed system header are omitted.
+
 For other prepared packages, override `tasks_dir` and `expected_task_count`, and
 collect against their matching JSONL. Keep local training data and asset caches
 uncommitted.

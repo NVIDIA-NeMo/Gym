@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe_external1.prepare_examples as module
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.task_data import TaskDataValidator
 from resources_servers.deepswe_external1.task_data import TaskData
 from resources_servers.deepswe_external1.task_store import PreparedTask
@@ -93,3 +94,21 @@ def test_public_cli_and_row_schema(task: PreparedTask, tmp_path: Path, monkeypat
         }
     ]
     assert "does not execute or validate" in capsys.readouterr().out
+
+
+def test_committed_rollouts_match_public_examples() -> None:
+    data = Path(__file__).resolve().parents[1] / "data"
+    examples = {row["task_id"]: row for row in map(json.loads, (data / "example.jsonl").read_text().splitlines())}
+    rollouts = list(map(json.loads, (data / "example_rollouts.jsonl").read_text().splitlines()))
+    assert len(examples) == len(rollouts) == 5
+    assert {row["task_id"] for row in rollouts} == set(examples)
+    for row in rollouts:
+        for key, value in examples[row["task_id"]].items():
+            assert row[key] == value
+        NeMoGymResponse.model_validate(row["response"])
+        assert row["validation_mode"] == "agent"
+        assert row["evaluation_completed"] and row["opencode_finished"] and row["opencode_export_found"]
+        assert not row.get("mask_sample") and not row.get("failure_kind")
+        assert row["reward"] in (0.0, 1.0)
+        assert row["rollout_provenance"]["num_repeats"] == 1
+        assert any(item["type"] == "function_call" for item in row["response"]["output"])
