@@ -79,7 +79,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     schemas = {
         "browser": [{"name": "navigate", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}]
     }
-    full_output = "start" + "x" * 6000 + "MIDDLE_MUST_SURVIVE" + "y" * 6000 + "end"
+    full_output = "start" + "x" * 6000 + "MIDDLE_MUST_BE_ELIDED" + "y" * 6000 + "end"
 
     async def execute(command, **kwargs):
         commands.append((command, kwargs))
@@ -172,7 +172,16 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     assert "Task skills are in /skills" in prompt
     tool_outputs = [item for item in requests[-1]["input"] if item.get("type") == "function_call_output"]
     assert [item["call_id"] for item in tool_outputs] == ["call_0", "call_1"]
-    assert tool_outputs[-1]["output"] == "<returncode>-1</returncode>\n" + full_output
+    observation = json.loads(tool_outputs[-1]["output"])
+    assert observation["returncode"] == -1
+    assert observation["output_head"] == full_output[:5000]
+    assert observation["output_tail"] == full_output[-5000:]
+    assert observation["elided_chars"] == len(full_output) - 10000
+    assert observation["exception_info"] == f"Command timed out after {step_timeout} seconds."
+    assert "MIDDLE_MUST_BE_ELIDED" not in tool_outputs[-1]["output"]
+    trajectory = json.loads((directory / "trajectory.json").read_text())
+    large_observation = next(message for message in trajectory["messages"] if message.get("tool_call_id") == "call_1")
+    assert large_observation["extra"]["raw_output"] == full_output
     calls = [item for item in requests[-1]["input"] if item.get("type") == "function_call"]
     assert [item["call_id"] for item in calls] == ["call_0", "call_1"]
     assert [item["id"] for item in requests[-1]["input"] if item.get("type") == "reasoning"] == ["rs_0", "rs_1"]
@@ -185,7 +194,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
         assert json.dumps(schemas) in prompt
         assert "call SERVER TOOL 'JSON_ARGUMENTS'" in prompt
         assert "client.py call browser navigate" in actions[0][0]
-        assert tool_outputs[0]["output"].endswith("MCP navigation succeeded")
+        assert json.loads(tool_outputs[0]["output"])["output"] == "MCP navigation succeeded"
         assert any("setsid --fork" in command and "server.sock" in command for command, _ in commands)
         assert sandbox.upload.await_count == 2
         assert json.loads((directory / "mcp.json").read_text()) == seed.mcp_servers

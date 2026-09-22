@@ -66,10 +66,21 @@ reminder when tool calls are missing or malformed. Valid tool calls still execut
 The adapter preserves Responses output items (including reasoning and tool calls)
 when replaying history and returns observations with their matching call IDs.
 
-Full command observations are deliberately retained: we do not use `mini.yaml`'s
-first/last 5,000-character truncation. AA's intent regarding that upstream default
-is unclear. There is no context compaction or summarization. Execution uses
+Command observations use `mini.yaml`'s JSON format and first/last 5,000-character
+limit, including timeout metadata. Full command output remains available in the
+native trajectory's `extra.raw_output`; the model sees the bounded observation.
+There is no context compaction or summarization. Execution uses
 `DefaultAgent` without interactive confirmations and keeps cost limits disabled.
+
+Length-limited responses use mini-SWE's concise-response recovery prompt. If all
+consecutive format errors are length-limited, the terminal status is
+`OutputTokenLimitExceeded`. For vLLM, enable
+`policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors: true`
+so an overfull input is reported as `ContextWindowExceeded` instead of a synthetic
+empty completion. The agent stops without retrying that input, and the caller can
+still verify its partial work. Other model API errors remain infrastructure errors.
+These changes affect benchmark trajectories and results compared with the prior
+unbounded-observation profile.
 
 Task skills are exposed by their supplied directory. For MCP tasks, setup installs
 `mcp==1.29.0` into a task-local virtual environment, discovers the declared tools,

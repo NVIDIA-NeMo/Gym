@@ -13,10 +13,12 @@ from typing import Any
 from uuid import uuid4
 
 import yaml
+from aiohttp import ClientResponseError
 from minisweagent import __version__ as mini_swe_version
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir
 from minisweagent.environments.local import LocalEnvironment
+from minisweagent.exceptions import LimitsExceeded
 from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
     format_toolcall_observation_messages,
@@ -128,9 +130,9 @@ class GymModel:
     def format_observation_messages(self, message, outputs, template_vars=None):
         messages = format_toolcall_observation_messages(
             actions=message.get("extra", {}).get("actions", []),
-            outputs=outputs,
-            # Intentionally retain full observations instead of mini.yaml's head/tail truncation.
-            observation_template="<returncode>{{output.returncode}}</returncode>\n{{output.output}}",
+            outputs=[{"exception_info": None, **output} for output in outputs],
+            observation_template=MINI_CONFIG["model"]["observation_template"],
+            template_vars=template_vars,
         )
         for observation, output in zip(messages, outputs):
             if output.get("images"):
@@ -267,7 +269,27 @@ class MiniSWEHarness:
             params["tools"] = [{"type": "function", **BASH_TOOL["function"], "strict": False}]
             if self.observability_enabled:
                 invocation.conversation = conversation_adapter.validate_python(params["input"])
-            response = await self.query(params)
+            try:
+                response = await self.query(params)
+            except ClientResponseError as exc:
+                detail = getattr(exc, "response_content", b"").decode(errors="replace")
+                context_overflow = exc.status == 400 and (
+                    "context_length_exceeded" in detail
+                    or "context length" in detail.lower()
+                    or "maximum model length" in detail.lower()
+                    or ("max_tokens" in detail and "too large" in detail.lower())
+                )
+                if not context_overflow:
+                    raise
+                # An overfull transcript cannot be repaired by format-error retries.
+                # End the agent normally so the caller can still verify its work.
+                raise LimitsExceeded(
+                    {
+                        "role": "exit",
+                        "content": detail,
+                        "extra": {"exit_status": "ContextWindowExceeded", "submission": ""},
+                    }
+                ) from exc
             responses.append(response)
             output_items.extend(response.output)
             if self.observability_enabled:
@@ -408,7 +430,16 @@ class MiniSWEHarness:
                     output = json.dumps(tool_result)
             except (ValueError, AttributeError, KeyError, TypeError):
                 pass
-            outcome = {"output": output, "returncode": result.return_code, "images": images}
+            outcome = {
+                "output": output,
+                "returncode": result.return_code,
+                "images": images,
+                "exception_info": (
+                    f"Command timed out after {min(budget, self.config.step_timeout_sec)} seconds."
+                    if result.error_type == "timeout"
+                    else None
+                ),
+            }
             # Observe before LocalEnvironment._check_finished raises Submitted.
             # mini-SWE deliberately omits that final ordinary tool message.
             messages = model.format_observation_messages({"extra": {"actions": [action]}}, [outcome])
@@ -432,6 +463,13 @@ class MiniSWEHarness:
         termination = HarnessOutcome(reason="completed")
         try:
             info = await asyncio.wait_for(asyncio.shield(worker), budget)
+            if info.get("exit_status") == "RepeatedFormatError" and all(
+                response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
+                for response in responses[-agent.n_consecutive_format_errors :]
+            ):
+                info["exit_status"] = "OutputTokenLimitExceeded"
+                agent.messages[-1]["content"] = "OutputTokenLimitExceeded"
+                agent.save(agent.config.output_path)
             if info.get("exit_status") != "Submitted":
                 termination = HarnessOutcome(reason="nonzero_exit", detail=info.get("exit_status"))
         except asyncio.CancelledError:
