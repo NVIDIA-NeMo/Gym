@@ -16,7 +16,13 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig, HermesAgentSessionState
+from responses_api_agents.hermes_agent.app import (
+    HermesAgent,
+    HermesAgentConfig,
+    HermesAgentSessionState,
+    RunnerCleanup,
+    SessionPhase,
+)
 
 
 @pytest.fixture
@@ -87,9 +93,14 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
     with TestClient(agent.setup_webserver()) as client:
         seed = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
         assert seed.status_code == 200
+        assert state.phase is SessionPhase.READY
+        assert state.runner_cleanup is RunnerCleanup.NOT_LAUNCHED
         assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 409
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         assert client.post(path, json={"input": "task"}).status_code == 200
+        assert state.task is not None
+        assert state.task.done()
+        assert state.phase is SessionPhase.ACTIVATED
         assert client.post(path, json={"input": "task"}).status_code == 409
         close = {
             "agent_session_id": seed.json()["agent_session_id"],
@@ -98,6 +109,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         first = client.post("/v1/agent_sessions/close", json=close)
         retry = client.post("/v1/agent_sessions/close", json=close)
         assert first.status_code == retry.status_code == 200
+        assert state.phase is SessionPhase.CLOSING
         assert first.json() == retry.json()
         assert client.post(path, json={"input": "task"}).status_code == 409
         wrong = dict(close, episode_id={"rollout_id": "other"})
@@ -105,6 +117,21 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
     assert agent._run_sandbox_episode.await_count == 1
     state.sandbox.disconnect.assert_awaited_once()
     state.sandbox.stop.assert_not_awaited()
+
+
+async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state: HermesAgentSessionState) -> None:
+    agent._agent_sessions["session"] = state
+    agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
+    with pytest.raises(HTTPException) as error:
+        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", top_p=0.9))
+    assert error.value.status_code == 422
+    assert state.phase is SessionPhase.READY
+    assert state.task is None
+    agent._run_sandbox_episode.assert_not_awaited()
+
+    await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert state.phase is SessionPhase.ACTIVATED
+    agent._run_sandbox_episode.assert_awaited_once()
 
 
 def test_http_close_retry_survives_other_session_closes(agent, state, monkeypatch):
@@ -201,6 +228,7 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
     body = NeMoGymResponseCreateParamsNonStreaming(input="task")
     running = asyncio.create_task(agent.responses(request(state), body))
     await asyncio.wait_for(started.wait(), 5)
+    assert state.phase is SessionPhase.ACTIVATED
     with pytest.raises(HTTPException) as error:
         await agent.responses(request(state), body)
     assert error.value.status_code == 409
@@ -210,23 +238,38 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
     )
     assert first == second
     assert stopped.is_set()
+    assert state.phase is SessionPhase.CLOSING
     with pytest.raises(asyncio.CancelledError):
         await running
     state.sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_failure_keeps_session_for_retry(agent, state):
+@pytest.mark.parametrize("runner_started", [False, True], ids=["not-launched", "cleanup-confirmed"])
+async def test_close_failure_keeps_session_for_retry(
+    agent: HermesAgent, state: HermesAgentSessionState, runner_started: bool
+) -> None:
     agent._agent_sessions["session"] = state
+    if runner_started:
+        state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+        state.runner_session = AsyncMock()
+        state.runner_exit_task = asyncio.create_task(asyncio.sleep(0, result=0))
+        await state.runner_exit_task
+        agent._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
     state.sandbox.exec.side_effect = [SimpleNamespace(return_code=1), SimpleNamespace(return_code=0)]
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     with pytest.raises(RuntimeError, match="session files"):
         await agent.close_agent_session(request(state), close)
     assert agent._agent_sessions["session"] is state
+    assert state.phase is SessionPhase.CLOSING
+    assert state.runner_cleanup is (RunnerCleanup.CONFIRMED if runner_started else RunnerCleanup.NOT_LAUNCHED)
+    assert state.runner_session is None
     state.sandbox.disconnect.assert_not_awaited()
     with pytest.raises(HTTPException):
         await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
     await agent.close_agent_session(request(state), close)
     state.sandbox.disconnect.assert_awaited_once()
+    if runner_started:
+        agent._download_json.assert_awaited_once()
 
 
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
@@ -240,7 +283,8 @@ async def test_unknown_launch_blocks_close(agent, state, failure):
             agent_session_id="session",
             state=state,
         )
-    assert state.launch_started
+    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    assert state.runner_session is None
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent._close_agent_session_state(state)
     state.sandbox.disconnect.assert_not_awaited()
@@ -248,17 +292,19 @@ async def test_unknown_launch_blocks_close(agent, state, failure):
 
 @pytest.mark.parametrize("receipt", [{}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}])
 async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, receipt):
-    state.launch_started = True
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
     state.runner_session = AsyncMock()
     state.runner_exit_task = asyncio.create_task(asyncio.sleep(0, result=0))
     await state.runner_exit_task
     agent._download_json = AsyncMock(return_value=receipt)
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await agent._close_agent_session_state(state)
+    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
     state.runner_session.close.assert_not_awaited()
     state.sandbox.disconnect.assert_not_awaited()
     agent._download_json.return_value = {"cleanup_confirmed": True}
     await agent._close_agent_session_state(state)
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
     state.sandbox.disconnect.assert_awaited_once()
 
 
@@ -344,7 +390,7 @@ async def test_runner_exit_rechecks_output_after_stale_probe(
         with pytest.raises(RuntimeError, match="runner exited without output: runner stderr"):
             await activation
     assert len(probes) == 2
-    assert state.cleanup_confirmed
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
     runner.send_signal.assert_not_awaited()
     runner.close.assert_awaited_once()
     assert state.runner_session is None

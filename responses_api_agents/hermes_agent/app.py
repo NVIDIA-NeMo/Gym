@@ -24,6 +24,7 @@ from asyncio import Semaphore
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -151,6 +152,22 @@ _HERMES_REQUIREMENT = (
 _AGENT_SESSION_ID_KEY = "agent_session_id"
 
 
+class SessionPhase(Enum):
+    """Track activation eligibility, not whether the invocation task is still running."""
+
+    READY = auto()
+    ACTIVATED = auto()
+    CLOSING = auto()  # Failed closes remain retryable, but cannot reactivate.
+
+
+class RunnerCleanup(Enum):
+    """Track remote process cleanup independently of session files and connections."""
+
+    NOT_LAUNCHED = auto()
+    UNCONFIRMED = auto()  # A launch attempt may have succeeded without returning a handle.
+    CONFIRMED = auto()
+
+
 @dataclass
 class HermesAgentSessionState:
     request: AgentSeedSessionRequest
@@ -161,10 +178,8 @@ class HermesAgentSessionState:
     runner_exit_task: asyncio.Task[int] | None = None
     observations: AgentObservationBundle | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
-    activated: bool = False
-    closing: bool = False
-    launch_started: bool = False
-    cleanup_confirmed: bool = False
+    phase: SessionPhase = SessionPhase.READY
+    runner_cleanup: RunnerCleanup = RunnerCleanup.NOT_LAUNCHED
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -307,7 +322,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             if closed is not None:
                 return closed[1]
             state = self._require_agent_session(agent_session_id)
-            state.closing = True
+            state.phase = SessionPhase.CLOSING
             observations = await self._close_agent_session_state(state)
             result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
             del self._agent_sessions[agent_session_id]
@@ -488,7 +503,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
         runner_session = state.runner_session
         runner_exit_task = state.runner_exit_task
-        if runner_session is None and (state.cleanup_confirmed or not state.launch_started):
+        if runner_session is None and state.runner_cleanup in (
+            RunnerCleanup.NOT_LAUNCHED,
+            RunnerCleanup.CONFIRMED,
+        ):
             return
         if runner_session is None or runner_exit_task is None:
             raise RuntimeError("Hermes launch outcome is unknown; cannot confirm termination")
@@ -514,11 +532,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # Signalling can race with process exit, but a failed exit watcher
             # is not evidence that the runner stopped.
             runner_exit_task.result()
-        if not state.cleanup_confirmed:
+        if state.runner_cleanup is not RunnerCleanup.CONFIRMED:
             receipt = await self._download_json(state.sandbox, f"{state.session_dir}/cleanup.json")
             if receipt.get("cleanup_confirmed") is not True:
                 raise RuntimeError(f"Hermes descendant cleanup was not confirmed: {receipt.get('error')}")
-            state.cleanup_confirmed = True
+            state.runner_cleanup = RunnerCleanup.CONFIRMED
         # Keep both handles on timeout, cancellation, or provider failure so a
         # later close can retry without incorrectly authorizing verification.
         await runner_session.close()
@@ -696,7 +714,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
-        state.launch_started = True
+        state.runner_cleanup = RunnerCleanup.UNCONFIRMED
         try:
             state.runner_session = await state.sandbox.pty.create(
                 command=(
@@ -1084,10 +1102,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
-            if state.activated or state.closing:
+            if state.phase is not SessionPhase.READY:
                 raise HTTPException(409, "Hermes sandbox sessions support one activation")
             body = self._validate_sandbox_request(body)
-            state.activated = True
+            state.phase = SessionPhase.ACTIVATED
 
             async def activate() -> NeMoGymResponse:
                 async with self.sem:
