@@ -1,0 +1,24 @@
+# ChemReason-Bench (ACL 2026 Long Papers 33211-33248), full evaluation set: 7,306 instances.
+# See resources_servers/chemreason_bench/README.md for the tasks, metrics and published numbers.
+config_paths:
+  - resources_servers/chemreason_bench/configs/chemreason_bench.yaml
+
+chemreason_bench_chemreason_bench_resources_server:
+  _inherit_from: chemreason_bench
+
+chemreason_bench_chemreason_bench_simple_agent:
+  _inherit_from: chemreason_bench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: chemreason_bench_chemreason_bench_resources_server
+      datasets:
+      - name: chemreason_bench
+        type: benchmark
+        jsonl_fpath: benchmarks/chemreason_bench/data/chemreason_bench_benchmark.jsonl
+        prepare_script: benchmarks/chemreason_bench/prepare.py
+        license: Creative Commons Attribution 4.0 International
+        prompt_config: benchmarks/prompts/eval/chemreason_bench/paper.yaml
+        # Upstream evaluates one deterministic pass per instance (temperature 0).
+        num_repeats: 1
