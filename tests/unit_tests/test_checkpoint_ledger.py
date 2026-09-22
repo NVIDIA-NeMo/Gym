@@ -200,7 +200,6 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
         "rollouts": 1,
         "rows": 2,
         "excluded_tombstoned": 1,
-        "excluded_inactive": 0,
         "generation_cut_records": 0,
         "manifest_digest": summary["manifest_digest"],
         "storage_reference_index": summary["storage_reference_index"],
@@ -242,13 +241,11 @@ def test_commit_packages_only_active_continuations_without_scanning_store(tmp_pa
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
-        source_attempts=[("rollout-a", 0), ("rollout-b", 0)],
         continuation_roots=[root],
     )
 
     assert summary["rollouts"] == 1
     assert summary["rows"] == 3
-    assert summary["excluded_inactive"] == 1
     ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
     assert _read_archived_custody(checkpoint, "rollout-a") == expected
     assert {entry["capture_key"] for entry in _lineage_index(checkpoint)} == {"rollout-a"}
@@ -275,7 +272,6 @@ def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> N
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
-        source_attempts=[("rollout-a", 0)],
         continuation_roots=[],
         generation_cut_receipts=(receipt,),
     )
@@ -311,13 +307,20 @@ def test_completed_call_supersedes_older_generation_cut(tmp_path) -> None:
     }
     with (source / "rollout-a.lineage.jsonl").open("a") as handle:
         handle.write(json.dumps(completed, sort_keys=True) + "\n")
+    commit_receipts = asyncio.run(
+        store.load_generation_cut_receipts(
+            ("rollout-a",),
+            checkpoint_id="checkpoint-1",
+            server_name="policy",
+        )
+    )
+    assert commit_receipts[0].prefixes == receipt.prefixes
     checkpoint = tmp_path / "checkpoint"
 
     summary = CaptureLedgerCheckpointer(source, server_name="policy").commit(
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
-        source_attempts=[("rollout-a", 0)],
         continuation_roots=[_continuation_root("rollout-a", last_call_index=0)],
         generation_cut_receipts=(receipt,),
     )
@@ -348,7 +351,9 @@ def test_commit_uses_bounded_deterministic_lineage_archives(tmp_path, monkeypatc
     )
 
     manifest = _ledger_manifest(checkpoint)
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 5
+    assert "source_attempts" not in manifest
+    assert "source_attempts_index" not in manifest
     assert manifest["rollout_count"] == 5
     assert manifest["row_count"] == 10
     assert [archive["members"] for archive in manifest["archives"]] == [2, 2, 1]
@@ -395,7 +400,6 @@ def test_restore_supports_legacy_per_rollout_v2_checkpoint(tmp_path) -> None:
         },
         "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         "tombstones": [],
-        "source_attempts": [],
     }
     (ledger_dir / LEDGER_MANIFEST_NAME).write_text(json.dumps(manifest))
 
@@ -466,7 +470,6 @@ def test_commit_rejects_a_requested_continuation_without_lineage(tmp_path) -> No
             checkpoint,
             checkpoint_id="checkpoint-1",
             tombstones=[],
-            source_attempts=[("rollout-missing", 0)],
             continuation_roots=[_continuation_root("rollout-missing")],
         )
 
@@ -596,7 +599,6 @@ def test_model_commit_accepts_agent_continuation_index_and_returns_reference_ind
         headers=AUTH_HEADERS,
     )
     assert commit.status_code == 200
-    assert commit.json()["excluded_inactive"] == 0
     references = read_jsonl_artifact(
         checkpoint,
         CheckpointArtifactReference.model_validate(commit.json()["storage_reference_index"]),
@@ -1126,50 +1128,54 @@ def test_model_restore_loads_generation_cut_from_checkpointed_lineage(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_multi_worker_restore_installs_one_shared_cut_lease(tmp_path) -> None:
-    inventory = GenerationCutInventory.build(
-        checkpoint_id="checkpoint-1",
-        server_name="policy",
-        active_prefixes=[
-            GenerationCutPrefix(
-                ticket_id="ticket-1",
-                rollout_id="rollout-a",
-                attempt_index=0,
-                model_call_id="source-call",
-                admitted_at=1.0,
+async def test_four_worker_cut_inventory_restores_into_two_worker_shared_registry(tmp_path) -> None:
+    receipts: list[GenerationCutReceipt] = []
+    for index, rollout_id in enumerate(("rollout-a", "rollout-b", "rollout-c", "rollout-d")):
+        inventory = GenerationCutInventory.build(
+            checkpoint_id="checkpoint-1",
+            server_name="policy",
+            active_prefixes=[
+                GenerationCutPrefix(
+                    ticket_id=f"ticket-{index}",
+                    rollout_id=rollout_id,
+                    attempt_index=0,
+                    model_call_id=f"source-call-{index}",
+                    admitted_at=float(index + 1),
+                )
+            ],
+        )
+        receipts.append(
+            GenerationCutReceipt(
+                checkpoint_id="checkpoint-1",
+                cut_id=f"worker-cut-{index}",
+                inventory_digest=inventory.inventory_digest,
+                inventory=inventory,
+                backend_snapshot_id=f"tq-cut-{index}",
+                prefixes=(
+                    GenerationCutPrefixAck(
+                        **inventory.active_prefixes[0].model_dump(mode="json"),
+                        disposition="durable_prefix",
+                        cut_kind="active_prefix",
+                        frozen_buffer_id=f"active/checkpoint-1/{index}",
+                        staging_keys=(f"__generation_cut__/checkpoint-1/{rollout_id}/source-call-{index}",),
+                        prefix_token_count=index + 1,
+                        prefix_digest=f"{index + 1:064x}",
+                        effective_output_limit=128,
+                    ),
+                ),
             )
-        ],
-    )
-    receipt = GenerationCutReceipt(
-        checkpoint_id="checkpoint-1",
-        cut_id="cut-1",
-        inventory_digest=inventory.inventory_digest,
-        inventory=inventory,
-        backend_snapshot_id="tq-cut-1",
-        prefixes=(
-            GenerationCutPrefixAck(
-                **inventory.active_prefixes[0].model_dump(mode="json"),
-                disposition="durable_prefix",
-                cut_kind="active_prefix",
-                frozen_buffer_id="active/checkpoint-1",
-                staging_keys=("__generation_cut__/checkpoint-1/rollout-a/source-call",),
-                prefix_token_count=2,
-                prefix_digest="a" * 64,
-                effective_output_limit=128,
-            ),
-        ),
-    )
+        )
     source_root = tmp_path / "source"
     source = FileLineageStore(source_root)
-    await source.record_generation_cut(receipt)
+    for receipt in receipts:
+        await source.record_generation_cut(receipt)
     checkpoint = tmp_path / "checkpoint"
     CaptureLedgerCheckpointer(source_root, server_name="policy").commit(
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=set(),
-        source_attempts={("rollout-a", 0)},
         continuation_roots=[],
-        generation_cut_receipts=(receipt,),
+        generation_cut_receipts=tuple(receipts),
     )
 
     restored = FileLineageStore(tmp_path / "restored")
@@ -1208,32 +1214,38 @@ async def test_multi_worker_restore_installs_one_shared_cut_lease(tmp_path) -> N
                 },
             )
         )
-        assert result["generation_cuts_restored"] == 1
+        assert result["generation_cuts_restored"] == 4
+        assert result["tombstones_restored"] == 0
+        assert "tombstones" not in result
         assert coordinator.restored_cuts.status() == {
-            "entries": 1,
-            "available": 1,
+            "entries": 4,
+            "available": 4,
             "leased": 0,
             "consumed": 0,
         }
         assert all(agent.service_client().has_restored_cuts for agent in agents)
 
-        claimed = (
-            await agents[1]
-            .service_client()
-            .request(
-                "claim_generation_cut",
-                {
-                    "rollout_id": "rollout-a",
-                    "attempt_index": 1,
-                    "model_call_id": "replacement-call",
-                },
+        claimed = []
+        for index, rollout_id in enumerate(("rollout-a", "rollout-b", "rollout-c", "rollout-d")):
+            claimed.append(
+                await agents[index % 2]
+                .service_client()
+                .request(
+                    "claim_generation_cut",
+                    {
+                        "rollout_id": rollout_id,
+                        "attempt_index": 1,
+                        "model_call_id": f"replacement-call-{index}",
+                    },
+                )
             )
-        )
-        assert GenerationCutPrefixAck.model_validate(claimed) == receipt.prefixes[0]
-        assert coordinator.restored_cuts.status()["leased"] == 1
+        assert [GenerationCutPrefixAck.model_validate(item) for item in claimed] == [
+            receipt.prefixes[0] for receipt in receipts
+        ]
+        assert coordinator.restored_cuts.status()["leased"] == 4
         with pytest.raises(CoordinatorServiceError) as owned:
             await (
-                agents[0]
+                agents[1]
                 .service_client()
                 .request(
                     "claim_generation_cut",
@@ -1297,7 +1309,6 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
     )
     assert commit.status_code == 200
     assert commit.json()["storage_reference_index"]["records"] == 0
-    assert commit.json()["excluded_inactive"] == 1
     retry = source_client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
         json=commit_body,
@@ -1332,8 +1343,6 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
     )
     assert restored_status.status_code == 200
     assert restored_status.json()["state"] == "paused"
-    with pytest.raises(StaleAttemptError):
-        restored_limiter.admit(rollout_id="rollout-a", attempt_index=0)
 
 
 def test_restored_tombstone_fences_exact_attempt(tmp_path) -> None:
@@ -1496,19 +1505,9 @@ def test_namespaced_restore_rejects_conflicting_shared_lineage(tmp_path) -> None
     assert not restored.exists()
 
 
-@pytest.mark.parametrize(
-    ("retry_tombstones", "retry_source_attempts", "message"),
-    [
-        ([("rollout-b", 1)], [("rollout-a", 0)], "abort exclusions"),
-        ([], [("rollout-a", 0), ("rollout-c", 2)], "source attempts"),
-    ],
-)
-def test_commit_retry_rejects_changed_semantic_sets_after_final_fsync_failure(
+def test_commit_retry_rejects_changed_tombstones_after_final_fsync_failure(
     tmp_path,
     monkeypatch,
-    retry_tombstones,
-    retry_source_attempts,
-    message,
 ) -> None:
     source = tmp_path / "source"
     _write_custody(source, "rollout-a")
@@ -1533,22 +1532,20 @@ def test_commit_retry_rejects_changed_semantic_sets_after_final_fsync_failure(
             checkpoint,
             checkpoint_id="checkpoint-1",
             tombstones=[],
-            source_attempts=[("rollout-a", 0)],
             continuation_roots=[_continuation_root("rollout-a")],
         )
     assert (checkpoint / MODEL_LEDGER_SUBDIR / "policy" / LEDGER_MANIFEST_NAME).exists()
 
-    with pytest.raises(LedgerMismatchError, match=message):
+    with pytest.raises(LedgerMismatchError, match="abort exclusions"):
         checkpointer.commit(
             checkpoint,
             checkpoint_id="checkpoint-1",
-            tombstones=retry_tombstones,
-            source_attempts=retry_source_attempts,
+            tombstones=[("rollout-b", 1)],
             continuation_roots=[_continuation_root("rollout-a")],
         )
 
 
-def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
+def test_restored_ledger_survives_the_next_commit(tmp_path) -> None:
     source_client, source_limiter = _participant(tmp_path / "source")
     expected = _write_custody(tmp_path / "source", "rollout-a")
     source_limiter.release(source_limiter.admit(rollout_id="rollout-a", attempt_index=0))
@@ -1572,16 +1569,16 @@ def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
         == 200
     )
 
-    restored_client, restored_limiter = _participant(tmp_path / "restored")
+    restored_client, _ = _participant(tmp_path / "restored")
     restore = {"checkpoint_id": "restore-1", "deadline_ts": 4e9}
-    assert (
-        restored_client.post(
-            f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
-            json={**restore, "checkpoint_dir": str(first_checkpoint)},
-            headers=AUTH_HEADERS,
-        ).status_code
-        == 200
+    restore_response = restored_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
+        json={**restore, "checkpoint_dir": str(first_checkpoint)},
+        headers=AUTH_HEADERS,
     )
+    assert restore_response.status_code == 200
+    assert restore_response.json()["tombstones_restored"] == 0
+    assert "tombstones" not in restore_response.json()
     assert (
         restored_client.post(
             f"{MODEL_ADMISSION_URL_PREFIX}/resume",
@@ -1590,9 +1587,6 @@ def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
         ).status_code
         == 200
     )
-    with pytest.raises(StaleAttemptError):
-        restored_limiter.admit(rollout_id="rollout-a", attempt_index=0)
-
     second = {"checkpoint_id": "checkpoint-2", "deadline_ts": 4e9}
     restored_client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=second, headers=AUTH_HEADERS)
     second_checkpoint = tmp_path / "checkpoint-2"

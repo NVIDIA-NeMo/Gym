@@ -70,6 +70,7 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.coordinator import (
     AdmissionCoordinator,
+    CoordinatorCheckpointEvidence,
     CoordinatorServiceClient,
     MissingWorkersError,
 )
@@ -99,7 +100,7 @@ GENERATION_CUT_COORDINATOR_PROOF_NAME = "generation-cut-workers.json"
 LEGACY_GENERATION_CUT_ACK_NAME = "generation-cut.json"
 STORAGE_REFERENCE_INDEX_NAME = "storage-references.jsonl"
 LINEAGE_INDEX_NAME = "lineage-index.jsonl"
-LEDGER_SCHEMA_VERSION = 3
+LEDGER_SCHEMA_VERSION = 5
 
 # FileLineageStore writes one token-free custody file per rollout.
 # Lock files and token-store files are not part of this participant.
@@ -180,7 +181,6 @@ class CaptureLedgerCommitResult(BaseModel):
     rollouts: int = Field(ge=0)
     rows: int = Field(ge=0)
     excluded_tombstoned: int = Field(ge=0)
-    excluded_inactive: int = Field(default=0, ge=0)
     generation_cut_records: int = Field(default=0, ge=0)
     manifest_digest: str
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
@@ -194,7 +194,6 @@ class CaptureLedgerRestoreResult(BaseModel):
     rows: int = Field(ge=0)
     checkpoint_id: Optional[str] = None
     tombstones: list[AttemptIdentity] = Field(default_factory=list)
-    source_attempts: list[AttemptIdentity] = Field(default_factory=list)
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
     generation_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
     storage_reference_index: CheckpointArtifactReference
@@ -217,7 +216,6 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         checkpoint_id: str,
         server_name: str,
         tombstones: tuple[tuple[str, int], ...],
-        source_attempts: tuple[tuple[str, int], ...],
         continuation_roots: tuple[AgentContinuationRoot, ...],
         generation_cut_receipts: tuple[GenerationCutReceipt, ...],
     ) -> CaptureLedgerCommitResult: ...
@@ -764,7 +762,6 @@ class CaptureLedgerCheckpointer:
         *,
         checkpoint_id: str,
         tombstones: list[tuple[str, int]],
-        source_attempts: Optional[list[tuple[str, int]]] = None,
         generation_cut_proof: GenerationCutCoordinatorProof | None = None,
         continuation_roots: list[AgentContinuationRoot],
         generation_cut_receipts: tuple[GenerationCutReceipt, ...] = (),
@@ -797,7 +794,6 @@ class CaptureLedgerCheckpointer:
                 checkpoint_id=checkpoint_id,
                 server_name=self.server_name,
                 tombstones=tombstones,
-                source_attempts=source_attempts or [],
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots_digest=roots_digest,
                 generation_cuts_digest=cuts_digest,
@@ -829,10 +825,6 @@ class CaptureLedgerCheckpointer:
         ledger_dir.mkdir(parents=True, exist_ok=True)
 
         excluded = len(tombstones)
-        source_capture_keys = {
-            capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in source_attempts or []
-        }
-        excluded_inactive = len(source_capture_keys - archived_capture_keys - fenced)
         archive_references: list[_LineageArchiveReference] = []
         lineage_members: list[_LineageArchiveMember] = []
         external_references: dict[str, ExternalStorageReference] = {}
@@ -875,14 +867,9 @@ class CaptureLedgerCheckpointer:
             "continuation_roots": len(normalized_roots),
             "generation_cuts_sha256": cuts_digest,
             "generation_cut_records": generation_cut_records,
-            "excluded_inactive": excluded_inactive,
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
             "tombstones": [
                 {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in sorted(tombstones)
-            ],
-            "source_attempts": [
-                {"rollout_id": rollout_id, "attempt_index": attempt}
-                for rollout_id, attempt in sorted(source_attempts or [])
             ],
         }
         if generation_cut_proof is not None:
@@ -904,7 +891,6 @@ class CaptureLedgerCheckpointer:
             "rollouts": len(lineage_members),
             "rows": sum(member.rows for member in lineage_members),
             "excluded_tombstoned": excluded,
-            "excluded_inactive": excluded_inactive,
             "generation_cut_records": generation_cut_records,
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
@@ -921,7 +907,6 @@ class CaptureLedgerCheckpointer:
         checkpoint_id: str,
         server_name: Optional[str],
         tombstones: list[tuple[str, int]],
-        source_attempts: list[tuple[str, int]],
         generation_cut_proof: GenerationCutCoordinatorProof | None,
         continuation_roots_digest: str,
         generation_cuts_digest: str,
@@ -936,13 +921,8 @@ class CaptureLedgerCheckpointer:
         expected_tombstones = [
             {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in sorted(tombstones)
         ]
-        expected_source_attempts = [
-            {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in sorted(source_attempts)
-        ]
         if manifest.get("tombstones", []) != expected_tombstones:
             raise LedgerMismatchError("committed ledger abort exclusions changed before commit retry")
-        if manifest.get("source_attempts", []) != expected_source_attempts:
-            raise LedgerMismatchError("committed ledger source attempts changed before commit retry")
         expected_proof = generation_cut_proof.model_dump(mode="json") if generation_cut_proof is not None else None
         if manifest.get("generation_cut_proof") != expected_proof:
             raise LedgerMismatchError("committed ledger worker generation-cut proof changed before commit retry")
@@ -972,7 +952,6 @@ class CaptureLedgerCheckpointer:
             "rollouts": rollout_count,
             "rows": total_rows,
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
-            "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
             "generation_cut_records": int(manifest.get("generation_cut_records", 0)),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
@@ -1081,7 +1060,6 @@ class CaptureLedgerCheckpointer:
             "rows": total_rows,
             "checkpoint_id": manifest.get("checkpoint_id"),
             "tombstones": list(manifest.get("tombstones", ())),
-            "source_attempts": list(manifest.get("source_attempts", ())),
             "generation_cut_receipts": [receipt.model_dump(mode="json") for receipt in restored_cut_receipts],
         }
         if manifest.get("generation_cut_proof") is not None:
@@ -1145,11 +1123,11 @@ async def _commit_model_ledger(
     ledger: Optional[CaptureLedger],
     file_ledger_root: Optional[Path],
     tombstones: set[tuple[str, int]],
-    source_attempts: set[tuple[str, int]],
     continuation_roots: list[AgentContinuationRoot],
     generation_cut_receipts: tuple[GenerationCutReceipt, ...],
+    generation_cuts_already_recorded: bool = False,
 ) -> dict[str, Any]:
-    if generation_cut_receipts:
+    if generation_cut_receipts and not generation_cuts_already_recorded:
         if not isinstance(ledger, GenerationCutCaptureLedger):
             raise LedgerNotCheckpointableError(
                 "generation-prefix cuts require a capture ledger that can record cut coordinates"
@@ -1164,7 +1142,6 @@ async def _commit_model_ledger(
             checkpoint_id=checkpoint_id,
             server_name=server_name,
             tombstones=tuple(tombstones),
-            source_attempts=tuple(source_attempts),
             continuation_roots=tuple(continuation_roots),
             generation_cut_receipts=generation_cut_receipts,
         )
@@ -1188,7 +1165,6 @@ async def _commit_model_ledger(
             checkpoint_dir,
             checkpoint_id=checkpoint_id,
             tombstones=sorted(tombstones),
-            source_attempts=sorted(source_attempts),
             continuation_roots=continuation_roots,
             generation_cut_receipts=generation_cut_receipts,
         )
@@ -1222,6 +1198,13 @@ async def _restore_model_ledger(
         )
     checkpointer = CaptureLedgerCheckpointer(file_ledger_root, server_name=server_name)
     return await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
+
+
+def _consume_restored_tombstones(result: dict[str, Any]) -> tuple[AttemptIdentity, ...]:
+    """Keep the tombstone inventory inside Gym and bound the wire reply."""
+    tombstones = tuple(AttemptIdentity.model_validate(item) for item in result.pop("tombstones", ()))
+    result["tombstones_restored"] = len(tombstones)
+    return tombstones
 
 
 class PolicyModelCheckpointCoordinatorService:
@@ -1334,7 +1317,7 @@ class PolicyModelCheckpointCoordinatorService:
             "waiters_total": status["waiters_total"],
         }
         if status["state"] == AdmissionState.PAUSED.value:
-            result["generation_cut_proof"] = self.coordinator.generation_cut_proof().model_dump(mode="json")
+            result["generation_cut_summary"] = self.coordinator.generation_cut_summary()
         return result
 
     def _status_payload(self, status: dict[str, Any]) -> dict[str, Any]:
@@ -1404,8 +1387,9 @@ class PolicyModelCheckpointCoordinatorService:
 
     async def _resume(self, body: ModelAdmissionResumeRequest) -> dict[str, Any]:
         async def run() -> dict[str, Any]:
-            await self.coordinator.resume_admission()
-            status = await self._await_worker_acks(10.0)
+            checkpoint_artifacts = await self.coordinator.resume_admission()
+            status = await self._await_worker_acks(body.remaining())
+            await self.coordinator.cleanup_checkpoint_artifacts(checkpoint_artifacts)
             return {
                 "state": status["state"],
                 "workers": {
@@ -1439,7 +1423,7 @@ class PolicyModelCheckpointCoordinatorService:
 
         async def run() -> dict[str, Any]:
             await self.coordinator.add_tombstone(body.rollout_id, body.attempt_index)
-            status = await self._await_worker_acks(10.0)
+            status = await self._await_worker_acks(body.remaining())
             return {
                 "state": status["state"],
                 "aborted_inflight": 0,
@@ -1455,17 +1439,61 @@ class PolicyModelCheckpointCoordinatorService:
             run=run,
         )
 
-    def _generation_cut_receipts(self) -> tuple[GenerationCutReceipt, ...]:
-        proof = self.coordinator.generation_cut_proof()
-        return tuple(
-            worker.generation_cut_receipt for worker in proof.workers if worker.generation_cut_receipt is not None
+    async def _load_generation_cut_receipts(
+        self,
+        ledger: CaptureLedger | None,
+        evidence: CoordinatorCheckpointEvidence,
+    ) -> tuple[GenerationCutReceipt, ...]:
+        tickets = evidence.generation_cut_tickets
+        if not tickets:
+            return ()
+        if not isinstance(ledger, GenerationCutCaptureLedger):
+            raise LedgerNotCheckpointableError(
+                "multi-worker generation cuts require a capture ledger that can reload cut lineage"
+            )
+        expected_by_ticket = {}
+        capture_keys = set()
+        for ticket in tickets:
+            if ticket.rollout_id is None or ticket.attempt_index is None or ticket.model_call_id is None:
+                raise LedgerMismatchError("compact generation-cut index contains an uncorrelated cut ticket")
+            if ticket.ticket_id in expected_by_ticket:
+                raise LedgerMismatchError(f"compact generation-cut index repeats ticket {ticket.ticket_id!r}")
+            expected_by_ticket[ticket.ticket_id] = ticket
+            capture_keys.add(capture_key_for(ticket.rollout_id, ticket.attempt_index))
+        receipts = await ledger.load_generation_cut_receipts(
+            tuple(sorted(capture_keys)),
+            checkpoint_id=evidence.generation_cut_proof.checkpoint_id,
+            server_name=self.server_name,
         )
+        actual_by_ticket = {}
+        for receipt in receipts:
+            for prefix in receipt.prefixes:
+                if prefix.ticket_id in actual_by_ticket:
+                    raise LedgerMismatchError(f"generation-cut lineage repeats ticket {prefix.ticket_id!r}")
+                actual_by_ticket[prefix.ticket_id] = prefix
+        if set(actual_by_ticket) != set(expected_by_ticket):
+            raise LedgerMismatchError(
+                "generation-cut lineage does not match the compact worker indexes: "
+                f"expected={sorted(expected_by_ticket)!r}, actual={sorted(actual_by_ticket)!r}"
+            )
+        for ticket_id, ticket in expected_by_ticket.items():
+            prefix = actual_by_ticket[ticket_id]
+            if (
+                prefix.rollout_id != ticket.rollout_id
+                or prefix.attempt_index != ticket.attempt_index
+                or prefix.model_call_id != ticket.model_call_id
+            ):
+                raise LedgerMismatchError(f"generation-cut lineage identity differs for ticket {ticket_id!r}")
+        return receipts
 
     async def _commit(self, body: ModelCheckpointCommitRequest) -> dict[str, Any]:
         async def run() -> dict[str, Any]:
             status = self.coordinator.status()
             if status["state"] != AdmissionState.PAUSED.value:
                 raise LedgerNotQuiescentError("capture-ledger commit requires every policy worker to be paused")
+            evidence = await self.coordinator.checkpoint_evidence()
+            ledger = self.ledger_provider()
+            generation_cut_receipts = await self._load_generation_cut_receipts(ledger, evidence)
             continuation_roots = await asyncio.to_thread(
                 load_continuation_roots,
                 Path(body.checkpoint_dir),
@@ -1475,12 +1503,12 @@ class PolicyModelCheckpointCoordinatorService:
                 Path(body.checkpoint_dir),
                 checkpoint_id=body.checkpoint_id,
                 server_name=self.server_name,
-                ledger=self.ledger_provider(),
+                ledger=ledger,
                 file_ledger_root=self.file_ledger_root_provider(),
-                tombstones=self.coordinator.checkpoint_exclusions(),
-                source_attempts=self.coordinator.seen_attempts(),
+                tombstones=set(evidence.checkpoint_exclusions),
                 continuation_roots=continuation_roots,
-                generation_cut_receipts=self._generation_cut_receipts(),
+                generation_cut_receipts=generation_cut_receipts,
+                generation_cuts_already_recorded=True,
             )
 
         return await self.fence.run_operation(
@@ -1513,6 +1541,7 @@ class PolicyModelCheckpointCoordinatorService:
                 requested_receipts=body.generation_cut_receipts,
                 server_name=self.server_name,
             )
+            tombstones = _consume_restored_tombstones(result)
             if generation_cut_receipts and not self.supports_generation_cuts:
                 raise LedgerNotCheckpointableError(
                     "checkpoint contains generation cuts but this model server has no restore backend"
@@ -1536,12 +1565,9 @@ class PolicyModelCheckpointCoordinatorService:
                             )
                         restored_entries[replacement] = value
             self.coordinator.restored_cuts.install(restored_entries)
-            restored_tombstones = {
-                (str(item["rollout_id"]), int(item["attempt_index"]))
-                for item in (*result["tombstones"], *result.get("source_attempts", []))
-            }
+            restored_tombstones = {(item.rollout_id, item.attempt_index) for item in tombstones}
             await self.coordinator.install_tombstones(restored_tombstones)
-            await self._await_worker_acks(10.0)
+            await self._await_worker_acks(body.remaining())
             result["generation_cuts_restored"] = len(restored_entries)
             return result
 
@@ -1668,7 +1694,6 @@ def install_model_checkpoint(
                 checkpoint_id=checkpoint_id,
                 server_name=server_name,
                 tombstones=tuple(limiter.checkpoint_exclusions()),
-                source_attempts=tuple(limiter.seen_attempts()),
                 continuation_roots=tuple(continuation_roots),
                 generation_cut_receipts=generation_cut_receipts,
             )
@@ -1698,7 +1723,6 @@ def install_model_checkpoint(
                 checkpoint_dir,
                 checkpoint_id=checkpoint_id,
                 tombstones=limiter.checkpoint_exclusions(),
-                source_attempts=limiter.seen_attempts(),
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots=continuation_roots,
                 generation_cut_receipts=generation_cut_receipts,
@@ -1752,10 +1776,10 @@ def install_model_checkpoint(
         require_control_auth(authorization, auth_token)
         _require_policy()
         if coordinator_client is not None:
-            return await coordinator_client.request(
+            return await coordinator_client.request_with_deadline(
                 "model_checkpoint_commit",
                 body.model_dump(mode="json"),
-                timeout_s=max(body.remaining(), 0.001),
+                deadline=body,
             )
 
         async def run() -> dict[str, Any]:
@@ -1799,10 +1823,10 @@ def install_model_checkpoint(
         require_control_auth(authorization, auth_token)
         _require_policy()
         if coordinator_client is not None:
-            return await coordinator_client.request(
+            return await coordinator_client.request_with_deadline(
                 "model_checkpoint_restore",
                 body.model_dump(mode="json"),
-                timeout_s=max(body.remaining(), 0.001),
+                deadline=body,
             )
 
         async def run() -> dict[str, Any]:
@@ -1830,6 +1854,7 @@ def install_model_checkpoint(
                         "request-carried generation cuts disagree with the restored model lineage"
                     )
             generation_cut_receipts = lineage_receipts or body.generation_cut_receipts
+            tombstones = _consume_restored_tombstones(result)
             backend = limiter.generation_cut_backend
             if generation_cut_receipts and backend is None:
                 raise LedgerNotCheckpointableError(
@@ -1856,10 +1881,8 @@ def install_model_checkpoint(
                     and (prefix.rollout_id, prefix.attempt_index + 1) not in exclusions
                     for prefix in receipt.prefixes
                 )
-            for tombstone in result["tombstones"]:
-                limiter.install_tombstone(tombstone["rollout_id"], tombstone["attempt_index"])
-            for source_attempt in result.get("source_attempts", []):
-                limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
+            for attempt in tombstones:
+                limiter.install_tombstone(attempt.rollout_id, attempt.attempt_index)
             result["generation_cuts_restored"] = restored_cuts
             return result
 

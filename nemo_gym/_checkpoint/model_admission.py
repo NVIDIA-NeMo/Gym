@@ -93,10 +93,10 @@ def install_model_admission(
         require_control_auth(authorization, auth_token)
         _require_policy()
         if coordinator_client is not None:
-            return await coordinator_client.request(
+            return await coordinator_client.request_with_deadline(
                 "model_admission_pause",
                 body.model_dump(mode="json"),
-                timeout_s=max(body.remaining(), 0.001),
+                deadline=body,
             )
 
         async def run() -> dict[str, Any]:
@@ -120,11 +120,20 @@ def install_model_admission(
                 "waiters_total": counts["waiters_total"],
             }
             if counts["state"] == AdmissionState.PAUSED.value:
-                result["generation_cut_proof"] = limiter.generation_cut_worker_proof(
+                proof = limiter.generation_cut_worker_proof(
                     body.checkpoint_id,
                     coordinator_sequence=1,
                     worker_id="0",
-                ).model_dump(mode="json")
+                )
+                result["generation_cut_summary"] = {
+                    "checkpoint_id": body.checkpoint_id,
+                    "coordinator_sequence": 1,
+                    "expected_workers": 1,
+                    "records": (
+                        len(proof.generation_cut_receipt.prefixes) if proof.generation_cut_receipt is not None else 0
+                    ),
+                    "proof_digest": proof.membership_digest,
+                }
             return result
 
         result = await fence.run_operation(
@@ -194,11 +203,20 @@ def install_model_admission(
             ],
         }
         if counts["state"] == AdmissionState.PAUSED.value:
-            result["generation_cut_proof"] = limiter.generation_cut_worker_proof(
+            proof = limiter.generation_cut_worker_proof(
                 checkpoint_id,
                 coordinator_sequence=1,
                 worker_id="0",
-            ).model_dump(mode="json")
+            )
+            result["generation_cut_summary"] = {
+                "checkpoint_id": checkpoint_id,
+                "coordinator_sequence": 1,
+                "expected_workers": 1,
+                "records": (
+                    len(proof.generation_cut_receipt.prefixes) if proof.generation_cut_receipt is not None else 0
+                ),
+                "proof_digest": proof.membership_digest,
+            }
         return result
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
@@ -209,10 +227,10 @@ def install_model_admission(
         require_control_auth(authorization, auth_token)
         _require_policy()
         if coordinator_client is not None:
-            return await coordinator_client.request(
+            return await coordinator_client.request_with_deadline(
                 "model_admission_resume",
                 body.model_dump(mode="json"),
-                timeout_s=10.0,
+                deadline=body,
             )
 
         async def run() -> dict[str, Any]:
@@ -246,10 +264,10 @@ def install_model_admission(
         require_control_auth(authorization, auth_token)
         _require_policy()
         if coordinator_client is not None:
-            return await coordinator_client.request(
+            return await coordinator_client.request_with_deadline(
                 "model_admission_abort_inflight",
                 body.model_dump(mode="json"),
-                timeout_s=10.0,
+                deadline=body,
             )
 
         async def run() -> dict[str, Any]:
