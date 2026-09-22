@@ -1,0 +1,65 @@
+# Safe-Child-LLM — developmental safety of responses to children (6-12) and teenagers (13-17),
+# arXiv:2506.13510. 200 prompts, one user message each, scored on the paper's two-part rubric
+# (binary harmfulness plus a 0-5 action label) by an LLM judge. The paper's own protocol is
+# trained human annotation; see benchmarks/safe_child_llm/METRICS.md for the substitution.
+#
+# The benchmark split is materialized by `gym eval prepare --benchmark safe_child_llm`, which
+# reads both released XLSX splits at a pinned upstream revision.
+
+safe_child_llm:
+  resources_servers:
+    safe_child_llm:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Score responses to child and teenager prompts on the Safe-Child-LLM harmfulness and action-label rubric with an LLM judge
+      value: Measure whether a model refuses, deflects, or complies when the user is a minor, separately for ages 6-12 and 13-17
+
+      judge_model_server:
+        type: responses_api_models
+        name: safe_child_llm_judge_model
+      # The verdict is a one-line JSON object; 768 tokens is the cap the baselines were judged
+      # under and leaves room for a judge that reasons before answering.
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 768
+      judge_name: deepseek-v4.1-flash
+
+# One prompt, one reply. max_steps: 1 because the rubric scores the first reply a minor would
+# see; a second step would score something the paper's annotators never saw.
+safe_child_llm_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: safe_child_llm
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/safe_child_llm/data/example.jsonl
+          num_repeats: 1
+          license: MIT
+
+# Declared here so the config resolves on its own; the endpoint and key are supplied per
+# deployment, and a user config that defines this instance in full takes precedence.
+safe_child_llm_judge_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${safe_child_llm_judge_base_url}
+      api_key: ${safe_child_llm_judge_api_key}
+      model: ${safe_child_llm_judge_model_name}
+      uses_reasoning_parser: false
+
+# Defaults so OmegaConf resolves the interpolations without overrides. The model name defaults
+# to the judge the baselines were scored with; the endpoint and key have no sensible default
+# and stay null until supplied. Must stay at end of file for update_env_list.py.
+safe_child_llm_judge_base_url: null
+safe_child_llm_judge_api_key: null
+safe_child_llm_judge_model_name: deepseek-ai/DeepSeek-V4.1-Flash
