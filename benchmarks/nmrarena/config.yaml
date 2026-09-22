@@ -1,0 +1,25 @@
+# Chain to the existing resources server + agent config. `domain` (knowledge) and
+# `verified: false` live on the resources server block in that file.
+config_paths:
+  - resources_servers/nmrarena/configs/nmrarena.yaml
+
+nmrarena_benchmark_agent:
+  _inherit_from: nmrarena_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: nmrarena
+        type: benchmark
+        jsonl_fpath: benchmarks/nmrarena/data/nmrarena_benchmark.jsonl
+        prepare_script: benchmarks/nmrarena/prepare.py
+        # null: the preparation script materialises each row with upstream's
+        # system prompt, user prompt and decoding, so there is no row-level
+        # prompt to apply here.
+        prompt_config: null
+        # Upstream swept the benchmark three times and reports the mean +/- SD
+        # over the sweeps. A single draw reports a different quantity.
+        num_repeats: 3
+        # The code and dataset file are MIT, but the spectra are curated from a
+        # third-party database whose rights are not determined; see
+        # resources_servers/nmrarena/README.md "Licensing". Downloaded at run time.
+        license: TBD
