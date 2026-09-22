@@ -230,6 +230,10 @@ class AgentExecution:
         self.terminal_model_call_id: Optional[str] = None
         self.started_at = time.time()
         self.external_wait_depth = 0
+        # The event is level-triggered, so pair it with the checkpoint epoch
+        # that authorized the wakeup. A waiter must not consume checkpoint
+        # N's signal after checkpoint N+1 has frozen the execution again.
+        self.resume_epoch = 0
         self.resume_event = asyncio.Event()
         self.resume_event.set()
 
@@ -301,6 +305,7 @@ class AgentCheckpointParticipant:
         ] = {}
         self._accepting = True
         self._changed = asyncio.Condition()
+        self._checkpoint_epoch = 0
 
     async def begin(
         self,
@@ -419,7 +424,7 @@ class AgentCheckpointParticipant:
                 execution.state = AgentExecutionState.RETIRED
                 key = (execution.rollout_id, execution.attempt_index)
                 self._remember_tombstone(key)
-                execution.resume_event.set()
+                self._signal_resume(execution)
                 if execution.parked_task is not None and execution.parked_task is not asyncio.current_task():
                     execution.parked_task.cancel()
                 execution.boundary = None
@@ -481,6 +486,21 @@ class AgentCheckpointParticipant:
     async def begin_external_wait(self, execution: AgentExecution) -> None:
         """Mark a replayable external operation whose result is not yet consumed."""
         self._require_owner(execution)
+        # prepare() and this method share one event loop. If prepare wins the
+        # boundary race, join that checkpoint and defer the external operation
+        # until resume rather than failing the rollout.
+        if execution.state == AgentExecutionState.PARK_REQUESTED:
+            await self.park(execution)
+            self._require_owner(execution)
+        elif execution.state in {
+            AgentExecutionState.PARKED,
+            AgentExecutionState.EXTERNAL_WAIT_FROZEN,
+        }:
+            await self._wait_until_running(
+                execution,
+                minimum_epoch=self._checkpoint_epoch,
+                retired_detail="agent execution was retired before entering an external wait",
+            )
         if execution.state != AgentExecutionState.RUNNING:
             raise AgentCheckpointError("an agent execution can enter an external wait only while running")
         execution.external_wait_depth += 1
@@ -496,10 +516,11 @@ class AgentCheckpointParticipant:
         if execution.external_wait_depth > 0:
             return
         if execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
-            await execution.resume_event.wait()
-            self._require_owner(execution)
-            if execution.state == AgentExecutionState.RETIRED:
-                raise AgentStaleAttemptError("agent execution was retired while its external result was frozen")
+            await self._wait_until_running(
+                execution,
+                minimum_epoch=self._checkpoint_epoch,
+                retired_detail="agent execution was retired while its external result was frozen",
+            )
         elif execution.state == AgentExecutionState.PARK_REQUESTED:
             await self.park(execution)
 
@@ -543,18 +564,20 @@ class AgentCheckpointParticipant:
         execution.resume_event.clear()
         await self._notify()
         try:
-            await execution.resume_event.wait()
+            await self._wait_until_running(
+                execution,
+                minimum_epoch=self._checkpoint_epoch,
+                retired_detail="agent execution was retired while parked",
+            )
         finally:
             if execution.parked_task is asyncio.current_task():
                 execution.parked_task = None
         self._require_owner(execution)
-        if execution.state == AgentExecutionState.RETIRED:
-            raise AgentStaleAttemptError("agent execution was retired while parked")
-        execution.state = AgentExecutionState.RUNNING
         await self._notify()
 
     async def prepare(self, deadline_ts: float) -> dict[str, Any]:
         """Park running work and expose every condition blocking publication."""
+        self._checkpoint_epoch += 1
         self._accepting = False
         requested: list[AgentExecution] = []
         external_wait_frozen: list[AgentExecution] = []
@@ -578,10 +601,11 @@ class AgentCheckpointParticipant:
                 for execution in requested:
                     if self._owns(execution) and execution.state == AgentExecutionState.PARK_REQUESTED:
                         execution.state = AgentExecutionState.RUNNING
+                        self._signal_resume(execution)
                 for execution in external_wait_frozen:
                     if self._owns(execution) and execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
                         execution.state = AgentExecutionState.RUNNING
-                        execution.resume_event.set()
+                        self._signal_resume(execution)
                 await self._notify()
 
     async def _wait_prepared(self, deadline_ts: float) -> dict[str, Any]:
@@ -604,21 +628,23 @@ class AgentCheckpointParticipant:
         for execution in list(self._executions.values()):
             if execution.state == AgentExecutionState.PARK_REQUESTED:
                 execution.state = AgentExecutionState.RUNNING
+                self._signal_resume(execution)
             elif execution.state == AgentExecutionState.EXTERNAL_WAIT_FROZEN:
                 execution.state = AgentExecutionState.RUNNING
-                execution.resume_event.set()
+                self._signal_resume(execution)
                 released += 1
             elif execution.state == AgentExecutionState.PARKED:
                 if execution.outer_task is None:
                     execution.state = AgentExecutionState.RETIRED
                     key = (execution.rollout_id, execution.attempt_index)
                     self._remember_tombstone(key)
-                    execution.resume_event.set()
+                    self._signal_resume(execution)
                     if execution.parked_task is not None:
                         execution.parked_task.cancel()
                     self._executions.pop(key, None)
                 else:
-                    execution.resume_event.set()
+                    execution.state = AgentExecutionState.RUNNING
+                    self._signal_resume(execution)
                     released += 1
         await self._notify()
         return {"state": "accepting", "released": released}
@@ -639,7 +665,7 @@ class AgentCheckpointParticipant:
             await self._notify()
             return {"retired": False, "tombstoned": True}
         execution.state = AgentExecutionState.RETIRED
-        execution.resume_event.set()
+        self._signal_resume(execution)
         tasks = {execution.outer_task, execution.parked_task}
         current = asyncio.current_task()
         for task in tasks:
@@ -753,6 +779,46 @@ class AgentCheckpointParticipant:
                 f"rollout {execution.rollout_id!r} attempt {execution.attempt_index} execution "
                 f"generation {execution.generation} is no longer current"
             )
+
+    def _signal_resume(self, execution: AgentExecution) -> None:
+        """Wake an execution with the checkpoint epoch authorizing it."""
+        execution.resume_epoch = self._checkpoint_epoch
+        execution.resume_event.set()
+
+    async def _wait_until_running(
+        self,
+        execution: AgentExecution,
+        *,
+        minimum_epoch: int,
+        retired_detail: str,
+    ) -> None:
+        """Wait for a non-stale resume and revalidate execution ownership."""
+        claimed_parked_task = False
+        try:
+            while True:
+                if execution.state == AgentExecutionState.RETIRED:
+                    raise AgentStaleAttemptError(retired_detail)
+                self._require_owner(execution)
+                if execution.state == AgentExecutionState.RUNNING and execution.resume_epoch >= minimum_epoch:
+                    return
+
+                # A newer checkpoint may freeze the execution after an older
+                # resume signalled this waiter but before it was scheduled.
+                if execution.state == AgentExecutionState.PARK_REQUESTED:
+                    execution.state = AgentExecutionState.PARKED
+                    if execution.parked_task is None:
+                        execution.parked_task = asyncio.current_task()
+                        claimed_parked_task = True
+                    await self._notify()
+                    continue
+
+                # There is no await between inspecting state and clearing the
+                # event, so resume() cannot be lost in this interval.
+                execution.resume_event.clear()
+                await execution.resume_event.wait()
+        finally:
+            if claimed_parked_task and execution.parked_task is asyncio.current_task():
+                execution.parked_task = None
 
     @staticmethod
     def _execution_status(execution: AgentExecution) -> dict[str, Any]:

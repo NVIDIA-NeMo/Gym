@@ -315,9 +315,7 @@ async def test_new_model_boundary_replaces_restored_lineage_coordinate() -> None
             "call-2",
             attempt_index=1,
             boundary_index=2,
-        ).model_copy(
-            update={"last_committed_model_capture_key": "rollout-a-a1"}
-        ),
+        ).model_copy(update={"last_committed_model_capture_key": "rollout-a-a1"}),
     )
     await participant.commit_boundary(
         execution,
@@ -452,6 +450,66 @@ async def test_external_wait_without_boundary_uses_normal_park_request() -> None
     assert not completed.done()
     assert (await participant.resume())["released"] == 1
     await completed
+
+
+@pytest.mark.asyncio
+async def test_external_wait_arriving_after_prepare_parks_instead_of_failing() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    external_wait = asyncio.create_task(participant.begin_external_wait(execution))
+    report = await prepare
+
+    assert report["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert execution.external_wait_depth == 0
+    assert not external_wait.done()
+
+    await participant.resume()
+    await asyncio.wait_for(external_wait, timeout=1)
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    assert execution.external_wait_depth == 1
+    await participant.end_external_wait(execution)
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
+async def test_stale_resume_signal_cannot_cross_a_new_external_wait_checkpoint() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+
+    first_prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    external_wait = asyncio.create_task(participant.begin_external_wait(execution))
+    assert (await first_prepare)["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+
+    # Checkpoint 1 signals resume, then checkpoint 2 freezes the execution
+    # before the waiting task is scheduled.
+    participant._accepting = True
+    execution.state = agent_checkpoint.AgentExecutionState.RUNNING
+    execution.resume_epoch = participant._checkpoint_epoch
+    execution.resume_event.set()
+    participant._checkpoint_epoch += 1
+    participant._accepting = False
+    execution.state = agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert not external_wait.done()
+
+    await participant.resume()
+    await asyncio.wait_for(external_wait, timeout=1)
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    assert execution.external_wait_depth == 1
+    await participant.end_external_wait(execution)
+    await participant.finish(execution, outcome="failed")
 
 
 @pytest.mark.asyncio

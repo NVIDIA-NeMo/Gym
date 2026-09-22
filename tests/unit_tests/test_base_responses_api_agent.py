@@ -12,10 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym._checkpoint.agent import AgentBoundaryRecord, AgentCheckpointParticipant
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
@@ -143,3 +146,39 @@ class TestBaseResponsesAPIAgent:
         assert result is not None
         assert result.outcome == ModelCallCaptureOutcome.CAPTURED
         assert result.model_call_id == "call-1"
+
+    async def test_checkpoint_prepare_before_external_wait_blocks_operation(self) -> None:
+        agent = self._agent({})
+        participant = AgentCheckpointParticipant("test-agent")
+        agent._checkpoint_participant = participant
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        operation_started = asyncio.Event()
+
+        async def operation() -> str:
+            operation_started.set()
+            return "done"
+
+        token = participant.bind(execution)
+        try:
+            prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            request = asyncio.create_task(agent.checkpointable_external_wait(operation))
+
+            assert (await prepare)["ready_to_commit"] is True
+            assert not operation_started.is_set()
+
+            await participant.resume()
+            assert await asyncio.wait_for(request, timeout=1) == "done"
+            assert operation_started.is_set()
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")
