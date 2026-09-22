@@ -39,12 +39,12 @@ bash benchmarks/launcher/eval.sh \
   --checkpoint /path/to/checkpoints/Laguna-S-2.1-FP8
 ```
 
-For Laguna XS 2.1 FP8, use the matching XS profile and checkpoint:
+For Laguna XS 2.1 BF16, use the matching XS profile and checkpoint:
 
 ```bash
 bash benchmarks/launcher/eval.sh \
   --profile benchmarks/launcher/laguna_xs/terminal_bench_2_1.sh \
-  --checkpoint /path/to/checkpoints/Laguna-XS-2.1-FP8
+  --checkpoint /path/to/checkpoints/Laguna-XS-2.1
 ```
 
 Both profiles use TP1, a 262144-token context limit, and seven DFlash draft tokens.

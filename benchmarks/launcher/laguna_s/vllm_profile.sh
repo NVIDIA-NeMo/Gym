@@ -7,6 +7,11 @@ export ROUTER_BALANCE_ABS_THRESHOLD=40
 export ROUTER_BALANCE_REL_THRESHOLD=2
 export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0
 
+# Evaluation output-token cap, forwarded by eval.sh to Gym.
+BENCHMARK_EXTRA_ARGS+=(
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.max_tokens=49152"
+)
+
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log

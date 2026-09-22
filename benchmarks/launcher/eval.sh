@@ -73,6 +73,7 @@ printf -v GYM_RUN_ARGS '%q ' "${gym_run_args[@]}"
 export GYM_RUN_ARGS
 
 # Benchmark settings come from the selected evaluation profile.
+BENCHMARK_EXTRA_ARGS=("${BENCHMARK_EXTRA_ARGS[@]:-}"); [[ -z "${BENCHMARK_EXTRA_ARGS[0]}" ]] && BENCHMARK_EXTRA_ARGS=()
 config=$BENCHMARK_CONFIG
 repeats=${BENCHMARK_REPEATS:-1}
 concurrency=$BENCHMARK_CONCURRENCY
@@ -91,4 +92,5 @@ bash "$launcher_dir/sbatch.sh" \
     --config "$config" \
     ++limit="$limit" ++num_repeats="$repeats" \
     ++num_samples_in_parallel="$concurrency" \
-    ++observability_enabled="${OBSERVABILITY_ENABLED:-true}"
+    ++observability_enabled="${OBSERVABILITY_ENABLED:-true}" \
+    "${BENCHMARK_EXTRA_ARGS[@]}"
