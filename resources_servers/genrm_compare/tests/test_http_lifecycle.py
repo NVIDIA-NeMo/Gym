@@ -260,7 +260,7 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
     requests[0].cancel()
     await asyncio.gather(requests[0], return_exceptions=True)
     await until(lambda: not old.members[0].waiters)
-    assert old.phase in ("collecting", "evaluating") and old.members[0].body is not None
+    assert old.phase in ("collecting", "evaluating") and old.members[0].response_obj is not None
     requests[0] = asyncio.create_task(verify(0))
     requests += [asyncio.create_task(verify(i)) for i in range(count, 4)]
     services.judge_release.set()

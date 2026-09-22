@@ -84,7 +84,7 @@ async def test_disconnect_reattaches_without_replacing_answer(server, during_jud
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
     cohort = next(iter(server._verify_cohorts.values()))
-    assert cohort.members[0].body is not None and not cohort.members[0].waiters
+    assert cohort.members[0].response_obj is not None and not cohort.members[0].waiters
     with pytest.raises(HTTPException) as error:
         await server.verify(member(0, response_id="different-answer"))
     assert error.value.status_code == 409
@@ -115,7 +115,9 @@ async def test_judge_has_separate_deadline_and_drains_comparisons(server):
     results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1)
     assert all(isinstance(r, genrm.JudgeError) and "evaluation deadline" in str(r) for r in results)
     assert started == cancelled == {(0, 1), (1, 0)}
-    assert all(m.body is None and not m.waiters for c in server._verify_cohorts.values() for m in c.members.values())
+    assert all(
+        m.response_obj is None and not m.waiters for c in server._verify_cohorts.values() for m in c.members.values()
+    )
 
 
 async def test_simultaneous_groups_do_not_mix(server):
@@ -143,7 +145,7 @@ async def test_final_arrival_deadline_race_never_publishes_partial_reward(server
     else:
         assert all(isinstance(r, HTTPException) for r in results)
         assert not cohort.rewards
-    assert all(m.body is None and not m.waiters for m in cohort.members.values())
+    assert all(m.response_obj is None and not m.waiters for m in cohort.members.values())
 
 
 async def test_shutdown_fails_waiters_and_prevents_new_work(server):
@@ -165,10 +167,10 @@ async def test_abandoned_group_expires_without_another_request(server):
     timer = cohort.collection_timeout_task
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
-    assert cohort.members[0].body is not None and not cohort.members[0].waiters
+    assert cohort.members[0].response_obj is not None and not cohort.members[0].waiters
     await asyncio.wait_for(timer, 1)
     assert cohort.phase == "failed" and not cohort.rewards
-    assert all(m.body is None and not m.waiters for m in cohort.members.values())
+    assert all(m.response_obj is None and not m.waiters for m in cohort.members.values())
 
 
 async def test_late_judge_result_cannot_publish_after_supersession(server):
@@ -206,7 +208,7 @@ async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_membe
     with pytest.raises(HTTPException, match="did not collect"):
         await first
     assert server._verify_cohorts[old.key] is old and old.phase == "failed"
-    assert all(m.body is None and not m.waiters for m in old.members.values())
+    assert all(m.response_obj is None and not m.waiters for m in old.members.values())
 
     server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
     results = await asyncio.gather(
