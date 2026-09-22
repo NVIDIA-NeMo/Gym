@@ -1,0 +1,16 @@
+{
+    "mechanism_rxn": [
+        {
+            "step": "1",
+            "rxn_smiles": "CC=C.O>>C[CH+]C"
+        },
+        {
+            "step": "2",
+            "rxn_smiles": "C[CH+]C>>CC(C)[OH2+]"
+        },
+        {
+            "step": "3",
+            "rxn_smiles": "CC(C)[OH2+]>>CC(C)O.[OH3+]"
+        }
+    ]
+}
