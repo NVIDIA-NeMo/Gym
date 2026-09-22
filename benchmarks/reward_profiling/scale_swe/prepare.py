@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 OUTPUT_FPATH = (
-    Path(__file__).parent.parent.parent
+    Path(__file__).parent.parent.parent.parent
     / "resources_servers"
     / "scale_swe"
     / "data"
