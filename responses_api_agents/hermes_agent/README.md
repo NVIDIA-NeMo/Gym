@@ -1,33 +1,5 @@
 # Hermes Agent
 
-## Native sandbox sessions
-
-EnvironmentServer creates the Resources session first, then passes its `SandboxAccess` to Hermes.
-Hermes installs its pinned runtime and runs inside that task sandbox; Resources owns verification
-and sandbox teardown. Use `enabled_toolsets: [terminal]`, one agent-server worker, and a Linux
-sandbox with PTY process support. Existing calls without an agent session keep the local path below.
-
-Each native session accepts one activation. Repeated activations and stale session cookies return
-409. Close stops the active invocation and requires a supervisor receipt confirming that tool
-descendants have exited before verification can proceed. Unknown launch outcomes or missing
-receipts fail close. Successful close receipts remain available for
-`session_close_retry_window_seconds` (default: 300 seconds), measured from successful cleanup.
-Other sessions cannot evict them early, and retries do not extend expiry. Set the window to cover
-the caller's full close-retry horizon, including response timeouts and backoff. After expiry, close
-returns 409; the stale cookie still cannot activate the host path. Expired receipts are pruned on
-session seed/close activity. Receipt memory scales with the close rate and window; this is not
-durable storage across agent-server restarts.
-
-Native input may be a string or text history ending in a user message, optionally starting with
-a system message. Configured system text, request `instructions`, and input system text are combined.
-Request `max_output_tokens` and `temperature` override their configured defaults; the token limit
-applies to each model call, as with the existing `max_tokens` config. Unsupported input modes,
-sampling fields, and required Resources tools return 422 rather than being silently ignored.
-
-Usage aggregation is still a follow-up: the final response currently reports zero usage even when
-the trajectory contains token IDs. Cleanup is cooperative, not isolation against hostile task code.
-Resources/provider expiry is still needed after an agent-server crash.
-
 # Quick start
 
 ## Create env.yaml in Gym/
@@ -114,5 +86,14 @@ hermes_agent:
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
 | `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
+| `session_close_retry_window_seconds` | `300` | native-session close receipt retention from successful cleanup; retries do not extend expiry |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
+
+Note: Native EnvironmentServer sessions run Hermes inside the Resources-owned task sandbox.
+Use `enabled_toolsets: [terminal]`, one agent-server worker, and a Linux sandbox with PTY support.
+Each session runs once and must confirm process cleanup before verification. Close receipts are
+process-local; configure the retry window to cover response timeouts and backoff. Other sessions
+cannot evict receipts early, and expired sessions return 409 without falling back to the host.
+Native requests support text input and instructions; output limits apply per model call, and
+unsupported settings return 422. Response usage is still zero pending aggregation support.
