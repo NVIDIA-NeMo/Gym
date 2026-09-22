@@ -28,7 +28,6 @@ from typing import (
     get_args,
 )
 
-from anthropic.types import CacheControlEphemeralParam
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -1030,8 +1029,6 @@ class NeMoGymFunctionDefinition(FunctionDefinition):
 
 class NeMoGymChatCompletionToolParam(ChatCompletionToolParam):
     function: Required[NeMoGymFunctionDefinition]
-    # Anthropic-style prompt cache hint sent by some OpenAI-compatible clients (e.g. pool).
-    cache_control: NotRequired[CacheControlEphemeralParam]
 
 
 class NeMoGymChatCompletionCustomToolParam(ChatCompletionCustomToolParam):
@@ -1048,7 +1045,7 @@ NeMoGymChatCompletionToolUnionParam = Annotated[
 
 
 class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextParam):
-    cache_control: NotRequired[CacheControlEphemeralParam]
+    pass
 
 
 class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):

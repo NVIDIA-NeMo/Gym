@@ -17,7 +17,6 @@ import json
 from unittest.mock import MagicMock
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pool_sandboxed_agent.app import (
     PoolSandboxedAgent,
@@ -115,25 +114,3 @@ def test_pool_agent_config_is_non_streaming_and_scales_compaction() -> None:
     assert config["memory"]["compact"]["TriggerCompressionTokenCount"] == 800
     assert config["memory"]["compact"]["MaxSummarizeTokenCount"] == 700
     assert "exit" in config["enabled_tools"]
-
-
-def test_chat_params_accept_pool_cache_control_hints() -> None:
-    NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
-        {
-            "model": "dummy_model",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
-                },
-                {"role": "user", "content": "hi"},
-            ],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {"name": "read", "parameters": {"type": "object"}},
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        }
-    )
