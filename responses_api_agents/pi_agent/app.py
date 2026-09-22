@@ -34,8 +34,8 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent, kill_cli_process_group
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -443,14 +443,16 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class PiAgent(SimpleResponsesAPIAgent):
+class PiAgent(CLIResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
     config: PiAgentConfig
+    observation_source = "pi"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_pi(self.config.pi_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
@@ -537,6 +539,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             assert proc.stdout is not None and proc.stderr is not None
             events: list[tuple[float, dict[str, Any]]] = []
@@ -554,6 +557,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                     (_, events), _, _ = await output_task
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                except asyncio.CancelledError:
+                    kill_cli_process_group(proc)
+                    await output_task
+                    raise
             else:
                 try:
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
@@ -562,6 +569,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                     await proc.communicate()
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                except asyncio.CancelledError:
+                    kill_cli_process_group(proc)
+                    await proc.communicate()
+                    raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("pi exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -653,7 +664,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),

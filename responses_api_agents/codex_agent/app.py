@@ -33,7 +33,8 @@ from fastapi import Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body
+from nemo_gym.cli_agent_sessions import CLIResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -324,12 +325,14 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
     finished_naturally: bool = False
 
 
-class CodexAgent(SimpleResponsesAPIAgent):
+class CodexAgent(CLIResponsesAPIAgent):
+    observation_source = "codex"
     config: CodexAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         ensure_codex(self.config.codex_version)
         try:
@@ -512,6 +515,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 await proc.communicate()
                 LOG.warning("codex timed out after %ds", self.config.timeout)
                 return "", model
+            except asyncio.CancelledError:
+                _kill_process_group(proc)
+                await proc.communicate()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -624,12 +631,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-    async def responses(
+    async def _execute_responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body)
+        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         async with self.sem:
