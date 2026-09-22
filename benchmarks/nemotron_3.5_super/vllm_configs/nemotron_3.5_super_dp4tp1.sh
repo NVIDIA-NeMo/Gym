@@ -34,7 +34,7 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
-    --data-parallel-size 4
+    --data-parallel-size 8
     --data-parallel-size-local 4
     --tensor-parallel-size 1
     --api-server-count 1
