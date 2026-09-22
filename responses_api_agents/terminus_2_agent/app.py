@@ -31,7 +31,7 @@ from time import time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.agents.terminus_2.tmux_session import TmuxSession
 from harbor.environments.base import ExecResult
@@ -39,8 +39,7 @@ from harbor.models.agent.context import AgentContext
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest, BaseResponsesAPIAgentConfig, Body
-from nemo_gym.cli_agent_sessions import CLIActivation, CLIResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -311,27 +310,15 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     context_length_exceeded_error: int = 0
 
 
-class Terminus2Agent(CLIResponsesAPIAgent):
+class Terminus2Agent(SimpleResponsesAPIAgent):
     """NeMo Gym Responses API wrapper for the Terminus-2 terminal loop."""
 
     config: Terminus2AgentConfig
-    observation_source = "terminus_2"
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
-
-    async def initialize_agent_session_state(
-        self, agent_session_id: str, body: AgentSeedSessionRequest
-    ) -> CLIActivation:
-        state = await super().initialize_agent_session_state(agent_session_id, body)
-        # Unlike the other local harnesses, workspace_root is the workspace
-        # itself, not a parent under which an isolated directory is created.
-        if self.config.workspace_root:
-            raise HTTPException(422, "Native Terminus sessions require an isolated workspace; unset workspace_root")
-        return state
 
     def _logs_dir(self) -> Path:
         if not self.config.keep_logs:
@@ -434,17 +421,6 @@ class Terminus2Agent(CLIResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        """Preserve direct-call throttling; native sessions acquire the slot in the shared adapter."""
-        if self.agent_session_id_from_request(request) is not None:
-            return await super().responses(request, body)
-        async with self.sem:
-            return await super().responses(request, body)
-
-    async def _execute_responses(
-        self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming,
-    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if body.temperature is None:
             body.temperature = self.config.temperature
@@ -459,9 +435,10 @@ class Terminus2Agent(CLIResponsesAPIAgent):
             self.config.model_server.name,
             self._rollout_id(request),
         )
-        trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
-            body, instruction, api_base
-        )
+        async with self.sem:
+            trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
+                body, instruction, api_base
+            )
         output_items = trajectory_to_responses(trajectory)
         if not output_items:
             output_items = [

@@ -7,7 +7,6 @@ import asyncio
 import importlib
 import json
 import os
-import shutil
 import sys
 from contextlib import ExitStack
 from pathlib import Path
@@ -49,15 +48,12 @@ HARNESSES = [
     ("kilocode_agent", "KiloCodeAgent", "ensure_kilo", "_run_kilo"),
     ("prime_agent", "PrimeAgent", "ensure_prime_agent", "_run_prime_agent"),
     ("simple_strands_agent", "SimpleStrandsAgent", None, "_run_ssa"),
-    ("terminus_2_agent", "Terminus2Agent", None, "_run_terminus"),
 ]
 
 
 @pytest.fixture(params=HARNESSES, ids=[case[0] for case in HARNESSES])
 def cli(request: pytest.FixtureRequest, tmp_path: Path):
     module_name, class_name, installer, runner = request.param
-    if module_name == "terminus_2_agent":
-        pytest.importorskip("harbor", reason="Terminus conformance requires its server dependency")
     module = importlib.import_module(f"responses_api_agents.{module_name}.app")
     cls = getattr(module, class_name)
     config_cls = cls.model_fields["config"].annotation
@@ -71,7 +67,7 @@ def cli(request: pytest.FixtureRequest, tmp_path: Path):
         "model": "test-model",
         "concurrency": 1,
     }
-    if "workspace_root" in config_cls.model_fields and module_name != "terminus_2_agent":
+    if "workspace_root" in config_cls.model_fields:
         settings["workspace_root"] = str(tmp_path / "workspaces")
     if module_name == "codex_agent":
         settings["codex_version"] = "0.144.4"
@@ -153,19 +149,6 @@ def mock_runner(agent, runner: str) -> AsyncMock:
             "messages": [{"role": "assistant", "content": [{"text": "42"}]}],
             "usage": {"inputTokens": 7, "outputTokens": 3},
         }
-    elif runner == "_run_terminus":
-        from harbor.models.agent.context import AgentContext
-
-        result = (
-            {
-                "steps": [{"source": "agent", "message": "42"}],
-                "final_metrics": {"total_prompt_tokens": 7, "total_completion_tokens": 3},
-            },
-            AgentContext(n_input_tokens=7, n_output_tokens=3, n_cache_tokens=0),
-            {},
-            False,
-            True,
-        )
     elif runner == "_run_codex":
         result = (
             "\n".join(
@@ -205,8 +188,6 @@ def test_http_seed_activate_close_preserves_response_usage_and_observations(cli,
         assert "_ng_agent_observations" not in body
         if runner == "_run_ssa":
             assert mocked.call_args.args[0]["rollout_id"] == key
-        elif runner == "_run_terminus":
-            assert f"/ng-rollout/{key}/" in mocked.call_args.args[2]
         else:
             assert key in [*mocked.call_args.args, *mocked.call_args.kwargs.values()]
         closed = client.post("/v1/agent_sessions/close", json=close_request(session_id).model_dump(mode="json"))
@@ -384,8 +365,6 @@ def test_multiworker_legacy_config_rejects_only_native_seed(cli):
 def test_persistent_workspace_is_legacy_only(cli, tmp_path):
     agent, _, runner = cli
     options = [name for name in ("cwd", "repo_dir") if name in type(agent.config).model_fields]
-    if runner == "_run_terminus":
-        options.append("workspace_root")
     if not options:
         pytest.skip("Harness only exposes temporary workspaces")
     setattr(agent.config, options[0], str(tmp_path))
@@ -656,81 +635,3 @@ async def test_real_subprocess_cancellation_cleans_up(cli, monkeypatch, tmp_path
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="Requires a local tmux binary")
-async def test_native_terminus_close_removes_tmux_session_and_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pytest.importorskip("harbor")
-    from uuid import uuid4
-
-    from responses_api_agents.terminus_2_agent import app as module
-
-    # A dedicated tmux server prevents this test from touching user sessions.
-    socket_name = f"gym-test-{uuid4().hex}"
-
-    class TestEnvironment(module.LocalEnvironment):
-        async def exec(
-            self,
-            command: str,
-            cwd: str | None = None,
-            env: dict[str, str] | None = None,
-            timeout_sec: int | float | None = None,
-        ) -> module.ExecResult:
-            return await super().exec(
-                command.replace("tmux ", f"tmux -L {socket_name} "), cwd=cwd, env=env, timeout_sec=timeout_sec
-            )
-
-    monkeypatch.setattr(module, "LocalEnvironment", TestEnvironment)
-    server = MagicMock(spec=ServerClient)
-    agent = module.Terminus2Agent(
-        config=module.Terminus2AgentConfig(
-            host="127.0.0.1",
-            port=8080,
-            name="agent",
-            entrypoint="app.py",
-            resources_server={"type": "resources_servers", "name": "verifier"},
-            model_server={"type": "responses_api_models", "name": "policy"},
-        ),
-        server_client=server,
-    )
-    monkeypatch.setattr(module.Terminus2Agent, "resolve_model_base_url", MagicMock(return_value="http://model/v1"))
-    entered = asyncio.Event()
-    workspaces: list[Path] = []
-    loop = SimpleNamespace(_session=None, _standalone_session_name="episode")
-
-    async def setup(environment: TestEnvironment) -> None:
-        workspaces.append(environment.cwd)
-        result = await environment.exec("tmux new-session -d -s episode")
-        assert result.return_code == 0, result.stderr
-
-    async def run(instruction: str, environment: TestEnvironment, context: module.AgentContext) -> None:
-        entered.set()
-        await asyncio.Event().wait()
-
-    async def close(environment: TestEnvironment) -> None:
-        await module.StandaloneTerminus2.close(loop, environment)
-
-    loop.setup, loop.run, loop.close = setup, run, close
-    agent._build_agent = MagicMock(return_value=loop)
-    request = request_for()
-    await agent.seed_agent_session(request, seed())
-    activation = asyncio.create_task(agent.responses(request, params()))
-    inspector = TestEnvironment(tmp_path, 5)
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=10)
-        assert (await inspector.exec("tmux has-session -t episode")).return_code == 0
-        await asyncio.wait_for(agent.close_agent_session(request, close_request()), timeout=10)
-        with pytest.raises(asyncio.CancelledError):
-            await activation
-        assert (await inspector.exec("tmux has-session -t episode")).return_code != 0
-        assert workspaces and all(not path.exists() for path in workspaces)
-        assert agent.sem._value == 1
-        assert agent._agent_sessions == {}
-    finally:
-        await inspector.exec("tmux kill-server")
-        if not activation.done():
-            activation.cancel()
-        await asyncio.gather(activation, return_exceptions=True)
