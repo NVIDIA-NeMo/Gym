@@ -19,7 +19,6 @@ Compares a model's generated SQL query to an expected query using an LLM judge.
 Supports multiple SQL dialects: MySQL, PostgreSQL, SQLite (more to come - TODO).
 """
 
-import asyncio
 import re
 from contextlib import nullcontext
 from enum import Enum
@@ -42,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
 
 
@@ -212,7 +212,9 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         super().__init__(*args, **kwargs)
 
         if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+            self._judge_endpoint_max_concurrency = TimedSemaphore(
+                value=self.config.judge_endpoint_max_concurrency, site="resources.text_to_sql"
+            )
         else:
             self._judge_endpoint_max_concurrency = None
 

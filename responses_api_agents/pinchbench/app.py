@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
@@ -188,7 +189,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     config: PinchBenchAgentConfig
 
     def model_post_init(self, context):
-        self._sem = asyncio.Semaphore(self.config.max_concurrent)
+        self._sem = TimedSemaphore(self.config.max_concurrent, site="agent.pinchbench")
         return super().model_post_init(context)
 
     async def responses(

@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 LOG = logging.getLogger(__name__)
@@ -326,7 +327,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.nemo_fabric_agent")
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(

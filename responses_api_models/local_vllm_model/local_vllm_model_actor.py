@@ -80,6 +80,20 @@ class LocalVLLMModelActor:
         for k, v in self.env_vars.items():
             environ[k] = v
 
+        # Must come after the loop above: init_telemetry() reads NEMO_GYM_OTEL_*/OTEL_*
+        # from os.environ, which is only populated by that loop -- this actor gets those
+        # vars via runtime_env.env_vars (see local_vllm_model/app.py's
+        # telemetry_env_snapshot() usage), not by inheriting the driver's environment.
+        # This is the one process that actually touches the GPU, so it is also the one
+        # process the GPU sampler (nemo_gym.telemetry.gpu) needs to run inside. A
+        # distinct server_name (not just `self.server_name`) gives this process its own
+        # service.name, distinguishing it in a backend's service map from the outer
+        # VLLMModel/LocalVLLMModel process, which only proxies HTTP and never touches
+        # the GPU itself.
+        from nemo_gym.telemetry.setup import init_telemetry
+
+        init_telemetry(server_name=f"{self.server_name}-vllm-actor", server_type="responses_api_models")
+
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
         self.server_thread.start()
 

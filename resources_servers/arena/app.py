@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -161,7 +162,7 @@ class ArenaResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        self._judge_semaphore = asyncio.Semaphore(self.config.judge_concurrency)
+        self._judge_semaphore = TimedSemaphore(self.config.judge_concurrency, site="resources.arena")
         # Online and offline evaluation share this scoring implementation.
         self._metrics = ArenaMetrics(self.config)
 

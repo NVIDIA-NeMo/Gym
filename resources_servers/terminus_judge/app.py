@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import logging
 from contextlib import nullcontext
@@ -38,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 
@@ -256,8 +256,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 raise ValueError("judge_responses_create_params is required when enable_llm_judge is True")
 
             if self.config.judge_endpoint_max_concurrency is not None:
-                self._judge_endpoint_max_concurrency = asyncio.Semaphore(
-                    value=self.config.judge_endpoint_max_concurrency
+                self._judge_endpoint_max_concurrency = TimedSemaphore(
+                    value=self.config.judge_endpoint_max_concurrency, site="resources.terminus_judge"
                 )
 
             with open(self.config.judge_prompt_template_fpath, "r") as f:

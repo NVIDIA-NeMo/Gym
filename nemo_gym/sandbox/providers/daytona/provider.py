@@ -33,6 +33,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -293,6 +294,14 @@ def _log_create_retry(retry_state: Any) -> None:
         sleep_s,
         exception,
     )
+
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
+
+        record_sandbox_create_retry(provider="daytona")
 
 
 def _log_operation_retry(retry_state: Any) -> None:
@@ -867,7 +876,7 @@ class DaytonaProvider:
     async def create_batch(self, spec: SandboxSpec, count: int, *, allow_partial: bool = False) -> list[SandboxHandle]:
         if count < 1:
             raise ValueError("count must be >= 1")
-        semaphore = asyncio.Semaphore(self._batch.concurrency)
+        semaphore = TimedSemaphore(self._batch.concurrency, site="sandbox.daytona.batch_create")
 
         async def _create_one() -> SandboxHandle:
             async with semaphore:
@@ -1003,9 +1012,11 @@ class DaytonaProvider:
         payload = data.encode() if isinstance(data, str) else data
         timeout_s = self._operations.file_timeout_s
         await self._await_operation(
-            lambda: handle.raw.fs.upload_file(payload, target_path)
-            if timeout_s is None
-            else handle.raw.fs.upload_file(payload, target_path, timeout=timeout_s),
+            lambda: (
+                handle.raw.fs.upload_file(payload, target_path)
+                if timeout_s is None
+                else handle.raw.fs.upload_file(payload, target_path, timeout=timeout_s)
+            ),
             operation=f"upload_file({target_path})",
             sandbox_id=handle.sandbox_id,
             timeout_s=float(timeout_s) if timeout_s is not None else None,
@@ -1014,9 +1025,11 @@ class DaytonaProvider:
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         timeout_s = self._operations.file_timeout_s
         result = await self._await_operation(
-            lambda: handle.raw.fs.download_file(source_path)
-            if timeout_s is None
-            else handle.raw.fs.download_file(source_path, timeout_s),
+            lambda: (
+                handle.raw.fs.download_file(source_path)
+                if timeout_s is None
+                else handle.raw.fs.download_file(source_path, timeout_s)
+            ),
             operation=f"download_file({source_path})",
             sandbox_id=handle.sandbox_id,
             timeout_s=float(timeout_s) if timeout_s is not None else None,
@@ -1026,9 +1039,11 @@ class DaytonaProvider:
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         timeout_s = self._operations.file_timeout_s
         await self._await_operation(
-            lambda: handle.raw.fs.upload_file(str(source_path), target_path)
-            if timeout_s is None
-            else handle.raw.fs.upload_file(str(source_path), target_path, timeout=timeout_s),
+            lambda: (
+                handle.raw.fs.upload_file(str(source_path), target_path)
+                if timeout_s is None
+                else handle.raw.fs.upload_file(str(source_path), target_path, timeout=timeout_s)
+            ),
             operation=f"upload_file({target_path})",
             sandbox_id=handle.sandbox_id,
             timeout_s=float(timeout_s) if timeout_s is not None else None,
@@ -1038,9 +1053,11 @@ class DaytonaProvider:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         timeout_s = self._operations.file_timeout_s
         await self._await_operation(
-            lambda: handle.raw.fs.download_file(source_path, str(target_path))
-            if timeout_s is None
-            else handle.raw.fs.download_file(source_path, str(target_path), timeout_s),
+            lambda: (
+                handle.raw.fs.download_file(source_path, str(target_path))
+                if timeout_s is None
+                else handle.raw.fs.download_file(source_path, str(target_path), timeout_s)
+            ),
             operation=f"download_file({source_path})",
             sandbox_id=handle.sandbox_id,
             timeout_s=float(timeout_s) if timeout_s is not None else None,

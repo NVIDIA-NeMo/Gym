@@ -20,6 +20,7 @@ from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     highest_k_metrics,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 class BigCodeBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -50,7 +51,7 @@ class BigCodeBenchResourcesServer(SimpleResourcesServer):
     config: BigCodeBenchResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore = asyncio.Semaphore(self.config.num_processes)
+        self._semaphore = TimedSemaphore(self.config.num_processes, site="resources.bigcodebench")
 
         venv_path = Path(self.config.venv_path)
         if not venv_path.is_absolute():

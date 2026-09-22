@@ -83,6 +83,27 @@ def test_trajectory_rejects_duplicate_model_call_ids() -> None:
         )
 
 
+def test_trajectory_record_round_trips_correlation_fields() -> None:
+    record = TrajectoryRecord(
+        task_id="task",
+        rollout_id="4-2-a1",
+        run_id="run-abc",
+        benchmark="arena",
+        repeat_index=1,
+    )
+    restored = TrajectoryRecord.model_validate(record.model_dump(mode="json"))
+    assert restored.run_id == "run-abc"
+    assert restored.benchmark == "arena"
+    assert restored.repeat_index == 1
+
+
+def test_trajectory_record_correlation_fields_default_to_none() -> None:
+    record = TrajectoryRecord(task_id="task", rollout_id="4-2")
+    assert record.run_id is None
+    assert record.benchmark is None
+    assert record.repeat_index is None
+
+
 @pytest.mark.parametrize(
     "timing",
     (

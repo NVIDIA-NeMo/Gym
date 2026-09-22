@@ -60,6 +60,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,
@@ -394,7 +395,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     _HEADLESS_TOOL_DENY: ClassVar[tuple[str, ...]] = ("message",)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.openclaw_agent")
         ensure_openclaw(self.config.openclaw_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if not command or shutil.which(command) is None:

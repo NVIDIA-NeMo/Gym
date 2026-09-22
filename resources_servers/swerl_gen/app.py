@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.swerl_gen.eval.process_patch import (
     extract_pred_patch,
     extract_pred_patch_relaxed_formatting,
@@ -91,7 +92,7 @@ class SWEGenResourcesServer(SimpleResourcesServer):
         return app
 
     def model_post_init(self, context):
-        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._semaphore: Semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.swerl_gen")
 
     async def verify(self, body: SWEGenVerifyRequest) -> SWEGenVerifyResponse:
         # Extract full model output text (including <think> and <solution> blocks).

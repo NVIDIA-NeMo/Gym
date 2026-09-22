@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
@@ -31,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
@@ -73,7 +73,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             max_http_attempts=self.config.max_http_attempts,
         )
         self._semaphore = (
-            asyncio.Semaphore(self.config.max_concurrent_requests)
+            TimedSemaphore(self.config.max_concurrent_requests, site="model.openai_model")
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )

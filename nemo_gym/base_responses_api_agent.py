@@ -45,6 +45,7 @@ from nemo_gym.server_utils import (
     apply_rollout_prefix,
     rollout_path_prefix,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -113,11 +114,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return self._model_call_capture_enabled() or self._token_id_capture_enabled()
 
     def _model_call_capture_enabled(self) -> bool:
-        """Whether evaluation model-call observability is enabled."""
+        """Whether evaluation model-call observability is enabled.
+
+        Also true when `GymSpanGroup.MODEL_CALL` telemetry is active, independent of
+        `observability_enabled`: this flag is what makes `rollout_id_from_run` return a
+        real id at all, which is what threads a rollout id through `rollout_context` into
+        every downstream model-server call. Without that id, `_ModelCallCaptureMiddleware`
+        can never resolve `rollout_from_path`, so `gym.model.time_to_first_byte_ms` (and
+        `gym.model.call_duration_ms`'s `nemo.gym.rollout.id` span attribute) would stay
+        unreachable under telemetry alone, mirroring the same gap fixed in
+        `ServerClient.request`'s URL-prefixing decision.
+        """
         global_config = getattr(self.server_client, "global_config_dict", None)
-        if not isinstance(global_config, Mapping):
-            return False
-        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+        if isinstance(global_config, Mapping) and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)):
+            return True
+        return is_span_group_enabled(GymSpanGroup.MODEL_CALL)
 
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""

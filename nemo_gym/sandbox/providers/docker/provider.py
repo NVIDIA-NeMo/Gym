@@ -40,6 +40,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ class DockerProvider:
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
-        self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._semaphore = TimedSemaphore(self._exec_config.concurrency, site="sandbox.docker")
 
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None

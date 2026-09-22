@@ -47,6 +47,7 @@ from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
@@ -730,7 +731,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         _validate_runner_runtime(self.config)
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.osworld_agent")
 
     def setup_webserver(self):
         """Idempotently fill a configured asset cache before accepting work."""

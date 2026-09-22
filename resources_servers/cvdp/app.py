@@ -28,7 +28,6 @@ provider). Keeping execution in ``testbench_runner.py``
 lets this file stay focused on the contract and scoring.
 """
 
-import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -52,6 +51,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.cvdp.testbench_runner import TestbenchRunner
 
 
@@ -168,7 +168,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
     config: CVDPResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
-        self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
+        self._semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.cvdp")
         self._harness = TestbenchRunner(
             self.config,
             named_sandbox_configs=getattr(self.server_client, "global_config_dict", None),

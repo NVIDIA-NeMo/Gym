@@ -85,6 +85,30 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
+# Matches the auto-generated encoding built by `maybe_rollout_id_from_run_body`:
+# "{task_index}-{rollout_index}" or "{task_index}-{rollout_index}-a{attempt_index}". An
+# explicit `_ng_rollout_id` does not follow this shape and simply fails to match.
+_ROLLOUT_ID_DECODE_PATTERN = re.compile(r"^(?P<task>\d+)-(?P<rollout>\d+)(?:-a(?P<attempt>\d+))?$")
+
+
+def decode_rollout_id(rollout_id: Optional[str]) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Best-effort split of an auto-generated rollout id into
+    ``(task_index, rollout_index, attempt_index)``.
+
+    Returns ``(None, None, None)`` for an explicit custom id (it carries no encoded
+    identity) or when ``rollout_id`` is falsy. Used to attach task/repeat identity to spans
+    and trajectory records without threading extra state through `rollout_context` -- the
+    encoding already crosses every process boundary as part of `rollout_id` itself.
+    """
+    if not rollout_id:
+        return None, None, None
+    match = _ROLLOUT_ID_DECODE_PATTERN.match(rollout_id)
+    if not match:
+        return None, None, None
+    attempt = match.group("attempt")
+    return int(match.group("task")), int(match.group("rollout")), int(attempt) if attempt is not None else 0
+
+
 @contextmanager
 def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
     token = _ROLLOUT_ID.set(rollout_id)

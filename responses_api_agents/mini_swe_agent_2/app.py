@@ -51,6 +51,7 @@ from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
@@ -664,7 +665,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.mini_swe_agent_2")
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

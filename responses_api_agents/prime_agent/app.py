@@ -54,6 +54,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
 
 
@@ -284,7 +285,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.prime_agent")
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if command == "prime-agent":
             ensure_prime_agent(self.config.prime_agent_version)

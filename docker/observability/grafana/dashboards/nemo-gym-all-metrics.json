@@ -1,0 +1,305 @@
+{
+  "title": "NeMo Gym — All Metrics",
+  "uid": "nemo-gym-all-metrics",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rollouts completed / min (by outcome)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "Prometheus",
+      "description": "gym_rollout_completed_total — throughput and success rate. Are evals progressing?",
+      "targets": [
+        {
+          "expr": "sum by (nemo_gym_rollout_outcome) (rate(gym_rollout_completed_total[5m])) * 60",
+          "legendFormat": "{{nemo_gym_rollout_outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Rollout duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "Prometheus",
+      "description": "gym_rollout_duration_ms — end-to-end time per rollout.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Model call duration (p50 / p95 / p99, by dialect)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "Prometheus",
+      "description": "gym_model_call_duration_ms — total model-call latency, grouped by service_name (the emitting process) and dialect rather than nemo_gym_server_name, which resource_to_telemetry_conversion overwrites on this metric.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_model_call_duration_ms_milliseconds_bucket[5m])) by (le, service_name, nemo_gym_model_dialect))", "legendFormat": "p50 {{service_name}}/{{nemo_gym_model_dialect}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_model_call_duration_ms_milliseconds_bucket[5m])) by (le, service_name, nemo_gym_model_dialect))", "legendFormat": "p95 {{service_name}}/{{nemo_gym_model_dialect}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_model_call_duration_ms_milliseconds_bucket[5m])) by (le, service_name, nemo_gym_model_dialect))", "legendFormat": "p99 {{service_name}}/{{nemo_gym_model_dialect}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Model time-to-first-byte (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": "Prometheus",
+      "description": "gym_model_time_to_first_byte_ms — streaming TTFB, separate from total call duration.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_model_time_to_first_byte_ms_milliseconds_bucket[5m])) by (le, service_name))", "legendFormat": "p50 {{service_name}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_model_time_to_first_byte_ms_milliseconds_bucket[5m])) by (le, service_name))", "legendFormat": "p95 {{service_name}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_model_time_to_first_byte_ms_milliseconds_bucket[5m])) by (le, service_name))", "legendFormat": "p99 {{service_name}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Sandbox startup duration (p50 / p95 / p99, by provider)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": "Prometheus",
+      "description": "gym_sandbox_startup_duration_ms — only covers sandboxes created via nemo_gym.sandbox.api.AsyncSandbox (e.g. the swebench resources server's verification sandbox). Harnesses that drive their own container lifecycle outside AsyncSandbox (e.g. mini_swe_agent_2's minisweagent-library sandbox) are not represented here.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_sandbox_startup_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p50 {{nemo_gym_sandbox_provider}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_sandbox_startup_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p95 {{nemo_gym_sandbox_provider}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_sandbox_startup_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p99 {{nemo_gym_sandbox_provider}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Verify duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": "Prometheus",
+      "description": "gym_verify_duration_ms — resources-server /verify latency.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_verify_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_verify_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_verify_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Concurrency queue-wait duration (p50 / p95 / p99, by site)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": "Prometheus",
+      "description": "gym_concurrency_queue_wait_duration_ms — time spent waiting to acquire a TimedSemaphore, per call site. Duration only, not a live queue-depth/active-slots gauge (see plan Phase 1 item 5).",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_concurrency_queue_wait_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_concurrency_site))", "legendFormat": "p50 {{nemo_gym_concurrency_site}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_concurrency_queue_wait_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_concurrency_site))", "legendFormat": "p95 {{nemo_gym_concurrency_site}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_concurrency_queue_wait_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_concurrency_site))", "legendFormat": "p99 {{nemo_gym_concurrency_site}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Verify success rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": "Prometheus",
+      "description": "gym_verify_success_rate — cumulative fraction since process start, not a windowed rate.",
+      "targets": [
+        { "expr": "gym_verify_success_rate", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Process CPU % (by service)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": "Prometheus",
+      "description": "gym_process_cpu_percent — scoped to each Gym server's own Python PID only, not its child process tree (Enroot/OpenClaw/unsquashfs/sandbox processes are not included; see plan Phase 1 item 1).",
+      "targets": [
+        { "expr": "gym_process_cpu_percent", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Host memory (used vs total)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": "Prometheus",
+      "description": "gym_host_memory_used_mib / gym_host_memory_total_mib — host-wide, not per-process.",
+      "targets": [
+        { "expr": "gym_host_memory_used_mib_MiB", "legendFormat": "used ({{service_name}})" },
+        { "expr": "gym_host_memory_total_mib_MiB", "legendFormat": "total ({{service_name}})" }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "GPU utilization % (by GPU index)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": "Prometheus",
+      "description": "gym_process_gpu_utilization_percent — polled via nvidia-smi every gpu_sample_interval_s, filtered by CUDA_VISIBLE_DEVICES when parseable (falls back to reporting all GPUs otherwise). Every process on the host reports the same host-wide reading redundantly.",
+      "targets": [
+        { "expr": "gym_process_gpu_utilization_percent", "legendFormat": "gpu{{nemo_gym_gpu_index}} ({{service_name}})" }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "GPU memory (used vs total, by GPU index)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "gym_process_gpu_memory_used_mib_MiB", "legendFormat": "used gpu{{nemo_gym_gpu_index}} ({{service_name}})" },
+        { "expr": "gym_process_gpu_memory_total_mib_MiB", "legendFormat": "total gpu{{nemo_gym_gpu_index}} ({{service_name}})" }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "HTTP retries (rate, by reason) / timeouts",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": "Prometheus",
+      "description": "gym_http_retry_total / gym_http_timeout_total — ServerClient retry loop. Separate from gym_sandbox_create_retry_total (Daytona-specific sandbox-create retries), not plotted here.",
+      "targets": [
+        { "expr": "sum by (nemo_gym_http_retry_reason) (rate(gym_http_retry_total[5m]))", "legendFormat": "retry: {{nemo_gym_http_retry_reason}}" },
+        { "expr": "sum(rate(gym_http_timeout_total[5m]))", "legendFormat": "timeouts" }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Active servers (fleet size)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": "Prometheus",
+      "description": "gym_servers_active — orchestrator-only gauge counting server *processes* in the fleet, not concurrent rollout workers.",
+      "targets": [
+        { "expr": "gym_servers_active", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Sandbox exec duration (p50 / p95 / p99, by provider)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "datasource": "Prometheus",
+      "description": "gym_sandbox_exec_duration_ms — one command's wall-clock time inside an already-provisioned sandbox. Same AsyncSandbox-only coverage caveat as sandbox startup.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_sandbox_exec_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p50 {{nemo_gym_sandbox_provider}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_sandbox_exec_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p95 {{nemo_gym_sandbox_provider}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_sandbox_exec_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))", "legendFormat": "p99 {{nemo_gym_sandbox_provider}}" }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Tool-call duration (p50 / p95 / p99, by tool name)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "datasource": "Prometheus",
+      "description": "gym_tool_call_duration_ms — requires telemetry.span_groups to include tool_call (part of per_rollout/all, not default). Only covers tool routes on a resources server, via ToolCallTelemetryMiddleware; skipped entirely for a server with expose_tools_over_mcp direct-dispatch (see nemo_gym/mcp_auto_exposure.py).",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_tool_call_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_tool_name))", "legendFormat": "p50 {{nemo_gym_tool_name}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_tool_call_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_tool_name))", "legendFormat": "p95 {{nemo_gym_tool_name}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_tool_call_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_tool_name))", "legendFormat": "p99 {{nemo_gym_tool_name}}" }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Concurrency: limit / active / available / queued (by site)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "datasource": "Prometheus",
+      "description": "gym_concurrency_limit / .active / .available / .queue_depth — live state, not just after-the-fact wait duration. \"Active == limit (available == 0) and queue_depth > 0\" is a bottlenecked semaphore.",
+      "targets": [
+        { "expr": "gym_concurrency_limit", "legendFormat": "limit {{nemo_gym_concurrency_site}}" },
+        { "expr": "gym_concurrency_active", "legendFormat": "active {{nemo_gym_concurrency_site}}" },
+        { "expr": "gym_concurrency_available", "legendFormat": "available {{nemo_gym_concurrency_site}}" },
+        { "expr": "gym_concurrency_queue_depth", "legendFormat": "queued {{nemo_gym_concurrency_site}}" }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Concurrency admission cancelled (rate, by site)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "datasource": "Prometheus",
+      "description": "gym_concurrency_admission_cancelled_total — a caller's wait for a semaphore permit was cancelled before admission (e.g. its own timeout fired first). Gym's semaphores have no reject-on-full policy, so this is the one abnormal-admission signal that exists.",
+      "targets": [
+        { "expr": "sum by (nemo_gym_concurrency_site) (rate(gym_concurrency_admission_cancelled_total[5m]))", "legendFormat": "{{nemo_gym_concurrency_site}}" }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Agent turn count per rollout (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 72 },
+      "datasource": "Prometheus",
+      "description": "gym_agent_turn_count — recorded post-hoc at rollout completion from the assembled trajectory (Gym's agent harnesses have no live per-turn span). Requires telemetry.span_groups to include agent.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_agent_turn_count_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p50 {{nemo_gym_agent_name}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_agent_turn_count_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p95 {{nemo_gym_agent_name}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_agent_turn_count_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p99 {{nemo_gym_agent_name}}" }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Agent turn duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 72 },
+      "datasource": "Prometheus",
+      "description": "gym_agent_turn_duration_ms — derived from the gap between consecutive trajectory turn timestamps, not a live span.",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_agent_turn_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p50 {{nemo_gym_agent_name}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_agent_turn_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p95 {{nemo_gym_agent_name}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_agent_turn_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_agent_name))", "legendFormat": "p99 {{nemo_gym_agent_name}}" }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Process CPU: own PID vs. full process tree (by service)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 80 },
+      "datasource": "Prometheus",
+      "description": "gym_process_cpu_percent (this PID only) vs. gym_process_tree_cpu_percent (this PID + every child -- Enroot, OpenClaw, unsquashfs, sandbox-runtime processes). The gap between the two lines is \"actual job workload\" the Gym-PID-only number was missing.",
+      "targets": [
+        { "expr": "gym_process_cpu_percent", "legendFormat": "own PID: {{service_name}}" },
+        { "expr": "gym_process_tree_cpu_percent", "legendFormat": "full tree: {{service_name}}" }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Process-tree memory (by service)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 80 },
+      "datasource": "Prometheus",
+      "description": "gym_process_tree_memory_used_mib — this process's RSS plus every child process, the process-scoped counterpart to the host-wide memory panel above.",
+      "targets": [
+        { "expr": "gym_process_tree_memory_used_mib", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Tool-call CPU % / memory (p95, by tool name)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 88 },
+      "datasource": "Prometheus",
+      "description": "gym_tool_call_cpu_percent / gym_tool_call_memory_used_mib — process-tree CPU/RSS sampled at each tool call's span close. An approximation (\"how busy was the process during this call\"), not an isolated per-call measurement — Gym cannot attribute CPU to one concurrent tool call in a multi-tenant process.",
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_tool_call_cpu_percent_bucket[5m])) by (le, nemo_gym_tool_name))", "legendFormat": "cpu% p95 {{nemo_gym_tool_name}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_tool_call_memory_used_mib_bucket[5m])) by (le, nemo_gym_tool_name))", "legendFormat": "mem p95 {{nemo_gym_tool_name}}" }
+      ]
+    },
+    {
+      "id": 24,
+      "title": "% of rollout time spent in tool calls",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 88 },
+      "datasource": "Prometheus",
+      "description": "Derived, not a separate instrument: sum(tool-call time) / sum(rollout time) over the same window. Fleet-wide ratio across all rollouts in the window, not a per-rollout figure — a per-rollout breakdown needs the trace-level join the Pareto/efficiency script does (see nemo_gym/pareto_analysis.py), since OTel metrics deliberately do not carry rollout_id as a label.",
+      "targets": [
+        { "expr": "100 * sum(rate(gym_tool_call_duration_ms_milliseconds_sum[5m])) / sum(rate(gym_rollout_duration_ms_milliseconds_sum[5m]))", "legendFormat": "% time in tools" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "title": "NeMo Gym Overview",
+  "uid": "nemo-gym-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rollouts completed / min (by outcome)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (nemo_gym_rollout_outcome) (rate(gym_rollout_completed_total[5m])) * 60",
+          "legendFormat": "{{nemo_gym_rollout_outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Rollout duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gym_rollout_duration_ms_milliseconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Sandbox startup duration (p95, by provider)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(gym_sandbox_startup_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_sandbox_provider))",
+          "legendFormat": "{{nemo_gym_sandbox_provider}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Concurrency queue-wait duration (p95, by site)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(gym_concurrency_queue_wait_duration_ms_milliseconds_bucket[5m])) by (le, nemo_gym_concurrency_site))",
+          "legendFormat": "{{nemo_gym_concurrency_site}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Model call duration (p95, by dialect)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": "Prometheus",
+      "description": "Grouped by dialect and the emitting model server's service_name, not nemo_gym_server_name — that attribute is ambiguous on this metric: it carries the target model-server name at the call site, but resource_to_telemetry_conversion overwrites it with the emitting process's own name (same attribute key reused for two different things). service_name (derived from the process, not this metric's attributes) disambiguates correctly.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(gym_model_call_duration_ms_milliseconds_bucket[5m])) by (le, service_name, nemo_gym_model_dialect))",
+          "legendFormat": "{{service_name}} / {{nemo_gym_model_dialect}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Process CPU % (by service)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "gym_process_cpu_percent", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Verify success rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "gym_verify_success_rate", "legendFormat": "{{service_name}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "HTTP retries / timeouts (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum by (nemo_gym_http_retry_reason) (rate(gym_http_retry_total[5m]))", "legendFormat": "retry: {{nemo_gym_http_retry_reason}}" },
+        { "expr": "sum(rate(gym_http_timeout_total[5m]))", "legendFormat": "timeouts" }
+      ]
+    }
+  ]
+}

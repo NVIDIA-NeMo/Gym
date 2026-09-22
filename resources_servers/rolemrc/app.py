@@ -78,6 +78,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import timed_semaphore_or_null
 
 
 LOG = logging.getLogger(__name__)
@@ -679,7 +680,7 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             if self.config.judge_model_server is None or getattr(self.config, params_field) is None:
                 raise ValueError(f"rolemrc judge mode requires `judge_model_server` and `{params_field}`.")
             mc = self.config.judge_endpoint_max_concurrency
-            self._judge_semaphore = nullcontext() if mc is None else asyncio.Semaphore(mc)
+            self._judge_semaphore = timed_semaphore_or_null(mc, site="resources.rolemrc")
         else:
             # Pre-load CPU scorers off the request path (one-time startup cost
             # instead of blocking — and racing on — the first verify call).

@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
@@ -300,7 +301,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.claude_code_agent")
         ensure_claude_code(self.config.claude_code_version)
         try:
             ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()

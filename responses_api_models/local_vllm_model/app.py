@@ -222,6 +222,8 @@ Total Ray cluster resources: {cluster_resources()}""")
         if self.config.debug:
             print(f"Using PYTHONPATH={pythonpath}")
 
+        from nemo_gym.telemetry.setup import telemetry_env_snapshot
+
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=head_node_placement_group,
@@ -233,6 +235,13 @@ Total Ray cluster resources: {cluster_resources()}""")
                     "PYTHONPATH": pythonpath,
                     # Listed before `env_vars` so a server config can still override PATH.
                     "PATH": self._ray_actor_path(),
+                    # Ray's runtime_env does not forward the driver's environment to the
+                    # actor the way a Popen-spawned sibling server gets its env for free
+                    # -- same reason PYTHONPATH/PATH are threaded through explicitly
+                    # above. Without this, the actor never sees NEMO_GYM_OTEL_*/OTEL_*
+                    # and telemetry (including GPU sampling) stays silently disabled in
+                    # the one process that actually touches the GPU.
+                    **telemetry_env_snapshot(),
                     **env_vars,
                 },
             ),

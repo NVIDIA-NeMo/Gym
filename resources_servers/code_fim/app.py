@@ -57,6 +57,7 @@ from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     highest_k_metrics,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 _SUPPORTED_SPLITS = ("single_line", "multi_line", "random_span", "random_span_light")
@@ -189,7 +190,7 @@ class CodeFIMResourcesServer(SimpleResourcesServer):
     config: CodeFIMResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._semaphore: Semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.code_fim")
         self._dataset: Dict[str, Any] = _load_split(self.config.split)
 
     @staticmethod

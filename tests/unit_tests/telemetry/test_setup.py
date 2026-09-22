@@ -185,6 +185,16 @@ def test_caller_resource_attributes_are_merged(enabled_console_env, monkeypatch)
     assert captured["nemo.gym.version"] == __version__
 
 
+def test_current_run_id_is_none_before_init(clean_otel_env):
+    assert telemetry_setup.current_run_id() is None
+
+
+def test_current_run_id_reflects_the_resolved_config(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_RUN_ID", "run-abc")
+    init_telemetry(server_name="x")
+    assert telemetry_setup.current_run_id() == "run-abc"
+
+
 # --------------------------------------------------------------------------- #
 # The three shared-global-state questions
 # --------------------------------------------------------------------------- #
@@ -323,6 +333,70 @@ def test_shutdown_is_idempotent(enabled_console_env):
     init_telemetry(server_name="weather")
     shutdown_telemetry()
     shutdown_telemetry()
+
+
+def test_gpu_sampling_disabled_by_default(enabled_console_env):
+    init_telemetry(server_name="weather")
+    assert telemetry_setup.is_gpu_sampling_enabled() is False
+
+
+def test_gpu_sampling_disabled_never_starts_a_thread(enabled_console_env, monkeypatch):
+    """The regression-guard case for GPU sampling's cost when off: unlike CPU sampling
+    (a per-request hot-path check that measurably regressed once -- see
+    test_overhead.py), GPU sampling's cost model is "does a background thread exist at
+    all," not nanoseconds per call. Confirm `start_gpu_sampler` is never invoked when
+    disabled (the default), so no thread and no subprocess ever gets spawned."""
+    from nemo_gym.telemetry import gpu as telemetry_gpu
+
+    calls = []
+    monkeypatch.setattr(telemetry_gpu, "start_gpu_sampler", lambda interval_s: calls.append(interval_s))
+
+    init_telemetry(server_name="weather")
+
+    assert calls == []
+
+
+def test_gpu_sampling_enabled_starts_the_sampler(enabled_console_env, monkeypatch):
+    from nemo_gym.telemetry import gpu as telemetry_gpu
+
+    enabled_console_env.setenv("NEMO_GYM_OTEL_GPU_SAMPLING_ENABLED", "1")
+    enabled_console_env.setenv("NEMO_GYM_OTEL_GPU_SAMPLE_INTERVAL_S", "7.5")
+
+    calls = []
+    monkeypatch.setattr(telemetry_gpu, "start_gpu_sampler", lambda interval_s: calls.append(interval_s))
+
+    init_telemetry(server_name="weather")
+
+    assert telemetry_setup.is_gpu_sampling_enabled() is True
+    assert telemetry_setup.gpu_sample_interval_s() == 7.5
+    assert calls == [7.5]
+
+    shutdown_telemetry()
+
+
+def test_shutdown_stops_the_gpu_sampler(enabled_console_env, monkeypatch):
+    from nemo_gym.telemetry import gpu as telemetry_gpu
+
+    enabled_console_env.setenv("NEMO_GYM_OTEL_GPU_SAMPLING_ENABLED", "1")
+
+    calls = []
+    monkeypatch.setattr(telemetry_gpu, "stop_gpu_sampler", lambda *a, **k: calls.append(1))
+
+    init_telemetry(server_name="weather")
+    shutdown_telemetry()
+
+    assert calls == [1]
+
+
+def test_reset_for_testing_resets_gpu_globals(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_GPU_SAMPLING_ENABLED", "1")
+    init_telemetry(server_name="weather")
+    assert telemetry_setup.is_gpu_sampling_enabled() is True
+
+    telemetry_setup._reset_for_testing()
+
+    assert telemetry_setup.is_gpu_sampling_enabled() is False
+    assert telemetry_setup.gpu_sample_interval_s() == 10.0
 
 
 def test_shutdown_swallows_provider_errors(enabled_console_env, monkeypatch):

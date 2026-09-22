@@ -1,0 +1,50 @@
+# OTel Collector — record-only mode.
+#
+# No Grafana / Prometheus / Tempo needed to run this: just this one lightweight
+# collector process, listening for OTLP and writing every signal straight to disk as
+# OTLP-JSON-lines. Use this on a machine/node with no access to the live observability
+# stack (or just to avoid running it), then replay the files later with
+# otel-collector-replay.yaml against a running Prometheus + Tempo to see them in Grafana.
+#
+# Output (mapped to ./docker/observability/offline/data on the host via the volume in
+# docker-compose.record.yml):
+#   /data/traces.jsonl
+#   /data/metrics.jsonl
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  file/traces:
+    path: /data/traces.jsonl
+  file/metrics:
+    path: /data/metrics.jsonl
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/traces]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/metrics]

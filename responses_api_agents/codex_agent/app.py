@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 
 
@@ -330,7 +331,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.codex_agent")
         ensure_codex(self.config.codex_version)
         try:
             ver = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()

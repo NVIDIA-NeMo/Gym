@@ -74,6 +74,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # Local cache layer. Support both package import (tests:
@@ -994,7 +995,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
         # Criteria are independent; a question is ~9 criteria x 3-10 calls, so judge
         # them concurrently but under a semaphore to spare the judge endpoint.
-        semaphore = asyncio.Semaphore(max(1, self.config.judge_max_concurrency))
+        semaphore = TimedSemaphore(max(1, self.config.judge_max_concurrency), site="resources.finance_agent_v2")
 
         async def judge_one(criterion: Dict[str, Any]) -> RubricJudgement:
             async with semaphore:

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Spider 2.0-Lite execution-based Text-to-SQL resource server."""
 
-import asyncio
 import logging
 import re
 from enum import Enum
@@ -17,6 +16,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.spider2_lite.eval_utils import (
     compare_multi_result_sets,
     execute_and_compare,
@@ -118,7 +118,7 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._sqlite_dir: Path = ensure_spider2_lite(self._resolve_spider2_dir())
-        self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        self._semaphore = TimedSemaphore(self.config.max_concurrency, site="resources.spider2_lite")
 
     def _resolve_spider2_dir(self) -> Path:
         p = Path(self.config.spider2_lite_dir)

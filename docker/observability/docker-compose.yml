@@ -1,0 +1,53 @@
+# Local observability stack for NeMo Gym's OpenTelemetry integration.
+#
+# Gym exports OTLP -> otel-collector -> Prometheus (metrics) + Tempo (traces) -> Grafana.
+# Run: docker compose -f docker/observability/docker-compose.yml up -d
+# Then point Gym at it: OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 (see
+# ../../configs/telemetry_grafana.yaml for a ready-made telemetry: block).
+#
+# Grafana: http://localhost:3000 (anonymous admin access, local dev only).
+# Prometheus: http://localhost:9090
+# Tempo query API: http://localhost:3200
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.114.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC — Gym's OTEL_EXPORTER_OTLP_ENDPOINT
+      - "4318:4318" # OTLP HTTP
+      - "8889:8889" # Prometheus scrape target
+    depends_on:
+      - tempo
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200" # Tempo query API, used by Grafana's Tempo datasource
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo

@@ -35,18 +35,26 @@ Presets
     than nesting every rollout under one run-long span — the same reasoning behind
     NeMo-RL's ``per_step``.
 ``all``
-    Every group, including ``sandbox`` and the groups inherited from nemo-lens.
+    Every group, including ``sandbox``, ``tool_call``, and the groups inherited from
+    nemo-lens.
 
 Only groups Gym actually emits under appear in ``default`` and ``per_rollout``. The
 training-oriented groups inherited from ``nemo.lens.groups.SpanGroup`` (``checkpoint``,
 ``step``, ``optimizer``, ``evaluate``, ...) remain resolvable, and are reachable through
 ``all``, but no Gym call site emits under them.
 
-There is deliberately no ``tool_call`` or ``dataset`` group. A resources-server tool call
-is already a SERVER span named after its route (``POST /get_weather``), which answers the
-same questions without a second layer; and Gym's dataset code is CLI upload/download
+There is deliberately no ``dataset`` group -- Gym's dataset code is CLI upload/download
 helpers, not a runtime path worth tracing. A span group with no call site is a knob that
-silently does nothing, so neither is declared until something emits under it.
+silently does nothing, so it is not declared until something emits under it.
+
+``tool_call`` *used* to be deliberately absent, on the argument that a resources-server
+tool call is already a SERVER span named after its route (``POST /get_weather``). That
+holds for tracing (one more span layer would be redundant), but not for *metrics*: a
+generic per-route SERVER span duration is not a Prometheus-queryable "duration by tool
+name" surface, since the route lives in the span name, not a metric label. ``tool_call``
+exists to carry that one attributed metric (``gym.tool.call_duration_ms``, dimensioned by
+``nemo.gym.tool.name``) without duplicating the SERVER span's tracing job -- see
+``ToolCallTelemetryMiddleware`` in ``nemo_gym.telemetry.endpoints``.
 
 Disabling ``server`` or ``http_client`` breaks cross-process trace joining: ``server``
 is the FastAPI ingress side that adopts an inbound ``traceparent`` as its parent, and
@@ -137,6 +145,20 @@ class GymSpanGroup(SpanGroup):
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
+    CONCURRENCY = "concurrency"
+    """Semaphore queue-wait timing across the rollout driver, agent/model servers,
+    resources-server judges, and sandbox providers. Not part of ``default`` — it fires at
+    every one of Gym's ~60 concurrency-limiting semaphores, which is too much volume for
+    the always-on baseline preset. Part of ``per_rollout``: "am I bottlenecked on a
+    concurrency limit" is exactly the debugging question that preset exists for."""
+
+    TOOL_CALL = "tool_call"
+    """Per-tool-name call-count/duration metric on a resources server's tool routes (see
+    the module docstring for why this exists alongside, not instead of, the generic
+    SERVER span). Not part of ``default`` or ``per_rollout`` for the same volume reasoning
+    as ``concurrency`` — every tool invocation across every resources server, opt in via
+    ``all`` or an explicit group list."""
+
     # ------------------------------------------------------------------ #
     # All groups and presets
     # ------------------------------------------------------------------ #
@@ -150,6 +172,8 @@ class GymSpanGroup(SpanGroup):
             AGENT,
             MODEL_CALL,
             SANDBOX,
+            CONCURRENCY,
+            TOOL_CALL,
         ]
     )
 
@@ -162,6 +186,6 @@ class GymSpanGroup(SpanGroup):
         # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root
         # trace with a bounded span count. ``job`` wraps a whole eval run and lives in
         # ``default`` and ``all``.
-        "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,
+        "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL, CONCURRENCY, TOOL_CALL]) | CROSS_PROCESS_SPINE,
         "all": ALL_GROUPS,
     }
