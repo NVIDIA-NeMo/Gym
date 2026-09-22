@@ -26,6 +26,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from resources_servers.leancat.app import (
     STATUS_BANNED_TOKENS,
@@ -132,10 +133,11 @@ class TestLeanCatApp:
             domain=["Category"],
         )
 
-    def _stub_sandbox(self, server: LeanCatResourcesServer, **output) -> AsyncMock:
-        result = {"process_status": "completed", "stdout": "", "stderr": ""} | output
-        mock = AsyncMock(return_value=result)
-        server._sandbox_client.execute_lean4 = mock
+    def _stub_sandbox(self, server: LeanCatResourcesServer, **result) -> AsyncMock:
+        """Stub the compile step, so no sandbox is created and no Lean runs."""
+        exec_result = SandboxExecResult(**({"stdout": "", "stderr": "", "return_code": 0} | result))
+        mock = AsyncMock(return_value=exec_result)
+        server._run_lean = mock
         return mock
 
     @pytest.mark.asyncio
@@ -155,14 +157,17 @@ class TestLeanCatApp:
     @pytest.mark.parametrize(
         "sandbox_output,expected_status",
         [
-            ({"stderr": "/lean4/my_project/x.lean:7:2: error: unknown tactic"}, STATUS_COMPILE_ERROR),
-            # `lake env lean` exits 0 on a sorry-carrying build; the status alone would pass it.
+            (
+                {"stderr": "/lean4/my_project/x.lean:7:2: error: unknown tactic", "return_code": 1},
+                STATUS_COMPILE_ERROR,
+            ),
+            # `lake env lean` exits 0 on a sorry-carrying build; the exit code alone would pass it.
             ({"stdout": "warning: declaration uses 'sorry'"}, STATUS_COMPILE_ERROR),
-            # The NeMo-Skills sandbox says "failed" for any non-zero lake exit, which is the
-            # normal way a wrong proof looks and must not read as infrastructure trouble.
-            ({"process_status": "failed"}, STATUS_COMPILE_ERROR),
-            ({"process_status": "timeout"}, STATUS_TIMEOUT),
-            ({"process_status": "error", "stderr": "connection refused"}, STATUS_SANDBOX_ERROR),
+            # A non-zero exit with no error_type is how an ordinary wrong proof looks, and
+            # must not be reported as infrastructure trouble.
+            ({"return_code": 1}, STATUS_COMPILE_ERROR),
+            ({"return_code": -1, "error_type": "TimeoutError"}, STATUS_TIMEOUT),
+            ({"return_code": -1, "error_type": "SandboxConnectionError"}, STATUS_SANDBOX_ERROR),
         ],
         ids=["compile-error", "zero-exit-with-sorry", "non-zero-lake-exit", "timeout", "sandbox-down"],
     )
@@ -205,11 +210,11 @@ class TestLeanCatApp:
         # The model owns the file here, unlike math_formal_lean: nothing is prepended.
         captured = {}
 
-        async def capture_code(code: str, timeout: float):
+        async def capture_code(code: str, timeout_s: float | None = None):
             captured["code"] = code
-            return {"process_status": "completed", "stdout": "", "stderr": ""}
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
 
-        server._sandbox_client.execute_lean4 = capture_code
+        server._run_lean = capture_code
         await server.verify(self._create_request(f"Reasoning...\n```lean4\n{SOLVED}\n```"))
         assert captured["code"] == SOLVED
 
@@ -294,7 +299,7 @@ class TestToolchainCheck:
 
     @pytest.mark.asyncio
     async def test_mismatch_against_the_rows_pin_is_logged(self, server, caplog):
-        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.12.0"', "stderr": ""})
+        server._run_lean = AsyncMock(return_value=SandboxExecResult(stdout='"4.12.0"', stderr="", return_code=0))
         with caplog.at_level("ERROR"):
             await server._check_toolchain_once("leanprover/lean4:v4.19.0")
         assert "MATHLIB MISMATCH" in caplog.text

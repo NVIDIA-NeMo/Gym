@@ -24,11 +24,20 @@ where the model writes only a proof body and the server reassembles the file. Be
 model owns the whole file it could also weaken the theorem, so
 ``proof_utils.check_statement_preserved`` compares the submission against the reference.
 
-The sandbox client, ``CompilerOutput``, the Mathlib version probe and the Lean comment
-stripper are imported from ``math_formal_lean``. Only the whole-file logic lives here.
+Verification runs through ``nemo_gym.sandbox``: one sandbox per server process, created
+from a snapshot (or image) carrying Lean 4.19.0 and Mathlib v4.19.0, reused across
+rollouts. Each attempt is written into it and compiled with ``lake env lean``, which is
+what upstream's ``verify_lean`` does. A sandbox per rollout is not viable here -- pod
+allocation costs minutes and a run is thousands of rollouts.
+
+``CompilerOutput`` and the Lean comment stripper are imported from ``math_formal_lean``.
+Only the whole-file logic lives here.
 """
 
+import asyncio
+import logging
 import re
+import uuid
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
@@ -41,24 +50,29 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from resources_servers.leancat.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
     find_banned_tokens,
 )
 from resources_servers.math_formal_lean.app import CompilerOutput
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
-from resources_servers.math_formal_lean.toolchain import ToolchainCheck
+from resources_servers.math_formal_lean.toolchain import normalize_version, parse_lean_version
 
 
 # Terminal values of `proof_status`. Only COMPLETED scores 1.0. "completed",
 # "empty_generation" and "timeout" match math_formal_lean's vocabulary; the rest are
 # specific to the whole-file task.
+logger = logging.getLogger(__name__)
+
 STATUS_COMPLETED = "completed"
 STATUS_EMPTY_GENERATION = "empty_generation"
 STATUS_BANNED_TOKENS = "banned_tokens"
@@ -71,24 +85,25 @@ STATUS_SANDBOX_ERROR = "sandbox_error"
 def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Optional[str]]:
     """Map a sandbox result onto a proof status and, when it failed, a one-line reason.
 
-    A zero exit (``process_status == "completed"``) is not sufficient: a build that declares
-    a ``sorry`` exits zero with only a warning, so the output is scanned for ``error:`` and
-    ``sorry`` as well.
+    A zero exit is not sufficient: a build that declares a ``sorry`` exits zero with only a
+    warning, so the output is scanned for ``error:`` and ``sorry`` as well.
+
+    ``error_type`` distinguishes the sandbox failing to run the command from Lean rejecting
+    the proof. A non-zero exit with no ``error_type`` is an ordinary compile error, which is
+    what most wrong proofs look like and must not be reported as infrastructure trouble.
     """
-    process_status = compiler_output.get("process_status", "unknown")
+    error_type = compiler_output.get("error_type")
+    if error_type:
+        if "timeout" in str(error_type).lower():
+            return STATUS_TIMEOUT, "Lean compilation timed out."
+        return STATUS_SANDBOX_ERROR, f"Sandbox reported {error_type!r}."
 
-    if process_status == "timeout":
-        return STATUS_TIMEOUT, "Lean compilation timed out."
-    if process_status == "failed":
-        # The NeMo-Skills sandbox reports "failed" for any non-zero `lake env lean` exit,
-        # i.e. an ordinary compile error, not an infrastructure problem.
-        return STATUS_COMPILE_ERROR, "Lean rejected the proof."
-    if process_status != "completed":
-        return STATUS_SANDBOX_ERROR, f"Sandbox reported status {process_status!r}."
-
-    stdout = compiler_output.get("stdout", "")
-    stderr = compiler_output.get("stderr", "")
+    stdout = compiler_output.get("stdout") or ""
+    stderr = compiler_output.get("stderr") or ""
     combined = f"{stdout}\n{stderr}".lower()
+
+    if compiler_output.get("return_code", 0) != 0:
+        return STATUS_COMPILE_ERROR, "Lean rejected the proof."
     if "error:" in combined:
         return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
     if re.search(r"\bsorry\b", combined) is not None:
@@ -110,8 +125,15 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
     # can rescore stored rollouts.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
-    sandbox_host: str = "127.0.0.1"
-    sandbox_port: int = 6000
+    # Name of a top-level sandbox config block, or an inline {provider: {...}} mapping.
+    sandbox_provider: str = "sandbox"
+    # image / snapshot_id / resources / ttl, as in the shipped provider configs. A snapshot
+    # is the practical route here: there is no published image at Mathlib v4.19.0, and one
+    # built inside a sandbox can be snapshotted once and reused (provider_options.snapshot_id).
+    sandbox_config: Dict[str, Any] = {}
+    # Directory of the lake project the compile runs in, so `lake env lean` resolves Mathlib.
+    lean_project_dir: str = "/lean4/my_project"
+
     # Upstream's per-attempt verification budget (EVALUATION.md); LeanCat proofs import all
     # of Mathlib and rely on heavy typeclass search.
     compilation_timeout: float = 300.0
@@ -119,8 +141,8 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
     require_statement_preserved: bool = True
     ban_proof_shortcuts: bool = True
 
-    # Probe the sandbox's Lean/Mathlib version once and log an error on a mismatch (see
-    # math_formal_lean/toolchain.py). A row's own `lean_toolchain` overrides the default.
+    # Probe the sandbox's Lean/Mathlib version once and log an error on a mismatch. A row's
+    # own `lean_toolchain` overrides the default.
     check_lean_version: bool = True
     expected_lean_version: str = "4.19.0"
 
@@ -171,24 +193,100 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._sandbox_client = Lean4SandboxClient(
-            host=self.config.sandbox_host,
-            port=self.config.sandbox_port,
-            max_output_characters=self.config.max_output_characters,
-            # Compiles run for minutes; let the sandbox, not the client, report a timeout.
-            timeout_buffer=30.0,
-        )
-        self._toolchain = ToolchainCheck(self.config.expected_lean_version)
+        # One sandbox per server process, created on the first verify. Creating one per
+        # rollout is not viable: pod allocation costs minutes and a run is thousands of
+        # rollouts. `_sandbox_lock` keeps concurrent verifies from creating several.
+        # There is no server shutdown hook, so cleanup is `sandbox_config.ttl_s`: the
+        # sandbox expires on its own if the process dies without releasing it.
+        self._sandbox: Optional[AsyncSandbox] = None
+        self._sandbox_lock = asyncio.Lock()
+        self._toolchain_checked = False
+
+    async def _ensure_sandbox(self) -> AsyncSandbox:
+        """Create the shared sandbox on first use, or return the running one."""
+        if self._sandbox is not None:
+            return self._sandbox
+
+        async with self._sandbox_lock:
+            if self._sandbox is not None:
+                return self._sandbox
+
+            provider = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+            default_metadata = resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict())
+            sandbox_config = dict(self.config.sandbox_config)
+
+            spec = SandboxSpec(
+                image=sandbox_config.get("image"),
+                ttl_s=sandbox_config.get("ttl_s"),
+                ready_timeout_s=sandbox_config.get("ready_timeout_s"),
+                workdir=self.config.lean_project_dir,
+                env=dict(sandbox_config.get("env", {})),
+                metadata=default_metadata | sandbox_config.get("metadata", {}) | {"nemo_gym_agent": self.config.name},
+                resources=SandboxResources.from_mapping(sandbox_config.get("resources", {})),
+                entrypoint=sandbox_config.get("entrypoint"),
+                provider_options=sandbox_config.get("provider_options", {}),
+            )
+            sandbox = AsyncSandbox(provider)
+            await sandbox.start(spec)
+            self._sandbox = sandbox
+            return sandbox
 
     async def _check_toolchain_once(self, expected: Optional[str]) -> None:
         """Log an error if the sandbox's Mathlib is not the one the rows were written against.
 
         A wrong Mathlib fails statements with ordinary compile errors, so the score would be
-        meaningless but look plausible. Runs once per process.
+        meaningless but look plausible: on Mathlib v4.12.0, 36 of the 100 reference statements
+        fail to compile with their `sorry` still intact. Runs once per process.
         """
-        if not self.config.check_lean_version:
+        if not self.config.check_lean_version or self._toolchain_checked:
             return
-        await self._toolchain.run(self._sandbox_client, expected_override=expected)
+        self._toolchain_checked = True
+
+        want = normalize_version(expected or self.config.expected_lean_version)
+        result = await self._run_lean("import Mathlib\n#eval Lean.versionString\n", timeout_s=600)
+        found = parse_lean_version({"stdout": result.stdout or "", "stderr": result.stderr or ""})
+
+        if found is None:
+            logger.error(
+                "LEAN VERSION UNKNOWN: could not determine the sandbox's Lean version. "
+                "If `import Mathlib` does not compile, every task will fail for reasons that "
+                "have nothing to do with the model."
+            )
+        elif want and found != want:
+            logger.error(
+                "MATHLIB MISMATCH: sandbox is Lean %s but the rows are written against %s. "
+                "Statements will fail with ordinary compile errors and the score will be "
+                "meaningless but plausible.",
+                found,
+                want,
+            )
+
+    async def _run_lean(self, code: str, timeout_s: Optional[float] = None) -> SandboxExecResult:
+        """Write ``code`` to a fresh file in the sandbox and compile it with `lake env lean`.
+
+        This is upstream's `verify_lean` (``scripts/eval_common.py``): a temp file inside the
+        lake project, compiled with the project's toolchain. The file is passed through a
+        heredoc rather than interpolated into the command, so quotes, backslashes and unicode
+        in a proof need no escaping. Each call uses a unique name because one sandbox serves
+        many concurrent verifies.
+        """
+        sandbox = await self._ensure_sandbox()
+        timeout = self.config.compilation_timeout if timeout_s is None else timeout_s
+        path = f"attempt_{uuid.uuid4().hex}.lean"
+        delimiter = f"LEANCAT_EOF_{uuid.uuid4().hex}"
+
+        # `cat` writes the file, then lake compiles it; the file is removed either way so a
+        # long-lived sandbox does not accumulate one file per rollout.
+        command = (
+            f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
+            f"lake env lean {path}; status=$?; rm -f {path}; exit $status"
+        )
+        return await sandbox.exec(
+            command,
+            cwd=self.config.lean_project_dir,
+            # The sandbox, not the client, should report the timeout.
+            timeout_s=timeout + 30,
+        )
 
     async def verify(self, body: LeanCatVerifyRequest) -> LeanCatVerifyResponse:
         """Score one attempt: 1.0 only if it is a valid LeanCat proof, else 0.0.
@@ -233,15 +331,20 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
         await self._check_toolchain_once(body.lean_toolchain)
 
-        raw_output = await self._sandbox_client.execute_lean4(
-            code=code,
-            timeout=self.config.compilation_timeout,
+        result = await self._run_lean(code)
+        proof_status, failure_reason = determine_proof_status(
+            {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.return_code,
+                "error_type": result.error_type,
+            }
         )
-        proof_status, failure_reason = determine_proof_status(raw_output)
+        limit = self.config.max_output_characters
         compiler_output = CompilerOutput(
-            process_status=raw_output.get("process_status", "unknown"),
-            stdout=raw_output.get("stdout", ""),
-            stderr=raw_output.get("stderr", ""),
+            process_status=proof_status,
+            stdout=(result.stdout or "")[:limit],
+            stderr=(result.stderr or "")[:limit],
         )
 
         return LeanCatVerifyResponse(

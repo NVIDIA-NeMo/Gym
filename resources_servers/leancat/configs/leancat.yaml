@@ -2,8 +2,29 @@ leancat:
   resources_servers:
     leancat:
       entrypoint: app.py
-      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
-      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      # Verification runs in a nemo_gym sandbox, not an out-of-band HTTP service.
+      # `sandbox` is the instance name every shipped provider config binds, so the provider
+      # is chosen by which one is on +config_paths (opensandbox, docker, apptainer, ...).
+      sandbox_provider: sandbox
+      sandbox_config:
+        # There is no published image at Mathlib v4.19.0, so the practical route is a
+        # snapshot: build the environment once inside a sandbox, verify it with
+        # check_sandbox.py, snapshot it, and point every run at the id.
+        #   provider_options: {snapshot_id: <id>}
+        # `image` is the alternative when a registry image exists. Setting neither fails at
+        # create time rather than silently compiling against the wrong Mathlib.
+        provider_options:
+          snapshot_id: ${oc.env:LEANCAT_SANDBOX_SNAPSHOT_ID,null}
+        # Long-lived: one sandbox serves a whole run, and there is no shutdown hook, so this
+        # is also what reclaims it if the server dies.
+        ttl_s: 86400
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 30
+        metadata:
+          benchmark: leancat
       compilation_timeout: 300.0
       # num_workers must stay unset: >1 launches uvicorn by import string, which needs a
       # module-level `app` object this server does not define.

@@ -20,18 +20,20 @@ must compile with a "declaration uses 'sorry'" warning and no errors. A hard err
 sandbox's Mathlib is not v4.19.0. No model or GPU needed.
 
 Usage:
-    python check_sandbox.py --host <node> --port 6000
-    python check_sandbox.py --host <node> --port 6000 --limit 5
+    python check_sandbox.py --snapshot-id <id>
+    python check_sandbox.py --image <registry/image:tag> --limit 5
 """
 
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config
 from resources_servers.math_formal_lean.toolchain import TOOLCHAIN_PROBE, parse_lean_version
 
 
@@ -68,26 +70,94 @@ def load_statements(limit: int | None) -> list[tuple[str, str, str]]:
     return out[:limit] if limit else out
 
 
-def build_client(args: argparse.Namespace):
-    return Lean4SandboxClient(host=args.host, port=args.port, max_output_characters=4000, timeout_buffer=30.0)
+def provider_config(args: argparse.Namespace) -> dict:
+    """Inline provider config, so this script needs no Gym global config to run.
+
+    Defaults to OpenSandbox against `OPENSANDBOX_DOMAIN`/`OPENSANDBOX_API_KEY`. The cells use
+    self-signed certificates, hence `tls_verify: false` -- the same default the shipped
+    provider config carries.
+    """
+    if args.provider != "opensandbox":
+        return {args.provider: {}}
+    return {
+        "opensandbox": {
+            "connection": {
+                "domain": args.domain,
+                "api_key": os.environ.get("OPENSANDBOX_API_KEY"),
+                "tls_verify": False,
+            }
+        }
+    }
+
+
+async def start_sandbox(args: argparse.Namespace) -> AsyncSandbox:
+    """Start one sandbox from a snapshot or image, exactly as the server does."""
+    sandbox = AsyncSandbox(resolve_provider_config(provider_config(args)))
+    await sandbox.start(
+        SandboxSpec(
+            image=args.image,
+            ttl_s=args.ttl,
+            ready_timeout_s=args.ready_timeout,
+            workdir=args.project_dir,
+            resources=SandboxResources.from_mapping({"cpu": args.cpu, "memory_mib": args.memory_mib}),
+            provider_options={"snapshot_id": args.snapshot_id} if args.snapshot_id else {},
+            metadata={"benchmark": "leancat", "purpose": "check-sandbox"},
+        )
+    )
+    return sandbox
+
+
+async def run_lean(sandbox: AsyncSandbox, code: str, project_dir: str, timeout: float) -> dict:
+    """Compile one file, the same way app.py does: heredoc in, `lake env lean`, temp file out."""
+    import uuid
+
+    path = f"check_{uuid.uuid4().hex}.lean"
+    delimiter = f"LEANCAT_EOF_{uuid.uuid4().hex}"
+    command = (
+        f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
+        f"lake env lean {path}; status=$?; rm -f {path}; exit $status"
+    )
+    result = await sandbox.exec(command, cwd=project_dir, timeout_s=timeout + 30)
+    return {
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "return_code": result.return_code,
+        "error_type": result.error_type,
+    }
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6000)
+    parser.add_argument("--provider", default="opensandbox", help="Sandbox provider name.")
+    parser.add_argument(
+        "--domain",
+        default=os.environ.get("OPENSANDBOX_DOMAIN"),
+        help="OpenSandbox endpoint; defaults to $OPENSANDBOX_DOMAIN.",
+    )
+    parser.add_argument("--snapshot-id", default=os.environ.get("LEANCAT_SANDBOX_SNAPSHOT_ID"))
+    parser.add_argument("--image", default=None, help="Image URI, when there is no snapshot.")
+    parser.add_argument("--project-dir", default="/lean4/my_project", help="Lake project to compile in.")
+    parser.add_argument("--ttl", type=float, default=7200)
+    parser.add_argument("--ready-timeout", type=float, default=1200)
+    parser.add_argument("--cpu", type=float, default=4)
+    parser.add_argument("--memory-mib", type=int, default=16384)
     parser.add_argument("--limit", type=int, default=None, help="Check only the first N problems.")
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args()
 
-    client = build_client(args)
-    if not await client.health_check():
-        print(f"FAIL: Lean is not reachable via {type(client).__name__}", file=sys.stderr)
+    if not args.snapshot_id and not args.image:
+        print("FAIL: pass --snapshot-id or --image; there is no default Lean environment.", file=sys.stderr)
+        return 2
+
+    try:
+        sandbox = await start_sandbox(args)
+    except Exception as exc:  # noqa: BLE001 - the reason matters more than the type here
+        print(f"FAIL: could not start a sandbox: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
     # Report the toolchain first so per-problem failures below can be read in context.
-    probe = await client.execute_lean4(code=TOOLCHAIN_PROBE, timeout=args.timeout)
+    probe = await run_lean(sandbox, TOOLCHAIN_PROBE, args.project_dir, args.timeout)
     found = parse_lean_version(probe)
     if found is None:
         print("FAIL: `import Mathlib` did not compile -- this sandbox cannot state any LeanCat problem.")
@@ -100,21 +170,21 @@ async def main() -> int:
         print(f"Sandbox toolchain: Lean/Mathlib {found} (expected {EXPECTED_LEAN_VERSION})\n")
 
     problems = load_statements(args.limit)
-    print(f"Compiling {len(problems)} reference statements via {type(client).__name__}\n")
+    print(f"Compiling {len(problems)} reference statements in the sandbox\n")
 
     semaphore = asyncio.Semaphore(args.concurrency)
     failures: list[tuple[str, str, str]] = []
 
     async def check(problem_id: str, level: str, statement: str) -> None:
         async with semaphore:
-            result = await client.execute_lean4(code=statement, timeout=args.timeout)
+            result = await run_lean(sandbox, statement, args.project_dir, args.timeout)
         combined = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
-        status = result.get("process_status", "unknown")
+        error_type = result.get("error_type")
         return_code = result.get("return_code")
 
-        if status != "completed":
-            failures.append((problem_id, level, f"sandbox status {status!r}"))
-            print(f"  {problem_id} [{level:<6}] FAIL  {status}")
+        if error_type:
+            failures.append((problem_id, level, f"sandbox error {error_type!r}"))
+            print(f"  {problem_id} [{level:<6}] FAIL  {error_type}")
         elif return_code not in (None, 0):
             first = next((ln for ln in combined.splitlines() if "error:" in ln.lower()), f"exit {return_code}")
             failures.append((problem_id, level, first.strip()))
