@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 import shlex
 import tempfile
 import uuid
@@ -29,6 +30,8 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
+
+LOG = logging.getLogger(__name__)
 
 _MODEL_RELAY_PORT = 18080
 _HOP_BY_HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
@@ -90,7 +93,8 @@ async def _pump_model_relay(endpoint: SandboxEndpoint, upstream: str) -> None:
     timeout = ClientTimeout(total=None, connect=30)
     active: set[asyncio.Task] = set()
     failures: asyncio.Queue[BaseException] = asyncio.Queue()
-    ready_deadline = asyncio.get_running_loop().time() + 120
+    stall_budget_s = 120
+    last_success = asyncio.get_running_loop().time()
 
     def finished(task: asyncio.Task) -> None:
         active.discard(task)
@@ -113,15 +117,22 @@ async def _pump_model_relay(endpoint: SandboxEndpoint, upstream: str) -> None:
                     ) as response:
                         if response.status == 204:
                             ready = True
+                            last_success = asyncio.get_running_loop().time()
                             continue
                         response.raise_for_status()
                         payload = await response.json()
                         ready = True
+                        last_success = asyncio.get_running_loop().time()
                 except asyncio.CancelledError:
                     raise
                 except (ClientError, OSError, TimeoutError) as error:
-                    if not ready and asyncio.get_running_loop().time() >= ready_deadline:
-                        raise RuntimeError("sandbox model relay did not become ready") from error
+                    if asyncio.get_running_loop().time() - last_success >= stall_budget_s:
+                        message = (
+                            "sandbox model relay did not become ready"
+                            if not ready
+                            else "sandbox model relay stopped responding"
+                        )
+                        raise RuntimeError(message) from error
                     await asyncio.sleep(1)
                     continue
                 task = asyncio.create_task(_forward_model_request(session, endpoint, upstream, payload))
@@ -277,7 +288,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                 await sandbox.download(output_path, local / "response.json")
                 response = NeMoGymResponse.model_validate_json((local / "response.json").read_text())
                 if response.usage and response.usage.total_tokens == 0 and result.stderr:
-                    self.logger.warning("sandboxed harness diagnostics: %s", result.stderr[-2000:])
+                    LOG.warning("sandboxed harness diagnostics: %s", result.stderr[-2000:])
                 return response
         finally:
             await sandbox.stop()

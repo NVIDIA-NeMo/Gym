@@ -24,7 +24,7 @@ import sqlite3
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
-from time import monotonic, time
+from time import time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -59,13 +59,16 @@ from nemo_gym.rollout_observability import (
     ContextCompactionObservation,
     ObservationGap,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -83,7 +86,9 @@ def _milliseconds(value: Any) -> Optional[float]:
     return float(value) / 1000
 
 
-def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
+def _parse_opencode_session(
+    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
         return AgentObservationBundle(
@@ -370,6 +375,9 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
+    if trajectory is not None:
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
+
     return AgentObservationBundle(
         source="opencode",
         records=[*invocations, *tools, *compactions],
@@ -608,9 +616,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, dict[str, Any]]:
+        trajectory: Optional[TrajectoryRecord] = None,
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
-        started_at = monotonic()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -653,9 +661,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
                 try:
-                    observations = _parse_opencode_session(db_path, invocation_id)
+                    observations = _parse_opencode_session(db_path, invocation_id, trajectory)
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
+                    if trajectory is not None:
+                        trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                     observations = AgentObservationBundle(
                         source="opencode",
                         records=[AgentInvocation(invocation_id=invocation_id)],
@@ -673,15 +683,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
-            run_metadata = {
-                "duration_ms": (monotonic() - started_at) * 1000,
-                "is_error": run_status != "completed",
-                "returncode": proc.returncode,
-                "status": run_status,
-            }
-            if timed_out:
-                run_metadata["error_type"] = "timeout"
-            return output_items, usage, self.config.model, observations, run_metadata
+            return output_items, usage, self.config.model, observations
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -700,12 +702,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
+        trajectory = (
+            TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
+        )
 
-        output_items, usage, model_name, observations, run_metadata = await self._run_opencode(
+        output_items, usage, model_name, observations = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
             collect_observations=collect_observations,
+            trajectory=trajectory,
         )
         if collect_observations:
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
@@ -751,7 +757,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            metadata={"agent_run": json.dumps(run_metadata, sort_keys=True)},
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
@@ -760,6 +765,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        if trajectory is not None:
+            response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
         return AgentEpisode(response=response, observations=observations)
 
     async def responses(
@@ -803,6 +810,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            raw_trajectory = agent_resp_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+            trajectory = (
+                scope_opencode_trajectory(TrajectoryRecord.model_validate(raw_trajectory), body, rollout_id)
+                if isinstance(raw_trajectory, dict) and rollout_id is not None
+                else None
+            )
             raw_observations = (
                 agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
             )
@@ -832,6 +845,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 verify_json
                 | {"turns_used": turns, "finished_naturally": naturally}
                 | ({"ng_agent_observations": observations} if observations is not None else {})
+                | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
 

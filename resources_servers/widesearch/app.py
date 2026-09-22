@@ -90,7 +90,7 @@ def extract_dataframe(text: str) -> pd.DataFrame | None:
         ]
         if lines:
             try:
-                frame = pd.read_csv(StringIO("\n".join(lines)), sep="|")
+                frame = pd.read_csv(StringIO("\n".join(lines)), sep="|", dtype=str)
             except (pd.errors.EmptyDataError, pd.errors.ParserError):
                 continue
             return frame.loc[:, ~frame.columns.str.startswith("Unnamed")]

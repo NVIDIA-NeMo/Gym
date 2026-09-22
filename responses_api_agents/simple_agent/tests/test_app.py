@@ -27,8 +27,6 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
@@ -510,7 +508,8 @@ class TestApp:
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
 
-    async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("empty_output", [False, True])
+    async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -552,137 +551,132 @@ class TestApp:
             "tools": [],
         }
 
-        mock_response_chat_data = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "model": "dummy_model",
-            "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Hello! How can I help you today?",
-                            "type": "output_text",
-                        }
-                    ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                }
-            ],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
-
+        if empty_output:
+            mock_response_reasoning_data["output"] = []
+        mock_response_reasoning_data["status"] = "completed"
+        mock_response_reasoning_data["metadata"] = {"existing_key": "preserved"}
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data), json.dumps(mock_response_chat_data)]
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data)]
+        dotjson_mock.cookies = {}
         server.server_client.post.return_value = dotjson_mock
 
-        # No model provided should use the one from the config
-        res_no_model = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
-        assert res_no_model.status_code == 200
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
 
-        expected_calls = [
-            call(
-                server_name="my server name",
-                url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
-                    input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
-                ),
-                cookies=None,
-            ),
-            call().ok.__bool__(),
-            call().read(),
-            call(
-                server_name="my server name",
-                url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
-                    input=[
-                        NeMoGymEasyInputMessage(content="hello", role="user", type="message"),
-                        NeMoGymResponseReasoningItem(
-                            id="msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                            summary=[NeMoGymSummary(text="I'm thinking how to respond", type="summary_text")],
-                            type="reasoning",
-                            encrypted_content=None,
-                            status="completed",
-                        ),
-                    ]
-                ),
-                cookies=dotjson_mock.cookies,
-            ),
-            call().ok.__bool__(),
-            call().read(),
-            call().cookies.items(),
-            call().cookies.items().__iter__(),
-            call().cookies.items().__len__(),
-        ]
-        server.server_client.post.assert_has_calls(expected_calls)
+        assert res.status_code == 200
+        server.server_client.post.assert_awaited_once()
+        assert res.json()["status"] == "incomplete"
+        assert res.json()["incomplete_details"] is None
+        assert res.json()["metadata"]["existing_key"] == "preserved"
+        assert res.json()["metadata"]["ng_termination_reason"] == (
+            "empty_output" if empty_output else "incomplete_reasoning"
+        )
+        assert res.json()["metadata"]["ng_termination_message"] in caplog.text
+        assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
+        if not empty_output:
+            assert res.json()["output"][0]["summary"] == mock_response_reasoning_data["output"][0]["summary"]
+        assert "Ending trajectory" in caplog.text
+        assert "finish_reason='stop'" in caplog.text
+        assert "finish_reason='length', handled separately" in caplog.text
+        assert "badly trained model requiring training-level fixes" in caplog.text
+        assert "bug in the inference engine" in caplog.text
+        assert mock_response_reasoning_data["id"] in caplog.text
 
-        actual_responses_dict = res_no_model.json()
-        expected_responses_dict = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "error": None,
-            "incomplete_details": None,
-            "instructions": None,
-            "metadata": None,
-            "model": "dummy_model",
+    async def test_reasoning_only_trajectory_is_incomplete(self) -> None:
+        server, server_client = _make_agent(True)
+        payload = {
+            "id": "reasoning-response",
+            "created_at": 1.0,
+            "model": "model",
             "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": None,
-                    "encrypted_content": None,
-                    "summary": [
-                        {
-                            "text": "I'm thinking how to respond",
-                            "type": "summary_text",
-                        }
-                    ],
-                    "type": "reasoning",
-                },
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Hello! How can I help you today?",
-                            "type": "output_text",
-                            "logprobs": None,
-                        }
-                    ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                },
-            ],
+            "output": [{"id": "reasoning-1", "type": "reasoning", "summary": []}],
             "parallel_tool_calls": True,
-            "temperature": None,
             "tool_choice": "auto",
             "tools": [],
-            "top_p": None,
-            "background": None,
-            "max_output_tokens": None,
-            "max_tool_calls": None,
-            "previous_response_id": None,
-            "prompt": None,
-            "reasoning": None,
-            "service_tier": None,
-            "status": None,
-            "text": None,
-            "top_logprobs": None,
-            "truncation": None,
-            "usage": None,
-            "user": None,
-            "conversation": None,
-            "prompt_cache_key": None,
-            "safety_identifier": None,
+            "usage": {
+                "input_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 5,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 8,
+            },
         }
-        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
+        server_client.post = AsyncMock(return_value=_mock_response(payload))
+
+        response, trajectory, _, _ = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+            rollout_id="reasoning-rollout",
+            collect_trajectory=True,
+        )
+
+        server_client.post.assert_awaited_once()
+        assert response.usage.total_tokens == 8
+        assert [item.type for item in response.output] == ["reasoning"]
+        assert trajectory.invocations[0].status == "incomplete"
+        assert len(trajectory.turns) == 1
+        assert trajectory.turns[0].answer == []
+        assert trajectory.turns[0].reasoning_content[0]["id"] == "reasoning-1"
+        assert trajectory.tool_calls == []
+
+    @pytest.mark.parametrize("with_compaction", [False, True])
+    @pytest.mark.parametrize("skip_verification", [False, True])
+    async def test_termination_metadata_survives_run(self, with_compaction, skip_verification) -> None:
+        from responses_api_agents.simple_agent_with_compaction.app import (
+            SimpleAgentWithCompaction,
+            SimpleAgentWithCompactionConfig,
+            SimpleAgentWithCompactionRunRequest,
+        )
+
+        agent_cls = SimpleAgentWithCompaction if with_compaction else SimpleAgent
+        config_cls = SimpleAgentWithCompactionConfig if with_compaction else SimpleAgentConfig
+        request_cls = SimpleAgentWithCompactionRunRequest if with_compaction else SimpleAgentRunRequest
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = agent_cls(
+            config=config_cls(
+                host="localhost",
+                port=8080,
+                entrypoint="",
+                name="agent",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+                skip_verification=skip_verification,
+            ),
+            server_client=client,
+        )
+        payload = {
+            "id": "reasoning-response",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [{"id": "reasoning-1", "type": "reasoning", "summary": []}],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "completed",
+        }
+        request = MagicMock(cookies={})
+
+        async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if server_name == "agent":
+                response = await server.responses(request, Response(), kwargs["json"])
+                return _mock_response(response.model_dump(mode="json"))
+            if server_name == "model":
+                return _mock_response(payload)
+            assert url_path == "/verify"
+            assert kwargs["json"]["response"]["metadata"]["ng_termination_reason"] == "incomplete_reasoning"
+            return _mock_response(kwargs["json"] | {"reward": 0.0})
+
+        client.post = AsyncMock(side_effect=post)
+        result = await server.run(request, request_cls(responses_create_params={"input": "question"}))
+        saved = json.loads(result.model_dump_json())
+        assert "ng_trajectory" not in saved
+        assert saved["response"]["status"] == "incomplete"
+        assert saved["response"]["metadata"]["ng_termination_reason"] == "incomplete_reasoning"
+        assert "training-level fixes" in saved["response"]["metadata"]["ng_termination_message"]
+        assert sum(call.kwargs["server_name"] == "model" for call in client.post.await_args_list) == 1
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
@@ -711,15 +705,11 @@ class TestApp:
             "object": "response",
             "output": [
                 {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "summary": [
-                        {
-                            "text": "Hello! How can I help you today?",
-                            "type": "summary_text",
-                        }
-                    ],
-                    "status": "completed",
-                    "type": "reasoning",
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "my_tool",
+                    "arguments": "{invalid json",
                 }
             ],
             "parallel_tool_calls": True,
@@ -767,9 +757,10 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
-    async def test_incomplete_details(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_incomplete_details(self, monkeypatch: MonkeyPatch, caplog) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})
+        assert "Ending trajectory" not in caplog.text
 
     async def _test_incomplete_details_helper(self, monkeypatch: MonkeyPatch, incomplete_details) -> None:
         config = SimpleAgentConfig(
