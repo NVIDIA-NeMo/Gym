@@ -15,26 +15,27 @@
 
 """Build a Lean + Mathlib sandbox environment and snapshot it.
 
-**This is the recipe for the environment every LeanCat number depends on.** Run it once; it
-prints a snapshot id that later runs boot from in seconds via ``LEANCAT_SANDBOX_SNAPSHOT_ID``.
+**This is the recipe for the environment every Lean benchmark's numbers depend on.** Run it
+once per Mathlib version; it prints a snapshot id that later runs boot from in seconds.
 Nobody runs it again unless the snapshot is lost.
 
-The version is an argument, so this also builds the environment for any other Lean benchmark:
-LeanCat needs v4.19.0, while minif2f, proofnet, putnam_bench and math_formal_lean are written
-against v4.12.0. One snapshot per version; they are not interchangeable. On v4.12.0, 36 of
-LeanCat's 100 reference statements fail to compile with their ``sorry`` still intact, which
-silently caps any score at 64/100 and skews it by difficulty.
+The version is an argument because the benchmarks disagree and the environments are not
+interchangeable: minif2f, mobench, proofnet and putnam_bench run against this server at
+Mathlib v4.12.0, while leancat's statements are written against v4.19.0. Compiled oleans do
+not carry across versions, so each version needs its own snapshot. The cost of getting it
+wrong is quiet: on v4.12.0, 36 of leancat's 100 reference statements fail to compile with
+their ``sorry`` still intact, which caps any score at 64/100 and skews it by difficulty.
 
-Why a snapshot rather than an image: LeanCat's upstream publishes no container, and no
-published image carries Mathlib v4.19.0 -- ``leanprovercommunity/mathlib`` ships only
-``latest``/``gitpod``/``debian``, and NeMo-Skills' sandbox image is pinned to v4.12.0.
-Building inside a sandbox and snapshotting needs no docker, no registry and no push.
+Why a snapshot rather than an image: no published image carries Mathlib v4.19.0 --
+``leanprovercommunity/mathlib`` ships only ``latest``/``gitpod``/``debian``, and NeMo-Skills'
+sandbox image is pinned to v4.12.0. Building inside a sandbox and snapshotting needs no
+docker, no registry and no push.
 
 The base is a slim Debian image, not the NeMo-Skills sandbox: that one is
 ``uwsgi-nginx-flask`` plus pypy and a large Python stack, all of it there to serve the HTTP
-``/execute`` API this server no longer uses -- roughly 15 GB that would be pulled on every
-start and stored in every snapshot. Its prebuilt Mathlib does not help either, since oleans
-do not carry across versions and the cache is refetched regardless.
+``/execute`` API -- roughly 15 GB pulled on every start and stored in every snapshot. Its
+prebuilt Mathlib does not help either, since oleans do not carry across versions and the
+cache is refetched regardless.
 
 A snapshot is an opaque blob tied to one cell, so treat it as a cache and this script as the
 source of truth: if the snapshot is lost or the cell retired, re-run this.
@@ -42,8 +43,8 @@ source of truth: if the snapshot is lost or the cell retired, re-run this.
 Usage:
     export OPENSANDBOX_DOMAIN=https://<cell-endpoint>
     export OPENSANDBOX_API_KEY=<key>
-    python build_sandbox.py                          # v4.19.0, for LeanCat
-    python build_sandbox.py --lean-version v4.12.0   # the other Lean benchmarks
+    python build_sandbox.py --lean-version v4.19.0   # leancat
+    python build_sandbox.py --lean-version v4.12.0   # minif2f, mobench, proofnet, putnam_bench
     python build_sandbox.py --no-snapshot --keep     # build only, leave it up to inspect
 """
 
@@ -64,7 +65,8 @@ from nemo_gym.sandbox.config import resolve_provider_config
 BASE_IMAGE = "debian:bookworm-slim"
 LEAN_PROJECT_DIR = "/lean4/my_project"
 
-# LeanCat's pin (upstream configs/evaluation_protocol.json). Override for other benchmarks.
+# leancat's pin (its upstream configs/evaluation_protocol.json); the other benchmarks on this
+# server are v4.12.0, so this is always worth passing explicitly.
 DEFAULT_LEAN_VERSION = "v4.19.0"
 
 
@@ -242,8 +244,8 @@ async def main() -> int:
         snapshot_id = snapshot.get("id") or snapshot.get("snapshotId")
 
         print(f"\nSnapshot: {snapshot_id}\n")
-        print("Gate it before trusting any score -- all 100 reference statements must compile:")
-        print(f"  python check_sandbox.py --snapshot-id {snapshot_id}")
+        print("Gate it before trusting any score -- for leancat, all 100 reference statements:")
+        print(f"  python ../leancat/check_sandbox.py --snapshot-id {snapshot_id}")
         print("\nThen point runs at it:")
         print(f"  export LEANCAT_SANDBOX_SNAPSHOT_ID={snapshot_id}")
         return 0
