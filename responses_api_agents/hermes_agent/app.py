@@ -163,7 +163,7 @@ class SessionPhase(Enum):
 class RunnerCleanup(Enum):
     """Track remote process cleanup independently of session files and connections."""
 
-    NOT_LAUNCHED = auto()
+    IDLE = auto()  # No remote launch has been attempted.
     UNCONFIRMED = auto()  # A launch attempt may have succeeded without returning a handle.
     CONFIRMED = auto()
 
@@ -179,7 +179,7 @@ class HermesAgentSessionState:
     observations: AgentObservationBundle | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     phase: SessionPhase = SessionPhase.READY
-    runner_cleanup: RunnerCleanup = RunnerCleanup.NOT_LAUNCHED
+    runner_cleanup: RunnerCleanup = RunnerCleanup.IDLE
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -504,7 +504,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         runner_session = state.runner_session
         runner_exit_task = state.runner_exit_task
         if runner_session is None and state.runner_cleanup in (
-            RunnerCleanup.NOT_LAUNCHED,
+            RunnerCleanup.IDLE,
             RunnerCleanup.CONFIRMED,
         ):
             return
