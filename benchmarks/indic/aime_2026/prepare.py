@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import tempfile
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,22 +17,22 @@ from typing import Any
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "aime_2026_benchmark.jsonl"
 PROMPT_PATH = BENCHMARK_DIR.parents[1] / "prompts/generic/math.yaml"
-DEFAULT_LANGUAGES = ("bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "ta", "te", "ur")
+DEFAULT_LANGUAGES = ("as", "bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "sa", "ta", "te", "ur")
 BENCHMARK_ID = "indic/aime_2026"
-SOURCE_ID = "anushakamathofficial/indic_aime_2026"
-SOURCE_REVISION = "938c1c90c23b25ca0f43d1bfc5103b332e8c033e"
+SOURCE_ID = "ai4bharat/indic-aime-2026"
+SOURCE_REVISION = "6cbc9d963bdd9f77e18f28de396f2f9b09bb180a"
 SOURCE_SPLIT = "train"
-SOURCE_LICENSE = "CC-BY-NC-SA-4.0"
+SOURCE_LICENSE = "Apache-2.0"
 EXPECTED_ENGLISH_ROWS = 30
 CANONICAL_REPO = "MathArena/aime_2026"
 CANONICAL_REVISION = "d2de22f3c656b4f56cf8981212186377d1e23bc3"
 CANONICAL_FILE = "data/train-00000-of-00001.parquet"
 CANONICAL_COLUMNS = {"problem_idx", "answer", "problem"}
-SOURCE_COLUMNS = CANONICAL_COLUMNS | {"language", "language_code", "judge_pass_stage"}
 
 
 LANGUAGE_NAMES = {
     "en": "English",
+    "as": "Assamese",
     "bn": "Bengali",
     "gu": "Gujarati",
     "hi": "Hindi",
@@ -43,17 +42,13 @@ LANGUAGE_NAMES = {
     "ne": "Nepali",
     "or": "Odia",
     "pa": "Punjabi",
+    "sa": "Sanskrit",
     "ta": "Tamil",
     "te": "Telugu",
     "ur": "Urdu",
 }
-QUALITY_STAGES = {
-    "english_source",
-    "first_judge_pass",
-    "passed_after_correction",
-    "failed_after_correction_review_needed",
-    "not_judged_review_needed",
-    "failed_first_judge_review_needed",
+SOURCE_COLUMNS = CANONICAL_COLUMNS | {
+    f"problem_{LANGUAGE_NAMES[language]}_translation" for language in DEFAULT_LANGUAGES
 }
 
 
@@ -100,7 +95,7 @@ def _index_rows(records: Sequence[Mapping[str, Any]], *, language: str | None) -
         raise ValueError(f"Empty AIME 2026 configuration: {language or 'canonical'}")
     indexed = {}
     for row in records:
-        if not isinstance(row, Mapping) or set(row) != (SOURCE_COLUMNS if language else CANONICAL_COLUMNS):
+        if not isinstance(row, Mapping) or set(row) != CANONICAL_COLUMNS:
             raise ValueError(f"Unexpected AIME 2026 source columns for {language or 'canonical'}")
         if type(row["problem_idx"]) is not int or row["problem_idx"] < 1:
             raise ValueError("AIME 2026 requires positive integer problem_idx values")
@@ -111,16 +106,6 @@ def _index_rows(records: Sequence[Mapping[str, Any]], *, language: str | None) -
         identity = str(row["problem_idx"])
         if identity in indexed:
             raise ValueError(f"Duplicate AIME 2026 problem identity: {language}/{identity}")
-        if language:
-            if row["language_code"] != language or row["language"] != LANGUAGE_NAMES[language]:
-                raise ValueError(f"Language metadata mismatch: {language}/{identity}")
-            stage = row["judge_pass_stage"]
-            if (
-                not isinstance(stage, str)
-                or stage not in QUALITY_STAGES
-                or (stage == "english_source") != (language == "en")
-            ):
-                raise ValueError(f"Unexpected translation quality stage: {language}/{identity}")
         indexed[identity] = row
     return indexed
 
@@ -170,11 +155,7 @@ def load_source(
     config_name: str | None = None,
     question_ids: Sequence[str | int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Validate every selected configuration before filtering published translations.
-
-    English text and answers must match the pinned MathArena source exactly. Missing
-    translated questions are reported, not replaced with English or silently hidden.
-    """
+    """Validate source IDs and answers, then select translations without English fallback."""
     import pyarrow.parquet as pq
 
     selected, question_ids = _selection(languages, config_name, question_ids)
@@ -185,27 +166,27 @@ def load_source(
     wanted = set(canonical) if question_ids is None else set(question_ids)
     if wanted - canonical.keys():
         raise ValueError(f"Unknown question IDs: {sorted(wanted - canonical.keys(), key=int)}")
-    configs, files = {}, {}
-    for language in dict.fromkeys(["en", *selected]):
-        relative = f"data/{language}/{SOURCE_SPLIT}.parquet"
-        path = download_hf_file(SOURCE_ID, SOURCE_REVISION, relative)
-        indexed = _index_rows(pq.read_table(path).to_pylist(), language=language)
-        if indexed.keys() - canonical.keys():
-            raise ValueError(f"Translated IDs absent from canonical source: {language}")
-        if language == "en" and indexed.keys() != canonical.keys():
-            raise ValueError("English AIME 2026 configuration must contain every canonical problem")
-        fields = CANONICAL_COLUMNS if language == "en" else CANONICAL_COLUMNS - {"problem"}
-        for identity, row in indexed.items():
-            if any(row[key] != canonical[identity][key] for key in fields):
-                raise ValueError(f"Canonical field mismatch: {language}/{identity}")
-        configs[language] = indexed
-        files[relative] = {"sha256": sha256(path), "rows": len(indexed)}
+    source_path = download_hf_file(SOURCE_ID, SOURCE_REVISION, "train.parquet")
+    source_rows = pq.read_table(source_path).to_pylist()
+    if any(set(row) != SOURCE_COLUMNS for row in source_rows):
+        raise ValueError("Unexpected AIME 2026 source columns")
+    english = _index_rows([{key: row[key] for key in CANONICAL_COLUMNS} for row in source_rows], language="en")
+    if english.keys() != canonical.keys():
+        raise ValueError("English AIME 2026 configuration must contain every canonical problem")
+    for identity, row in english.items():
+        if row != canonical[identity]:
+            raise ValueError(f"Canonical field mismatch: en/{identity}")
     records, coverage = [], {}
     for language in selected:
-        indexed = configs[language]
-        identities = sorted(wanted & indexed.keys(), key=int)
-        if not identities:
-            raise ValueError(f"Requested selection has no published translated rows for {language}")
+        problem_column = "problem" if language == "en" else f"problem_{LANGUAGE_NAMES[language]}_translation"
+        indexed = _index_rows(
+            [
+                {"problem_idx": row["problem_idx"], "answer": row["answer"], "problem": row[problem_column]}
+                for row in source_rows
+            ],
+            language=language,
+        )
+        identities = sorted(wanted, key=int)
         for identity in identities:
             records.append(
                 {
@@ -215,24 +196,14 @@ def load_source(
                     "language_name": LANGUAGE_NAMES[language],
                 }
             )
-        stages = Counter(indexed[identity]["judge_pass_stage"] for identity in identities)
-        coverage[language] = {
-            "published_rows": len(indexed),
-            "selected_rows": len(identities),
-            "missing_english_ids": sorted(canonical.keys() - indexed.keys(), key=int),
-            "missing_selected_ids": sorted(wanted - indexed.keys(), key=int),
-            "judge_pass_stage": dict(sorted(stages.items())),
-            "human_evaluation_pending": sum(
-                count for stage, count in stages.items() if stage.endswith("review_needed")
-            ),
-        }
+        coverage[language] = {"published_rows": len(indexed), "selected_rows": len(identities)}
     return records, {
         "source_id": SOURCE_ID,
         "source_revision": SOURCE_REVISION,
         "source_split": SOURCE_SPLIT,
         "source_license": SOURCE_LICENSE,
         "source_configs": selected,
-        "source_files": files,
+        "source_files": {"train.parquet": {"sha256": sha256(source_path), "rows": len(source_rows)}},
         "canonical_source_id": CANONICAL_REPO,
         "canonical_revision": CANONICAL_REVISION,
         "canonical_file_sha256": sha256(canonical_path),
@@ -240,7 +211,7 @@ def load_source(
         "coverage": coverage,
         "question_ids": question_ids,
         "canonical_join": "exact_problem_idx_all_three_English_fields_translated_answer_unchanged",
-        "translation_quality_policy": "include_all_published_and_report_flags",
+        "translation_quality_policy": "include_all_published_translations",
     }
 
 
@@ -254,8 +225,6 @@ def build_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "question_id": row["question_id"],
             "language": row["language"],
             "language_name": row["language_name"],
-            "judge_pass_stage": row["judge_pass_stage"],
-            "human_evaluation_pending": row["judge_pass_stage"].endswith("review_needed"),
         }
         for row in records
     ]
