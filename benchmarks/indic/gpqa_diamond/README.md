@@ -3,42 +3,48 @@
 
 # Indic GPQA Diamond
 
-This benchmark evaluates the 198 GPQA Diamond questions translated into 14 Indic languages in [`ai4bharat/indic-gpqa`](https://huggingface.co/datasets/ai4bharat/indic-gpqa). English is available as an explicit option and is excluded from the default language set. The translated dataset card declares Apache-2.0; the canonical English GPQA source is gated and licensed under CC-BY-4.0. Authenticate with a Hugging Face account that can access both repositories before preparing data. Do not publish dataset examples or generated JSONL.
+GPQA Diamond translated into 14 Indic languages, with 198 multiple-choice questions
+per language from [ai4bharat/indic-gpqa](https://huggingface.co/datasets/ai4bharat/indic-gpqa).
 
-The preparer pins both the translated dataset and [`Idavidrein/gpqa`](https://huggingface.co/datasets/Idavidrein/gpqa). It reads `train.parquet` once, aligns rows by `Record ID`, and checks all five English question/answer fields against the canonical source. Each language uses columns such as `Question_Hindi_translation`. Source explanations, annotator details, and other auxiliary columns are excluded from prepared tasks. The translated source is pinned to `c3c32b0a0ec7aeebe884c4c55c46730b4274a612`.
+## Configuration
 
-The evaluation reuses `benchmarks/gpqa`: `eval/aai/mcq-4choices.yaml` prompt, `simple_agent`, and `mcqa` verifier with `lenient_answer_colon_md` grading. Each question has eight responses, matching English GPQA. Report mean accuracy (`pass@1[avg-of-8]/accuracy`); the shared verifier also reports pass and majority metrics.
+This benchmark uses the `mcqa` resource server and `simple_agent`, matching
+[English GPQA](../../gpqa/config.yaml).
 
-Choices start with the correct answer followed by the three distractors and use the English preparer's MD5-seeded shuffle. Translations use the canonical English question so corresponding options occupy the same positions in every language. The question and option text remain translated. All 198 questions, including row 69, are retained.
+- **Grading mode**: `lenient_answer_colon_md` (`Answer: A/B/C/D` extraction).
+- **Prompt**: `benchmarks/prompts/eval/aai/mcq-4choices.yaml`.
+- **Responses per question**: 8.
+- **Metric**: `pass@1[avg-of-8]/accuracy` (mean accuracy, 0–100).
 
-The English GPQA code is unchanged; the Indic preparer matches its row format and shuffle.
+Choice positions are shuffled deterministically using the English question included
+in the dataset, so corresponding choices stay aligned across languages. Generation
+settings come from the model configuration.
 
-Generation settings, token budget, and thinking mode come from the selected model configuration, just as for English GPQA. Use identical model settings for both runs. Run each language separately for per-language scores; a combined run reports aggregate metrics.
-
-This replaces the previous original-repository zero-shot profile. Regenerate prepared JSONL: old prompts, the custom parser, the `--shuffle-seed` option, and the one-response/1,000-token/no-thinking defaults have been removed. Earlier results are not directly comparable.
-
-Regenerate existing JSONL after changing the dataset source: this release includes translation corrections, so scores can change.
-
-Prepare all default Indic languages:
+## Usage
 
 ```bash
-.venv/bin/python -m benchmarks.indic.gpqa_diamond.prepare
+# Prepare data
+gym eval prepare --benchmark indic/gpqa_diamond
+
+# Run against a vLLM endpoint
+gym eval run \
+    --benchmark indic/gpqa_diamond \
+    --model-type vllm_model \
+    --model MODEL_NAME \
+    --model-url http://HOST:PORT/v1 \
+    --model-api-key dummy \
+    --output results/indic_gpqa/rollouts.jsonl
 ```
 
-Prepare a small gated-data smoke sample:
+## Language Selection
+
+By default, preparation includes `as`, `bn`, `gu`, `hi`, `kn`, `ml`, `mr`, `ne`,
+`or`, `pa`, `sa`, `ta`, `te`, and `ur`. English (`en`) is optional.
+
+Prepare one language for per-language scores, then run the evaluation command above:
 
 ```bash
-.venv/bin/python -m benchmarks.indic.gpqa_diamond.prepare \
-  --languages hi \
-  --question-ids 0 69 \
-  --output-path /tmp/indic_gpqa_smoke.jsonl
-```
-
-Run the benchmark after starting or configuring the vLLM policy endpoint:
-
-```bash
-.venv/bin/gym eval run \
-  --config benchmarks/indic/gpqa_diamond/config.yaml \
-  --agent indic_gpqa_diamond_agent \
-  --model <model-name-or-path>
+gym eval prepare --benchmark indic/gpqa_diamond \
+    "+prepare_script_args={languages:[hi]}" \
+    +use_cached_prepared_benchmarks=false
 ```
