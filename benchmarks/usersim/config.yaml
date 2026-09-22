@@ -1,0 +1,23 @@
+# NeMo UserSim benchmark overlay. Preparation owns NGC access; runtime is offline.
+config_paths:
+  - resources_servers/usersim/configs/usersim.yaml
+
+environment_server_routes:
+  "usersim:benchmark": usersim_environment
+
+usersim:
+  resources_servers:
+    usersim:
+      personas_cache_dir: benchmarks/usersim/data/personas
+
+usersim_assistant:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: usersim
+          type: benchmark
+          jsonl_fpath: benchmarks/usersim/data/usersim.jsonl
+          prepare_script: benchmarks/usersim/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: Apache 2.0
