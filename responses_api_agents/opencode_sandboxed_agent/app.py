@@ -558,7 +558,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
                         "timeout": self.config.opencode_model_call_timeout,  # in milliseconds
-                        "chunkTimeout": 600000,  # in milliseconds, 10 min
+                        # "chunkTimeout": 600000,  # in milliseconds, 10 min
                     },
                     "models": {
                         "dummy_model": {
