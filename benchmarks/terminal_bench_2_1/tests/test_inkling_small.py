@@ -50,8 +50,8 @@ def pinned_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         for name in names
     ]
     normalized = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
-    reference = tmp_path / "reference.json"
-    reference.write_text(
+    manifest = tmp_path / "tasks.json"
+    manifest.write_text(
         json.dumps(
             {
                 "task_repository": str(origin),
@@ -62,7 +62,7 @@ def pinned_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         )
     )
     monkeypatch.setattr(preparation, "GYM_ROOT", tmp_path)
-    monkeypatch.setattr(preparation, "REFERENCE_PATH", reference)
+    monkeypatch.setattr(preparation, "TASK_MANIFEST_PATH", manifest)
     monkeypatch.setattr(preparation, "SOURCE_PATH", tmp_path / "data" / "tasks")
     monkeypatch.setattr(preparation, "OUTPUT_PATH", tmp_path / "data" / "rows.jsonl")
     return rows
@@ -114,40 +114,53 @@ def test_input_drift_is_rejected(pinned_tasks: list[dict], monkeypatch: pytest.M
     if change == "guidance":
         monkeypatch.setattr(preparation, "TERMINAL_INTERACTION_GUIDANCE", "Different guidance")
     else:
-        reference = json.loads(preparation.REFERENCE_PATH.read_text())
+        manifest = json.loads(preparation.TASK_MANIFEST_PATH.read_text())
         if change == "order":
-            reference["task_order"].reverse()
+            manifest["task_order"].reverse()
         else:
-            reference["task_order"].pop()
-        preparation.REFERENCE_PATH.write_text(json.dumps(reference))
-    with pytest.raises(ValueError, match="differ from the reference|89 unique tasks"):
+            manifest["task_order"].pop()
+        preparation.TASK_MANIFEST_PATH.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="differ from the pinned|89 unique tasks"):
         preparation.prepare()
     assert output.read_bytes() == original
 
 
-def test_full_profile_enables_fixes_and_reference_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENSANDBOX_DOMAIN", "unused.example")
-    monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
+def _resolve_profile(*, shared_mounts: bool, tmux_path: str | None = None) -> dict:
+    initial = {
+        "config_paths": ["benchmarks/terminal_bench_2_1/inkling_small.yaml"],
+        "policy_base_url": "http://127.0.0.1:1/v1",
+        "policy_api_key": "unused",
+        "policy_model_name": "offline-model",
+    }
+    if shared_mounts:
+        initial["config_paths"].append("benchmarks/terminal_bench_2_1/deployments/opensandbox_shared_mounts.yaml")
+    if tmux_path is not None:
+        initial["terminal_bench_2_1_terminus_2_sandboxed_agent"] = {
+            "responses_api_agents": {"terminus_2_sandboxed_agent": {"remote_tmux_binary_path": tmux_path}}
+        }
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
             offline=True,
-            initial_global_config_dict=OmegaConf.create(
-                {
-                    "config_paths": [
-                        "benchmarks/terminal_bench_2_1/inkling_small.yaml",
-                        "benchmarks/nemotron_3.5_super/sandbox_utils.yaml",
-                        "benchmarks/nemotron_3.5_super/policy_model_override.yaml",
-                    ],
-                    "policy_base_url": "http://127.0.0.1:1/v1",
-                    "policy_api_key": "unused",
-                    "policy_model_name": "offline-model",
-                }
-            ),
+            initial_global_config_dict=OmegaConf.create(initial),
         )
     )
-    config = OmegaConf.to_container(config, resolve=True)
+    return OmegaConf.to_container(config, resolve=True)
+
+
+@pytest.mark.parametrize("shared_mounts", [False, True])
+def test_profile_preserves_evaluation_settings_and_separates_deployment(
+    monkeypatch: pytest.MonkeyPatch, shared_mounts: bool
+) -> None:
+    if shared_mounts:
+        monkeypatch.setenv("OPENSANDBOX_DOMAIN", "unused.example")
+        monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
+    else:
+        monkeypatch.delenv("OPENSANDBOX_DOMAIN", raising=False)
+        monkeypatch.delenv("OPENSANDBOX_API_KEY", raising=False)
+    tmux_path = "/deployment/tools/tmux" if shared_mounts else None
+    config = _resolve_profile(shared_mounts=shared_mounts, tmux_path=tmux_path)
     agent = config["terminal_bench_2_1_terminus_2_sandboxed_agent"]["responses_api_agents"][
         "terminus_2_sandboxed_agent"
     ]
@@ -156,8 +169,8 @@ def test_full_profile_enables_fixes_and_reference_budgets(monkeypatch: pytest.Mo
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
     assert agent["recover_stalled_interrupts"] is True
-    assert agent["terminal_hidden_mounts"] == ["/mnt/s3-data", "/mnt/.s3-gate"]
-    assert agent["remote_tmux_binary_path"] == "/mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64"
+    assert agent["terminal_hidden_mounts"] == (["/mnt/s3-data", "/mnt/.s3-gate"] if shared_mounts else [])
+    assert agent["remote_tmux_binary_path"] == tmux_path
     assert agent["model_context_limit"] == 1048576
     assert agent["sandbox_timeout"] == 10800
     assert agent["llm_request_timeout"] == 3600
@@ -171,7 +184,12 @@ def test_full_profile_enables_fixes_and_reference_budgets(monkeypatch: pytest.Mo
     assert config["num_samples_in_parallel"] == 256
     assert config["observability_enabled"] is True
     assert config["upload_rollouts"] is False
-    assert "opensandbox" in config["sandbox"]
+    if shared_mounts:
+        assert "opensandbox" in config["sandbox"]
+        assert resources["sandbox_config"]["metadata"]["nemo.nvidia.com/resources"] == "custom"
+    else:
+        assert "sandbox" not in config
+        assert "nemo.nvidia.com/resources" not in resources["sandbox_config"]["metadata"]
     assert agent["datasets"] == [
         {
             "name": "terminal_bench_2_1_inkling_small",

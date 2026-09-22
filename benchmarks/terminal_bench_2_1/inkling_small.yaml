@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Workspace OpenSandbox reproduction profile for reference run 7330058.
+# Inkling evaluation settings and pinned task inputs; select a sandbox deployment separately.
+# For the shared-mount OpenSandbox service, also load deployments/opensandbox_shared_mounts.yaml
+# and provide the remote_tmux_binary_path available on that service.
 # Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small_fast_parsers.sh
 config_paths:
-  - benchmarks/terminal_bench_2_1/terminus_2_terminal_guidance.yaml
   - benchmarks/terminal_bench_2_1/terminus_2_noninteractive.yaml
-  - benchmarks/terminal_bench_2_1/terminus_2_private_mounts.yaml
   - benchmarks/terminal_bench_2_1/terminus_2_reasoning_retention.yaml
-  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
@@ -18,7 +17,6 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
       sandbox_timeout: 10800
       llm_request_timeout: 3600
       recover_stalled_interrupts: true
-      remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
       datasets:
         - name: terminal_bench_2_1_inkling_small
           type: benchmark
@@ -30,9 +28,6 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
   resources_servers:
     terminal_bench_2_1:
       evaluation_timeout: 1800
-      sandbox_config:
-        metadata:
-          nemo.nvidia.com/resources: custom
 
 policy_model:
   responses_api_models:

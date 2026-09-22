@@ -1,5 +1,4 @@
 {
-  "reference_job": "7330058",
   "task_repository": "https://github.com/harbor-framework/terminal-bench-2-1",
   "task_revision": "7131e4375048a0e408a8fb404b5f499d726b695b",
   "normalized_rows_sha256": "7152e5291b1886f36a579e9a492fcac5ffac836b9d93d91b2cb218ecdf2194ae",
@@ -94,19 +93,5 @@
     "mteb-leaderboard",
     "sqlite-with-gcov",
     "sanitize-git-repo"
-  ],
-  "reference_result": {
-    "attempts": 712,
-    "raw_passes": 417,
-    "identified_invalid_passes": 4,
-    "passes_after_manual_review": 413,
-    "qualification": "All 712 attempts remain in the denominator; invalid passes are treated as failures. This is one historical run, not a reproduction guarantee."
-  },
-  "artifact_hashes_recorded_utc": "2026-09-22T00:43:45.235817+00:00",
-  "artifact_provenance": "Hashes collected at packaging time from the reference paths; no historical hashes were recorded when job 7330058 started.",
-  "model_reference_path": "/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/Gym/results/Inkling-Small-NVFP4",
-  "container_reference_path": "/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/Gym/results/vllm/vllm-openai:v0.29.0___mtp-fix-try02.sqsh",
-  "image_provenance": "Task image tags come from the pinned task revision. Historical image digests were not recorded; mutable tags do not establish byte-for-byte image identity.",
-  "tmux_reference_path": "/mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64",
-  "tmux_provenance": "The shared binary path and version are recorded; no historical binary hash was captured."
+  ]
 }
