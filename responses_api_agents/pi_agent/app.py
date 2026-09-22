@@ -601,6 +601,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         for name in unsupported:
             if values.get(name) is not None:
                 raise HTTPException(422, f"Native Pi does not support request field {name}")
+        output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
+        if not 0 < output_limit <= 2**53 - 1:
+            raise HTTPException(422, "Native Pi max_output_tokens must be a positive JavaScript-safe integer")
         if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
             raise HTTPException(422, "Pi owns tool selection and execution policy")
         if (body.metadata or {}).get("chat_template_kwargs") is not None:
@@ -637,6 +640,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         if body.max_output_tokens is not None:
             models["providers"]["nemo"]["models"][0]["maxTokens"] = body.max_output_tokens
         await state.upload_json("home/.pi/agent/models.json", models)
+        output_limit_extension = "output-limit.mjs"
+        await state.sandbox.upload(
+            Path(__file__).with_name(output_limit_extension), f"{state.directory}/{output_limit_extension}"
+        )
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -649,6 +656,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--model",
             self.config.model,
             "--no-extensions",
+            "--extension",
+            f"{state.directory}/{output_limit_extension}",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",

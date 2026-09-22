@@ -152,9 +152,12 @@ curl --fail-with-body -H 'Content-Type: application/json' \
 ```
 
 Input is one text user message, optionally preceded by a system message. The adapter also
-applies `instructions` and its configured system prompt. It forwards `max_output_tokens`
-to Pi's model configuration, but Pi 0.80.2 has been observed to omit the limit from inference
-requests. Do not rely on this field for enforcement yet; configure a limit on the model server.
+applies `instructions` and its configured system prompt. For native sessions, request
+`max_output_tokens` overrides the agent's configured default. An adapter-owned Pi extension
+sends the limit as `max_tokens` on every Chat Completions request and preserves any smaller
+upstream limit. This is a per-model-call cap, including reasoning tokens, rather than a total
+episode budget. Limits must be positive JavaScript-safe integers. Model-server configuration
+must not override this request limit with a larger value. Enforcement is tested with Pi 0.80.2.
 Unsupported sampling, history, and tool-policy overrides are rejected rather than silently
 ignored; configure sampling and chat-template settings on the Gym model server.
 
