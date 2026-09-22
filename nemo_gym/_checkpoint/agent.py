@@ -766,6 +766,12 @@ class AgentCheckpointParticipant:
             self._restored[(record.rollout_id, record.attempt_index + 1)] = record
         self._accepting = False
 
+    def close_for_restore(self) -> None:
+        """Close admission before checkpoint files are loaded and installed."""
+        if self._executions:
+            raise AgentCheckpointError("cannot restore agent state over live executions")
+        self._accepting = False
+
     def _remember_tombstone(self, key: tuple[str, int]) -> None:
         self._tombstones.add(key)
         self._generations.pop(key, None)
@@ -1223,25 +1229,35 @@ def load_agent_checkpoint_records(checkpoint_root: Path, manifest_path: Path) ->
     )
 
 
-def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
-    directory = _agent_checkpoint_directory(checkpoint_dir, participant.instance_name)
+def _load_agent_state(
+    checkpoint_dir: Path,
+    instance_name: Optional[str],
+) -> tuple[list[AgentBoundaryRecord], dict[str, Any]]:
+    """Read and validate agent state without mutating the live participant."""
+    directory = _agent_checkpoint_directory(checkpoint_dir, instance_name)
     manifest_path = directory / AGENT_MANIFEST_NAME
     if not manifest_path.exists():
         raise AgentCheckpointError(f"agent checkpoint has no committed manifest at {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("instance_name") != participant.instance_name:
+    if manifest.get("instance_name") != instance_name:
         raise AgentCheckpointError(
-            f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, "
-            f"not {participant.instance_name!r}"
+            f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, not {instance_name!r}"
         )
     records = _load_agent_archive_records(directory, checkpoint_root=checkpoint_dir, manifest=manifest)
     continuation_index = _validate_continuation_index(checkpoint_dir, manifest, records)
-    participant.install_restored(records)
     result: dict[str, Any] = {
         "records": len(records),
         "source_checkpoint_id": manifest["checkpoint_id"],
     }
     result["continuation_index"] = continuation_index.model_dump(mode="json")
+    return records, result
+
+
+def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
+    """Synchronously restore a participant for direct and test callers."""
+    participant.close_for_restore()
+    records, result = _load_agent_state(checkpoint_dir, participant.instance_name)
+    participant.install_restored(records)
     return result
 
 
@@ -1401,15 +1417,28 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
-            return await asyncio.to_thread(restore_agent_state, participant, Path(body.checkpoint_dir))
+            participant.close_for_restore()
+            records, result = await asyncio.to_thread(
+                _load_agent_state,
+                Path(body.checkpoint_dir),
+                participant.instance_name,
+            )
+            participant.install_restored(records)
+            return result
 
         return await fence.run_operation(
             body.checkpoint_id,
             "agent-checkpoint/restore",
-            allowed_phases=frozenset({CheckpointPhase.IDLE}),
+            allowed_phases=frozenset(
+                {
+                    CheckpointPhase.IDLE,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                }
+            ),
             phase_during=CheckpointPhase.RESTORING,
             phase_after=CheckpointPhase.RESTORED_PAUSED,
             run=run,
+            phase_on_failure=CheckpointPhase.RESTORE_FAILED_PAUSED,
         )
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/resume")
@@ -1431,6 +1460,7 @@ def install_agent_checkpoint(
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
                     CheckpointPhase.RESTORED_PAUSED,
                 }
             ),

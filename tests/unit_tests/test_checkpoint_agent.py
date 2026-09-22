@@ -32,6 +32,7 @@ from nemo_gym._checkpoint import (
     AGENT_MANIFEST_NAME,
     AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
+    AgentAdmissionClosedError,
     AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointError,
@@ -930,6 +931,91 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
     await participant.resume()
     await park
     await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_restore_loads_off_loop_and_installs_on_event_loop(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent_checkpoint._commit_agent_records(
+        [_boundary()],
+        tmp_path,
+        checkpoint_id="source-checkpoint",
+    )
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            checkpoint_mode="export_restore",
+            multi_process=MultiProcessCapability(mode="single_worker"),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(
+        app,
+        participant=participant,
+        fence=fence,
+        auth_token="secret",
+    )
+    event_loop_thread = threading.get_ident()
+    loader_started = threading.Event()
+    release_loader = threading.Event()
+    loader_thread: list[int] = []
+    install_thread: list[int] = []
+    original_loader = agent_checkpoint._load_agent_state
+    original_install = participant.install_restored
+
+    def blocking_loader(*args, **kwargs):
+        loader_thread.append(threading.get_ident())
+        loader_started.set()
+        assert release_loader.wait(timeout=5)
+        return original_loader(*args, **kwargs)
+
+    def record_install(records) -> None:
+        install_thread.append(threading.get_ident())
+        original_install(records)
+
+    monkeypatch.setattr(agent_checkpoint, "_load_agent_state", blocking_loader)
+    monkeypatch.setattr(participant, "install_restored", record_install)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        restore = asyncio.create_task(
+            client.post(
+                f"{agent_checkpoint.AGENT_CHECKPOINT_URL_PREFIX}/restore",
+                json={
+                    "checkpoint_id": "restore-1",
+                    "deadline_ts": time.time() + 5,
+                    "checkpoint_dir": str(tmp_path),
+                },
+                headers={"authorization": "Bearer secret"},
+            )
+        )
+        try:
+            assert await asyncio.wait_for(
+                asyncio.to_thread(loader_started.wait),
+                timeout=1,
+            )
+            assert participant._accepting is False
+            with pytest.raises(AgentAdmissionClosedError):
+                await participant.begin("new-rollout", 0, task=None)
+        finally:
+            release_loader.set()
+
+        response = await restore
+
+    assert response.status_code == 200
+    assert response.json()["records"] == 1
+    assert loader_thread[0] != event_loop_thread
+    assert install_thread == [event_loop_thread]
+    assert fence.phase == CheckpointPhase.RESTORED_PAUSED
 
 
 @pytest.mark.asyncio
