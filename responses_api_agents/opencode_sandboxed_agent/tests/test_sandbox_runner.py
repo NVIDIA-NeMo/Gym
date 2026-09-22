@@ -88,8 +88,9 @@ def test_spawn_error_is_not_success(tmp_path):
     assert summary["return_code"] != 0
 
 
-def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
-    # Deliver SIGTERM after the real child exists but before Popen returns to run().
+@pytest.mark.parametrize("interruption", ["signal", "exception"])
+def test_interruption_during_spawn_does_not_leak_child(tmp_path, interruption):
+    # Interrupt after the real child exists but before Popen returns to run().
     # Isolate signal handlers/subreaper state from pytest, and always reap the test child.
     driver = """
 import json, os, runpy, signal, subprocess, sys
@@ -99,6 +100,8 @@ children = []
 def interrupted_spawn(*args, **kwargs):
     child = spawn(*args, **kwargs)
     children.append(child)
+    if sys.argv[3] == 'exception':
+        raise RuntimeError('lost launch handle')
     os.kill(os.getpid(), signal.SIGTERM)
     return child
 subprocess.Popen = interrupted_spawn
@@ -108,7 +111,13 @@ try:
         'command': [sys.executable, '-c', 'import time; time.sleep(60)'],
         'timeout': 5, 'cleanup_timeout': 2,
     })
-    summary['child_alive'] = any(child.poll() is None for child in children)
+    summary['child_alive'] = False
+    for child in children:
+        try:
+            os.kill(child.pid, 0)
+            summary['child_alive'] = True
+        except ProcessLookupError:
+            pass
     print(json.dumps(summary))
 finally:
     for child in children:
@@ -117,7 +126,7 @@ finally:
         child.wait()
 """
     completed = subprocess.run(
-        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path), interruption],
         capture_output=True,
         text=True,
         errors="replace",
@@ -125,7 +134,9 @@ finally:
         check=True,
     )
     summary = json.loads(completed.stdout)
-    assert summary["timed_out"] is True
+    assert summary["timed_out"] is (interruption == "signal")
+    if interruption == "exception":
+        assert summary["error"] == "lost launch handle"
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
 
