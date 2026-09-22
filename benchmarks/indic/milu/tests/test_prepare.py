@@ -194,12 +194,12 @@ def test_native_config_and_server_wiring(monkeypatch, render_chat_template):
     }
     if render_chat_template is not None:
         overrides["policy_model"] = {
-            "responses_api_models": {"vllm_loglikelihood": {"render_chat_template": render_chat_template}}
+            "responses_api_models": {"vllm_model": {"render_chat_template": render_chat_template}}
         }
     config = global_config.GlobalConfigDictParser().parse_no_environment(
         initial_global_config_dict=OmegaConf.create(overrides)
     )
-    model = config["policy_model"]["responses_api_models"]["vllm_loglikelihood"]
+    model = config["policy_model"]["responses_api_models"]["vllm_model"]
     assert model["render_chat_template"] is (False if render_chat_template is None else render_chat_template)
     assert model["use_completions_api"] is True
     assert model["chat_template_kwargs"] is None

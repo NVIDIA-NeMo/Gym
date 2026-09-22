@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 config_paths:
-  - responses_api_models/vllm_loglikelihood/configs/vllm_loglikelihood.yaml
+  - responses_api_models/vllm_model/configs/vllm_model_completions.yaml
 
 milu_mcqa_resources_server:
   resources_servers:

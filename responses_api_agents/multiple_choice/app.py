@@ -11,7 +11,7 @@ from pydantic import Field
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentRunRequest, SimpleAgentVerifyResponse
-from responses_api_models.vllm_loglikelihood.app import LogLikelihoodResponse
+from responses_api_models.vllm_model.app import LogLikelihoodResponse
 
 
 class MultipleChoiceRunRequest(SimpleAgentRunRequest):

@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 from copy import deepcopy
 from threading import Lock
@@ -24,8 +25,8 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request, Response
-from pydantic import Field, PrivateAttr, model_validator
+from fastapi import FastAPI, Request, Response
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -157,6 +158,24 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
         LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
+class LogLikelihoodRequest(BaseModel):
+    context: str = Field(min_length=1)
+    continuations: list[str] = Field(min_length=2, max_length=26)
+
+
+class ContinuationScore(BaseModel):
+    continuation: str
+    logprob: float = Field(allow_inf_nan=False, strict=True)
+    context_tokens: int
+    continuation_token_ids: list[int]
+    token_logprobs: list[float]
+
+
+class LogLikelihoodResponse(BaseModel):
+    model: str
+    scores: list[ContinuationScore]
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -258,17 +277,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # which lifts the multi-turn restriction.
     use_completions_api: bool = False
 
-    # Only consulted when ``use_completions_api`` is True. When True, render
-    # the messages list to a prompt string via HF AutoTokenizer.apply_chat_template
-    # (tokenize=False, add_generation_prompt=True) before forwarding to
-    # /v1/completions. The HF tokenizer is loaded once at startup from
-    # ``tokenizer`` (or ``model`` if unset). Fails at startup if the loaded
-    # tokenizer has no chat_template.
+    # Render prompts client-side via HF AutoTokenizer.apply_chat_template.
+    # Generation consults this only with ``use_completions_api=True``;
+    # ``/loglikelihood`` consults it independently. The tokenizer is loaded once
+    # at startup from ``tokenizer`` (or ``model`` if unset).
     render_chat_template: bool = False
 
     # HF identifier or local path passed to AutoTokenizer.from_pretrained.
     # When None, falls back to ``model``.
     tokenizer: Optional[str] = None
+
+    # Controls for continuation scoring through ``/loglikelihood``.
+    max_context_tokens: int = Field(default=16384, ge=2)
+    likelihood_seed: int = 42
+    likelihood_add_special_tokens: bool = False
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -288,6 +310,69 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/loglikelihood")(self.loglikelihood)
+        return app
+
+    async def loglikelihood(self, request: Request, body: LogLikelihoodRequest) -> LogLikelihoodResponse:
+        client = self._resolve_client(request)
+        prompt = body.context
+        if not prompt.strip() or any(not continuation for continuation in body.continuations):
+            raise ValueError("Likelihood needs a non-whitespace context and nonempty continuations")
+        if self.config.render_chat_template:
+            prompt = self._render_messages_via_chat_template({"messages": [{"role": "user", "content": prompt}]})
+        context = prompt.rstrip()
+        suffix = prompt[len(context) :]
+        encoded = await client.create_tokenize(
+            model=self.config.model,
+            prompt=context,
+            add_special_tokens=self.config.likelihood_add_special_tokens,
+        )
+        context_ids = encoded["tokens"]
+        if not context_ids:
+            raise ValueError("Tokenizer returned an empty context")
+
+        async def score(continuation: str) -> ContinuationScore:
+            full = await client.create_tokenize(
+                model=self.config.model,
+                prompt=context + suffix + continuation,
+                add_special_tokens=self.config.likelihood_add_special_tokens,
+            )
+            token_ids = full["tokens"]
+            if token_ids[: len(context_ids)] != context_ids or len(token_ids) <= len(context_ids):
+                raise ValueError("Context/continuation token boundary is ambiguous; refusing an incorrect score")
+            if len(token_ids) + 1 > self.config.max_context_tokens:
+                raise ValueError("Likelihood prompt exceeds max_context_tokens; increase the documented context limit")
+            result = await client.create_completion(
+                model=self.config.model,
+                prompt=token_ids,
+                temperature=0,
+                max_tokens=1,
+                logprobs=1,
+                echo=True,
+                seed=self.config.likelihood_seed,
+            )
+            choices = result.get("choices", [])
+            if len(choices) != 1:
+                raise ValueError("Expected exactly one echoed completion per continuation")
+            probabilities = (choices[0].get("logprobs") or {}).get("token_logprobs", [])
+            if len(probabilities) != len(token_ids) + 1:
+                raise ValueError("vLLM did not return complete echoed prompt logprobs plus one generated token")
+            selected = probabilities[len(context_ids) : len(token_ids)]
+            if any(type(value) not in (float, int) or not math.isfinite(value) for value in selected):
+                raise ValueError("Missing/nonfinite continuation logprobs cannot be scored")
+            return ContinuationScore(
+                continuation=continuation,
+                logprob=sum(selected),
+                context_tokens=len(context_ids),
+                continuation_token_ids=token_ids[len(context_ids) :],
+                token_logprobs=selected,
+            )
+
+        scores = await asyncio.gather(*(score(continuation) for continuation in body.continuations))
+        return LogLikelihoodResponse(model=self.config.model, scores=scores)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -368,7 +453,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         self._chat_template_tokenizer = None
-        if self.config.use_completions_api and self.config.render_chat_template:
+        if self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
 
     def _load_chat_template_tokenizer(self):
@@ -386,7 +471,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         except ImportError as e:
             raise ImportError(
                 f"NeMo Gym server `{self.config.name}` is configured with "
-                "use_completions_api=true and render_chat_template=true, which requires "
+                "render_chat_template=true, which requires "
                 "the `transformers` package to load an HF tokenizer for chat-template "
                 "rendering. Install it (`pip install transformers`) or set "
                 "render_chat_template=false to use raw rendering instead."

@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from responses_api_models.vllm_loglikelihood.app import (
+from responses_api_models.vllm_model.app import (
     LogLikelihoodRequest,
-    VLLMLogLikelihoodConfig,
-    VLLMLogLikelihoodModel,
+    VLLMModel,
+    VLLMModelConfig,
 )
 
 
@@ -22,7 +22,7 @@ def setup(monkeypatch):
         return {"choices": [{"logprobs": {"token_logprobs": [None] + [-0.5] * (n - 1) + [-999]}}]}
 
     client.create_completion = AsyncMock(side_effect=completion)
-    config = VLLMLogLikelihoodConfig(
+    config = VLLMModelConfig(
         name="model",
         host="127.0.0.1",
         port=12345,
@@ -33,8 +33,8 @@ def setup(monkeypatch):
         return_token_id_information=False,
         uses_reasoning_parser=False,
     )
-    model = VLLMLogLikelihoodModel.model_construct(config=config, server_client=MagicMock(global_config_dict={}))
-    monkeypatch.setattr(VLLMLogLikelihoodModel, "_resolve_client", lambda self, request: client)
+    model = VLLMModel.model_construct(config=config, server_client=MagicMock(global_config_dict={}))
+    monkeypatch.setattr(VLLMModel, "_resolve_client", lambda self, request: client)
     return model, client
 
 
@@ -109,14 +109,8 @@ async def test_empty_engine_payload_rejected(setup, failure):
         await model.loglikelihood(MagicMock(), LogLikelihoodRequest(context="x", continuations=[" A", " B"]))
 
 
-def test_likelihood_route_is_added_to_native_model(setup, monkeypatch):
-    from fastapi import FastAPI
-
-    from responses_api_models.vllm_model.app import VLLMModel
-
-    app = FastAPI()
-    monkeypatch.setattr(VLLMModel, "setup_webserver", lambda self: app)
-    assert setup[0].setup_webserver() is app
+def test_likelihood_route_is_available_on_vllm_model(setup):
+    app = setup[0].setup_webserver()
     assert any(route.path == "/loglikelihood" for route in app.routes)
 
 
@@ -137,23 +131,17 @@ async def test_explicit_special_tokens_keep_continuation_offsets(setup):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trailing_whitespace", ["", "\n\n"])
 async def test_chat_template_scores_choices_after_assistant_prefix(setup, trailing_whitespace):
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
+    class ChatTemplateTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, tools, suffix):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert tools is None
+            return f"<bos><user>{messages[0]['content']}<eos><assistant>{suffix}"
 
     model, client = setup
     model.config.render_chat_template = True
     model.config.use_completions_api = True
-    model._chat_template_tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
-        bos_token="<bos>",
-        eos_token="<eos>",
-        chat_template=(
-            "{{ bos_token }}{% for message in messages %}"
-            "{{ '<' + message['role'] + '>' + message['content'] + eos_token }}"
-            "{% endfor %}{% if add_generation_prompt %}{{ '<assistant>' + suffix }}{% endif %}"
-        ),
-    )
+    model._chat_template_tokenizer = ChatTemplateTokenizer()
     model.config.chat_template_kwargs = {"suffix": trailing_whitespace}
     prompt = "Question: demo\nAnswer: B\n\nQuestion: test\nAnswer:"
     rendered_context = "<bos><user>" + prompt + "<eos><assistant>"
