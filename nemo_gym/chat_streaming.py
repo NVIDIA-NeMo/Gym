@@ -54,6 +54,27 @@ def _wants_usage(stream_options: Any) -> bool:
     return bool(isinstance(stream_options, dict) and stream_options.get("include_usage"))
 
 
+_PROMPT_CACHE_HINT_KEYS = frozenset({"cache_control"})
+
+
+def strip_prompt_cache_hints(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop Anthropic-style ``cache_control`` hints from messages, content parts and tools.
+
+    Clients such as Poolside's ``pool`` CLI attach ``cache_control: {"type": "ephemeral"}`` to the
+    last content part and tool spec of every request. The strict params models forbid unknown
+    fields and a Gym backend cannot act on the hint, so it is removed wherever it appears.
+    """
+
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: strip(item) for key, item in value.items() if key not in _PROMPT_CACHE_HINT_KEYS}
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        return value
+
+    return {key: (strip(value) if key in ("messages", "tools") else value) for key, value in body.items()}
+
+
 def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Map a streaming-dialect chat body onto the strict non-streaming params shape.
 
