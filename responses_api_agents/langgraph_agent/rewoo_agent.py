@@ -112,6 +112,7 @@ def _extract_text(outputs):
 
 
 class ReWOOAgent(LangGraphAgentAdapter):
+    ray_enabled = False
     config: ReWOOAgentConfig
 
     async def _call_model(self, state, prompt):

@@ -122,6 +122,7 @@ class CitationIfVerifyResponse(BaseVerifyResponse):
 
 
 class CitationIfResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: CitationIfResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

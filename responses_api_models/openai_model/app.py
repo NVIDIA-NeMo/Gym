@@ -63,6 +63,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: SimpleModelServerConfig
 
     def model_post_init(self, context):

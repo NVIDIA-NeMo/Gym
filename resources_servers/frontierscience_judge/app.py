@@ -235,6 +235,7 @@ class FrontierScienceJudgeVerifyResponse(BaseVerifyResponse):
 
 
 class FrontierScienceJudgeServer(SimpleResourcesServer):
+    ray_enabled = False
     config: FrontierScienceJudgeConfig
 
     def model_post_init(self, context):

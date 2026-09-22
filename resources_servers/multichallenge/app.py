@@ -239,6 +239,8 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
 class MultiChallengeServer(SimpleResourcesServer):
     """MultiChallenge evaluation server."""
 
+    ray_enabled = False
+
     config: MultiChallengeConfig
 
     def setup_webserver(self) -> FastAPI:

@@ -203,6 +203,7 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HermesAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: HermesAgentConfig
     sem: Semaphore = None
     # Set of agents currently running run_conversation, plus a flag tracking whether the single

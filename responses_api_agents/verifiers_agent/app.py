@@ -196,6 +196,7 @@ class VerifiersAgentRunRequest(BaseRunRequest):
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 

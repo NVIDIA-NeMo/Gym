@@ -179,6 +179,8 @@ class ArenaJudgeVerifyResponse(BaseVerifyResponse):
 class ArenaJudgeServer(SimpleResourcesServer):
     """Pairwise LLM-judge server for arena-hard-v2."""
 
+    ray_enabled = False
+
     config: ArenaJudgeConfig
 
     def model_post_init(self, context: Any) -> None:

@@ -78,6 +78,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: SimpleAgentConfig
 
     async def _create_episode(

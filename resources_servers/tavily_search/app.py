@@ -190,6 +190,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 10
     MAX_RESULT_CHARS: int = 2000

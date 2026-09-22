@@ -337,8 +337,16 @@ gym env start --config $config_paths
 ```
 
 The initialization happens in two places:
-1. **Main Process** (`cli.py`): Ray is initialized in the main process when `RunHelper.start()` is called
-2. **Server Process** (`server_utils.py`): Each server invokes `initialize_ray()` during its startup and connects to the same Ray cluster initialized by the main process.
+1. **Main Process** (`cli.py`): Ray is initialized in the main process when `RunHelper.start()` is called.
+2. **Server Process** (`server_utils.py`): Each Ray-enabled server connects to the shared cluster. A multi-worker Uvicorn manager does not connect; its workers connect independently.
+
+Server implementations declare whether they use Ray as a class attribute:
+```python
+class MyResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
+```
+
+`None` remains enabled for backward compatibility and produces a warning. A future release will interpret `None` as disabled, so new and maintained servers should declare `True` or `False` explicitly.
 
 ### Ray Configuration
 You can also specify a custom Ray cluster address in your config:
@@ -347,7 +355,7 @@ ray_head_node_address: "ray://your-cluster-address:10001"
 ```
 Training frameworks like [Nemo-RL](https://github.com/NVIDIA-NeMo/RL) will configure the Ray head node address, allowing remote tasks to run across all nodes in the cluster.
 
-If not specified, NeMo Gym will start a local Ray cluster and store the address in the global config for child processes to connect to.
+If no address is specified, NeMo Gym starts a local Ray cluster and stores the address in the global config. Only server implementations declaring `ray_enabled = True`, or relying on the temporary `None` compatibility default, connect to it.
 
 ## Using Ray for CPU-Intensive Tasks
 

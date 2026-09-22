@@ -169,6 +169,8 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
+    ray_enabled = False
+
     config: ScicodeAgentConfig
 
     def model_post_init(self, context):

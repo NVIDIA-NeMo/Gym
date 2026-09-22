@@ -308,6 +308,7 @@ def _build_comet_actor_class(use_worker_python: bool = False):
 
 
 class WmtTranslationResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: WmtTranslationResourcesServerConfig
 
     # COMET actor pool state — populated lazily during compute_metrics() so

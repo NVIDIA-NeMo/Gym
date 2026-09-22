@@ -192,6 +192,7 @@ class RagtruthVerifyResponse(BaseVerifyResponse):
 
 
 class RagtruthResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: RagtruthResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

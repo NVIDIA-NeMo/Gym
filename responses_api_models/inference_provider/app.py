@@ -54,6 +54,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
 
 
 class InferenceProvider(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: InferenceProviderConfig
 
     def model_post_init(self, context):

@@ -103,6 +103,7 @@ class SimpleAgentWithCompactionVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: SimpleAgentWithCompactionConfig
 
     async def _tool_response_items(

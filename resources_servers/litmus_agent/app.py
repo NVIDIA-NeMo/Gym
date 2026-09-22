@@ -662,6 +662,7 @@ def compute_reward(
 
 
 class LitmusAgentResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LitmusAgentConfig
 
     # Per-instance sandbox state. _session_locks serializes calls within a

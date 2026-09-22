@@ -135,6 +135,7 @@ def _extract_input_text(responses_create_params) -> str:
 
 
 class LCNIAHResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LCNIAHResourcesServerConfig
 
     async def verify(self, body: LCNIAHVerifyRequest) -> LCNIAHVerifyResponse:

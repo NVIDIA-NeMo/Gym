@@ -279,6 +279,7 @@ class PrimeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class PrimeAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: PrimeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

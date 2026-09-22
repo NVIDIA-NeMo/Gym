@@ -457,6 +457,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: OpenCodeSandboxedAgentConfig
 
     def model_post_init(self, context: Any, /) -> None:

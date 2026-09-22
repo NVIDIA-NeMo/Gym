@@ -178,6 +178,7 @@ class BixBenchDataset(TaskDataset[BixBenchEnv]):
 
 
 class BixBenchResourcesServer(AviaryResourcesServer[BixBenchEnv, BixBenchDataset]):
+    ray_enabled = False
     dataset: BixBenchDataset = Field(default_factory=lambda: BixBenchDataset())
 
 

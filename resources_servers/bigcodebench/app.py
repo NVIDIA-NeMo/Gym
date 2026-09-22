@@ -47,6 +47,7 @@ class BigCodeBenchVerifyResponse(BaseVerifyResponse):
 
 
 class BigCodeBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: BigCodeBenchResourcesServerConfig
 
     def model_post_init(self, context):

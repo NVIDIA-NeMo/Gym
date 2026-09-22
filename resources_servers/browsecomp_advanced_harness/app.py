@@ -915,6 +915,7 @@ def _last_assistant_text(response) -> str:
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TavilySearchResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)

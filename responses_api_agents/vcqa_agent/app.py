@@ -201,6 +201,7 @@ class VcqaAgentVerifyResponse(BaseVerifyResponse):
 
 
 class VcqaAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: VcqaAgentConfig
 
     async def responses(

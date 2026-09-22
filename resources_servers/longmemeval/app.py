@@ -270,6 +270,7 @@ class LongMemEvalVerifyResponse(BaseVerifyResponse):
 
 
 class LongMemEvalResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LongMemEvalResourcesServerConfig
 
     _semaphore: Any = PrivateAttr(default=None)

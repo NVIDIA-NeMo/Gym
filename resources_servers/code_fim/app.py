@@ -186,6 +186,7 @@ def postprocess_completion(raw_code: str, prefix: str, suffix: str) -> str:
 # Server
 # ----------------------------
 class CodeFIMResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: CodeFIMResourcesServerConfig
 
     def model_post_init(self, context):

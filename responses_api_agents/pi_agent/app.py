@@ -446,6 +446,8 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
 class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
+    ray_enabled = False
+
     config: PiAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

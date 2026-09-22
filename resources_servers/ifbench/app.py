@@ -93,6 +93,7 @@ def _loose_response_variants(response: str) -> List[str]:
 
 
 class IFBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: IFBenchResourcesServerConfig
 
     def __init__(self, **kwargs):

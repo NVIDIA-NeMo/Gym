@@ -408,6 +408,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     - /submit_final_result: Submit the final answer
     """
 
+    ray_enabled = False
+
     config: FinanceAgentResourcesServerConfig
 
     def model_post_init(self, context):

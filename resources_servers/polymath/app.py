@@ -72,6 +72,8 @@ class PolyMathVerifyResponse(LibraryJudgeMathVerifyResponse):
 class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge + difficulty-weighted aggregation + per-language metrics."""
 
+    ray_enabled = False
+
     config: PolyMathResourcesServerConfig
 
     async def verify(self, body: PolyMathVerifyRequest) -> PolyMathVerifyResponse:  # type: ignore[override]

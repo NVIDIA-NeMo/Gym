@@ -350,6 +350,8 @@ def _extract_question_text(
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
+    ray_enabled = False
+
     config: LLMJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):

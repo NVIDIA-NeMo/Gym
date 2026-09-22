@@ -382,6 +382,8 @@ class _NemoGymRetrievalLLM:
 class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     """Exposes the upstream Vals finance-agent-v2 tools as HTTP endpoints."""
 
+    ray_enabled = False
+
     config: FinanceAgentV2ResourcesServerConfig
 
     # Tool name -> upstream Tool instance (None when the tool is unavailable,

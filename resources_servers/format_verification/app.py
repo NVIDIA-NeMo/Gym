@@ -39,6 +39,7 @@ class FormatVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class FormatVerificationResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: FormatVerificationResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
