@@ -43,6 +43,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -168,7 +170,13 @@ def parse_pool_events(events_text: str) -> tuple[List[NeMoGymResponseOutputItem]
         match event:
             case {"type": "reasoning", "reasoning": str(think)} if think.strip():
                 flush_pending_call("")
-                emit_message(f"<think>\n{think}\n</think>")
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[NeMoGymSummary(text=think, type="summary_text")],
+                        status="completed",
+                    )
+                )
             case {"type": "reasoning"} | {"type": "thought"}:
                 # thought repeats the preceding reasoning event.
                 pass
