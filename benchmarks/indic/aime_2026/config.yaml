@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/matharena_aime/configs/matharena_aime.yaml
+
+# Native Gym supplies distinct, reproducible seeds to the four independent samples.
+num_repeats: 4
+num_repeats_add_seed: true
+responses_create_params:
+  max_output_tokens: 120000
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        enable_thinking: true
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 64
+
+matharena_aime_agent:
+  responses_api_agents:
+    matharena_aime:
+      datasets:
+        - name: indic_aime_2026
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/aime_2026/data/aime_2026_benchmark.jsonl
+          prepare_script: benchmarks/indic/aime_2026/prepare.py
+          prompt_config: benchmarks/indic/aime_2026/prompts/default.yaml
+          num_repeats: 1
+          license: CC-BY-NC-SA-4.0
