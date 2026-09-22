@@ -1,0 +1,99 @@
+# VERA-MH — chatbot safety in simulated suicide-risk conversations (arXiv:2605.13318;
+# https://github.com/SpringCare/VERA-MH at 2c9d1fc, rubric v1.2).
+#
+# Two servers implement the benchmark. `vera_mh_agent` simulates the conversation between a
+# persona model (the user simulator) and the policy model under evaluation; `vera_mh` (this
+# resources server) judges the transcript with the vendored v1.2 rubric and computes the
+# VERA-MH score. The 200-row recommended profile is built by `gym eval prepare --benchmark vera_mh`.
+#
+# The judge and the two user simulators are reached through OpenAI-compatible chat completions.
+# Defaults follow upstream's recommended profile: GPT 5.4 judge and GPT 5.2 simulator from OpenAI
+# (OPENAI_API_KEY), Claude Opus 4.5 simulator through OpenRouter (OPENROUTER_API_KEY). Any other
+# route to the same models is set per role with VERA_MH_<ROLE>_BASE_URL / _API_KEY / _MODEL.
+
+vera_mh:
+  resources_servers:
+    vera_mh:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: VERA-MH simulated mental-health crisis conversations judged with the clinical v1.2 rubric by GPT 5.4
+      value: Measure suicide-risk detection, confirmation, guidance to human care, supportive conversation and AI boundaries in multi-turn chats
+      judge_model_server:
+        type: responses_api_models
+        name: vera_mh_judge
+      # Recommended judge profile (upstream README "Recommended settings", CHANGELOG v1.2.0): GPT 5.4 at
+      # reasoning_effort=low. Upstream drops its temperature=0 default for gpt-5+ reasoning models, so
+      # it stays unset here.
+      judge_reasoning_effort: low
+      judge_temperature: null
+      # Upstream allows 3 retries when the judge's reply is not the requested JSON. One unparseable
+      # question discards the whole conversation, and a slot that failed once tends to fail again, so
+      # more attempts are allowed here. A retry only re-asks the same question; it changes no verdict.
+      judge_parse_retries: 8
+
+vera_mh_agent:
+  responses_api_agents:
+    vera_mh_agent:
+      entrypoint: app.py
+      domain: safety
+      description: VERA-MH persona-vs-provider conversation simulation with separately named simulator and provider model servers
+      value: Evaluate chatbot safety in simulated suicide-risk conversations before judging with the clinical rubric
+      resources_server:
+        type: resources_servers
+        name: vera_mh
+      # The chatbot under evaluation.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Recommended profile: GPT 5.2 and Claude Opus 4.5 user agents, keyed by the row's `user_simulator`.
+      user_model_servers:
+        gpt-5.2:
+          type: responses_api_models
+          name: vera_mh_user_gpt52
+        claude-opus-4-5:
+          type: responses_api_models
+          name: vera_mh_user_opus45
+      # Upstream passes no sampling overrides to the user agents; LangChain's ChatAnthropic client caps
+      # Claude replies at 1024 tokens by default, which is reproduced here. Persona replies are short.
+      user_responses_create_params:
+        claude-opus-4-5:
+          input: []
+          max_output_tokens: 1024
+      max_turns: 30
+      persona_speaks_first: true
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/vera_mh/data/example.jsonl
+          num_repeats: 1
+
+# --- Judge and user-simulator model servers ---------------------------------------------------
+# Declared here so the config resolves on its own; keys and any non-default route come from the
+# environment.
+vera_mh_judge:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:VERA_MH_JUDGE_BASE_URL,'https://api.openai.com/v1'}
+      api_key: ${oc.env:VERA_MH_JUDGE_API_KEY,${oc.env:OPENAI_API_KEY,''}}
+      model: ${oc.env:VERA_MH_JUDGE_MODEL,gpt-5.4}
+      num_concurrent_requests: ${oc.decode:${oc.env:VERA_MH_JUDGE_CONCURRENCY,8}}
+
+vera_mh_user_gpt52:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:VERA_MH_USER_GPT52_BASE_URL,'https://api.openai.com/v1'}
+      api_key: ${oc.env:VERA_MH_USER_GPT52_API_KEY,${oc.env:OPENAI_API_KEY,''}}
+      model: ${oc.env:VERA_MH_USER_GPT52_MODEL,gpt-5.2}
+      num_concurrent_requests: ${oc.decode:${oc.env:VERA_MH_USER_CONCURRENCY,8}}
+
+vera_mh_user_opus45:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:VERA_MH_USER_OPUS45_BASE_URL,'https://openrouter.ai/api/v1'}
+      api_key: ${oc.env:VERA_MH_USER_OPUS45_API_KEY,${oc.env:OPENROUTER_API_KEY,''}}
+      model: ${oc.env:VERA_MH_USER_OPUS45_MODEL,anthropic/claude-opus-4.5}
+      num_concurrent_requests: ${oc.decode:${oc.env:VERA_MH_USER_CONCURRENCY,8}}
