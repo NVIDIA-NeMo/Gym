@@ -15,7 +15,6 @@
 import asyncio
 import json
 import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -44,6 +43,7 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchMetrics,
     SweBenchMultilingualDatasetProcessor,
     SWEBenchVerifyResponse,
+    SWERolloutExecutor,
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
     SWEBenchWrapperInstanceConfig,
@@ -51,21 +51,11 @@ from responses_api_agents.swe_agents.app import (
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
     _render_opencode_user_message,
+    _run_rollout_in_worker_scratch,
     _resolve_opencode_workspace_path,
     runner_ray_remote,
     update_metrics,
 )
-
-
-SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_swebench_results():
-    """Remove swebench_results_* dirs that model_post_init creates in the source tree."""
-    yield
-    for d in SWE_AGENTS_DIR.glob("swebench_results_*"):
-        shutil.rmtree(d, ignore_errors=True)
 
 
 ########################################
@@ -144,6 +134,7 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
             },
         ),
         persistent_dir=persistent_dir,
+        harness_runtime_dir=persistent_dir / "harness_runtime",
         ray_queue_timestamp=time.time(),
         inference_params={"temperature": 1.0, "top_p": 1.0},
         agent_run_id="test_run_123",
@@ -224,6 +215,7 @@ class TestSWEBenchWrapperConfig:
         assert config.agent_prompt_override_random is False
         assert config.openhands_should_log is False
         assert config.debug is False
+        assert config.runtime_scratch_dir == Path("/tmp")
         assert config.agent_framework_repo is None
         assert config.agent_framework_commit == "HEAD"
 
@@ -792,6 +784,9 @@ class TestSweBenchDatasetProcessor:
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert "run_local_evaluation" in result.command
             assert "django__django-12345" in result.command
+            assert "cd /trajectories_mount/harness_runtime/eval_harness/swebench" in result.command
+            assert 'PYTHONPATH="/swebench_setup/SWE-bench:' in result.command
+            assert "PYTHONDONTWRITEBYTECODE=1" in result.command
             assert result.mode == "eval"
             assert result.timeout == config.swebench_tests_timeout + 120
 
@@ -812,6 +807,12 @@ class TestSweBenchMultilingualDatasetProcessor:
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert "SWE-bench_Multilingual" in result.command
+            assert (
+                "cd /trajectories_mount/harness_runtime/eval_harness/swebench_multilingual"
+                in result.command
+            )
+            assert 'PYTHONPATH="/swebench_multilingual_setup/SWE-bench_Multilingual:' in result.command
+            assert "PYTHONDONTWRITEBYTECODE=1" in result.command
             assert result.mode == "eval"
 
 
@@ -828,6 +829,9 @@ class TestR2EGymDatasetProcessor:
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert "run_local_evaluation.py" in result.command
+            assert "cd /trajectories_mount/harness_runtime/eval_harness/r2e_gym" in result.command
+            assert 'PYTHONPATH="/r2egym_setup/R2E-Gym/src:' in result.command
+            assert "PYTHONDONTWRITEBYTECODE=1" in result.command
             assert result.mode == "eval"
 
 
@@ -846,6 +850,7 @@ class TestOpenHandsHarnessProcessor:
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert result.mode == "agent"
             assert "timeout" in result.command
+            assert str(config.harness_runtime_dir) in result.expected_file_pattern
             assert "run_infer.sh" in self._read_agent_script(config)
 
     def _read_agent_script(self, config) -> str:
@@ -922,6 +927,41 @@ class TestOpenHandsHarnessProcessor:
             script = self._read_agent_script(config)
             assert "user_prompt.j2" in script
             assert "system_prompt.j2" in script
+
+    def test_replay_system_prompt_still_overrides_selected_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            selected_system_prompt = Path(tmpdir) / "selected_system_prompt.j2"
+            selected_system_prompt.write_text("selected system prompt")
+            replay_messages = [
+                {"role": "system", "content": "replayed system prompt"},
+                {"role": "user", "content": "continue fixing the bug"},
+            ]
+            config = _make_instance_config(
+                tmpdir,
+                resolved_system_prompt_template=str(selected_system_prompt),
+                problem_info={
+                    "problem_statement": "Fix",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["/containers/{instance_id}.sif"],
+                    "replay_messages": json.dumps(replay_messages),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+
+            replay_system_prompt = config.persistent_dir / "replay_system_prompt.j2"
+            assert config.resolved_system_prompt_template == str(replay_system_prompt)
+            assert replay_system_prompt.read_text() == "replayed system prompt"
+            assert selected_system_prompt.read_text() == "selected system prompt"
+            script = self._read_agent_script(config)
+            assert "/openhands_setup/OpenHands/system_prompt.j2" in script
+            assert "/trajectories_mount/replay_messages.json" in script
 
     def test_get_run_command_diversify_tool_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1154,15 +1194,16 @@ class TestOpenCodeHarnessProcessor:
             # default SWE-bench dataset → /testbed
             assert "/testbed" in rendered
 
-    def test_get_run_command_search_path_targets_opencode_dir(self, _stub_model_server_lookup) -> None:
+    def test_get_run_command_search_path_targets_worker_scratch(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self._opencode_config(tmpdir)
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenCodeHarnessProcessor(config=config)
             result = processor.get_run_command()
-            # gym globs `expected_file_pattern` post-run; must point under the
-            # opencode setup dir, not the openhands one.
-            assert str(config.opencode_setup_dir) in result.expected_file_pattern
+            # The post-run glob must stay on worker-local scratch rather than
+            # writing completion files into the shared opencode checkout.
+            assert str(config.harness_runtime_dir) in result.expected_file_pattern
+            assert str(config.opencode_setup_dir) not in result.expected_file_pattern
             assert "output.jsonl" in result.expected_file_pattern
 
     def test_get_run_command_requires_opencode_setup_dir(self, _stub_model_server_lookup) -> None:
@@ -1240,7 +1281,7 @@ class TestOpencodeMultiSessionCopy:
         return RunOpenHandsAgent(config=cfg)
 
     def _eval_dir(self, agent: RunOpenHandsAgent) -> Path:
-        eval_dir = Path(agent.config.opencode_setup_dir) / "opencode" / agent.config.eval_dir_in_openhands
+        eval_dir = agent.config.harness_runtime_dir / agent.config.eval_dir_in_openhands
         eval_dir.mkdir(parents=True, exist_ok=True)
         return eval_dir
 
@@ -1419,6 +1460,370 @@ class TestRunnerRayRemote:
     def test_is_ray_remote(self) -> None:
         assert hasattr(runner_ray_remote, "remote")
 
+    def test_compact_response_round_trip_is_exact(self) -> None:
+        response = {
+            "id": "swebench-test",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "bash",
+                    "call_id": "call-1",
+                    "arguments": '{"command":"pwd"}',
+                    "prompt_token_ids": [10, 11, 12],
+                    "generation_token_ids": [20, 21],
+                    "generation_log_probs": [-0.1, -0.2],
+                },
+                {"type": "function_call_output", "call_id": "call-1", "output": "/testbed"},
+                {
+                    "type": "message",
+                    "id": "message-1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    "prompt_token_ids": [10, 11, 12, 20, 21, 30, 31],
+                    "generation_token_ids": [40],
+                    "generation_log_probs": [-0.3],
+                },
+                {
+                    # Exercise a non-monotonic prompt too. The encoder uses an
+                    # exact common prefix, not an assumption that prompts grow.
+                    "type": "message",
+                    "id": "message-2",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "retry", "annotations": []}],
+                    "prompt_token_ids": [99, 100],
+                    "generation_token_ids": [101],
+                    "generation_log_probs": [-0.4],
+                },
+            ],
+            "metadata": {"unicode": "snowman: \u2603"},
+        }
+        original = json.loads(json.dumps(response))
+
+        packed = swe_app._pack_ray_response(response)
+
+        assert isinstance(packed, bytes)
+        assert swe_app._unpack_ray_response(packed) == original
+        assert response == original
+
+    def test_compacted_transport_matches_legacy_transport_exactly(self) -> None:
+        """The optimization may change Ray bytes, never the received response."""
+        response = {
+            "id": "swebench-transport-ab",
+            "object": "response",
+            "created_at": 1_755_000_000,
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": [],
+                    "encrypted_content": None,
+                    "prompt_token_ids": [10, 11, 12],
+                    "generation_token_ids": [20, 21],
+                    "generation_log_probs": [-0.1, -0.2],
+                    "routed_experts": [[[1, 2], [3, 4]]],
+                },
+                {
+                    "type": "function_call",
+                    "id": "function-call-1",
+                    "name": "bash",
+                    "call_id": "call-1",
+                    "arguments": '{"command":"git diff"}',
+                    "status": "completed",
+                    "prompt_token_ids": [10, 11, 12, 20, 21, 30, 31],
+                    "generation_token_ids": [40, 41],
+                    "generation_log_probs": [-0.3, -0.4],
+                    "routed_experts": None,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "diff --git a/file.py b/file.py",
+                    "status": "completed",
+                },
+                {
+                    "type": "message",
+                    "id": "message-1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Submitted the patch.",
+                            "annotations": [],
+                            "logprobs": None,
+                        }
+                    ],
+                    "prompt_token_ids": [
+                        10,
+                        11,
+                        12,
+                        20,
+                        21,
+                        30,
+                        31,
+                        40,
+                        41,
+                        50,
+                        51,
+                    ],
+                    "generation_token_ids": [60, 61],
+                    "generation_log_probs": [-0.5, -0.6],
+                    "routed_experts": [[[5, 6], [7, 8]]],
+                },
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "metadata": {
+                "metrics": json.dumps(
+                    {
+                        "resolved": True,
+                        "mask_sample": False,
+                        "model_patch": "diff --git a/file.py b/file.py\n",
+                    }
+                ),
+                "unicode": "snowman: \u2603",
+            },
+        }
+        original = json.loads(json.dumps(response))
+
+        legacy_payload = swe_app._prepare_ray_response(
+            response,
+            compression_enabled=False,
+        )
+        compact_payload = swe_app._prepare_ray_response(
+            response,
+            compression_enabled=True,
+            log_stats=False,
+            verify_equivalence=True,
+        )
+
+        assert legacy_payload is response
+        assert isinstance(compact_payload, bytes)
+        legacy_received = swe_app._unpack_ray_response(legacy_payload)
+        compact_received = swe_app._unpack_ray_response(compact_payload)
+        assert legacy_received == original
+        assert compact_received == legacy_received
+        assert swe_app.orjson.dumps(
+            compact_received, option=swe_app.orjson.OPT_SORT_KEYS
+        ) == swe_app.orjson.dumps(
+            legacy_received, option=swe_app.orjson.OPT_SORT_KEYS
+        )
+        assert response == original
+
+    def test_compaction_substantially_reduces_long_trajectory(self) -> None:
+        output = []
+        prompt = list(range(2_000))
+        for turn in range(20):
+            generation = list(range(100_000 + turn * 200, 100_000 + (turn + 1) * 200))
+            output.append(
+                {
+                    "type": "function_call",
+                    "name": "bash",
+                    "call_id": f"call-{turn}",
+                    "arguments": '{"command":"true"}',
+                    "prompt_token_ids": list(prompt),
+                    "generation_token_ids": generation,
+                    "generation_log_probs": [-0.1] * len(generation),
+                }
+            )
+            # Approximate the tool-result tokens appended before the next model
+            # call, in addition to the preceding generated tokens.
+            prompt.extend(generation)
+            prompt.extend(range(200_000 + turn * 20, 200_000 + (turn + 1) * 20))
+
+        response = {"id": "long-trajectory", "output": output}
+        legacy_json_size = len(swe_app.orjson.dumps(response))
+        packed = swe_app._pack_ray_response(response)
+
+        assert swe_app._unpack_ray_response(packed) == response
+        assert len(packed) < legacy_json_size * 0.35
+
+    def test_unpack_accepts_legacy_ray_dictionary(self) -> None:
+        response = {"id": "legacy", "output": []}
+        assert swe_app._unpack_ray_response(response) is response
+
+    def test_compression_is_disabled_by_default(self, monkeypatch) -> None:
+        response = {"id": "legacy-default", "output": []}
+        monkeypatch.delenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", raising=False)
+
+        assert swe_app._prepare_ray_response(response) is response
+
+    def test_compression_can_be_disabled_without_copying(self, monkeypatch) -> None:
+        response = {"id": "legacy-disabled", "output": []}
+        monkeypatch.setenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", "0")
+
+        assert swe_app._prepare_ray_response(response) is response
+
+    def test_explicit_compression_setting_overrides_worker_environment(self, monkeypatch) -> None:
+        response = {"id": "explicit-config", "output": []}
+        monkeypatch.setenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", "0")
+
+        payload = swe_app._prepare_ray_response(
+            response,
+            compression_enabled=True,
+            log_stats=False,
+        )
+
+        assert isinstance(payload, bytes)
+        assert swe_app._unpack_ray_response(payload) == response
+
+    def test_explicit_disable_overrides_truthy_worker_environment(self, monkeypatch) -> None:
+        response = {"id": "explicit-disabled", "output": []}
+        monkeypatch.setenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", "1")
+
+        assert (
+            swe_app._prepare_ray_response(response, compression_enabled=False)
+            is response
+        )
+
+    def test_explicit_stats_setting_does_not_depend_on_worker_environment(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_SWE_RAY_RESPONSE_STATS", "0")
+
+        swe_app._pack_ray_response(
+            {"id": "explicit-stats", "output": []},
+            log_stats=True,
+        )
+
+        assert "[SWE RAY RESPONSE]" in capsys.readouterr().out
+
+    def test_pack_failure_falls_back_to_legacy_dictionary(self, monkeypatch) -> None:
+        response = {"id": "legacy-fallback", "output": []}
+        monkeypatch.setenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", "1")
+        monkeypatch.setattr(swe_app, "_pack_ray_response", MagicMock(side_effect=ValueError("new shape")))
+
+        assert swe_app._prepare_ray_response(response) is response
+
+    def test_strict_equivalence_rejects_pack_fallback(self, monkeypatch) -> None:
+        response = {"id": "strict-no-fallback", "output": []}
+        monkeypatch.setattr(
+            swe_app,
+            "_pack_ray_response",
+            MagicMock(side_effect=ValueError("new shape")),
+        )
+
+        with pytest.raises(RuntimeError, match="strict equivalence verification"):
+            swe_app._prepare_ray_response(
+                response,
+                compression_enabled=True,
+                verify_equivalence=True,
+            )
+
+    def test_non_finite_logprob_falls_back_without_data_loss(self, monkeypatch) -> None:
+        response = {
+            "id": "non-finite-logprob",
+            "output": [
+                {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3],
+                    "generation_log_probs": [float("-inf")],
+                }
+            ],
+        }
+        monkeypatch.setenv("NEMO_GYM_SWE_COMPRESS_RAY_RESPONSES", "1")
+
+        payload = swe_app._prepare_ray_response(response)
+
+        assert payload is response
+        assert payload["output"][0]["generation_log_probs"][0] == float("-inf")
+
+    def test_unpack_rejects_corrupt_envelope(self) -> None:
+        packed = swe_app._pack_ray_response({"id": "test", "output": []})
+        with pytest.raises(ValueError, match="Could not decode"):
+            swe_app._unpack_ray_response(packed[:-3])
+
+    @pytest.mark.parametrize("worker_error", [None, RuntimeError("rollout failed")])
+    def test_worker_scratch_is_always_removed(self, monkeypatch, tmp_path, worker_error) -> None:
+        config = _minimal_server_config()
+        config.runtime_scratch_dir = tmp_path
+        server_config = SWEBenchWrapperServerConfig(
+            ng_global_config_dict_str="'{}'",
+            model_server_name="test_model",
+            openhands_setup_dir=tmp_path / "openhands",
+            swebench_setup_dir=tmp_path / "swebench",
+            r2e_gym_setup_dir=tmp_path / "r2e",
+            swe_rebench_setup_dir=tmp_path / "rebench",
+            swebench_multilingual_setup_dir=tmp_path / "swebench_ml",
+            run_session_id="test_session",
+            base_results_dir=tmp_path / "unused",
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            model="test-model",
+            input=[],
+            metadata={
+                "problem_statement": "Fix bug",
+                "instance_id": "django__django-12345",
+                "base_commit": "abc123",
+                "dataset_name": "SWE-bench",
+                "split": "test",
+                "instance_dict": "{}",
+            },
+        )
+        expected_response = NeMoGymResponse(
+            id="swebench-django__django-12345",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={},
+        )
+
+        def fake_setup_params(wrapper, _body):
+            instance_root = wrapper._swe_bench_wrapper_server_config.base_results_dir / "instance"
+            eval_private_dir = instance_root / "eval_private"
+            eval_private_dir.mkdir(parents=True)
+            params = MagicMock()
+            params.eval_private_dir = eval_private_dir
+            return params, MagicMock()
+
+        # A Ray task is a generic default_worker.py process. It does not carry
+        # NEMO_GYM_CONFIG_DICT and must not enter any server-only initialization,
+        # even when its argv contains Ray's internal flags.
+        monkeypatch.delenv("NEMO_GYM_CONFIG_DICT", raising=False)
+        monkeypatch.setattr(
+            swe_app.sys,
+            "argv",
+            [
+                "default_worker.py",
+                "--node-ip-address=10.0.0.1",
+                "--node-manager-port=12345",
+                "--runtime-env-hash=67890",
+            ],
+        )
+        harness_setup = MagicMock(side_effect=AssertionError("server setup ran in Ray worker"))
+        global_config = MagicMock(side_effect=AssertionError("global config loaded in Ray worker"))
+        monkeypatch.setattr(OpenHandsHarnessProcessor, "setup", harness_setup)
+        monkeypatch.setattr(swe_app, "get_global_config_dict", global_config)
+
+        monkeypatch.setattr(SWERolloutExecutor, "_setup_params", fake_setup_params)
+        worker_rollout = (
+            AsyncMock(side_effect=worker_error) if worker_error else AsyncMock(return_value=expected_response)
+        )
+        monkeypatch.setattr(SWERolloutExecutor, "_run_worker_rollout", worker_rollout)
+
+        args = (
+            config.model_dump(mode="json"),
+            server_config.model_dump(mode="json"),
+            body.model_dump(mode="json"),
+        )
+        if worker_error:
+            with pytest.raises(RuntimeError, match="rollout failed"):
+                _run_rollout_in_worker_scratch(*args)
+        else:
+            result = _run_rollout_in_worker_scratch(*args)
+            assert result["id"] == expected_response.id
+        harness_setup.assert_not_called()
+        global_config.assert_not_called()
+        assert list(tmp_path.iterdir()) == []
+
 
 ########################################
 # ActiveContainerCommand tests
@@ -1458,7 +1863,7 @@ class TestRunOpenHandsAgent:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
             # Create required dirs
-            eval_dir = Path(agent.config.openhands_setup_dir) / "OpenHands" / agent.config.eval_dir_in_openhands
+            eval_dir = agent.config.harness_runtime_dir / agent.config.eval_dir_in_openhands
             eval_dir.mkdir(parents=True, exist_ok=True)
             traj_root = agent.config.trajectories_root
             traj_root.mkdir(parents=True, exist_ok=True)
@@ -1469,7 +1874,7 @@ class TestRunOpenHandsAgent:
     def test_openhands_dir_copy_from_host_with_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
-            eval_dir = Path(agent.config.openhands_setup_dir) / "OpenHands" / agent.config.eval_dir_in_openhands
+            eval_dir = agent.config.harness_runtime_dir / agent.config.eval_dir_in_openhands
             eval_dir.mkdir(parents=True, exist_ok=True)
             traj_root = agent.config.trajectories_root
             traj_root.mkdir(parents=True, exist_ok=True)
@@ -1486,7 +1891,7 @@ class TestRunOpenHandsAgent:
     def test_openhands_dir_copy_from_host_relative_output_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
-            eval_dir = Path(agent.config.openhands_setup_dir) / "OpenHands" / agent.config.eval_dir_in_openhands
+            eval_dir = agent.config.harness_runtime_dir / agent.config.eval_dir_in_openhands
             eval_dir.mkdir(parents=True, exist_ok=True)
             traj_root = agent.config.trajectories_root
             traj_root.mkdir(parents=True, exist_ok=True)
@@ -1503,7 +1908,7 @@ class TestRunOpenHandsAgent:
     def test_openhands_dir_copy_no_output_file_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
-            eval_dir = Path(agent.config.openhands_setup_dir) / "OpenHands" / agent.config.eval_dir_in_openhands
+            eval_dir = agent.config.harness_runtime_dir / agent.config.eval_dir_in_openhands
             eval_dir.mkdir(parents=True, exist_ok=True)
             traj_root = agent.config.trajectories_root
             traj_root.mkdir(parents=True, exist_ok=True)
@@ -1529,6 +1934,48 @@ class TestRunOpenHandsAgent:
             await active.process.wait()
             active.log_file.close()
             assert active.log_file_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_eval_start_failure_cleans_started_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir)
+            started_agent = MagicMock(spec=ActiveContainerCommand)
+            start_mock = AsyncMock(side_effect=[started_agent, RuntimeError("eval start failed")])
+            kill_mock = AsyncMock()
+
+            with (
+                patch.object(RunOpenHandsAgent, "_start_container_command", start_mock),
+                patch.object(RunOpenHandsAgent, "_kill_active_command", kill_mock),
+            ):
+                with pytest.raises(RuntimeError, match="eval start failed"):
+                    await agent.process_single_datapoint()
+
+            kill_mock.assert_awaited_once_with(started_agent)
+
+    @pytest.mark.asyncio
+    async def test_subprocess_start_failure_closes_log_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir)
+            agent.config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            command = ExecuteContainerCommandArgs(
+                command="true",
+                expected_file_pattern="/tmp/*.json",
+                mode="agent",
+                timeout=10,
+            )
+            log_handle = MagicMock()
+
+            with (
+                patch("builtins.open", return_value=log_handle),
+                patch(
+                    "responses_api_agents.swe_agents.app.asyncio.create_subprocess_shell",
+                    AsyncMock(side_effect=RuntimeError("spawn failed")),
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="spawn failed"):
+                    await agent._start_container_command(command, "true")
+
+            log_handle.close.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_finish_container_command_success(self) -> None:
@@ -1665,6 +2112,19 @@ class TestSWEBenchWrapper:
         assert wrapper._vllm_converter is not None
         assert wrapper._swe_bench_wrapper_server_config is not None
         assert wrapper._swe_bench_wrapper_server_config.run_session_id is not None
+        assert wrapper._swe_bench_wrapper_server_config.base_results_dir == wrapper.config.runtime_scratch_dir
+
+    def test_model_post_init_does_not_create_runtime_scratch(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
+        missing_scratch = tmp_path / "must_be_prepared_by_launcher"
+        config = _minimal_server_config()
+        config.runtime_scratch_dir = missing_scratch
+
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        assert wrapper._swe_bench_wrapper_server_config.base_results_dir == missing_scratch
+        assert not missing_scratch.exists()
 
     def test_resolve_absolute_path_none(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -1881,7 +2341,19 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
+            assert "--no-mount home,tmp,hostfs,cwd,bind-paths" in result
+            assert "--pwd /" in result
+            assert "env -u APPTAINER_BIND -u APPTAINER_BINDPATH" in result
+            assert "-u SINGULARITY_BIND -u SINGULARITY_BINDPATH" in result
             assert params.container in result
+            assert f"src={params.harness_runtime_dir / '.eval_sessions'}" in result
+            assert f"src={params.harness_runtime_dir / 'logs'}" in result
+            assert f"src={params.harness_runtime_dir / 'evaluation' / 'oh'}" in result
+            assert (
+                f"src={params.persistent_dir / 'container_scripts'},"
+                "dst=/trajectories_mount/container_scripts,ro"
+                in result
+            )
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -1902,6 +2374,81 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "/swebench_setup" in result
+            assert (
+                f"src={params.swebench_setup_dir},dst=/swebench_setup,ro" in result
+            )
+
+    def test_eval_mode_multilingual_setup_is_read_only(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc",
+                    "dataset_name": "SWE-bench/SWE-bench_Multilingual",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["/containers/{instance_id}.sif"],
+                },
+            )
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+            oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+            for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+                (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+            (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+
+            result = wrapper._build_apptainer_command(
+                params,
+                ExecuteContainerCommandArgs(
+                    command="run_eval",
+                    expected_file_pattern="/tmp/*.json",
+                    mode="eval",
+                    timeout=300,
+                ),
+            )
+
+            assert (
+                f"src={params.swebench_multilingual_setup_dir},"
+                "dst=/swebench_multilingual_setup,ro"
+                in result
+            )
+            assert f"src={params.swebench_setup_dir},dst=/swebench_setup" not in result
+
+    def test_eval_mode_r2e_gym_setup_is_read_only(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix",
+                    "instance_id": "org__Repo-1",
+                    "base_commit": "abc",
+                    "dataset_name": "R2E-Gym/R2E-Gym-Subset",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["/containers/{instance_id}.sif"],
+                },
+            )
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+            oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+            for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+                (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+            (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+
+            result = wrapper._build_apptainer_command(
+                params,
+                ExecuteContainerCommandArgs(
+                    command="run_eval",
+                    expected_file_pattern="/tmp/*.json",
+                    mode="eval",
+                    timeout=300,
+                ),
+            )
+
+            assert f"src={params.r2e_gym_setup_dir},dst=/r2egym_setup,ro" in result
+            assert f"src={params.swebench_setup_dir},dst=/swebench_setup" not in result
 
     def test_memory_limit(self, monkeypatch) -> None:
         # No cgroups in the enroot sandbox, so the memory limit is enforced by
@@ -2062,8 +2609,11 @@ class TestSWEBenchWrapperBuildApptainerCommand:
                 timeout=300,
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
-            assert "user_prompt.j2" in result
-            assert "system_prompt.j2" in result
+            assert f"src={user_prompt},dst=/openhands_setup/OpenHands/user_prompt.j2" in result
+            assert f"src={system_prompt},dst=/openhands_setup/OpenHands/system_prompt.j2" in result
+            assert (
+                f"src={system_prompt},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2" in result
+            )
 
 
 class TestSWEBenchWrapperGetOpenhandsTrajectory:
@@ -2166,6 +2716,7 @@ class TestSWEBenchWrapperSetupParams:
     def test_basic_setup_params(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper._swe_bench_wrapper_server_config.base_results_dir = Path(tmpdir)
             container_file = Path(tmpdir) / "django__django-12345.sif"
             container_file.touch()
 
@@ -2198,6 +2749,7 @@ class TestSWEBenchWrapperSetupParams:
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper._swe_bench_wrapper_server_config.base_results_dir = Path(tmpdir)
             container_file = Path(tmpdir) / "nv__test-1.sif"
             container_file.touch()
 
@@ -2235,6 +2787,7 @@ class TestSWEBenchWrapperSetupParams:
     def test_setup_params_r2e_gym(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper._swe_bench_wrapper_server_config.base_results_dir = Path(tmpdir)
             container_file = Path(tmpdir) / "repo_final_1.sif"
             container_file.touch()
 
@@ -2261,12 +2814,20 @@ class TestSWEBenchWrapperSetupParams:
 
     def test_setup_params_with_prompt_overrides(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        wrapper.config.agent_prompt_overrides = [
-            AgentPromptOverride(agent_cls="CodexAgent"),
-            AgentPromptOverride(agent_cls="OpenCodeAgent"),
-        ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            source_user_prompt = Path(tmpdir) / "source_user_prompt.j2"
+            source_system_prompt = Path(tmpdir) / "source_system_prompt.j2"
+            source_user_prompt.write_text("original user prompt")
+            source_system_prompt.write_text("original system prompt")
+            wrapper.config.agent_prompt_overrides = [
+                AgentPromptOverride(
+                    user_prompt_template=str(source_user_prompt),
+                    system_prompt_template=str(source_system_prompt),
+                    agent_cls="CodeActAgent",
+                )
+            ]
+            wrapper._swe_bench_wrapper_server_config.base_results_dir = Path(tmpdir)
             container_file = Path(tmpdir) / "django__django-12345.sif"
             container_file.touch()
 
@@ -2289,8 +2850,28 @@ class TestSWEBenchWrapperSetupParams:
             )
 
             params, _ = wrapper._setup_params(body)
-            # deterministic selection based on instance_id
-            assert params.resolved_agent_cls in ["CodexAgent", "OpenCodeAgent"]
+            runtime_prompts = params.harness_runtime_dir / "prompts"
+            runtime_user_prompt = runtime_prompts / "user_prompt.j2"
+            runtime_system_prompt = runtime_prompts / "system_prompt.j2"
+
+            assert params.resolved_agent_cls == "CodeActAgent"
+            assert params.resolved_user_prompt_template == str(runtime_user_prompt)
+            assert params.resolved_system_prompt_template == str(runtime_system_prompt)
+            assert runtime_user_prompt.read_text() == "original user prompt"
+            assert runtime_system_prompt.read_text() == "original system prompt"
+            assert f"src={runtime_user_prompt},dst=/openhands_setup/OpenHands/user_prompt.j2" in (
+                params.agent_apptainer_command_str
+            )
+            assert f"src={runtime_system_prompt},dst=/openhands_setup/OpenHands/system_prompt.j2" in (
+                params.agent_apptainer_command_str
+            )
+
+            # Simulate a runtime harness overwrite and prove that it cannot
+            # mutate the configured Lustre/source prompt.
+            runtime_user_prompt.write_text("harness-mutated user prompt")
+            runtime_system_prompt.write_text("harness-mutated system prompt")
+            assert source_user_prompt.read_text() == "original user prompt"
+            assert source_system_prompt.read_text() == "original system prompt"
 
 
 class TestSWEBenchWrapperResponses:
@@ -2347,7 +2928,32 @@ class TestSWEBenchWrapperResponses:
                 assert result.id == "swebench-django__django-12345"
 
     @pytest.mark.asyncio
-    async def test_responses_exception_writes_traceback(self, monkeypatch) -> None:
+    async def test_inner_responses_decodes_compressed_ray_result(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        body = NeMoGymResponseCreateParamsNonStreaming(model="test-model", input=[])
+        expected_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={},
+        )
+        packed = swe_app._pack_ray_response(expected_response.model_dump(mode="json"))
+        fake_runner = MagicMock()
+        fake_runner.remote = AsyncMock(return_value=packed)
+        monkeypatch.setattr(swe_app, "runner_ray_remote", fake_runner)
+
+        result = await wrapper._inner_responses(body)
+
+        assert result == expected_response
+        fake_runner.remote.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_responses_exception_is_reraised(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
             container_file = Path(tmpdir) / "django__django-12345.sif"
@@ -2399,6 +3005,9 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                # Worker-materialized (session, segment) responses; empty here
+                # -> run() falls back to the single main response.
+                "session_responses": "[]",
             },
         )
 
@@ -2423,6 +3032,79 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            # Empty session_responses -> plural field falls back to the single
+            # main response (openhands / pre-session-tagging dumps).
+            assert len(result.responses) == 1
+            assert result.responses[0].id == "swebench-test"
+
+    @pytest.mark.asyncio
+    async def test_run_rehydrates_worker_session_responses(self, monkeypatch) -> None:
+        """run() must build `responses` from metadata["session_responses"], not disk.
+
+        The completion files behind them live in worker-local scratch that is
+        deleted before run() executes (and possibly on another node), so the
+        metadata channel is the only valid source.
+        """
+        wrapper = _create_wrapper(monkeypatch)
+
+        def _session_response(sess: str, seg: int) -> dict:
+            return NeMoGymResponse(
+                id=f"swebench-test-1-{sess}-seg{seg}",
+                created_at=123,
+                model="test-model",
+                object="response",
+                output=[],
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+                metadata={
+                    "session_id": sess,
+                    "parent_session_id": "root" if sess != "root" else "",
+                    "segment_index": str(seg),
+                    "segment_boundary_reason": "",
+                },
+            ).model_dump(mode="json")
+
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": True, "patch_exists": True}),
+                "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "session_responses": json.dumps(
+                    [_session_response("root", 0), _session_response("ses_sub", 0)]
+                ),
+            },
+        )
+
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+            from nemo_gym.base_resources_server import BaseRunRequest
+
+            body = BaseRunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    model="test-model",
+                    input=[],
+                    metadata={
+                        "problem_statement": "Fix",
+                        "instance_id": "test-1",
+                        "base_commit": "abc",
+                        "dataset_name": "SWE-bench",
+                        "split": "test",
+                        "instance_dict": "{}",
+                    },
+                )
+            )
+
+            result = await wrapper.run(body)
+            assert [r.metadata["session_id"] for r in result.responses] == ["root", "ses_sub"]
+            assert result.responses[1].metadata["parent_session_id"] == "root"
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
@@ -2441,6 +3123,9 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": False, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                # Worker-materialized (session, segment) responses; empty here
+                # -> run() falls back to the single main response.
+                "session_responses": "[]",
             },
         )
 

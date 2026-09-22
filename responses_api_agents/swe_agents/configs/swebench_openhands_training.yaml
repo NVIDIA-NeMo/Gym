@@ -16,6 +16,9 @@ swe_agents_train:
       swebench_tests_timeout: 1200
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
+      # The launcher prepares this job-scoped parent on every allocated node.
+      # Each rollout uses a unique child directory and removes it on completion.
+      runtime_scratch_dir: /raid/scratch/temp_swe_${oc.env:NRL_SLURM_JOB_ID}
       dataset_path: ???
       agent_prompt_overrides:
       # # Codex agent
@@ -68,6 +71,9 @@ swe_agents_val:
       swebench_tests_timeout: 1200
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
+      # The launcher prepares this job-scoped parent on every allocated node.
+      # Each rollout uses a unique child directory and removes it on completion.
+      runtime_scratch_dir: /raid/scratch/temp_swe_${oc.env:NRL_SLURM_JOB_ID}
       dataset_path: ???
       
       agent_prompt_overrides:

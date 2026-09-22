@@ -22,6 +22,12 @@ swe_agents_train:
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 65536
       command_exec_timeout: 300
+      # The launcher prepares this job-scoped parent on every allocated node
+      # (node-local NVMe). Each rollout uses a unique child directory and
+      # removes it once its response is materialized in memory — no SWE
+      # rollout artifact ever lands on Lustre. Inherited by swe_agents_val
+      # via the anchor merge below.
+      runtime_scratch_dir: /raid/scratch/temp_swe_${oc.env:NRL_SLURM_JOB_ID}
 
       dataset_path: ???
 
