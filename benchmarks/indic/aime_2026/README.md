@@ -30,16 +30,20 @@ to this profile. Re-prepare with caching disabled and rerun evaluations.
 
 | Source | Pinned revision | Split |
 | --- | --- | --- |
-| `anushakamathofficial/indic_aime_2026` | `938c1c90c23b25ca0f43d1bfc5103b332e8c033e` | `train` |
+| `ai4bharat/indic-aime-2026` | `6cbc9d963bdd9f77e18f28de396f2f9b09bb180a` | `train` |
 | `MathArena/aime_2026` | `d2de22f3c656b4f56cf8981212186377d1e23bc3` | `train` |
 
-Preparation validates English text and answers against the canonical source and
-checks translated problem IDs and answers. English is selected explicitly with
-`languages: [en]`. The default 12 Indic languages contain 358 questions: Odia lacks
-question 12 and Punjabi lacks question 15. Missing translations are reported in
-the companion manifest and never replaced with English. Use the same question-ID
-subset in each language when comparing paired scores. Translation quality flags
-remain available for review. The source dataset license is CC-BY-NC-SA-4.0.
+Preparation reads the single `train.parquet` file and validates English text,
+problem IDs, and answers against the pinned MathArena source. Translations use
+columns such as `problem_Hindi_translation`; the English pipeline is unchanged.
+English is selected explicitly with `languages: [en]`. The default 14 Indic
+languages contain 420 questions, including Assamese and Sanskrit, with all 30
+questions present in every language. Empty translations are rejected and never
+replaced with English. No translation-quality flags are published in this schema.
+
+The AI4Bharat dataset card declares Apache-2.0; the canonical MathArena source
+retains CC-BY-NC-SA-4.0. Regenerate prepared data after this dataset migration:
+translation corrections and expanded coverage can change benchmark scores.
 
 ## Comparable English and translated runs
 
