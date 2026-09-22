@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+
+      debug: false
+
+      pool_version: 1.0.16
+      # Path to a pool binary already present in the task sandbox; skips the online installer.
+      remote_pool_binary_path: null
+      pool_model: dummy_model
+      # Needs to be set appropriately for every model.
+      pool_max_context_window: 262144
+      pool_extra_args: []
+      pool_env: {}
+      sandbox_model_base_url: null
+
+      sandbox_timeout: 10800  # 3hr default for harness execution
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        env:
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 0.25
+          memory_mib: 512
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: swebench-verified
+          harness: pool
+
+      datasets: []
