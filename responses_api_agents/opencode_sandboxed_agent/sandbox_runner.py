@@ -120,7 +120,8 @@ def run(params: RunnerInput) -> RunnerResult:
                     except ProcessLookupError:
                         pass
                     process.wait(timeout=params["cleanup_timeout"])
-                    drain_children(params["cleanup_timeout"])
+                # Popen may create a child and then raise before returning its handle.
+                drain_children(params["cleanup_timeout"])
                 cleanup_confirmed = True
             except Exception as exc:
                 error = f"cleanup: {exc}"

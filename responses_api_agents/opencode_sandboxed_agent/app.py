@@ -104,7 +104,11 @@ def _milliseconds(value: Any) -> Optional[float]:
 
 
 def parse_opencode_observations(
-    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+    db_path: Path,
+    fallback_invocation_id: str,
+    trajectory: Optional[TrajectoryRecord] = None,
+    *,
+    require_terminal_finish: bool = False,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -152,11 +156,20 @@ def parse_opencode_observations(
         if not isinstance(session_id, str) or session_id not in invocation_status:
             gaps.append(ObservationGap(code="agent_artifact_record_unowned", detail=row["id"]))
         elif message.get("role") == "assistant":
-            if isinstance(message.get("error"), dict):
-                invocation_status[session_id] = "failed"
             message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
-            if invocation_status[session_id] != "failed" and _milliseconds(message_time.get("completed")) is not None:
-                invocation_status[session_id] = "completed"
+            completed = _milliseconds(message_time.get("completed")) is not None
+            if require_terminal_finish:
+                # Each model turn can complete while its invocation still has tools/subagents to run.
+                finish = message.get("finish")
+                if message.get("error") or finish not in {None, "stop", "length", "content-filter", "tool-calls"}:
+                    invocation_status[session_id] = "failed"
+                else:
+                    invocation_status[session_id] = "completed" if finish == "stop" and completed else "incomplete"
+            else:
+                if isinstance(message.get("error"), dict):
+                    invocation_status[session_id] = "failed"
+                if invocation_status[session_id] != "failed" and completed:
+                    invocation_status[session_id] = "completed"
         if message.get("summary") is True:
             summary_text[row["id"]] = []
             parent_id = message.get("parentID")
@@ -810,6 +823,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
         error = None
         export = {}
+        cancelled = False
         try:
             export = json.loads(
                 await state.execute(
@@ -819,6 +833,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
             )
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception as exc:
             error = str(exc)
@@ -831,7 +846,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
                     path = Path(directory) / "observations.db"
                     await state.sandbox.download(f"{state.directory}/observations.db", path)
-                    state.observations = parse_opencode_observations(path, state.seed.episode_id.capture_key)
+                    state.observations = parse_opencode_observations(
+                        path, state.seed.episode_id.capture_key, require_terminal_finish=True
+                    )
             except Exception:
                 state.observations = AgentObservationBundle(
                     source="opencode",
@@ -840,6 +857,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         ObservationGap(code="observation_capture_failed"),
                     ],
                 )
+            if cancelled:
+                for record in state.observations.records:
+                    if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                        record.status = "incomplete"
+                        record.error_type = "cancelled"
         output = []
         usage = None
         if export.get("messages"):
@@ -872,10 +894,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if not assistants:
             error = error or "OpenCode produced no assistant result"
         incomplete = result is not None and result.timed_out
-        if assistants and assistants[-1].get("finish") == "length":
-            incomplete = True
-        elif assistants and not assistants[-1].get("time", {}).get("completed") and not incomplete:
-            error = error or "OpenCode ended without a terminal assistant result"
+        if assistants and not incomplete:
+            last = assistants[-1]
+            finish = last.get("finish")
+            if finish in {"length", "content-filter", "tool-calls"}:
+                incomplete = True
+            elif finish != "stop" or not last.get("time", {}).get("completed"):
+                error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
+        status = "failed" if error else "incomplete" if incomplete else "completed"
+        # Artifact message completion records a model turn, not the entire invocation.
+        for record in state.observations.records:
+            if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                record.status = status
+                record.error_type = "server_error" if error else "timeout" if result and result.timed_out else None
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -899,7 +930,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             object="response",
             output=output,
             usage=usage,
-            status="failed" if error else "incomplete" if incomplete else "completed",
+            status=status,
             error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
             tools=body.tools,

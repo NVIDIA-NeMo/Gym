@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -157,6 +158,39 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
+def capture_observations(sandbox, tmp_path):
+    """Persist the same assistant turns used by the fake runner as real SQLite artifacts."""
+    database = tmp_path / "observations.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            create table session(id text, parent_id text, time_created integer);
+            create table message(id text, session_id text, data text, time_created integer);
+            create table part(id text, message_id text, session_id text, data text, time_created integer);
+            insert into session values('root', null, 0);
+        """)
+        for index, message in enumerate(json.loads(sandbox.events)["messages"]):
+            message_id = f"message-{index}"
+            connection.execute(
+                "insert into message values (?, ?, ?, ?)",
+                (message_id, "root", json.dumps(message["info"]), index),
+            )
+            for part_index, part in enumerate(message["parts"]):
+                connection.execute(
+                    "insert into part values (?, ?, ?, ?, ?)",
+                    (f"part-{index}-{part_index}", message_id, "root", json.dumps(part), part_index),
+                )
+    original = sandbox.download
+
+    async def download(source, destination):
+        if source.endswith("/observations.db"):
+            Path(destination).write_bytes(database.read_bytes())
+        else:
+            await original(source, destination)
+
+    sandbox.download = download
+    return database
+
+
 def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -238,16 +272,21 @@ async def activate(agent, sandbox):
     return request, seeded.agent_session_id, task
 
 
-async def test_close_cancels_active_opencode_before_detaching(setup):
+async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     agent, sandbox = setup
     sandbox.blocked = True
+    capture_observations(sandbox, tmp_path)
     request, session_id, task = await activate(agent, sandbox)
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     with pytest.raises(asyncio.CancelledError):
         await task
     sandbox.runner.send_signal.assert_awaited_once_with("SIGTERM")
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+    invocation = next(record for record in closed.agent_observations.records if record.kind == "agent_invocation")
+    assert invocation.status == "incomplete"
+    assert invocation.error_type == "cancelled"
+    assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
 async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
@@ -504,7 +543,7 @@ def test_invalid_seed_never_connects(setup, option):
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])
-def test_partial_output_survives_model_failure_and_timeout(setup, kind):
+def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path):
     agent, sandbox = setup
     export = json.loads(sandbox.events)
     if kind == "error":
@@ -515,6 +554,7 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind):
     else:
         export["messages"][-1]["info"]["finish"] = "length"
     sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         session_id = created.json()["agent_session_id"]
@@ -523,10 +563,79 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind):
         assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
+        invocation = next(
+            record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+        )
+        assert invocation["status"] == result.json()["status"]
+        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
         retry = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert retry.json() == closed.json()
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
     sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("finish", "expected"),
+    [
+        ("stop", "completed"),
+        ("length", "incomplete"),
+        ("content-filter", "incomplete"),
+        ("tool-calls", "incomplete"),
+        ("error", "failed"),
+        ("unknown", "failed"),
+        (None, "failed"),
+    ],
+)
+def test_completed_model_turn_is_not_always_terminal(setup, tmp_path, finish, expected):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["info"]["finish"] = finish
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200
+        assert result.json()["status"] == expected
+        assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        if expected == "failed":
+            assert "terminal assistant result" in result.json()["error"]["message"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        invocation = next(
+            record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+        )
+        assert invocation["status"] == expected
+
+
+@pytest.mark.parametrize(("finish", "expected"), [("stop", "completed"), ("tool-calls", "incomplete")])
+def test_timeout_preserves_completed_children_and_marks_unfinished_children(setup, tmp_path, finish, expected):
+    agent, sandbox = setup
+    sandbox.result["timed_out"] = True
+    sandbox.result["return_code"] = -9
+    database = capture_observations(sandbox, tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("insert into session values ('child', 'root', 1)")
+        for index, reason in enumerate(("tool-calls", finish)):
+            connection.execute(
+                "insert into message values (?, ?, ?, ?)",
+                (
+                    f"child-message-{index}",
+                    "child",
+                    json.dumps({"role": "assistant", "finish": reason, "time": {"completed": 100 + index}}),
+                    index,
+                ),
+            )
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.json()["status"] == "incomplete"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        invocations = {
+            record["invocation_id"]: record["status"]
+            for record in closed.json()["agent_observations"]["records"]
+            if record["kind"] == "agent_invocation"
+        }
+        assert invocations == {"root": "incomplete", "child": expected}
 
 
 async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
