@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+profile: gpqa-original-zero-shot-chat-v1
+system: You are a very intelligent assistant, who follows instructions directly.
+user: "{prompt}"
