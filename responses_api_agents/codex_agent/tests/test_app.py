@@ -66,11 +66,14 @@ def _config(**kwargs) -> CodexAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_host_install(monkeypatch):
+    # Local execution installs lazily; mocks must cover the invocation, not just construction.
+    monkeypatch.setattr("responses_api_agents.codex_agent.app.ensure_codex", lambda version: None)
+
+
 def _make_agent(**kwargs) -> CodexAgent:
-    # Patch only the external side effect (codex install/version check) so the real
-    # model_post_init still runs — it initializes the semaphore.
-    with patch("responses_api_agents.codex_agent.app.ensure_codex"):
-        return CodexAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    return CodexAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:

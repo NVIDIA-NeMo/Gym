@@ -18,23 +18,34 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
-import subprocess
 import tempfile
 from asyncio import Semaphore
+from collections import OrderedDict
+from collections.abc import Mapping
 from copy import deepcopy
-from pathlib import Path
-from time import time
+from pathlib import Path, PurePosixPath
+from time import monotonic, time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from pydantic import ConfigDict, Field
+from fastapi import HTTPException, Request
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -46,14 +57,39 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 
 
 LOG = logging.getLogger(__name__)
+_SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+
+
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+    validate = """
+from pathlib import Path
+import sys
+workdir = Path(sys.argv[1]).resolve(strict=True)
+if not workdir.is_dir():
+    raise ValueError("Codex workdir must be an existing directory")
+for value in sys.argv[2:]:
+    owned = Path(value).resolve()
+    if workdir == owned or workdir in owned.parents or owned in workdir.parents:
+        raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
+"""
+    return (
+        f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
+        f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
+    )
 
 
 def _toml_key(key: str) -> str:
@@ -116,7 +152,9 @@ def _mcp_result_text(item: dict[str, Any]) -> str:
     return "" if result is None else str(result)
 
 
-def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
+def parse_exec_jsonl(
+    stdout: str, *, structured_reasoning: bool = False, include_partial: bool = False
+) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
     Codex emits ``item.completed`` events for each unit of work (assistant messages, reasoning,
@@ -130,6 +168,7 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     buffered_think: Optional[str] = None
     metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
     errors: list[str] = []
+    unfinished: dict[str, dict[str, Any]] = {}
 
     def _add_tool_pair(item: dict[str, Any], name: str, arguments: dict[str, Any], output: str) -> None:
         call_id = str(item.get("id") or f"call-{uuid4().hex[:8]}")
@@ -174,6 +213,12 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
             errors.append(message)
             continue
 
+        item = event.get("item")
+        if include_partial and isinstance(item, dict) and item.get("id"):
+            if etype in ("item.started", "item.updated"):
+                unfinished[item["id"]] = unfinished.get(item["id"], {}) | item
+            elif etype == "item.completed":
+                unfinished.pop(item["id"], None)
         if etype != "item.completed":
             continue
 
@@ -198,7 +243,14 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
             )
         elif itype == "reasoning":
             think = item.get("text") or ""
-            if think:
+            if think and structured_reasoning:
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=str(item.get("id") or f"reasoning-{len(output_items)}"),
+                        summary=[{"type": "summary_text", "text": think}],
+                    )
+                )
+            elif think:
                 buffered_think = (buffered_think + "\n" + think) if buffered_think else think
         elif itype == "command_execution":
             output = item.get("aggregated_output") or ""
@@ -216,6 +268,17 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
             _add_tool_pair(item, "update_plan", {"items": item.get("items") or []}, "")
         elif itype == "error":
             errors.append(item.get("message") or "unknown error")
+
+    # Native cancellation can leave useful command output in an item.updated event.
+    # Only synthesize items that never completed, retaining their latest snapshot by ID.
+    for item in unfinished.values():
+        partial, _ = parse_exec_jsonl(
+            json.dumps({"type": "item.completed", "item": item}), structured_reasoning=structured_reasoning
+        )
+        output_items.extend(
+            entry.model_copy(update={"status": "incomplete"}) if hasattr(entry, "status") else entry
+            for entry in partial
+        )
 
     # Some backends route the final answer through the reasoning channel (e.g. a vLLM reasoning
     # parser labeling the closing message as reasoning). If the run ends on buffered reasoning with
@@ -285,7 +348,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
     # When None, openai_base_url is used directly (default: the real OpenAI API).
@@ -297,7 +360,7 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     openai_api_key: str = ""  # pragma: allowlist secret
     openai_base_url: Optional[str] = None
     sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] = "danger-full-access"
-    timeout: int = 600
+    timeout: int = Field(default=600, gt=0)
     system_prompt: Optional[str] = None
     reasoning_effort: Optional[str] = None
     # Required: every config pins an explicit npm version so auto-install is reproducible and cannot
@@ -312,6 +375,9 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
     # tools, model_verbosity, ...). Per-rollout Gym MCP entries take precedence on name collisions.
     extra_config: dict[str, Any] = Field(default_factory=dict)
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    session_close_retry_window_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
 
 
 class CodexAgentRunRequest(BaseRunRequest):
@@ -329,14 +395,395 @@ class CodexAgent(SimpleResponsesAPIAgent):
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    _sandbox_sessions: dict[str, CodexSandboxSession] = PrivateAttr(default_factory=dict)
+    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
+        default_factory=OrderedDict
+    )
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
+
+    def _session_marker(self, request: Request) -> Optional[str]:
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping) or _SANDBOX_SESSION_KEY not in session:
+            return None
+        marker = session[_SANDBOX_SESSION_KEY]
+        if not isinstance(marker, str) or not marker:
+            raise HTTPException(409, "Invalid Codex sandbox session marker")
+        return marker
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Borrow the Resources-owned task sandbox and install a pinned Codex runtime inside it."""
+        self._expire_closed_agent_sessions()
+        if self._session_marker(request) is not None:
+            raise HTTPException(409, "Codex session already exists")
+        session_id = f"codex-{uuid4().hex}"
+        state = await self._initialize_agent_session_state(session_id, body)
+        self._sandbox_sessions[session_id] = state
+        request.session[_SANDBOX_SESSION_KEY] = session_id
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def _initialize_agent_session_state(
+        self, agent_session_id: str, body: AgentSeedSessionRequest
+    ) -> CodexSandboxSession:
+        # Match Hermes: session initialization owns the sandbox runtime setup,
+        # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
+        if self.config.num_workers not in (None, 1):
+            raise HTTPException(422, "Native Codex sessions require num_workers=1")
+        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+            raise HTTPException(422, "Native Codex requires direct, Resources-owned SandboxAccess")
+        if not body.sandbox_access.workdir.startswith("/") or ".." in PurePosixPath(body.sandbox_access.workdir).parts:
+            raise HTTPException(422, "Codex sandbox workdir must be absolute")
+        workdir = PurePosixPath(body.sandbox_access.workdir)
+        if workdir in (PurePosixPath("/"), PurePosixPath("/tmp")) or str(workdir).startswith("/tmp/nemo-gym-codex"):
+            raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
+        if self.config.model_server is None:
+            raise HTTPException(422, "Native Codex requires a sandbox-reachable Gym model_server")
+        if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
+            raise HTTPException(422, "Native Codex requires an exact codex_version, for example 0.144.4")
+        if self.config.cwd is not None or self.config.extra_config or self.config.openai_base_url is not None:
+            raise HTTPException(
+                422,
+                "Native Codex uses SandboxAccess.workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
+            )
+        if self.config.reasoning_effort is not None:
+            raise HTTPException(422, "Native Codex cannot guarantee reasoning_effort for custom Gym models")
+        if self.config.sandbox_mode != "danger-full-access":
+            raise HTTPException(422, "Native Codex requires danger-full-access inside the Resources-owned sandbox")
+
+        connection = body.sandbox_access.connection
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        directory = f"/tmp/nemo-gym-codex-sessions/{agent_session_id}"
+        runtime = f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
+        prepared_ok = False
+        try:
+            prepare = _sandbox_prepare_command(body.sandbox_access.workdir, directory, runtime)
+            prepared = await sandbox.exec(prepare, timeout_s=30)
+            if prepared.return_code != 0 or prepared.error_type:
+                raise RuntimeError(
+                    f"Cannot prepare Codex session: {prepare}; exit={prepared.return_code}, "
+                    f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
+                )
+            prepared_ok = True
+            # Install only the agent runtime in the existing task sandbox.
+            # Resources has already prepared the task repository and its dependencies.
+            installer = "install_codex_runtime.sh"
+            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+            installed = await sandbox.exec(
+                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                f"{shlex.quote(self.config.codex_version)}",
+                cwd=body.sandbox_access.workdir,
+                timeout_s=self.config.sandbox_install_timeout_seconds,
+            )
+            if installed.return_code != 0 or installed.error_type:
+                raise RuntimeError(
+                    f"Codex installer exited {installed.return_code}, error_type={installed.error_type}: {installed.stderr or installed.stdout}"
+                )
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+        except BaseException:
+            try:
+                if prepared_ok:
+                    cleanup = await sandbox.exec(f"rm -rf -- {shlex.quote(directory)}", timeout_s=30)
+                    if cleanup.return_code != 0 or cleanup.error_type:
+                        LOG.error("Could not remove failed Codex setup files: %s", cleanup)
+            finally:
+                await sandbox.disconnect()
+            raise
+        return CodexSandboxSession(body, sandbox, directory, runtime)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        """Confirm Codex teardown before allowing verification; never destroy the borrowed sandbox."""
+        self._expire_closed_agent_sessions()
+        session_id = self._session_marker(request)
+        closed = self._closed_sandbox_sessions.get(session_id)
+        if closed is not None and body.agent_session_id == session_id and body.episode_id == closed[0]:
+            return closed[1]
+        state = self._sandbox_sessions.get(session_id)
+        if state is None or body.agent_session_id != session_id or body.episode_id != state.seed.episode_id:
+            raise HTTPException(409, "Codex close does not match the seeded session and episode")
+        await state.close(self.config.session_close_timeout_seconds)
+        # Another close may have completed while this caller waited for the
+        # session's cleanup lock. Reuse its receipt without renewing its expiry.
+        self._expire_closed_agent_sessions()
+        closed = self._closed_sandbox_sessions.get(session_id)
+        if closed is not None:
+            return closed[1]
+        if self._sandbox_sessions.get(session_id) is not state:
+            raise HTTPException(409, "Codex close receipt has expired")
+        observations = state.observations or AgentObservationBundle(
+            source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]
+        )
+        self._sandbox_sessions.pop(session_id, None)
+        result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
+        # Keep the cookie as a tombstone so later activations cannot fall back
+        # to host execution. Other sessions must not shorten the retry window.
+        self._closed_sandbox_sessions[session_id] = (
+            body.episode_id,
+            result,
+            monotonic() + self.config.session_close_retry_window_seconds,
+        )
+        return result
+
+    def _expire_closed_agent_sessions(self) -> None:
+        """Prune receipts by close time, never by traffic or retry access order."""
+        now = monotonic()
+        while self._closed_sandbox_sessions:
+            if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
+                break
+            self._closed_sandbox_sessions.popitem(last=False)
+
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        """Validate and normalize input before consuming the session's activation."""
+        unsupported = (
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "reasoning",
+            "max_tool_calls",
+            "previous_response_id",
+            "prompt",
+            "text",
+            "context_management",
+            "conversation",
+            "moderation",
+            "top_logprobs",
+            "truncation",
+            "include",
+            "service_tier",
+            "safety_identifier",
+            "user",
+            "store",
+            "stream_options",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+        )
+        values = body.model_dump(mode="json")
+        for name in unsupported:
+            if values.get(name) is not None:
+                raise HTTPException(422, f"Native Codex does not support request field {name}")
+        if body.model is not None and body.model != self._effective_model():
+            raise HTTPException(422, "Native Codex model is selected by agent and model-server configuration")
+        unknown = set(body.model_extra or {})
+        if unknown:
+            raise HTTPException(422, f"Native Codex does not support extra request fields: {sorted(unknown)}")
+        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
+            raise HTTPException(422, "Codex owns tool selection and execution policy")
+        if (body.metadata or {}).get("chat_template_kwargs") is not None:
+            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Codex")
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        roles = [getattr(item, "role", None) for item in items]
+        if roles not in (["user"], ["system", "user"], ["developer", "user"]):
+            raise HTTPException(422, "Native Codex accepts one text user prompt with an optional system message")
+        for item in items:
+            if not isinstance(item.content, str) and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
+                for part in item.content
+            ):
+                raise HTTPException(422, "Native Codex only supports text input")
+
+        def text(item):
+            return (
+                item.content
+                if isinstance(item.content, str)
+                else "".join(part["text"] if isinstance(part, dict) else part.text for part in item.content)
+            )
+
+        prompt = text(items[-1])
+        input_system = text(items[0]) if len(items) == 2 else None
+        system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        return prompt, system
+
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_codex(self.config.codex_version)
+
+    async def _ensure_local_runtime(self) -> None:
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_codex, self.config.codex_version))
+        setup = self._local_setup_task
         try:
-            ver = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
-            LOG.warning("codex version: %s", ver or "(unknown)")
-        except Exception as exc:
-            LOG.warning("could not determine codex version: %s", exc)
+            await asyncio.shield(setup)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._local_setup_task is setup:
+                self._local_setup_task = None
+            raise
+
+    async def _sandbox_response(
+        self,
+        state: CodexSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+    ) -> NeMoGymResponse:
+        config = self._build_config(
+            self._resolve_call_base_url(state.seed.episode_id.capture_key), developer_instructions=system
+        )
+        await state.upload_text("home/.codex/config.toml", toml_dumps(config))
+        command = self._build_command("-", state.seed.sandbox_access.workdir)
+        command[0:1] = [
+            f"{state.runtime}/node/bin/node",
+            f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
+        ]
+        payload = {
+            "directory": state.directory,
+            "command": command,
+            "prompt": prompt,
+            "cwd": state.seed.sandbox_access.workdir,
+            "env": {
+                "HOME": f"{state.directory}/home",
+                "CODEX_HOME": f"{state.directory}/home/.codex",
+                "XDG_CACHE_HOME": f"{state.directory}/home/.cache",
+                # Gym receives the calls; never copy the direct OpenAI credential into this path.
+                "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+            },
+            "timeout": self.config.timeout,
+            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
+        }
+        raw = ""
+        failure = None
+        try:
+            async with self.sem:
+                raw = await state.execute(
+                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+                )
+        except BaseException as exc:
+            failure = exc
+            try:
+                raw = await state.read_text("events.jsonl")
+            except Exception:
+                LOG.warning("Codex event transcript unavailable after interrupted activation", exc_info=True)
+        events = []
+        for line in raw.splitlines():
+            try:
+                observed_at, event = json.loads(line)
+                if isinstance(event, dict):
+                    events.append((float(observed_at), event))
+            except (ValueError, TypeError):
+                LOG.warning("Skipping malformed Codex event record")
+        output, usage = parse_exec_jsonl(
+            "\n".join(json.dumps(event) for _, event in events), structured_reasoning=True, include_partial=True
+        )
+        result = state.result
+        error = result.error if result else "Codex runner result unavailable"
+        errors = usage.get("errors") or []
+        if errors:
+            error = error or "; ".join(errors)
+        if result and result.return_code != 0 and not result.timed_out:
+            error = error or f"Codex exited with code {result.return_code}"
+        completed = any(event.get("type") == "turn.completed" for _, event in events)
+        if result and not completed and not result.timed_out:
+            error = error or "Codex ended without turn.completed"
+        status = "failed" if error else "incomplete" if result.timed_out else "completed"
+        conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        if system:
+            conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
+        gaps = [
+            ObservationGap(code="model_call_join_key_unavailable", detail="CLI events omit model response IDs"),
+            ObservationGap(code="reasoning_token_usage_unavailable"),
+            ObservationGap(code="subagent_hierarchy_unavailable"),
+            ObservationGap(code="compaction_observations_unavailable"),
+        ]
+        if not completed:
+            gaps.append(ObservationGap(code="partial_model_usage_unavailable"))
+        if failure is not None:
+            gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
+        if not events:
+            gaps.append(ObservationGap(code="agent_transcript_unavailable"))
+        tools = []
+        starts = {}
+        for observed_at, event in events:
+            item = event.get("item") or {}
+            if item.get("type") not in (
+                "command_execution",
+                "mcp_tool_call",
+                "file_change",
+                "web_search",
+                "todo_list",
+            ):
+                continue
+            item_id = item.get("id")
+            if not item_id:
+                continue
+            if event.get("type") == "item.started":
+                starts[item_id] = observed_at
+            if event.get("type") == "item.completed":
+                start = starts.pop(item_id, None)
+                tools.append(
+                    ToolCallObservation(
+                        invocation_id=state.seed.episode_id.capture_key,
+                        tool_call_id=item_id,
+                        tool_name={"command_execution": "exec_command", "file_change": "apply_patch"}.get(
+                            item["type"], item["type"]
+                        ),
+                        started_at=start,
+                        completed_at=observed_at,
+                        status="failed" if item.get("status") == "failed" else "completed",
+                        timing_source="artifact",
+                    )
+                )
+                if start is None:
+                    gaps.append(ObservationGap(code="tool_start_unavailable", detail=item_id))
+        for item_id, start in starts.items():
+            tools.append(
+                ToolCallObservation(
+                    invocation_id=state.seed.episode_id.capture_key,
+                    tool_call_id=item_id,
+                    started_at=start,
+                    status="incomplete",
+                    timing_source="artifact",
+                )
+            )
+        state.observations = AgentObservationBundle(
+            source="codex",
+            records=[
+                AgentInvocation(
+                    invocation_id=state.seed.episode_id.capture_key,
+                    status="incomplete" if failure else status,
+                    conversation=[*conversation, *output],
+                ),
+                *tools,
+            ],
+            gaps=gaps,
+        )
+        if failure is not None:
+            raise failure
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self._effective_model(),
+            object="response",
+            output=output,
+            status=status,
+            error={"code": "server_error", "message": error} if error else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=NeMoGymResponseUsage(
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                total_tokens=usage["input_tokens"] + usage["output_tokens"],
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
+            ),
+            metadata={
+                "harness_execution": "sandbox",
+                "harness_hostname": result.hostname,
+                "harness_pid": str(result.pid),
+                "codex_version": self.config.codex_version,
+            },
+        )
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).
@@ -470,6 +917,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
         this rollout.
         """
+        await self._ensure_local_runtime()
         base_url = self._resolve_call_base_url(rollout_id)
         # Report the name the config actually pins (so response.model matches what Codex was told);
         # falls back to a sentinel only for a direct endpoint that lets Codex pick its own default.
@@ -629,9 +1077,30 @@ class CodexAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = self._session_marker(request)
+        if session_id is not None:
+            state = self._sandbox_sessions.get(session_id)
+            rollout_id = request.path_params.get("rollout_id")
+            if state is None or state.seed.episode_id.capture_key != rollout_id:
+                raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
+            if state.activated or state.closing:
+                raise HTTPException(409, "Codex sandbox sessions support one activation")
+            prompt, system = self._sandbox_input(body)
+            state.activated = True
+            state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+            try:
+                return await asyncio.shield(state.task)
+            except asyncio.CancelledError:
+                if not state.task.done() and not state.task.cancelling():
+                    state.task.cancel()
+                raise
         return await self._create_response(body)
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
+        if self._session_marker(request) is not None:
+            raise HTTPException(409, "Use the native session responses and close routes")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:
             cookies = request.cookies
 
