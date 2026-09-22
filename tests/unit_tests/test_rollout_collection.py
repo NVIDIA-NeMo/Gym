@@ -37,6 +37,7 @@ from pydantic import ValidationError
 import nemo_gym.batch_status
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
+from nemo_gym import rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
@@ -91,6 +92,8 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
     migrate_invalid_judge_main_rows,
 )
+from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     LineageResolution,
     ParentResolutionStatus,
@@ -108,6 +111,7 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
 def _environment_server_config() -> DictConfig:
@@ -1847,6 +1851,13 @@ class TestRolloutCollection:
             disable_health_check=True,
             require_complete=require_complete,
         )
+        outcomes: list[dict] = []
+        monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(
+            rollout_collection,
+            "record_rollout_completed",
+            lambda outcome, **kw: outcomes.append({"outcome": outcome, **kw}),
+        )
         with (
             pytest.raises(RuntimeError, match="EVAL FAILED: 1/2 samples completed")
             if require_complete
@@ -1866,6 +1877,23 @@ class TestRolloutCollection:
         assert failures[0][ROLLOUT_INDEX_KEY_NAME] == 0
         assert failures[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
         assert "reward" not in failures[0]
+        assert sorted(outcomes, key=lambda o: o["outcome"]) == [
+            {
+                "outcome": "failed",
+                "dispatch_name": "my_agent",
+                "failure_class": AGENT_RUN_ERROR_FAILURE_CLASS,
+                "failure_kind": None,
+                "failure_type": failures[0]["_ng_failure_type"],
+            },
+            {
+                "outcome": "scored",
+                "dispatch_name": "my_agent",
+                "failure_class": None,
+                "failure_kind": None,
+                "failure_type": None,
+            },
+        ]
+        assert failures[0]["_ng_failure_type"]
 
         # The failed rollout reaches neither the aggregator's input nor its denominator.
         assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
@@ -2238,6 +2266,70 @@ class TestRolloutCollection:
         else:
             with pytest.raises(RuntimeError, match="produced a result"):
                 await RolloutCollectionHelper().run_from_config(config)
+
+    async def test_run_from_config_counts_each_outcome_on_the_attempt_counter(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        collected_metrics,  # noqa: F811
+    ) -> None:
+        """An omitted, a failed and a scored attempt through the real loop, read back from the meter.
+
+        The failure is the shape an environment server returns: HTTP 200 carrying its own class and
+        exception type, which the driver must keep as labels without building the row itself.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(3)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        replies = {
+            0: {NG_NO_PERSIST_KEY: True},
+            1: {
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: "infrastructure_error",
+                "_ng_failure_type": "SandboxTimeoutException",
+                "failure_reason": "SandboxTimeoutException",
+            },
+            2: {"reward": 1.0},
+        }
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            return FakeResponse(200, replies[json["x"]])
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT
+        )
+
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                disable_aggregation=True,
+                disable_health_check=True,
+            )
+        )
+
+        points = {
+            tuple(sorted(p.attributes.items())): p.value
+            for p in collected_metrics().get(ROLLOUT_COMPLETED_INSTRUMENT, [])
+        }
+        assert points == {
+            (("nemo.gym.rollout.dispatch.name", "my_agent"), ("nemo.gym.rollout.outcome", "omitted")): 1,
+            (
+                ("nemo.gym.failure_class", "infrastructure_error"),
+                ("nemo.gym.failure_type", "SandboxTimeoutException"),
+                ("nemo.gym.rollout.dispatch.name", "my_agent"),
+                ("nemo.gym.rollout.outcome", "failed"),
+            ): 1,
+            (("nemo.gym.rollout.dispatch.name", "my_agent"), ("nemo.gym.rollout.outcome", "scored")): 1,
+        }
 
     @pytest.mark.parametrize("label_from", ["dataset", "verifier"])
     @pytest.mark.parametrize("counted_as", ["failure", "missing"])
@@ -6084,6 +6176,11 @@ class TestDispatchBudget:
             return {MASK_SAMPLE_KEY: NG_DISPATCH_DRAINED_KEY in result, "metrics": {}}
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+        outcomes: list[str] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "record_rollout_completed", lambda outcome, **kw: outcomes.append(outcome)
+        )
 
         # Each /run takes 25 s of a 60 s budget: three rows start and the other four drain.
         clock = SimpleNamespace(now=0.0)
@@ -6117,6 +6214,8 @@ class TestDispatchBudget:
         out = capsys.readouterr().out
         assert "Found 3 / 7 " in out and "Found 4 / 7 " not in out
         assert "Drained (not dispatched, no time left in the budget): 4." in out
+        # Drained rows never ran, so the attempt counter sees only the three that did.
+        assert outcomes == ["scored"] * 3
 
     @pytest.mark.parametrize("count_missing", [False, True], ids=["default", "missing counted as zero"])
     async def test_a_run_that_drained_everything_says_so(

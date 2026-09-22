@@ -268,8 +268,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         rewards = (result.get("verifier_result") or {}).get("rewards") or {}
         completed = "reward" in rewards
         failure = None
+        failure_type = None
         if not completed:
             failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
+            failure_type = failure
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
@@ -290,6 +292,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
             **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
+            **({"_ng_failure_type": failure_type} if failure_type else {}),
         )
 
     def _session(self, request, session_id):

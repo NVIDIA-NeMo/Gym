@@ -60,7 +60,7 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED
+from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered, validate_failure_kind
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -99,6 +99,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.gym_metrics import UNREGISTERED_FAILURE_KIND, record_rollout_completed
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -1686,6 +1687,33 @@ _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
+def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
+    """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt."""
+    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+        return
+    failure_class = result.get(NG_FAILURE_CLASS_KEY)
+    # A scored row can echo failure fields through a verifier; only a failure class makes them labels.
+    failure_kind = result.get("failure_kind") if failure_class is not None else None
+    failure_type = result.get("_ng_failure_type") if failure_class is not None else None
+    record_rollout_completed(
+        outcome,
+        dispatch_name=dispatch_name,
+        failure_class=failure_class,
+        failure_kind=_metric_failure_kind(failure_kind),
+        failure_type=failure_type if isinstance(failure_type, str) else None,
+    )
+
+
+def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
+    """The kind as a bounded label: registered or namespaced names pass, anything else is one bucket."""
+    if not isinstance(failure_kind, str):
+        return None
+    validate_failure_kind(failure_kind)
+    if is_registered(failure_kind) or is_namespaced(failure_kind):
+        return failure_kind
+    return UNREGISTERED_FAILURE_KIND
+
+
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
@@ -2868,11 +2896,14 @@ class RolloutCollectionHelper(BaseModel):
                 if upload_spool is not None and not result.get(NG_DISPATCH_DRAINED_KEY):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
+                dispatch_name = self._dispatch_name(row)
                 if no_persist:
                     # kill_shaped, or drained by the dispatch budget: written to neither
                     # the jsonl nor the sidecar. Set-difference on resume naturally
                     # re-dispatches; per-task timeout bounds wallclock.
-                    pass
+                    if not result.get(NG_DISPATCH_DRAINED_KEY):
+                        # A drained row never ran, so it is not an attempt.
+                        _record_rollout_outcome(result, "omitted", dispatch_name)
                 elif failure_class is not None:
                     # Non-kill_shaped failure → sidecar. The aggregator only reads
                     # the main jsonl, so this keeps win-rate uncontaminated.
@@ -2887,12 +2918,14 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
+                    _record_rollout_outcome(result, "failed", dispatch_name)
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
                     results_file.write(serialized + b"\n")
                     results_file.flush()
+                    _record_rollout_outcome(result, "scored", dispatch_name)
                     persisted_count += 1
                     persisted_success_keys.add((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
                     if config.retain_results_in_memory:
@@ -2916,7 +2949,6 @@ class RolloutCollectionHelper(BaseModel):
                         os.fsync(results_file.fileno())
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
-                dispatch_name = self._dispatch_name(row)
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
