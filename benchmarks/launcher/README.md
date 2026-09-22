@@ -35,9 +35,23 @@ From the Gym repository root, launch TB 2.1 with Laguna S and DFlash:
 
 ```bash
 bash benchmarks/launcher/eval.sh \
-  --profile benchmarks/launcher/laguna/terminal_bench_2_1.sh \
+  --profile benchmarks/launcher/laguna_s/terminal_bench_2_1.sh \
   --checkpoint /path/to/checkpoints/Laguna-S-2.1-FP8
 ```
+
+For Laguna XS 2.1 FP8, use the matching XS profile and checkpoint:
+
+```bash
+bash benchmarks/launcher/eval.sh \
+  --profile benchmarks/launcher/laguna_xs/terminal_bench_2_1.sh \
+  --checkpoint /path/to/checkpoints/Laguna-XS-2.1-FP8
+```
+
+Both profiles use TP1, a 262144-token context limit, and seven DFlash draft tokens.
+The XS profile uses `poolside/Laguna-XS-2.1-DFlash`; the S profile retains its
+existing `poolside/Laguna-S-2.1-DFlash-FP8` draft.
+See the [Laguna XS model card](https://huggingface.co/poolside/Laguna-XS-2.1)
+for serving requirements.
 
 Replace `terminal_bench_2_1.sh` with `swe_verified.sh`, `swe_multilingual.sh`,
 or `swe_pro.sh` for SWE evaluations. Add `--smoke` for one task and one rollout.
