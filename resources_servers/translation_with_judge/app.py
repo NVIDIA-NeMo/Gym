@@ -42,6 +42,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -267,6 +268,8 @@ Candidate translation:
         generation = raw.strip()
 
         if not generation:
+            # A genuine policy failure (the model produced no translation), not an
+            # infrastructure one -- stays an unmasked, real zero.
             return TranslationWithJudgeVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
@@ -290,6 +293,9 @@ Candidate translation:
             target_lang_name=_lang_name(body.tgt_lang),
         )
         reward = (judge_score / 100.0) if judge_score is not None else 0.0
+        # An unparseable judge response is an infrastructure/judge failure, not a policy
+        # one -- mask it so it is reported as lost coverage instead of a real zero score.
+        judge_unparseable = judge_score is None
 
         return TranslationWithJudgeVerifyResponse(
             **body.model_dump(),
@@ -299,6 +305,11 @@ Candidate translation:
             sentence_bleu=bleu,
             sentence_chrf=chrf,
             judge_evaluation=judge_evaluation,
+            mask_sample=judge_unparseable,
+            failure_kind=JUDGE_UNPARSEABLE if judge_unparseable else None,
+            failure_reason="Judge response contained no parseable `Score: <0-100>` line."
+            if judge_unparseable
+            else None,
         )
 
     async def _judge_translation(
@@ -401,9 +412,11 @@ Candidate translation:
             per_metric: Dict[str, List[float]] = {"judge_score": [], "bleu": [], "chrf": []}
             for run_rows in runs:
                 for metric in per_metric:
-                    # An unparseable judge score (None) counts as 0 here, matching verify()'s
-                    # reward=0.0 treatment -- dropping it instead would silently bias the mean
-                    # upward whenever the judge fails to produce a parseable score.
+                    # judge_score is None here only for the empty-generation case (a real
+                    # policy failure, unmasked) -- unparseable-judge rows are mask_sample=True
+                    # and never reach this method (the framework filters them out upstream).
+                    # Counts as 0 rather than being dropped, matching verify()'s own
+                    # reward=0.0 treatment for that case.
                     values = [row[metric] if row[metric] is not None else 0.0 for row in run_rows]
                     if values:
                         per_metric[metric].append(sum(values) / len(values))

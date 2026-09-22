@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -146,6 +147,8 @@ class TestApp:
         assert response.sentence_bleu == approx(0.0)
         assert response.sentence_chrf == approx(0.0)
         assert response.judge_evaluation is None
+        assert response.mask_sample is False
+        assert response.failure_kind is None
         server_mock.post.assert_not_called()
 
     async def test_verify_scores_from_judge_response(self, config: TranslationWithJudgeResourcesServerConfig) -> None:
@@ -164,13 +167,15 @@ class TestApp:
         assert response.sentence_bleu == approx(100.0)
         assert response.judge_evaluation is not None
         assert response.judge_evaluation.response == judge_response
+        assert response.mask_sample is False
+        assert response.failure_kind is None
 
         server_mock.post.assert_awaited_once()
         _, kwargs = server_mock.post.await_args
         assert kwargs["server_name"] == "translation_judge_model"
         assert kwargs["url_path"] == "/v1/responses"
 
-    async def test_verify_unparseable_judge_response_yields_zero_reward(
+    async def test_verify_unparseable_judge_response_masks_sample(
         self, config: TranslationWithJudgeResourcesServerConfig
     ) -> None:
         server_mock = MagicMock(spec=ServerClient)
@@ -184,6 +189,8 @@ class TestApp:
 
         assert response.judge_score is None
         assert response.reward == approx(0.0)
+        assert response.mask_sample is True
+        assert response.failure_kind == JUDGE_UNPARSEABLE
 
 
 class TestParseJudgeScore:
