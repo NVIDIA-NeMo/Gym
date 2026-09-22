@@ -593,6 +593,47 @@ def test_reference_default_pointer_locations_and_zero_wait(monkeypatch: pytest.M
     assert 2.0 not in sleeps
 
 
+@pytest.mark.parametrize("timeout", [False, True])
+def test_relaxed_scroll_step_preserves_live_evaluation_state(monkeypatch, tmp_path, timeout):
+    _install_pyautogui(monkeypatch)
+    monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", lambda _: None)
+    calls = []
+
+    def scroll(direction, amount, point, *, timeout):
+        calls.append((direction, amount, point, timeout))
+        if should_timeout:
+            raise TimeoutError("child killed and reaped; partial action not retried")
+
+    should_timeout = timeout
+    monkeypatch.setattr("nemo_gym.web.visual_browser.run_scroll", scroll)
+    driver = _driver(tmp_path, max_scroll_amount=None, action_delay_seconds=0)
+    context = _Context()
+    page = context.new_page()
+    driver._page, driver._context, driver._task = page, context, _task()
+    driver._observation = WebObservation(url=page.url)
+    driver._capture = lambda: WebObservation(url=page.url)
+    item = {
+        "type": "function_call",
+        "name": "computer",
+        "arguments": {
+            "actions": [
+                {"action": "scroll", "scroll_parameters": {"scroll_direction": "down", "scroll_amount": 100000}}
+            ]
+        },
+    }
+    action = parse_nano_omni_tool_calls([item], max_scroll_amount=None)
+    before = action.model_dump(mode="json")
+    result = driver.step(action)
+    assert calls == [("down", 100000, (960, 540), 30.0)]
+    assert result.execution_ok is not timeout and result.terminated is timeout
+    assert driver.evaluation_context().page is page
+    assert driver.evaluation_context().browser_context is context
+    assert result.observation.url == page.url
+    assert action.model_dump(mode="json") == before
+    if timeout:
+        assert "child killed and reaped" in result.info["action_error"]
+
+
 def test_computer_action_validation_and_coordinate_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_pyautogui(monkeypatch)
     monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", lambda _seconds: None)

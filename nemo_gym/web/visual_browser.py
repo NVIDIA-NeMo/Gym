@@ -30,6 +30,7 @@ from nemo_gym.web.models import (
     WebTask,
 )
 from nemo_gym.web.resource_config import WebResourcesServerConfig
+from nemo_gym.web.scroll_process import run_scroll
 
 
 LOG = logging.getLogger("nemo_gym.web.visual_browser")
@@ -47,6 +48,8 @@ class VisualBrowserDriverConfig(WebResourcesServerConfig):
     terminate_on_action_error: bool = True
     max_tool_calls: int | None = Field(default=8, ge=1)
     max_computer_actions: int = Field(default=20, ge=1, le=100)
+    max_scroll_amount: int | None = Field(default=MAX_SCROLL_AMOUNT, ge=0)
+    scroll_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     record_video: bool = False
     browser_channel: str | None = None
     task_image_root: str | None = None
@@ -362,6 +365,7 @@ class VisualBrowserDriver:
                 ],
                 max_calls=self.config.max_tool_calls,
                 max_computer_actions=self.config.max_computer_actions,
+                max_scroll_amount=self.config.max_scroll_amount,
             )
             if validated_action.terminal != action.terminal:
                 raise ValueError("computer-use action terminal flag does not match its tool calls")
@@ -738,17 +742,28 @@ class VisualBrowserDriver:
             time.sleep(float(self.config.action_delay_seconds if duration is None else duration))
         elif name == "scroll":
             params = spec.get("scroll_parameters") or {}
-            amount = int(params.get("scroll_amount", 1))
-            if not 0 <= amount <= MAX_SCROLL_AMOUNT:
-                raise ValueError(f"scroll_amount must be in [0, {MAX_SCROLL_AMOUNT}]")
+            amount = params.get("scroll_amount", 1)
+            limit = self.config.max_scroll_amount
+            if (
+                isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount < 0
+                or (limit is not None and amount > limit)
+            ):
+                raise ValueError(f"scroll_amount must be in [0, {limit}] as an integer")
             direction = params.get("scroll_direction", "down")
             if point is None:
                 point = (self.config.viewport_width // 2, self.config.viewport_height // 2)
-            pyautogui.moveTo(*point)
-            if direction in {"up", "down"}:
-                pyautogui.scroll(amount if direction == "up" else -amount)
+            if limit is None or limit > MAX_SCROLL_AMOUNT:
+                # A cancelled executor future cannot stop PyAutoGUI. Isolate
+                # relaxed scrolls so their deadline actually stops event input.
+                run_scroll(direction, amount, point, timeout=self.config.scroll_timeout_seconds)
             else:
-                pyautogui.hscroll(amount if direction == "right" else -amount)
+                pyautogui.moveTo(*point)
+                if direction in {"up", "down"}:
+                    pyautogui.scroll(amount if direction == "up" else -amount)
+                else:
+                    pyautogui.hscroll(amount if direction == "right" else -amount)
         elif name == "left_click_drag":
             end = self._pixel(spec.get("coordinate"))
             start_coordinate = spec.get("start_coordinate")
