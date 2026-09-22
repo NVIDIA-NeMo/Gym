@@ -7,17 +7,17 @@ import orjson
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-from environment_servers.single_agent.app import (
-    SingleAgentEnvironmentServer,
-    SingleAgentEnvironmentServerConfig,
+from environment_servers.single_agent_turn.app import (
+    SingleAgentTurnEnvironmentServer,
+    SingleAgentTurnEnvironmentServerConfig,
     _is_retryable_dependency_error,
 )
-from environment_servers.single_agent_legacy.app import SingleAgentLegacyEnvironmentServer
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.single_agent_episode_types import SingleAgentEpisodeRequest, SingleAgentTaskInput
+from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -56,7 +56,18 @@ class _Client(ServerClient):
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
         self.calls.append((server_name, url_path, kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        payload = orjson.loads(response.body)
+        body = kwargs.get("json")
+        if url_path == "/seed_session" and hasattr(body, "resources_session_id"):
+            payload["resources_session_id"] = body.resources_session_id
+        elif url_path == "/v1/agent_sessions":
+            payload["agent_session_id"] = body.agent_session_id
+        elif url_path == "/v1/agent_sessions/close":
+            payload["agent_session_id"] = body.agent_session_id
+        elif url_path == "/close_session":
+            payload["resources_session_id"] = body.resources_session_id
+        return _Response(payload)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -66,7 +77,7 @@ def _environment_server(
     *,
     token_capture: bool = False,
     resources_tool_transports: list[Literal["direct_http", "mcp"]] | None = None,
-) -> tuple[SingleAgentEnvironmentServer, _Client]:
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
             "resources": {"resources_servers": {"test": {"host": "resources", "port": 8000, "entrypoint": "app.py"}}},
@@ -109,7 +120,7 @@ def _environment_server(
             _Response({"resources_session_id": "resources-session"}),
         ],
     )
-    config = SingleAgentEnvironmentServerConfig(
+    config = SingleAgentTurnEnvironmentServerConfig(
         name="environment",
         host="environment",
         port=8002,
@@ -120,15 +131,15 @@ def _environment_server(
         cleanup_timeout_seconds=10,
         resources_tool_transports=resources_tool_transports or [],
     )
-    return SingleAgentEnvironmentServer(config=config, server_client=client), client
+    return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
 
 
-def _request() -> SingleAgentEpisodeRequest:
-    return SingleAgentEpisodeRequest(
+def _request() -> SingleAgentTurnRequest:
+    return SingleAgentTurnRequest(
         episode_id=EpisodeId(rollout_id="rollout", attempt=2),
         task=MaterializedTask(
             task_id=TaskId(taskset="source", task_id="task"),
-            task_input=SingleAgentTaskInput(
+            task_input=SingleAgentTurnTaskInput(
                 responses_create_params={"input": "task"},
                 task_data={"instance_id": "task"},
             ),
@@ -136,7 +147,7 @@ def _request() -> SingleAgentEpisodeRequest:
     )
 
 
-async def test_single_agent_protocol_with_direct_resources_tools() -> None:
+async def test_single_agent_turn_with_direct_resources_tools() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     result = await environment_server.run_request(_request())
 
@@ -165,7 +176,7 @@ async def test_single_agent_protocol_with_direct_resources_tools() -> None:
     assert client.calls[5][2]["json"].episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
-async def test_single_agent_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
+async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(
         {
@@ -196,7 +207,7 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
 
 async def test_legacy_compatibility_is_a_separate_environment_deployment() -> None:
     environment_server, client = _environment_server()
-    adapter = SingleAgentLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
     result = await adapter.run_legacy(
         {
             "_ng_task_index": 3,
@@ -216,11 +227,11 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
 async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
     native_environment, native_client = _environment_server()
-    legacy_adapter = SingleAgentLegacyEnvironmentServer(
+    legacy_adapter = SingleAgentTurnLegacyEnvironmentServer(
         config=legacy_environment.config,
         server_client=legacy_client,
     )
-    native_adapter = SingleAgentLegacyEnvironmentServer(
+    native_adapter = SingleAgentTurnLegacyEnvironmentServer(
         config=native_environment.config,
         server_client=native_client,
     )
@@ -232,11 +243,11 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
         "benchmark_field": "input",
         "responses_create_params": {"input": "task"},
     }
-    native_request = SingleAgentEpisodeRequest(
+    native_request = SingleAgentTurnRequest(
         episode_id=EpisodeId(rollout_id="3-2", attempt=1),
         task=MaterializedTask(
             task_id=TaskId(taskset="resources", task_id="task"),
-            task_input=SingleAgentTaskInput(
+            task_input=SingleAgentTurnTaskInput(
                 responses_create_params={"input": "task"},
                 task_data={"instance_id": "task", "benchmark_field": "input"},
             ),

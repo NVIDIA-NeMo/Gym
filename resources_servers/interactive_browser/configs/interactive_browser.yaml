@@ -34,3 +34,11 @@ interactive_browser_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/interactive_browser/data/example.jsonl
+
+interactive_browser_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: interactive_browser_simple_agent
