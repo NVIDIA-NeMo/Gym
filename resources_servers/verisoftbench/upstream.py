@@ -358,6 +358,9 @@ BACKEND_FAULT_MARKERS = (
     "lake command not found",
     "No such container",
     "is not running",
+    # Lake re-resolving a dependency inside the repository during `lake env lean`; the
+    # candidate never reached the elaborator.
+    "external command 'git' exited",
 )
 
 

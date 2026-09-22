@@ -82,7 +82,14 @@ def real_body(ground_truth_proof: str) -> tuple[str, bool]:
     """
     import re
 
-    g = ground_truth_proof.strip()
+    # Upstream's verify_ground_truth.py: "Strip trailing contamination from gt_proof: block
+    # comments or new top-level declarations ... accidentally included during extraction."
+    g = re.sub(
+        r"\n\n(?=/--|/-|example\b|def\b|theorem\b|lemma\b|#|open\b|namespace\b|section\b).*",
+        "",
+        ground_truth_proof.strip(),
+        flags=re.DOTALL,
+    )
     if g.startswith(":=") and not any(re.match(pat, g) for pat in _BODY_STARTS) and UPSTREAM_UTILS is not None:
         idx, pat = UPSTREAM_UTILS.find_decl_body_separator(g)
         if idx > 0 and pat not in (":=", ":"):

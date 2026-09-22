@@ -167,6 +167,7 @@ class TestBackendFaultMarkers:
         [
             ("Error response from daemon: No such container: x", True),
             ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock", True),
+            ("info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128", True),
             ("Line 3:2 - unsolved goals", False),
             ("Compilation timeout (>300s)", False),
             (None, False),
