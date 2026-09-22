@@ -20,7 +20,9 @@ comparing rewards. Do not assume parity with existing local Pi rollouts.
 
 1. EnvironmentServer asks Resources to seed a task. Resources creates the sandbox.
 2. EnvironmentServer passes `SandboxAccess` to Pi's `/v1/agent_sessions` endpoint.
-3. Pi connects as a borrower and prepares Node 22.19.0 and the configured Pi package.
+3. Pi connects as a borrower and automatically runs `install_pi_runtime.sh` to
+   install Node 22.19.0 and the configured Pi package outside the task repository.
+   This installs the harness runtime, not the task dependencies or test environment.
 4. EnvironmentServer calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
@@ -33,6 +35,15 @@ The native session supports one activation. It requires a matching episode and
 rollout identity and a single agent-server worker. It never falls back to a host
 CLI when sandbox setup fails. Calls without an agent session retain the existing
 local Pi behavior; they do not operate on the Resources-owned task sandbox.
+Server startup does not install Pi on the host. Host installation happens only
+on the first local invocation. Native sessions prepare their runtime during
+session initialization, following the same seed/close contracts as Hermes;
+there is no separate preparation endpoint or user-run setup script.
+
+This follows the same responsibility split as Harbor's installed agents:
+the task environment is prepared first, then agent setup installs the harness,
+and agent execution starts afterward. The shell file is a private installation
+detail, not an additional lifecycle contract.
 
 ## Configure
 
@@ -40,6 +51,9 @@ Use `responses_api_agents/pi_agent/configs/pi_swe_pro_native.yaml` as a composit
 example. Combine it with the SWE Pro resources configuration, a sandbox provider,
 and a Gym model-server instance named `policy`; set `pi_swe_pro_agent.model` to the
 served model ID using Gym's normal server configuration nesting.
+Only EnvironmentServer needs the Resources reference in this composition. Pi's
+`resources_server` setting is optional for native sessions and direct `/v1/responses`;
+it is required only when using the agent's existing `/run` endpoint.
 
 The sample uses Pi `0.80.2`. Native seed requires an exact `pi_version` rather than
 `latest`. The first draft supports Linux x86_64/aarch64 glibc task images with

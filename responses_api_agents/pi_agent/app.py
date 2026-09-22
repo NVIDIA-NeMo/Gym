@@ -422,7 +422,9 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    # Only the direct /run compatibility path calls Resources. Native sessions
+    # receive SandboxAccess from EnvironmentServer instead.
+    resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
     command: str = "pi"
@@ -468,11 +470,23 @@ class PiAgent(SimpleResponsesAPIAgent):
     _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse]] = PrivateAttr(
         default_factory=OrderedDict
     )
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Borrow the Resources-owned task sandbox and install a pinned Pi runtime inside it."""
         if request.session.get(_SANDBOX_SESSION_KEY) in self._sandbox_sessions:
             raise HTTPException(409, "Pi session already exists")
+        session_id = f"pi-{uuid4().hex}"
+        state = await self._initialize_agent_session_state(session_id, body)
+        self._sandbox_sessions[session_id] = state
+        request.session[_SANDBOX_SESSION_KEY] = session_id
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def _initialize_agent_session_state(
+        self, agent_session_id: str, body: AgentSeedSessionRequest
+    ) -> PiSandboxSession:
+        # Match Hermes: session initialization owns the sandbox runtime setup,
+        # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
         if self.config.num_workers not in (None, 1):
             raise HTTPException(422, "Native Pi sessions require num_workers=1")
         if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
@@ -495,30 +509,29 @@ class PiAgent(SimpleResponsesAPIAgent):
         except BaseException:
             await provider.aclose()
             raise
-        session_id = f"pi-{uuid4().hex}"
-        directory = f"/tmp/nemo-gym-pi-sessions/{session_id}"
+        directory = f"/tmp/nemo-gym-pi-sessions/{agent_session_id}"
         runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
-        state = PiSandboxSession(body, sandbox, directory, runtime)
         try:
             prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
             if prepared.return_code != 0:
                 raise RuntimeError(prepared.stderr or "Cannot create Pi sandbox session directory")
-            for name in ("prepare_sandbox.sh", "sandbox_runner.py"):
-                await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+            # Install only the agent runtime in the existing task sandbox.
+            # Resources has already prepared the task repository and its dependencies.
+            installer = "install_pi_runtime.sh"
+            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
             installed = await sandbox.exec(
-                f"bash {shlex.quote(directory + '/prepare_sandbox.sh')} {shlex.quote(runtime)} "
+                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
                 f"{shlex.quote(self.config.pi_version)}",
                 cwd=body.sandbox_access.workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             if installed.return_code != 0:
                 raise RuntimeError(installed.stderr or installed.stdout or "Pi sandbox installation failed")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException:
             await sandbox.disconnect()
             raise
-        self._sandbox_sessions[session_id] = state
-        request.session[_SANDBOX_SESSION_KEY] = session_id
-        return AgentSeedSessionResponse(agent_session_id=session_id)
+        return PiSandboxSession(body, sandbox, directory, runtime)
 
     async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
         """Confirm Pi teardown before allowing verification; never destroy the borrowed sandbox."""
@@ -707,10 +720,6 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_pi(self.config.pi_version)
-        command = self.config.command_parts[0] if self.config.command_parts else ""
-        if not command or shutil.which(command) is None:
-            LOG.warning("pi command %r is not on PATH yet", self.config.command)
 
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"pi_{uuid4().hex[:8]}"
@@ -762,6 +771,19 @@ class PiAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> tuple[list[Any], dict[str, int], str, list[tuple[float, dict[str, Any]]]]:
+        # Local callers still get automatic installation. Native sessions never
+        # enter this path, so their host does not need Pi, Node, or npm.
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_pi, self.config.pi_version))
+        setup_task = self._local_setup_task
+        try:
+            # Share one installation across concurrent local calls. Cancelling
+            # a caller must not release another caller to start a second install.
+            await asyncio.shield(setup_task)
+        except Exception:
+            if self._local_setup_task is setup_task:
+                self._local_setup_task = None
+            raise
         effective_model = self._effective_model()
         provider, _, model_id = effective_model.partition("/")
         work_dir = self._workspace_root()
@@ -946,6 +968,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
+        if self.config.resources_server is None:
+            raise HTTPException(
+                422, "Pi /run requires resources_server; use EnvironmentServer /run for native sessions"
+            )
         async with self.sem:
             cookies = request.cookies
 

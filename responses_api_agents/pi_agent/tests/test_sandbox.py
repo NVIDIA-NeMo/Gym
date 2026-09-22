@@ -148,7 +148,6 @@ def setup():
         port=8001,
         entrypoint="app.py",
         num_workers=1,
-        resources_server={"type": "resources_servers", "name": "swe"},
         model_server={"type": "responses_api_models", "name": "policy"},
         model="test-model",
         pi_version="0.80.2",
@@ -156,7 +155,7 @@ def setup():
     )
     module = "responses_api_agents.pi_agent.app"
     with (
-        patch(f"{module}.ensure_pi"),
+        patch(f"{module}.ensure_pi", side_effect=AssertionError("native sessions must not install host Pi")),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
@@ -177,6 +176,15 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
+            directory = f"/tmp/nemo-gym-pi-sessions/{session_id}"
+            installer = f"{directory}/install_pi_runtime.sh"
+            assert installer in sandbox.files
+            assert agent.config.resources_server is None
+            assert not sandbox.pty.create.called
+            assert not any(path.startswith("/app/") for path in sandbox.files)
+            install_call = sandbox.exec.await_args_list[1]
+            assert install_call.args[0] == (f"bash {installer} /tmp/nemo-gym-pi-node-22.19.0-0.80.2 0.80.2")
+            assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post(
                 "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": 123}
             )
@@ -207,8 +215,19 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
             assert "no_sandbox_runtime" not in [gap["code"] for gap in observations["gaps"]]
             assert len(observations["records"][0]["model_calls"]) == 2
     assert not agent._sandbox_sessions
+    assert agent._local_setup_task is None
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+    agent.server_client.post.assert_not_called()
+
+
+def test_direct_run_without_resources_rejected_before_execution(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/run", json={"responses_create_params": {"input": "task"}})
+    assert response.status_code == 422
+    assert "use EnvironmentServer /run" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
     agent.server_client.post.assert_not_called()
 
 
@@ -425,5 +444,18 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
         await agent.seed_agent_session(request, seed())
     assert not agent._sandbox_sessions
     assert not request.session
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
+    agent, sandbox = setup
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0), asyncio.CancelledError()]
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(asyncio.CancelledError):
+        await agent.seed_agent_session(request, seed())
+    assert not agent._sandbox_sessions
+    assert not request.session
+    sandbox.pty.create.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
