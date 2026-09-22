@@ -747,16 +747,27 @@ class TestDiscriminatedResponseItems:
 
 
 class TestNeMoGymChatCompletionSchemas:
-    @pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
-    def test_assistant_reasoning_fields_round_trip(self, field: str) -> None:
+    def test_assistant_reasoning_field_round_trips(self) -> None:
         payload = {
-            "messages": [{"role": "assistant", "content": "answer", field: "thought"}],
+            "messages": [{"role": "assistant", "content": "answer", "reasoning": "thought"}],
             "model": "gpt-test",
         }
 
         params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
 
-        assert params.model_dump(exclude_unset=True)["messages"][0][field] == "thought"
+        assert params.model_dump(exclude_unset=True)["messages"][0]["reasoning"] == "thought"
+
+    def test_assistant_reasoning_content_is_none_only(self) -> None:
+        # reasoning_content should not be used; only None (or absent) round-trips.
+        # See preserve_reasoning_in_assistant_content on vllm_model to avoid replaying it.
+        payload = {
+            "messages": [{"role": "assistant", "content": "answer", "reasoning_content": None}],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        assert "reasoning_content" not in params.model_dump(exclude_unset=True)["messages"][0]
 
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:
         payload = {
