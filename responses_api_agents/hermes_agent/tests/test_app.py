@@ -49,6 +49,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentSessionState,
     ModelServerRef,
     ResourcesServerRef,
+    RunnerCleanup,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
@@ -264,7 +265,7 @@ class TestSandboxSessionCleanup:
             workdir="/app",
             session_dir="/tmp/nemo-gym-hermes-sessions/session",
             runner_session=AsyncMock(),
-            launch_started=True,
+            runner_cleanup=RunnerCleanup.UNCONFIRMED,
             observations=AgentObservationBundle(source="hermes"),
         )
         return hermes, state
@@ -295,6 +296,7 @@ class TestSandboxSessionCleanup:
         runner.send_signal.assert_awaited_once_with("SIGTERM")
         assert state.runner_session is None
         assert state.runner_exit_task is None
+        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
         assert state.sandbox.exec.await_args.args[0] == f"rm -rf {state.session_dir}"
         state.sandbox.disconnect.assert_awaited_once()
         state.sandbox.stop.assert_not_awaited()
@@ -313,6 +315,7 @@ class TestSandboxSessionCleanup:
                 await hermes._close_agent_session_state(state)
             assert state.runner_session is runner
             assert state.runner_exit_task is watcher
+            assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
             runner.close.assert_not_awaited()
             state.sandbox.disconnect.assert_not_awaited()
         finally:
@@ -353,10 +356,12 @@ class TestSandboxSessionCleanup:
         with pytest.raises(SandboxPtyError, match="close failed"):
             await hermes._close_agent_session_state(state)
         assert state.runner_session is runner
+        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
         state.sandbox.disconnect.assert_not_awaited()
         await hermes._close_agent_session_state(state)
         assert runner.close.await_count == 2
         assert state.runner_session is None
+        hermes._download_json.assert_awaited_once()
 
     @pytest.mark.skipif(os.name != "posix", reason="Requires POSIX process groups")
     async def test_termination_escalates_and_waits_for_process_exit(self) -> None:
