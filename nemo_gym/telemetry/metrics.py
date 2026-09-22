@@ -48,13 +48,9 @@ papered over, so this module takes an explicit position on each of the five:
     Use that instead; see ``fern/versions/latest/pages/observability/metrics.mdx``.
 
 ``gym.sandbox.active`` (up-down counter, Gym-owned)
-    Used. Not a lens instrument: created on the lens meter by :func:`record_sandbox_active`.
-    One sandbox in the whole rollout is one unit; ``+1`` when a provider hands back a
-    handle, ``-1`` when Gym releases it. Dimensioned by ``nemo.gym.sandbox.provider``. An
-    up-down counter, not a gauge, because sandboxes are held by several agent-server
-    processes and a backend sums counters across processes correctly; a gauge would show
-    whichever process wrote last. The exported value is one process's current holdings,
-    so the fleet-wide number is ``sum(gym.sandbox.active)``.
+    Used. Created on the lens meter by :func:`record_sandbox_active`: ``+1`` when a provider
+    hands back a handle, ``-1`` when Gym releases it, per ``nemo.gym.sandbox.provider``. A
+    counter rather than a gauge so the backend sums it across the processes holding sandboxes.
 
 Every function here is a no-op unless telemetry is initialised *and* exporting, so call
 sites do not need their own guards for correctness — though they should still sit under a
@@ -76,9 +72,7 @@ _VERIFY_SUCCEEDED = 0
 
 SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_PROVIDER_ATTRIBUTE = "nemo.gym.sandbox.provider"
-#: The up-down counter behind ``gym.sandbox.active``, keyed by the meter that created it so
-#: a re-initialised handle (tests, ``_reset_for_testing``) gets a fresh instrument instead
-#: of one bound to a dead provider.
+#: (meter, counter) so a re-initialised telemetry handle gets a fresh instrument.
 _SANDBOX_ACTIVE_LOCK = threading.Lock()
 _SANDBOX_ACTIVE: tuple[object, object] | None = None
 
