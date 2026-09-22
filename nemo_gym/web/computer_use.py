@@ -228,13 +228,21 @@ NANO_OMNI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def nano_omni_tools(*, limits: WebActionLimits | None = None) -> list[dict[str, Any]]:
+def nano_omni_tools(
+    *, max_scroll_amount: int | None = MAX_SCROLL_AMOUNT, limits: WebActionLimits | None = None
+) -> list[dict[str, Any]]:
     """Return a mutation-safe copy of Nano Omni's Responses tool schema."""
 
     tools = deepcopy(NANO_OMNI_TOOLS)
+    computer = next(tool for tool in tools if tool["name"] == "computer")
+    action = computer["parameters"]["properties"]["actions"]["items"]
+    amount = action["properties"]["scroll_parameters"]["anyOf"][0]["properties"]["scroll_amount"]
+    if max_scroll_amount is None:
+        amount.pop("maximum")
+    else:
+        amount["maximum"] = max_scroll_amount
     if limits is None:
         return tools
-    computer = next(tool for tool in tools if tool["name"] == "computer")
     duration = computer["parameters"]["properties"]["actions"]["items"]["properties"]["duration"]
     if limits.max_wait_seconds != 30:
         duration["anyOf"][0]["maximum"] = limits.max_wait_seconds

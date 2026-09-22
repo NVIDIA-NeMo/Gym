@@ -19,42 +19,44 @@ from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
-from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.client.openai_client import _error_body_is_permanent_quota
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import (
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import (
     SESSION_LOST,
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    accumulate_response_usage,
+    SESSION_RELEASE_FAILED,
+    TRANSPORT_TIMEOUT,
     is_namespaced,
     is_registered,
 )
-from nemo_gym.core.failure_kinds import SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
-from nemo_gym.rollouts import NG_TERMINAL_KEY
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.web import (
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    _error_body_is_permanent_quota,
+    accumulate_response_usage,
+)
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
+from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.web.actions import MAX_SCROLL_AMOUNT, ActionParseError, parse_nano_omni_tool_calls
+from nemo_gym.web.api_models import (
+    WebCloseResponse,
+    WebEvaluateResponse,
+    WebSeedSessionResponse,
+    WebStepResponse,
+)
+from nemo_gym.web.computer_use import NANO_OMNI_SYSTEM_PROMPT, nano_omni_tools
+from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
+from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
-    NANO_OMNI_SYSTEM_PROMPT,
-    ActionParseError,
     WebActionLimits,
     WebActionProfile,
     WebArtifactRef,
     WebBenchmark,
-    WebCloseResponse,
-    WebEvaluateResponse,
     WebObservation,
-    WebSeedSessionResponse,
-    WebStepResponse,
     WebTask,
     WebVerifierResult,
-    compact_webvoyager_judge_evidence,
-    nano_omni_tools,
-    parse_nano_omni_tool_calls,
 )
 from responses_api_agents.web_agent.qwen_computer_use import (
     QwenPolicyState,
@@ -107,6 +109,7 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     # action validation and resource operation timeouts remain in force.
     nano_omni_max_tool_calls: int | None = Field(default=8, ge=1)
     nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    nano_omni_max_scroll_amount: int | None = Field(default=MAX_SCROLL_AMOUNT, ge=0)
     nano_omni_retry_invalid_tool_calls: bool = True
     nano_omni_parse_retry_feedback: bool = False
     nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -203,6 +206,7 @@ def _parse_response_action(
     qwen_state: QwenPolicyState | None = None,
     nano_omni_max_tool_calls: int | None = 8,
     nano_omni_max_computer_actions: int = 20,
+    nano_omni_max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
     action_limits: WebActionLimits | None = None,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
@@ -212,6 +216,7 @@ def _parse_response_action(
             response.output,
             max_calls=nano_omni_max_tool_calls,
             max_computer_actions=nano_omni_max_computer_actions,
+            max_scroll_amount=nano_omni_max_scroll_amount,
             limits=action_limits,
         )
     if qwen_state is None:
@@ -616,7 +621,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             if base_body.instructions is None:
                 base_body.instructions = NANO_OMNI_SYSTEM_PROMPT
             if not base_body.tools:
-                base_body.tools = nano_omni_tools()
+                base_body.tools = nano_omni_tools(max_scroll_amount=self.config.nano_omni_max_scroll_amount)
             base_body.tool_choice = "auto"
             base_body.parallel_tool_calls = True
 
@@ -636,7 +641,9 @@ class WebAgent(SimpleResponsesAPIAgent):
             ):
                 raise ValueError("browser step wait budget must be shorter than resources_request_timeout_secs")
             if self.config.policy_protocol == "nano_omni_toolcall" and use_default_tools:
-                base_body.tools = nano_omni_tools(limits=action_limits)
+                base_body.tools = nano_omni_tools(
+                    max_scroll_amount=self.config.nano_omni_max_scroll_amount, limits=action_limits
+                )
             artifacts.session_id = seed_data.session_id
             env_cookies = seed_response.cookies
             artifacts.seed_completed = True
@@ -824,6 +831,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             qwen_state=qwen_state,
                             nano_omni_max_tool_calls=self.config.nano_omni_max_tool_calls,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
+                            nano_omni_max_scroll_amount=self.config.nano_omni_max_scroll_amount,
                             action_limits=action_limits,
                         )
                         # Both maintained policy adapters add only a
