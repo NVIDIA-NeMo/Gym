@@ -1065,7 +1065,9 @@ the check."""
         without_environment_server = [
             agent.name
             for agent in self._agent_instances(global_config_dict)
-            if not self._is_unbound_agent(agent.server_config) and agent.name not in with_environment_server
+            if not self._is_unbound_agent(agent.server_config)
+            and agent.name not in with_environment_server
+            and agent.server_config.get("entrypoint") is not None
         ]
         if not without_environment_server:
             return
