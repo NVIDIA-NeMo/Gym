@@ -1,11 +1,104 @@
 # OpenCode Sandboxed Agent
 
+The existing `opencode_sandboxed_agent` entrypoint supports native EnvironmentServer
+sessions. OpenCode and its tools run inside the task sandbox created by Resources;
+the adapter only borrows the connection. The separate local `opencode_agent` and
+existing benchmark recipes keep their current behavior.
+
+## Native EnvironmentServer sessions
+
+Bind `single_agent_environment_server.environment_servers.single_agent.agent_server`
+to this agent and `resources_server` to a Resources implementation supporting native
+sessions and returning `SandboxAccess`. Bind this agent's `model_server` to a Gym
+model endpoint reachable from the task sandbox. Submit episodes to **EnvironmentServer
+`/run`**. Existing legacy Resources recipes do not automatically gain native lifecycle
+support merely by changing their agent.
+
+```yaml
+config_paths:
+  - environment_servers/single_agent/configs/single_agent.yaml
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+
+single_agent_environment_server:
+  environment_servers:
+    single_agent:
+      agent_server:
+        type: responses_api_agents
+        name: opencode_sandboxed_agent
+      resources_server:
+        type: resources_servers
+        name: task_resources  # Supply a native Resources config in this run.
+
+opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      opencode_version: 1.17.11
+```
+
+The agent opens `/v1/agent_sessions`, installs the pinned standalone OpenCode runtime,
+and runs one `/ng-rollout/<capture_key>/v1/responses` activation. It accepts a string
+or one user text message, optionally preceded by system/developer text; `instructions`
+is appended through OpenCode's instruction-file configuration. Images and conversation
+replay are rejected before consuming the activation. OpenCode owns tool selection.
+Required Resources HTTP/MCP tools are unsupported. Native `opencode_config` accepts
+only the existing `permission` and `tools` settings so provider/model overrides cannot
+bypass Gym correlation.
+
+Request `max_output_tokens`, sampling, reasoning, formatting, tool controls, and other
+unused request controls are explicitly rejected. Set effective sampling and per-model-call
+output limits on the Gym model server and verify its captured requests. OpenCode's model
+context metadata does not establish an enforced output-token limit. Model calls use
+Chat Completions through the attempt-qualified Gym URL; the adapter never rewrites the
+reasoning or tool history OpenCode sends.
+
+The supported runtime is Linux glibc x86_64 or aarch64 with Bash and Python 3.9+ (including
+SQLite and `fcntl`). Setup reports failing commands, exit codes and stderr. Missing curl
+and CA certificates are installed automatically only with root and apt-get; other images
+must include them. Online setup also needs tar/gzip and access to GitHub releases.
+`remote_opencode_binary_path` may name a pre-staged binary; the existing optional staged
+installer and dual-binary configuration remain supported. Every path is inside the sandbox,
+and the installed binary's version must match `opencode_version`.
+
+The version-scoped runtime cache lives under `/tmp/nemo-gym-opencode-runtime-<version>`
+and installation is serialized with a file lock. Per-session HOME, caches, instructions,
+SQLite state and supervisor files live under `/tmp/nemo-gym-opencode-sessions/<id>`,
+outside the task repository. Session close removes only the session directory and leaves
+the reusable runtime cache for Resources to destroy with the sandbox. No host OpenCode
+installation or execution occurs in native sessions.
+
+A Linux subreaper per activation kills and reaps tool descendants, including detached
+background processes. Close requires its positive cleanup receipt, successful adapter-file
+removal, and disconnect before verification can proceed. Unknown launch outcomes and
+unconfirmed cleanup fail closed and retain session state for retries. Successful close
+retries return the same result for `session_close_retry_window_seconds` (300 seconds by
+default); expired cookies continue to reject activation. State is process-local and requires
+one worker. Failed sessions remain until owner recovery/process restart; there is no
+cross-worker crash recovery. Process cleanup prevents verification races and is not a
+security boundary against hostile task code.
+
+The response preserves text, reasoning, tool results and partial output from OpenCode's
+SQLite state. Close returns the existing session-tree, subagent and compaction observations.
+Native usage restores inclusive cache/reasoning counts from all persisted assistant turns,
+including subagents. Auxiliary model requests not persisted as assistant messages may remain
+unaccounted for; compare against captured Gym calls before using totals for accounting.
+Missing artifacts and reconciliation are explicit observation gaps. A failed model call may
+still leave a correct patch: inspect episode failures and verifier outcomes separately.
+
+Functional smoke validation is not an accuracy baseline. Training token IDs/logprobs,
+multiple image families, and supervisor overhead at production concurrency need separate
+validation. Pin model, prompt, limits, image, verifier and concurrency for before/after runs.
+
+
 ## Prerequisites
 
 Complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
 for sandbox credentials, endpoint configuration, and resource limits before launching.
 
-## First evaluation
+## Legacy agent /run evaluation
 
 From the repository root, with Gym installed and model/sandbox access configured, use the
 [SWE-bench Verified recipe](../../benchmarks/swebench/verified/opencode.yaml), which binds

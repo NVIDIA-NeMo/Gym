@@ -13,27 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import re
 import sqlite3
 import sys
+import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -60,7 +69,8 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
@@ -71,6 +81,10 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_sandboxed_agent.sandbox import OpenCodeSandboxSession
+
+
+_NATIVE_SESSION_KEY = "nemo_gym_opencode_native_session"
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -388,20 +402,24 @@ def parse_opencode_observations(
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
 
-    opencode_version: str
+    opencode_version: str = "1.17.11"
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
-    opencode_max_context_window: int
+    opencode_max_context_window: int = 262144
 
     # Sandbox config
-    sandbox_provider: str
-    sandbox_config: Dict[str, Any]
-    sandbox_timeout: float
+    sandbox_provider: str = "sandbox"
+    sandbox_config: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_timeout: float = 10800
+
+    session_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    session_close_retry_window_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
 
     debug: bool = False
 
@@ -458,6 +476,405 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
+
+    _native_sessions: dict[str, OpenCodeSandboxSession] = PrivateAttr(default_factory=dict)
+    _closed_native_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
+        default_factory=OrderedDict
+    )
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Install OpenCode inside the Resources-owned sandbox before publishing a session."""
+        self._expire_native_receipts()
+        if request.session.get(_NATIVE_SESSION_KEY) in self._native_sessions:
+            raise HTTPException(409, "OpenCode session already exists")
+        session_id = f"opencode-{uuid4().hex}"
+        state = await self._initialize_agent_session_state(session_id, body)
+        self._native_sessions[session_id] = state
+        request.session[_NATIVE_SESSION_KEY] = session_id
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def _initialize_agent_session_state(
+        self, session_id: str, body: AgentSeedSessionRequest
+    ) -> OpenCodeSandboxSession:
+        if self.config.num_workers not in (None, 1):
+            raise HTTPException(422, "Native OpenCode sessions require num_workers=1")
+        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+            raise HTTPException(422, "Native OpenCode requires Resources-owned direct SandboxAccess")
+        workdir = body.sandbox_access.workdir
+        if not workdir.startswith("/") or "\x00" in workdir or workdir.rstrip("/") in ("", "/tmp"):
+            raise HTTPException(422, "Native OpenCode workdir must be an absolute path")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise HTTPException(422, "Native OpenCode uses its own tools; required HTTP/MCP tools are unsupported")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", self.config.opencode_version):
+            raise HTTPException(422, "Native OpenCode requires an exact opencode_version")
+        if self.config.opencode_max_context_window <= 0 or self.config.sandbox_timeout <= 0:
+            raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        if unsupported:
+            raise HTTPException(
+                422, f"Native OpenCode config supports permission/tools only; unsupported: {sorted(unsupported)}"
+            )
+        if self.config.remote_opencode_install_script_path and not self.config.remote_opencode_binary_path:
+            raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
+        if self.config.remote_opencode_musl_binary_path and not self.config.remote_opencode_install_script_path:
+            raise HTTPException(422, "A staged musl binary requires a compatible staged installer")
+        connection = body.sandbox_access.connection
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        directory = f"/tmp/nemo-gym-opencode-sessions/{session_id}"
+        runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
+        try:
+            command = f"test -d {quote(workdir)} && mkdir -p {quote(directory)}"
+            result = await sandbox.exec(command, timeout_s=30)
+            self._check_native_setup(command, result)
+            installer = "install_opencode_runtime.sh"
+            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+            command = "bash " + " ".join(
+                quote(arg)
+                for arg in (
+                    f"{directory}/{installer}",
+                    runtime,
+                    self.config.opencode_version,
+                    self.config.remote_opencode_binary_path or "",
+                    self.config.remote_opencode_install_script_path or "",
+                    self.config.remote_opencode_musl_binary_path or "",
+                )
+            )
+            result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.session_install_timeout_seconds)
+            self._check_native_setup(command, result)
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+        except BaseException:
+            try:
+                await sandbox.exec(f"rm -rf -- {quote(directory)}", timeout_s=30)
+            finally:
+                await sandbox.disconnect()
+            raise
+        return OpenCodeSandboxSession(body, sandbox, directory, runtime)
+
+    @staticmethod
+    def _check_native_setup(command: str, result: SandboxExecResult) -> None:
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(
+                f"OpenCode setup failed: command={command!r}, exit={result.return_code}, "
+                f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}"
+            )
+
+    def _expire_native_receipts(self) -> None:
+        now = monotonic()
+        while self._closed_native_sessions and next(iter(self._closed_native_sessions.values()))[2] <= now:
+            self._closed_native_sessions.popitem(last=False)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        """Stop descendants and disconnect before EnvironmentServer can start verification."""
+        self._expire_native_receipts()
+        session_id = request.session.get(_NATIVE_SESSION_KEY)
+        receipt = self._closed_native_sessions.get(session_id)
+        if receipt is not None and body.agent_session_id == session_id and body.episode_id == receipt[0]:
+            return receipt[1]
+        state = self._native_sessions.get(session_id)
+        if state is None or body.agent_session_id != session_id or state.seed.episode_id != body.episode_id:
+            raise HTTPException(409, "OpenCode close does not match the seeded session and episode")
+        await state.close(self.config.session_close_timeout_seconds)
+        self._expire_native_receipts()
+        if session_id in self._closed_native_sessions:
+            return self._closed_native_sessions[session_id][1]
+        if self._native_sessions.get(session_id) is not state:
+            raise HTTPException(409, "OpenCode close receipt expired")
+        observations = state.observations or AgentObservationBundle(
+            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+        )
+        result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
+        self._native_sessions.pop(session_id)
+        # Retain the cookie as a tombstone: retries and stale activations cannot enter the legacy path.
+        self._closed_native_sessions[session_id] = (
+            body.episode_id,
+            result,
+            monotonic() + self.config.session_close_retry_window_seconds,
+        )
+        return result
+
+    def _native_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        unsupported = (
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "reasoning",
+            "max_tool_calls",
+            "previous_response_id",
+            "prompt",
+            "text",
+            "context_management",
+            "conversation",
+            "moderation",
+            "top_logprobs",
+            "truncation",
+            "include",
+            "store",
+            "service_tier",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "stream_options",
+            "user",
+        )
+        values = body.model_dump(mode="json")
+        for key in unsupported:
+            if values.get(key) is not None:
+                raise HTTPException(
+                    422, f"Native OpenCode does not support request field {key}; configure Gym model limits/sampling"
+                )
+        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
+            raise HTTPException(422, "OpenCode owns tool selection and execution policy")
+        if (body.metadata or {}).get("chat_template_kwargs") is not None:
+            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server")
+        if body.model not in (None, "", "dummy_model", self.config.model_server.name):
+            raise HTTPException(422, "Native OpenCode uses the configured Gym model_server")
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        roles = [getattr(item, "role", None) for item in items]
+        if roles not in (["user"], ["system", "user"], ["developer", "user"]):
+            raise HTTPException(
+                422, "Native OpenCode accepts one user text prompt and optional system/developer message"
+            )
+        texts = []
+        for item in items:
+            if isinstance(item.content, str):
+                texts.append(item.content)
+            else:
+                parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
+                if any(part.get("type") != "input_text" for part in parts):
+                    raise HTTPException(422, "Native OpenCode supports text input only")
+                texts.append("\n".join(part["text"] for part in parts))
+        if not texts[-1].strip():
+            raise HTTPException(422, "Native OpenCode requires a nonempty user prompt")
+        return texts[-1], "\n\n".join(text for text in [body.instructions, *texts[:-1]] if text)
+
+    def _native_output(
+        self, export: dict[str, Any], observations: AgentObservationBundle
+    ) -> list[NeMoGymResponseOutputItem]:
+        output = []
+        for message in export.get("messages", []):
+            if message.get("info", {}).get("role") != "assistant":
+                continue
+            for part in message.get("parts", []):
+                if part.get("type") in (
+                    "step-start",
+                    "step-finish",
+                    "patch",
+                    "snapshot",
+                    "compaction",
+                    "agent",
+                    "retry",
+                ):
+                    continue
+                try:
+                    items = self._opencode_export_to_output_items(
+                        {"messages": [{"info": message["info"], "parts": [part]}]}
+                    )
+                    if part.get("type") == "tool":
+                        state = part.get("state") or {}
+                        for item in items:
+                            item.status = "completed" if state.get("status") == "completed" else "incomplete"
+                            if isinstance(item, NeMoGymFunctionCallOutput):
+                                item.output = state.get("output") or state.get("error") or ""
+                    output.extend(items)
+                except Exception:
+                    # A malformed or newer artifact must not discard already captured turns.
+                    observations.gaps.append(
+                        ObservationGap(code="agent_artifact_record_unparseable", detail=str(part.get("type")))
+                    )
+        return output
+
+    @staticmethod
+    def _native_usage(export: dict[str, Any]) -> NeMoGymResponseUsage | None:
+        # OpenCode 1.17.11 getUsage subtracts cache from input and reasoning from output.
+        # Restore inclusive OpenAI counters across the root and subagent model turns.
+        infos = export.get("usage_messages", [message["info"] for message in export.get("messages", [])])
+        usages = []
+        for info in infos:
+            tokens = info.get("tokens")
+            if info.get("role") != "assistant" or not tokens:
+                continue
+            cache = tokens.get("cache") or {}
+            input_tokens = int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+            output_tokens = int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+            usages.append(
+                NeMoGymResponseUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cache.get("read")),
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=tokens.get("reasoning")),
+                )
+            )
+        return NeMoGymResponseUsage.sum_from_list(usages) if usages else None
+
+    async def _native_response(
+        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+    ) -> NeMoGymResponse:
+        base_url = self.resolve_model_base_url(self.config.model_server.name, state.seed.episode_id.capture_key)
+        config = {
+            "model": "nemo_gym/dummy_model",
+            "small_model": "nemo_gym/dummy_model",
+            "enabled_providers": ["nemo_gym"],
+            "autoupdate": False,
+            "share": "disabled",
+            "provider": {
+                "nemo_gym": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": base_url,
+                        "apiKey": "dummy_key",
+                        "timeout": False,
+                    },  # pragma: allowlist secret
+                    "models": {
+                        "dummy_model": {
+                            "limit": {
+                                "context": self.config.opencode_max_context_window,
+                                "input": self.config.opencode_max_context_window,
+                                "output": self.config.opencode_max_context_window,
+                            }
+                        }
+                    },
+                }
+            },
+            **self.config.opencode_config,
+        }
+        # System instructions are separate from the user's task and applied to every OpenCode model turn.
+        if system:
+            # OpenCode reads instruction files as text; JSON quoting must not become prompt content.
+            with tempfile.TemporaryDirectory(prefix="opencode-instructions-") as directory:
+                path = Path(directory) / "instructions.md"
+                path.write_text(system)
+                await state.sandbox.upload(path, f"{state.directory}/instructions.md")
+            config["instructions"] = [f"{state.directory}/instructions.md"]
+        payload = {
+            "directory": state.directory,
+            "cwd": state.seed.sandbox_access.workdir,
+            "command": [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking", "--title", "NeMo Gym"],
+            "prompt": prompt,
+            "env": {
+                "HOME": f"{state.directory}/home",
+                "XDG_DATA_HOME": f"{state.directory}/data",
+                "XDG_CONFIG_HOME": f"{state.directory}/config",
+                "XDG_CACHE_HOME": f"{state.directory}/cache",
+                "XDG_STATE_HOME": f"{state.directory}/state",
+                "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+                "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+                "OPENCODE_DISABLE_AUTOUPDATE": "true",
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "1000000000",
+            },
+            "timeout": self.config.sandbox_timeout,
+            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
+        }
+        error = None
+        export = {}
+        try:
+            export = json.loads(
+                await state.execute(
+                    payload,
+                    timeout=self.config.sandbox_timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = str(exc)
+            try:
+                export = json.loads(await state.read_text("export.json"))
+            except Exception:
+                pass
+        finally:
+            try:
+                with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
+                    path = Path(directory) / "observations.db"
+                    await state.sandbox.download(f"{state.directory}/observations.db", path)
+                    state.observations = parse_opencode_observations(path, state.seed.episode_id.capture_key)
+            except Exception:
+                state.observations = AgentObservationBundle(
+                    source="opencode",
+                    gaps=[
+                        ObservationGap(code="agent_artifact_unavailable"),
+                        ObservationGap(code="observation_capture_failed"),
+                    ],
+                )
+        output = []
+        usage = None
+        if export.get("messages"):
+            try:
+                output = self._native_output(export, state.observations)
+                usage = self._native_usage(export)
+                infos = export.get("usage_messages", [message["info"] for message in export.get("messages", [])])
+                if any(
+                    info.get("role") == "assistant"
+                    and (
+                        "reasoning" not in (info.get("tokens") or {})
+                        or "read" not in ((info.get("tokens") or {}).get("cache") or {})
+                    )
+                    for info in infos
+                ):
+                    state.observations.gaps.append(ObservationGap(code="token_usage_detail_unavailable"))
+            except Exception as exc:
+                error = error or f"OpenCode output parse failed: {exc}"
+        result = state.result
+        if result is not None:
+            error = error or result.error
+            if result.return_code != 0 and not result.timed_out:
+                error = error or f"OpenCode exited with code {result.return_code}"
+        assistants = [
+            message["info"] for message in export.get("messages", []) if message["info"].get("role") == "assistant"
+        ]
+        for info in assistants:
+            if info.get("error"):
+                error = error or json.dumps(info["error"])
+        if not assistants:
+            error = error or "OpenCode produced no assistant result"
+        incomplete = result is not None and result.timed_out
+        if assistants and assistants[-1].get("finish") == "length":
+            incomplete = True
+        elif assistants and not assistants[-1].get("time", {}).get("completed") and not incomplete:
+            error = error or "OpenCode ended without a terminal assistant result"
+        if result is not None:
+            state.observations.records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=state.seed.sandbox_access.connection.provider_config_ref,
+                    sandbox_id=str(state.seed.sandbox_access.connection.descriptor.get("sandbox_id", "unknown")),
+                    outcome="timeout" if result.timed_out else "failed" if error else "completed",
+                    exit_code=result.return_code,
+                )
+            )
+        state.observations.gaps.append(
+            ObservationGap(
+                code="model_usage_reconciliation_unavailable",
+                detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
+            )
+        )
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model_server.name,
+            object="response",
+            output=output,
+            usage=usage,
+            status="failed" if error else "incomplete" if incomplete else "completed",
+            error={"code": "server_error", "message": error} if error else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                "harness_execution": "sandbox",
+                "opencode_version": self.config.opencode_version,
+                "harness_hostname": result.hostname if result else "unknown",
+                "harness_pid": str(result.pid) if result else "unknown",
+            },
+        )
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -657,6 +1074,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = request.session.get(_NATIVE_SESSION_KEY)
+        if isinstance(session_id, str):
+            state = self._native_sessions.get(session_id)
+            if state is None or request.path_params.get("rollout_id") != state.seed.episode_id.capture_key:
+                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+            if state.activated or state.closing:
+                raise HTTPException(409, "Native OpenCode sessions allow one activation")
+            prompt, system = self._native_input(body)
+            state.activated = True
+            state.task = asyncio.create_task(self._native_response(state, body, prompt=prompt, system=system))
+            try:
+                return await asyncio.shield(state.task)
+            except asyncio.CancelledError:
+                if not state.task.done() and not state.task.cancelling():
+                    state.task.cancel()
+                raise
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
@@ -901,6 +1334,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
+        if self.config.resources_server is None:
+            raise HTTPException(
+                422, "Submit native episodes to EnvironmentServer /run; legacy /run requires resources_server"
+            )
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
