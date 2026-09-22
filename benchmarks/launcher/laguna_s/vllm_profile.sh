@@ -3,6 +3,8 @@
 # vLLM downloads the official draft from Hugging Face at startup.
 
 MODEL_NAME=laguna-s-2.1-fp8
+export NUM_NODES=${NUM_NODES:-4}
+BENCHMARK_CONCURRENCY=$((64 * NUM_NODES))
 export ROUTER_BALANCE_ABS_THRESHOLD=40
 export ROUTER_BALANCE_REL_THRESHOLD=2
 export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0

@@ -354,12 +354,14 @@ class TestOpenCodeSandboxedAgent:
         ],
         ids=("disabled", "observability-only", "token-capture-only", "both"),
     )
+    @mark.parametrize("chunk_timeout_ms", [600000, 1800000])
     async def test_create_opencode_config_routes_each_capture_state(
         self,
         monkeypatch: MonkeyPatch,
         observability_enabled: bool,
         token_capture_enabled: bool,
         expected_base_url: str,
+        chunk_timeout_ms: int,
     ) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
@@ -380,9 +382,12 @@ class TestOpenCodeSandboxedAgent:
             }
         )
 
+        server.config.opencode_chunk_timeout_ms = chunk_timeout_ms
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
+        assert config["provider"]["nemo_gym"]["options"]["chunkTimeout"] == chunk_timeout_ms
+        assert config["provider"]["nemo_gym"]["options"]["timeout"] is False
 
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,

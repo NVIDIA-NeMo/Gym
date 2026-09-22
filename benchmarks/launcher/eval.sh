@@ -40,7 +40,8 @@ export GYM_CONTAINER=${GYM_CONTAINER:?Set GYM_CONTAINER to your Gym image}
 export ROUTER_CONTAINER=${ROUTER_CONTAINER:?Set ROUTER_CONTAINER to your router image}
 
 export CHECKPOINT="$checkpoint"
-export EXPERIMENT_NAME="$(basename "$(dirname "$profile")")-$(basename "$profile" .sh)"
+export EXPERIMENT_NAME="$(basename "$checkpoint")/$BENCHMARK"
+EXPERIMENT_NAME="${EXPERIMENT_NAME,,}"
 export WANDB_MODE=${WANDB_MODE:-disabled}
 export RUNS_DIR=${RUNS_DIR:-$gym_root/../runs}
 

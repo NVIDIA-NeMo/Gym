@@ -130,10 +130,10 @@ fi
 
 gym eval prepare "${gym_args[@]}" +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_$SLURM_JOB_ID/date_$(date +%Y%m%d_%H%M%S)
+experiment_name="$EXPERIMENT_NAME/$SLURM_JOB_ID"
 gym eval run \
     "${gym_args[@]}" "${gym_run_args[@]}" \
-    +wandb_name=$experiment_name \
+    "+wandb_name=$experiment_name" \
     "+nemo_gym_log_dir=$RUN_DIR/gym" \
     "++model_call_capture_dir=$RUN_DIR/captures" \
     "++output_jsonl_fpath=$RUN_DIR/rollouts.jsonl" \
