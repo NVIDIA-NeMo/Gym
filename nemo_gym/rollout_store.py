@@ -34,6 +34,7 @@ from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
     MissingDispatchHistory,
     RolloutJournal,
+    RolloutRecord,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
@@ -260,11 +261,13 @@ class RolloutStore:
         self._require_open()
         self._state.check_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
-        file.write(orjson.dumps(result) + b"\n")
+        raw = orjson.dumps(result) + b"\n"
+        record = RolloutRecord(Path(file.name), file.tell(), len(raw))
+        file.write(raw)
         file.flush()
         if sync:
             os.fsync(file.fileno())
-        self._state.outcome(result)
+        self._state.outcome(result, record=record)
 
     def record_omission(self, row: dict, reason: str) -> None:
         self._require_open()
@@ -290,7 +293,12 @@ class RolloutStore:
         return self._state.disposition(logical_rollout_id(row))
 
     def selected(self, disposition: str) -> list[dict]:
+        """Load selected payloads; use selected_records for metadata-only access."""
         return self._state.selected(disposition)
+
+    def selected_records(self, disposition: str) -> dict[tuple[str, int], RolloutRecord]:
+        """Map selected rollout/attempt identities to their original file slices."""
+        return self._state.selected_records(disposition)
 
     def failures(self) -> list[dict]:
         """Latest failure payloads, including terminal skips classified as omitted."""

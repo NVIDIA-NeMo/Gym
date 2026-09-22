@@ -22,6 +22,9 @@ The greatest dispatched attempt index wins, independent of arrival order.
 
 import warnings
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -65,12 +68,50 @@ def logical_rollout_id(row: dict) -> str:
     return identity
 
 
-def read_records(path: Path):
-    """Read committed JSONL records; an incomplete final write is not a record."""
+@dataclass(frozen=True, slots=True)
+class RolloutRecord:
+    """A persisted JSONL record, loaded only when its contents are requested.
+
+    Legacy migration may assign an attempt index without rewriting the source.
+    Offsets and lengths are bytes, including any final newline.
+    """
+
+    path: Path
+    offset: int
+    length: int
+    line_number: int = 0
+    legacy_attempt_index: int | None = None
+
+    def read(self) -> dict:
+        """Read this record with its effective legacy attempt identity."""
+        with self.path.open("rb") as file:
+            return self._read(file)
+
+    def _read(self, file: BinaryIO) -> dict:
+        file.seek(self.offset)
+        row = orjson.loads(file.read(self.length))
+        if self.legacy_attempt_index is not None:
+            row[ATTEMPT_INDEX_KEY_NAME] = self.legacy_attempt_index
+        return row
+
+
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    record: RolloutRecord
+    failure_class: str | None
+    terminal: bool
+    masked: bool
+
+
+def _indexed_records(path: Path) -> Iterator[tuple[RolloutRecord, dict]]:
+    """Scan one record at a time, retaining its original byte coordinates."""
     if not path.exists():
         return
     with path.open("rb") as file:
+        offset = 0
         for number, raw in enumerate(file, 1):
+            record = RolloutRecord(path, offset, len(raw), number)
+            offset += len(raw)
             if not raw.strip():
                 continue
             try:
@@ -82,7 +123,13 @@ def read_records(path: Path):
                 raise ConfigError(f"Malformed JSON in {path} at line {number}: {error}") from error
             if not isinstance(value, dict):
                 raise ConfigError(f"Expected an object in {path} at line {number}.")
-            yield value
+            yield record, value
+
+
+def read_records(path: Path) -> Iterator[dict]:
+    """Read committed JSONL records; an incomplete final write is not a record."""
+    for _, row in _indexed_records(path):
+        yield row
 
 
 def prepare_append(path: Path) -> None:
@@ -140,7 +187,7 @@ class RolloutJournal:
         self.dispatched: set[tuple[str, int]] = set()
         self.attempt_counts: Counter = Counter()
         self.latest: dict[str, int] = {}
-        self.payloads: dict[tuple[str, int], dict] = {}
+        self.payloads: dict[tuple[str, int], _Outcome] = {}
         self.omitted: set[tuple[str, int]] = set()
         self.file: BinaryIO | None = None
 
@@ -190,22 +237,27 @@ class RolloutJournal:
         if not legacy and key not in self.dispatched:
             raise MissingDispatchHistory(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
         previous = self.payloads.get(key)
-        if previous is not None and previous != row:
+        if previous is not None and previous.record.read() != row:
             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
         if key in self.omitted:
             raise ConfigError(f"Omitted rollout attempt {key!r} also has an outcome.")
         return key
 
-    def _payload(self, row: dict, *, legacy: bool = False) -> None:
+    def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False) -> None:
         key = self.check_outcome(row, legacy=legacy)
         if legacy:
             self._dispatch(key)
-        self.payloads[key] = row
+        self.payloads[key] = _Outcome(
+            record=record,
+            failure_class=row.get("_ng_failure_class"),
+            terminal=bool(row.get("_ng_failure_terminal")),
+            masked=bool(row.get("mask_sample")),
+        )
 
-    def outcome(self, row: dict) -> None:
+    def outcome(self, row: dict, *, record: RolloutRecord) -> None:
         """Called after the payload artifact is flushed, so it is already recoverable."""
         key = self._key(row)
-        self._payload(row)
+        self._payload(row, record)
         self._event(key, "failure" if row.get("_ng_failure_class") is not None else "success")
 
     def omit(self, row: dict, reason: str) -> None:
@@ -246,30 +298,33 @@ class RolloutJournal:
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
         for path in (failures_path_for(output), output):
-            for payload in read_records(path):
+            for record, payload in _indexed_records(path):
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
                     payload = dict(payload)
                     payload.setdefault(ATTEMPT_INDEX_KEY_NAME, legacy_counts[identity])
                     key = state._key(payload)
-                    if key in state.payloads and state.payloads[key] != payload:
+                    if key in state.payloads and state.payloads[key].record.read() != payload:
                         # Old append/reverify writers reused explicit attempt IDs.
                         # Only untagged legacy rows use arrival-order migration;
                         # journal-backed records still reject conflicting payloads.
                         payload[ATTEMPT_INDEX_KEY_NAME] = max(legacy_counts[identity], key[1] + 1)
                     legacy_counts[identity] = max(legacy_counts[identity], payload[ATTEMPT_INDEX_KEY_NAME] + 1)
+                    record = replace(record, legacy_attempt_index=payload[ATTEMPT_INDEX_KEY_NAME])
                 if (path == output) == (payload.get("_ng_failure_class") is not None) and not (
                     import_legacy and RUN_ID_KEY not in payload
                 ):
                     raise ConfigError(f"Outcome in the wrong artifact: {path}.")
-                state._payload(payload, legacy=rebuild_history or (import_legacy and RUN_ID_KEY not in payload))
+                state._payload(
+                    payload, record, legacy=rebuild_history or (import_legacy and RUN_ID_KEY not in payload)
+                )
         return state
 
     def seed_legacy_history(self) -> None:
         """Import existing outcomes explicitly; all subsequent writes have run identity."""
         for key, payload in self.payloads.items():
             self._event(key, "dispatched")
-            self._event(key, "failure" if payload.get("_ng_failure_class") is not None else "success")
+            self._event(key, "failure" if payload.failure_class is not None else "success")
 
     def disposition(self, identity: str) -> str:
         index = self.latest.get(identity)
@@ -281,20 +336,33 @@ class RolloutJournal:
         payload = self.payloads.get(key)
         if payload is None:
             return "unknown"
-        if payload.get("_ng_failure_class") == "skipped" and payload.get("_ng_failure_terminal"):
+        if payload.failure_class == "skipped" and payload.terminal:
             return "omitted"
-        return "failure" if payload.get("_ng_failure_class") is not None else "success"
+        return "failure" if payload.failure_class is not None else "success"
 
-    def selected(self, disposition: str) -> list[dict]:
-        return [
-            self.payloads[(identity, self.latest[identity])]
+    def selected_records(self, disposition: str) -> dict[tuple[str, int], RolloutRecord]:
+        """Select byte locations using attempt metadata, without loading payloads."""
+        return {
+            (identity, self.latest[identity]): self.payloads[(identity, self.latest[identity])].record
             for identity in self.expected
             if self.disposition(identity) == disposition and (identity, self.latest.get(identity)) in self.payloads
-        ]
+        }
+
+    def selected(self, disposition: str) -> list[dict]:
+        # Existing consumers explicitly request materialized results. Keep reads
+        # out of reconciliation/coverage and reuse handles for random access.
+        with ExitStack() as files:
+            handles = {}
+            rows = []
+            for record in self.selected_records(disposition).values():
+                if record.path not in handles:
+                    handles[record.path] = files.enter_context(record.path.open("rb"))
+                rows.append(record._read(handles[record.path]))
+            return rows
 
     def _retryable(self, identity: str) -> bool:
-        payload = self.payloads.get((identity, self.latest.get(identity)), {})
-        return self.disposition(identity) not in {"success", "omitted"} and not payload.get("_ng_failure_terminal")
+        payload = self.payloads.get((identity, self.latest.get(identity)))
+        return self.disposition(identity) not in {"success", "omitted"} and not (payload and payload.terminal)
 
     def exhausted_count(self, max_attempts: int) -> int:
         return sum(
@@ -318,7 +386,11 @@ class RolloutJournal:
         max_attempts = _get_max_rollout_attempts()
         # A producer-masked result completed execution, so recovery still reuses
         # it. Report its measurement status separately, after selecting attempts.
-        masked = sum(bool(row.get("mask_sample")) for row in self.selected("success"))
+        masked = sum(
+            self.payloads[(identity, self.latest[identity])].masked
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+        )
         return {
             "schema_version": 1,
             "selection_policy": self.manifest.selection_policy,

@@ -20,6 +20,8 @@ from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.rollout_recovery import RunManifest
+from nemo_gym.rollout_store import RolloutStore
 
 
 MODEL_CALL_CHECKS = {
@@ -1216,6 +1218,71 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     rollout_path.rename(custom_path)
     file_result = health.health_check_run_dir(run_dir, rollout_file="custom-name.jsonl", workers=1)
     assert len(file_result.rollouts) == 2
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_journal_health_workers_read_selected_offsets_from_original_shards(tmp_path, monkeypatch, workers):
+    paths = []
+    selected = []
+    for shard in range(2):
+        output = tmp_path / f"shard-{shard}.jsonl"
+        rows = [{"_ng_task_index": shard * 10 + index, "_ng_rollout_index": 0} for index in range(3)]
+        source = tmp_path / f"source-{shard}.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        manifest = RunManifest.create(source, rows, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+            for index, row in enumerate(store.pending(3)):
+                original = row | _record(row["_ng_task_index"], 0, answer="old 雪")
+                store.record_dispatch(original)
+                store.record_outcome(original)
+                retry = original | {"_ng_attempt_index": 1}
+                store.record_dispatch(retry)
+                if index == 0:
+                    completed = retry | _record(row["_ng_task_index"], 0, answer="new 雪")
+                    store.record_outcome(completed)
+                    selected.append(completed)
+                elif index == 2:
+                    store.record_outcome(retry | {"_ng_failure_class": "judge_failed"})
+                # Index 1's newer dispatch has no outcome: its old success is stale.
+        paths.append(output)
+    legacy = tmp_path / "legacy.jsonl"
+    legacy_row = _record(100, 0, answer="legacy 雪")
+    legacy.write_bytes(b"\n" + orjson.dumps(legacy_row) + b"\n[]\n")
+    paths.append(legacy)
+    original_bytes = [path.read_bytes() for path in paths]
+
+    def unexpected_materialization(*args):
+        pytest.fail("Health selection must not materialize a list of trajectories")
+
+    monkeypatch.setattr(RolloutStore, "selected", unexpected_materialization)
+    slices = health._index_jsonl(paths)
+    assert [(line.path, line.source_index) for line in slices] == [
+        (str(paths[0]), 0),
+        (str(paths[1]), 1),
+        (str(legacy), 2),
+        (str(legacy), 2),
+    ]
+    for line, expected in zip(slices, [*selected, legacy_row]):
+        with open(line.path, "rb") as file:
+            file.seek(line.offset)
+            assert orjson.loads(file.read(line.length)) == expected
+    assert slices[-1].line_number == 3
+
+    report_dir = tmp_path / "reports"
+    original_open = Path.open
+
+    def no_trajectory_copies(path, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in "wax+"):
+            assert path in (report_dir / "quality_summary.json", report_dir / "rollout_verdicts.jsonl")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", no_trajectory_copies)
+    result = run_health_checks(paths, workers=workers, output_dir=report_dir)
+    assert result.summary["run"]["artifacts"]["records"] == 4
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert result.summary["run"]["issues"]["record_unreadable"] == 1
+    assert {digest.task_index for digest in result.rollouts} == {0, 10, 100, "__unreadable_record__:input-2:line-3"}
+    assert [path.read_bytes() for path in paths] == original_bytes
 
 
 @pytest.mark.parametrize(

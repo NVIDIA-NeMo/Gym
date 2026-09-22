@@ -15,6 +15,8 @@
 
 """Exercise artifact ownership and interruption at persistence boundaries."""
 
+import gc
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -25,7 +27,13 @@ import pytest
 import nemo_gym.rollout_store as persistence
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.rollout_journal import RolloutJournal, journal_path_for, materialized_path_for, read_records
+from nemo_gym.rollout_journal import (
+    RolloutJournal,
+    RolloutRecord,
+    journal_path_for,
+    materialized_path_for,
+    read_records,
+)
 from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
 
@@ -164,6 +172,86 @@ def test_recovery_and_offline_selection_use_the_newest_dispatch(prepared_run):
         resumed.record_outcome(retry | {"reward": 0.0, "response": {}})
     assert [row["reward"] for row in RolloutStore.read(output).selected("success")] == [0.0]
     assert len(list(read_records(output))) == 2
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_large_history_retains_offsets_instead_of_trajectories(prepared_run, reopen, monkeypatch):
+    output, prepare = prepared_run
+    store = RolloutStore.start_or_resume(output, prepare, resume=False)
+    blob = "x" * (256 * 1024)
+
+    def write_history():
+        with store:
+            rows = store.pending(80)
+            for attempt in range(64):
+                row = rows[attempt % 2] | {"_ng_attempt_index": attempt}
+                store.record_dispatch(row)
+                payload = row | {"response": {"output_text": blob + str(attempt)}, "reward": 0.0}
+                if attempt % 2:
+                    payload["_ng_failure_class"] = "judge_failed"
+                store.record_outcome(payload)
+
+    if reopen:
+        write_history()
+        del store
+    gc.collect()
+    tracemalloc.start()
+    try:
+        if reopen:
+            store = RolloutStore.read(output)
+        else:
+            write_history()
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Sixteen MiB of saved responses must not become sixteen MiB of retained state.
+    # Allow room for parsing/serialization of one record and small metadata.
+    artifact_bytes = output.stat().st_size + failures_path_for(output).stat().st_size
+    assert retained < artifact_bytes / 4
+    assert peak < artifact_bytes / 2
+
+    def unexpected_read(*args):
+        pytest.fail("Coverage and retry selection must use metadata without rereading trajectories")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RolloutRecord, "_read", unexpected_read)
+        assert store.coverage()["successful"] == 1
+        assert store.coverage()["failed"] == 1
+        assert store.pending(80)[0]["_ng_attempt_index"] == 64
+        locations = store.selected_records("success")
+        assert len(locations) == 1
+
+    record = next(iter(locations.values()))
+    assert record.path == output
+    assert record.offset > 0
+    assert record.read()["_ng_attempt_index"] == 62
+    assert store.selected("success")[0]["response"]["output_text"] == blob + "62"
+
+
+def test_indexed_legacy_attempts_preserve_migration_without_rewriting(prepared_run):
+    output, prepare = prepared_run
+    rows, _ = prepare()
+    materialized_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    first = rows[0] | {"response": {"output_text": "snow: 雪"}, "reward": 0.0, "_ng_attempt_index": 0}
+    second = first | {"reward": 1.0}
+    raw_first = orjson.dumps(first) + b"\n"
+    raw_second = orjson.dumps(second)  # Complete JSON without a final newline remains readable.
+    original = b"\n" + raw_first + b"  \n" + raw_second
+    output.write_bytes(original)
+
+    store = RolloutStore.read(output)
+    record = next(iter(store.selected_records("success").values()))
+    assert (record.path, record.offset, record.length, record.line_number) == (
+        output,
+        len(b"\n" + raw_first + b"  \n"),
+        len(raw_second),
+        4,
+    )
+    assert record.read() == second | {"_ng_attempt_index": 1}
+    assert store.selected("success") == [second | {"_ng_attempt_index": 1}]
+    assert output.read_bytes() == original
 
 
 def test_legacy_import_preserves_artifacts_and_does_not_require_original_source(prepared_run):

@@ -1735,7 +1735,14 @@ class RolloutCollectionHelper(BaseModel):
 
                         export_metrics(step_metrics, step=int(current_pct))
 
-        persisted_results = store.selected("success")
+        # The collection API already retains returned results. Reuse those
+        # objects instead of rereading another copy of every saved trajectory.
+        selected_attempts = store.selected_records("success")
+        persisted_results = [
+            result
+            for result in results
+            if (logical_rollout_id(result), result.get(ATTEMPT_INDEX_KEY_NAME, 0)) in selected_attempts
+        ]
         persisted_rows = store.inputs_for(persisted_results)
         completion = store.coverage()
         print(

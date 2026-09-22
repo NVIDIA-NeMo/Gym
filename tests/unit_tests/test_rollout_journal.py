@@ -28,6 +28,7 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
     RolloutJournal,
+    RolloutRecord,
     coverage_path_for,
     journal_path_for,
     materialized_path_for,
@@ -68,10 +69,12 @@ def save(run, history, row, *, failure=None, reward=0.0, record_outcome=True):
         result.update(reward=reward, response={})
         target = output
     with target.open("ab") as file:
-        file.write(orjson.dumps(result) + b"\n")
+        raw = orjson.dumps(result) + b"\n"
+        record = RolloutRecord(target, file.tell(), len(raw))
+        file.write(raw)
         file.flush()
     if record_outcome:
-        history.outcome(result)
+        history.outcome(result, record=record)
     return result
 
 

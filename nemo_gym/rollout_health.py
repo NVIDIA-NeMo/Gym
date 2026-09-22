@@ -17,7 +17,6 @@ from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 import orjson
@@ -239,9 +238,27 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
 
 
 def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
+    """Index selected attempts in place; loose legacy files retain every line."""
     slices: list[_LineSlice] = []
     ordinal = 0
     for source_index, path in enumerate(paths):
+        if not path.is_file():
+            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
+        store = RolloutStore.read(path, import_legacy=False)
+        if store is not None:
+            for record in store.selected_records("success").values():
+                slices.append(
+                    _LineSlice(
+                        path=str(record.path),
+                        offset=record.offset,
+                        length=record.length,
+                        ordinal=ordinal,
+                        source_index=source_index,
+                        line_number=record.line_number,
+                    )
+                )
+                ordinal += 1
+            continue
         with path.open("rb") as handle:
             line_number = 0
             while True:
@@ -464,44 +481,14 @@ def run_health_checks(
 ) -> HealthCheckResult:
     """Check selected completed attempts, or raw records for loose legacy files.
 
-    Journal-backed JSONL files are append-only histories. Stage the store's
-    selected results for the existing file-based worker pipeline so health and
-    scoring agree, without rewriting history or sending large records over IPC.
+    Journal-backed JSONL files are append-only histories. Pass the store's
+    selected byte locations to workers so health and scoring agree, without
+    retaining trajectory contents, copying files, or sending records over IPC.
     Explicit failure-sidecar inputs remain available for diagnostic inspection.
     """
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
-    with TemporaryDirectory(prefix="gym-health-") as scratch:
-        selected_paths = []
-        for index, path in enumerate(paths):
-            if not path.is_file():
-                raise FileNotFoundError(f"Rollout JSONL not found: {path}")
-            store = RolloutStore.read(path, import_legacy=False)
-            if store is None:
-                selected_paths.append(path)
-                continue
-            selected = Path(scratch) / f"selected-{index}.jsonl"
-            with selected.open("wb") as file:
-                for row in store.selected("success"):
-                    file.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
-            selected_paths.append(selected)
-        return _run_health_checks(
-            selected_paths,
-            output_dir=output_dir or paths[0].parent,
-            workers=workers,
-            ignored_checks=ignored_checks,
-        )
-
-
-def _run_health_checks(
-    paths: Sequence[Path],
-    *,
-    output_dir: Path,
-    workers: int | None,
-    ignored_checks: Sequence[str],
-) -> HealthCheckResult:
-    """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     lines = _index_jsonl(paths)
     worker_inputs = [
@@ -548,7 +535,7 @@ def _run_health_checks(
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
-    summary_path, verdicts_path = _write_reports(summary, digests, output_dir)
+    summary_path, verdicts_path = _write_reports(summary, digests, output_dir or paths[0].parent)
     return HealthCheckResult(
         summary=summary,
         rollouts=digests,
