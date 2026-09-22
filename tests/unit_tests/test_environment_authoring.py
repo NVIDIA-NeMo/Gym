@@ -31,9 +31,7 @@ def test_load_and_materialize_hello_world() -> None:
 
     task = materialize_single_task(loaded)
 
-    assert task.task_id.taskset == "hello-world"
-    assert task.task_id.task_id == "hello-world-001"
-    assert task.task_id.revision == "1.0.0"
+    assert task.task_id.model_dump() == {"taskset": "hello-world", "task_id": "hello-world-001"}
     assert task.task_input.task_data == {}
     assert "/workspace/hello-gym.txt" in task.task_input.responses_create_params.input[0].content
     assert len(materialize_tasks_jsonl(loaded).splitlines()) == 1

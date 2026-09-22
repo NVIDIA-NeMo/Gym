@@ -351,7 +351,7 @@ def _materialize_declared_task(
         verifier_input=_resolve_task_data_references(task.verifier.verifier_input, task.task_data),
     )
     return MaterializedEnvironmentTask(
-        materialized=_materialized_task(loaded, taskset_name, task_id, instruction, task.task_data),
+        materialized=_materialized_task(taskset_name, task_id, instruction, task.task_data),
         verifier=verifier,
     )
 
@@ -444,7 +444,6 @@ def _materialize_directory_taskset(
         tasks.append(
             MaterializedEnvironmentTask(
                 materialized=_materialized_task(
-                    loaded,
                     taskset.name,
                     directory_task.task_id,
                     instruction,
@@ -535,7 +534,7 @@ def _materialize_file_taskset(
         )
         tasks.append(
             MaterializedEnvironmentTask(
-                materialized=_materialized_task(loaded, taskset_name, row.task_id, instruction, task_data),
+                materialized=_materialized_task(taskset_name, row.task_id, instruction, task_data),
                 verifier=verifier,
             )
         )
@@ -545,14 +544,13 @@ def _materialize_file_taskset(
 
 
 def _materialized_task(
-    loaded: LoadedEnvironment,
     taskset_name: str,
     task_id: str,
     instruction: str,
     task_data: dict[str, JsonValue],
 ) -> MaterializedTask[SingleAgentTaskInput]:
     return MaterializedTask[SingleAgentTaskInput](
-        task_id=TaskId(taskset=taskset_name, task_id=task_id, revision=loaded.definition.version),
+        task_id=TaskId(taskset=taskset_name, task_id=task_id),
         task_input=SingleAgentTaskInput(
             responses_create_params={
                 "input": [{"role": "user", "content": instruction}],
