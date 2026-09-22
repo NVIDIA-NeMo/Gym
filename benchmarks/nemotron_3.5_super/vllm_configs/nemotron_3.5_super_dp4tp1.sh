@@ -1,6 +1,7 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
+    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
