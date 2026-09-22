@@ -1,12 +1,19 @@
 # Chain to existing resource server + agent config
 config_paths:
   - resources_servers/false_statement_judge/configs/false_statement_judge.yaml
-  - resources_servers/false_statement_judge/configs/judge_nemotron3ultra.yaml
+  - benchmarks/judge_luna.yaml
 
 # We use `_inherit_from` directives to inherit from and not use the generic config
 # above to ensure this benchmark config is isolated.
 brokenarxiv_0526_false_statement_judge_resources_server:
   _inherit_from: false_statement_judge
+  resources_servers:
+    false_statement_judge:
+      judge_responses_create_params:
+        # Clear the inherited Ultra request settings for Luna medium.
+        max_output_tokens: null
+        temperature: null
+        top_p: null
 
 brokenarxiv_0526_false_statement_judge_simple_agent:
   _inherit_from: false_statement_judge_simple_agent

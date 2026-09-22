@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
@@ -20,10 +21,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from fastapi import Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -48,7 +52,9 @@ from nemo_gym.server_utils import (
     SimpleServer,
     UvicornProxyHeadersConfig,
     _format_upstream_error_log,
+    _log_validation_exception,
     _make_keepalive_socket_factory,
+    _validation_exception_handler,
     initialize_ray,
     raise_for_status,
 )
@@ -125,6 +131,33 @@ class TestServerUtils:
         assert isinstance(restored_error.headers, CIMultiDict)
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
+
+    async def test_raise_for_status_accepts_prefetched_content(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://judge.test/v1/responses"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://judge.test/v1/responses"),
+        )
+        original_error = ClientResponseError(
+            request_info=request_info,
+            history=(),
+            status=429,
+            message="Too Many Requests",
+            headers=CIMultiDictProxy(CIMultiDict()),
+        )
+        response = MagicMock()
+        response.ok = False
+        response.content.read = AsyncMock(side_effect=AssertionError("body already consumed"))
+        response.request_info = request_info
+        response.raise_for_status.side_effect = original_error
+        content = b'{"error":"rate_limit_exceeded"}'
+
+        with raises(ClientResponseError) as exc_info:
+            await raise_for_status(response, content)
+
+        assert exc_info.value.response_content == content
+        response.content.read.assert_not_awaited()
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
@@ -791,6 +824,271 @@ class TestServerUtils:
         assert "api_key=secret" not in message
         assert message.endswith("…")
         assert len(message) < 2200
+
+    @mark.parametrize(
+        ("body", "expected_truncated"),
+        [
+            (b"", False),
+            (b'{"nested":{"value":"small"}}', False),
+            (b"not-json\nwith-control-\x00", False),
+            (b'{"credentials":{"password":"secret"}}', False),
+            (b"x" * 4094, False),
+            (b"x" * 4095, True),
+            (b"\x00" * 4096, True),
+            ("中文".encode() * 4096, True),
+            (b"\\" * 4096, True),
+            (b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}', True),
+        ],
+        ids=[
+            "empty",
+            "small-json",
+            "non-json-control",
+            "credentials",
+            "at-limit",
+            "over-limit",
+            "escape-boundary",
+            "unicode",
+            "backslashes",
+            "multi-megabyte",
+        ],
+    )
+    async def test_validation_exception_log_bounds_body_before_rendering(
+        self, body: bytes, expected_truncated: bool, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=body)
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body", "required_field"),
+                "msg": "Field required",
+                "input": {"password": "value that must not be copied into the error log"},
+            }
+        ]
+        exc = RequestValidationError(errors, body={"original": "body"})
+        rendered_body_sizes = []
+        escaped_log_prefix = nemo_gym.server_utils._escaped_log_prefix
+
+        def tracking_escaped_log_prefix(value: str, max_chars: int):
+            rendered_body_sizes.append(len(value))
+            return escaped_log_prefix(value, max_chars)
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_escaped_log_prefix", tracking_escaped_log_prefix)
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, exc)
+
+        record = caplog.records[-1]
+        assert record.request_body_size_bytes == len(body)
+        assert len(rendered_body_sizes) == 1
+        assert rendered_body_sizes[0] <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert len(record.request_body_prefix) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert record.request_body_truncated is expected_truncated
+        decoded_prefix = nemo_gym.server_utils.json.loads(record.request_body_prefix)
+        assert decoded_prefix.endswith("...[truncated]") is expected_truncated
+        assert ("...[truncated]" in record.getMessage()) is expected_truncated
+        if not expected_truncated:
+            assert decoded_prefix == body.decode("utf-8", errors="replace")
+        assert "request_body_size_bytes=" in record.getMessage()
+        assert "request_body_truncated=" in record.getMessage()
+        assert "request_body_prefix=" in record.getMessage()
+        assert record.validation_error_count == 1
+        assert record.validation_errors == [
+            {
+                "type": "missing",
+                "loc": ["body", "required_field"],
+                "msg": "Field required",
+            }
+        ]
+        assert "value that must not be copied into the error log" not in str(record.validation_errors)
+        if body == b"not-json\nwith-control-\x00":
+            assert "\n" not in record.request_body_prefix
+            assert "\x00" not in record.request_body_prefix
+            assert "\\n" in record.request_body_prefix
+            assert "\\u0000" in record.request_body_prefix
+
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_log_bounds_error_count(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        errors = [
+            {
+                "type": "missing",
+                "loc": (location, f"field_{index}"),
+                "msg": "Field required",
+                "input": None,
+            }
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 5)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        assert record.validation_error_count == len(errors)
+        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+
+    async def test_validation_exception_log_marks_omitted_location_items(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body", *("field" for _ in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS))),
+                "msg": "Field required",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        assert len(record.validation_errors[0]["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+
+    async def test_validation_exception_detects_body_error_after_error_log_cap(
+        self, caplog: LogCaptureFixture
+    ) -> None:
+        body = b'{"required":null}'
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=body)
+        errors = [
+            {"type": "missing", "loc": ("query", f"field_{index}"), "msg": "Field required", "input": None}
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 1)
+        ]
+        errors.append({"type": "missing", "loc": ("body", "required"), "msg": "Field required", "input": None})
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        request.body.assert_awaited_once()
+        record = caplog.records[-1]
+        assert record.request_body_size_bytes == len(body)
+        assert record.request_body_prefix == '"{\\"required\\":null}"'
+        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert record.validation_errors_truncated is True
+
+    async def test_validation_exception_log_bounds_error_fields(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        large_value = "unsafe\n\x00" + "x" * (2 * 1024 * 1024)
+        errors = [
+            {
+                "type": large_value,
+                "loc": ("body", *([large_value] * (nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS + 1))),
+                "msg": large_value,
+                "input": None,
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        summary = record.validation_errors[0]
+        assert len(summary["type"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert len(summary["msg"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert summary["type"].endswith("...[truncated]")
+        assert summary["msg"].endswith("...[truncated]")
+        assert len(summary["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert all(
+            not isinstance(value, str) or len(value) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+            for value in summary["loc"]
+        )
+        assert "\n" not in str(summary)
+        assert "\x00" not in str(summary)
+        assert all(value.endswith("...[truncated]") for value in summary["loc"][1:])
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+        assert len(record.getMessage()) < 5000
+
+    async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"password=must-not-be-logged")
+        errors = [{"type": "missing", "loc": ("query", "required"), "msg": "Field required", "input": None}]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors, body=None))
+
+        request.body.assert_not_awaited()
+        record = caplog.records[-1]
+        assert not hasattr(record, "request_body_prefix")
+        assert "must-not-be-logged" not in record.getMessage()
+        assert "must-not-be-logged" not in str(record.validation_errors)
+
+    def test_validation_exception_query_error_does_not_disclose_body(self, caplog: LogCaptureFixture) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
+
+        @app.post("/query")
+        async def query(required: str) -> dict:
+            return {"required": required}
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+            response = client.post("/query", content=b"password=must-not-be-logged")
+
+        assert response.status_code == 422
+        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        assert not hasattr(record, "request_body_prefix")
+        assert "must-not-be-logged" not in record.getMessage()
+        assert "must-not-be-logged" not in str(record.validation_errors)
+
+    async def test_validation_exception_body_unavailable_is_logged(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(side_effect=RuntimeError("body unavailable"))
+        errors = [{"type": "missing", "loc": ("body", "field"), "msg": "Field required", "input": {}}]
+        exc = RequestValidationError(errors, body={"field": None})
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, exc)
+
+        record = caplog.records[-1]
+        assert record.getMessage().startswith("Request validation failed; request body unavailable")
+        assert record.validation_error_count == 1
+        assert exc.errors() == errors
+        assert exc.body == {"field": None}
+
+    async def test_validation_exception_logging_failure_does_not_mask_422(self, monkeypatch: MonkeyPatch) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        exc = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "field"), "msg": "Field required", "input": None}]
+        )
+        expected = await request_validation_exception_handler(request, exc)
+        monkeypatch.setattr(
+            nemo_gym.server_utils.logger, "warning", MagicMock(side_effect=RuntimeError("sink failed"))
+        )
+
+        actual = await _validation_exception_handler(request, exc)
+
+        assert actual.status_code == expected.status_code == 422
+        assert actual.body == expected.body
+        assert actual.headers == expected.headers
+
+    async def test_validation_exception_handler_preserves_fastapi_response(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b'{"field":null}')
+        exc = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "required"), "msg": "Field required", "input": None}]
+        )
+        expected = await request_validation_exception_handler(request, exc)
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            actual = await _validation_exception_handler(request, exc)
+
+        assert actual.status_code == expected.status_code == 422
+        assert actual.body == expected.body
+        assert actual.headers == expected.headers
 
     async def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]

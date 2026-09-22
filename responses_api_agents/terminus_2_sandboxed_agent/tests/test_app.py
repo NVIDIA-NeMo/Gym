@@ -77,7 +77,8 @@ def test_agent_implements_required_responses_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_nemo_gym_llm_records_every_responses_request_and_output():
+@pytest.mark.parametrize("reasoning_content", [None, "reasoning before answer 1"])
+async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning_content):
     class Client:
         def __init__(self):
             self.requests = []
@@ -125,7 +126,10 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     first = await llm.call("first")
     second = await llm.call(
         "second",
-        message_history=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer 1"}],
+        message_history=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer 1", "reasoning_content": reasoning_content},
+        ],
         previous_response_id="resp_1",
     )
     third = await llm.call(
@@ -138,13 +142,25 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     assert first.usage.prompt_tokens == 10
     assert second.content == "answer 2"
     assert third.content == "answer 3"
+    expected_reasoning = (
+        [{"id": "", "summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
+        if reasoning_content
+        else []
+    )
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
             "model": "policy_model",
             "input": [
                 {"content": "first", "role": "user", "type": "message"},
-                {"content": "answer 1", "role": "assistant", "type": "message"},
+                *expected_reasoning,
+                {
+                    "id": "",
+                    "content": [{"annotations": [], "text": "answer 1", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
                 {"content": "second", "role": "user", "type": "message"},
             ],
         },
@@ -166,7 +182,8 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug):
+@pytest.mark.parametrize("interleaved_thinking", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, interleaved_thinking):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -183,6 +200,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         debug=debug,
         model_context_limit=32_000,
         model_output_limit=4_000,
+        interleaved_thinking=interleaved_thinking,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -218,6 +236,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         async def run(self, instruction, environment, context):
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
+            assert self.kwargs["interleaved_thinking"] is interleaved_thinking
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             self.kwargs["llm"]._num_compactions = 2
