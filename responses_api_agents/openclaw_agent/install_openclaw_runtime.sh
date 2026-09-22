@@ -42,6 +42,10 @@ fi
 mkdir -p "$runtime"
 exec 9>"$runtime/.install.lock"
 flock -x 9
+mkdir -p "$runtime/home" "$runtime/cache"
+export HOME="$runtime/home"
+export npm_config_cache="$runtime/cache/npm"
+export XDG_CACHE_HOME="$runtime/cache"
 verify_version() {
   "$runtime/node/bin/node" -e \
     'const p=require(process.argv[1]); if(p.version!==process.argv[2])throw Error("OpenClaw version mismatch")' \
@@ -68,10 +72,6 @@ if [ "${#missing[@]}" -gt 0 ]; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates tar xz-utils coreutils gawk
 fi
-mkdir -p "$runtime/home" "$runtime/cache"
-export HOME="$runtime/home"
-export npm_config_cache="$runtime/cache/npm"
-export XDG_CACHE_HOME="$runtime/cache"
 cd "$runtime"
 archive="node-v${node_version}-linux-${arch}.tar.xz"
 curl -fsSL --retry 3 "https://nodejs.org/dist/v${node_version}/${archive}" -o "$archive"
