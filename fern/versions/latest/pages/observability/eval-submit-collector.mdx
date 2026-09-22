@@ -50,7 +50,7 @@ driver's return code.
 | --- | --- | --- |
 | Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics` | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive |
 | `dcgm-exporter`, `node_exporter` | Prometheus scrape on the node when the ports are set | per-GPU activity, memory and power; CPU, memory, network |
-| Anything in the job | OTLP on `localhost:4317` (gRPC) and `:4318` (HTTP) | Gym's own Lens telemetry uses this when enabled |
+| Anything in the job | OTLP traces and logs on `localhost:4317` (gRPC) and `:4318` (HTTP) | the on-ramp for Gym's own Lens telemetry |
 
 Every batch carries resource attributes the dashboards filter on: `user`, `run_id` (the gym job id),
 `slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity
