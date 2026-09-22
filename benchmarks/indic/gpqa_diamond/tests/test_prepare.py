@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import random
 
 import pytest
 import yaml
 
+from benchmarks.gpqa import prepare as english_module
 from benchmarks.indic.gpqa_diamond import prepare as module
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
@@ -30,6 +32,7 @@ def build(records, **kwargs):
         records,
         language="en",
         canonical_ids=[f"synthetic-{index}" for index in range(len(records))],
+        canonical_questions=[record(index)["Question"] for index in range(len(records))],
         **kwargs,
     )
 
@@ -41,28 +44,46 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch):
     full = build(records)
 
     assert random.getstate() == random_state
-    assert full[0]["options"] == [{"A": "three"}, {"B": "one"}, {"C": "two"}, {"D": "right "}]
-    assert full[0]["expected_answer"] == "D"
-    assert full[0]["prompt"] == (
-        "What is the correct answer to this question: Synthetic question 0?\n\nChoices:\n"
-        '(A) three\n(B) one\n(C) two\n(D) right \n\nFormat your response as follows: "The correct answer is (insert answer here)"'
-    )
+    for index, row in enumerate(full):
+        expected = [records[index][field] for field in module.TEXT_FIELDS[1:]]
+        random.Random(int(hashlib.md5(records[index]["Question"].encode()).hexdigest(), 16)).shuffle(expected)
+        assert row["options"] == [{letter: text} for letter, text in zip("ABCD", expected)]
+        assert row["expected_answer"] == "ABCD"[expected.index(records[index]["Correct Answer"])]
+        assert row["problem"] == records[index]["Question"] + "\n" + "\n".join(
+            f"{letter}: {text}" for letter, text in zip("ABCD", expected)
+        )
+        english = english_module.build_row(records[index])
+        assert {key: row[key] for key in english if key != "uuid"} == {
+            key: value for key, value in english.items() if key != "uuid"
+        }
     assert build(records, question_ids=["2"]) == full[2:]
-    assert build(records, shuffle_seed=7)[0]["options"] != full[0]["options"]
 
+    translated = [
+        record(index, "hi", **{field: "अनुवाद " + records[index][field] for field in module.TEXT_FIELDS})
+        for index in range(3)
+    ]
     hindi = module.build_rows(
-        [record(index, "hi") for index in range(3)],
+        translated,
         language="hi",
         canonical_ids=[f"synthetic-{index}" for index in range(3)],
+        canonical_questions=[row["Question"] for row in records],
     )
-    assert [row["expected_answer"] for row in full] == [row["expected_answer"] for row in hindi]
+    for original, translation in zip(full, hindi):
+        assert original["expected_answer"] == translation["expected_answer"]
+        assert translation["options"] == [
+            {letter: "अनुवाद " + text for letter, text in option.items()} for option in original["options"]
+        ]
     assert full[0]["uuid"] != hindi[0]["uuid"]
     assert hindi[0]["metadata"]["subset_for_metrics"] == "hi"
 
-    prompt = load_prompt_config(str(module.DIRECTORY / "prompts/default.yaml"))
+    prompt = load_prompt_config("benchmarks/prompts/eval/aai/mcq-4choices.yaml")
     validate_prompt_compatibility(full, prompt)
     rendered = apply_prompt_to_row(full[0], prompt)
-    assert [message["role"] for message in rendered["responses_create_params"]["input"]] == ["system", "user"]
+    assert [message["role"] for message in rendered["responses_create_params"]["input"]] == ["user"]
+    assert (
+        rendered["responses_create_params"]["input"]
+        == apply_prompt_to_row(english_module.build_row(records[0]), prompt)["responses_create_params"]["input"]
+    )
 
 
 def test_duplicate_text_behavior_and_row_69_are_upstream_compatible():
@@ -70,7 +91,7 @@ def test_duplicate_text_behavior_and_row_69_are_upstream_compatible():
     records[0]["Incorrect Answer 3"] = records[0]["Correct Answer"]
     rows = build(records)
 
-    assert rows[0]["expected_answer"] == "A"
+    assert rows[0]["expected_answer"] == english_module.build_row(records[0])["expected_answer"]
     assert rows[0]["metadata"]["duplicate_choice_text"]
     assert rows[69]["metadata"]["task_id"] == "69"
     assert len(rows) == 198
@@ -125,14 +146,38 @@ def test_prepare_uses_pins_and_checks_canonical_alignment(tmp_path, monkeypatch)
         module.prepare(tmp_path / "invalid.jsonl", languages=["hi"])
 
 
-def test_config_uses_official_profile_and_deterministic_chat_defaults():
+def test_config_matches_english_pipeline():
     config = yaml.safe_load((module.DIRECTORY / "config.yaml").read_text(encoding="utf-8"))
-    model = config["policy_model"]["responses_api_models"]["vllm_model"]
-    verifier = config["indic_gpqa_diamond_resources_server"]["resources_servers"]["gpqa_diamond"]
-    dataset = config["indic_gpqa_diamond_agent"]["responses_api_agents"]["simple_agent"]["datasets"][0]
+    english = yaml.safe_load((english_module.BENCHMARK_DIR / "config.yaml").read_text(encoding="utf-8"))
+    assert config["config_paths"] == english["config_paths"]
+    assert config["indic_gpqa_diamond_resources_server"] == english["gpqa_mcqa_resources_server"]
+    agent = config["indic_gpqa_diamond_agent"]
+    english_agent = english["gpqa_mcqa_simple_agent"]
+    assert agent["_inherit_from"] == english_agent["_inherit_from"]
+    params = agent["responses_api_agents"]["simple_agent"]
+    english_params = english_agent["responses_api_agents"]["simple_agent"]
+    assert params["max_steps"] == english_params["max_steps"]
+    dataset = params["datasets"][0]
+    english_dataset = english_params["datasets"][0]
+    assert dataset["num_repeats"] == english_dataset["num_repeats"] == 8
+    assert dataset["prompt_config"] == english_dataset["prompt_config"]
+    assert set(config) == {"config_paths", "indic_gpqa_diamond_resources_server", "indic_gpqa_diamond_agent"}
 
-    assert config["num_repeats"] == dataset["num_repeats"] == 1
-    assert config["responses_create_params"]["max_output_tokens"] == 1000
-    assert model["chat_template_kwargs"] == {"enable_thinking": False}
-    assert model["sampling_overrides"] == {"temperature": 0.0, "top_p": 1.0, "top_k": -1, "seed": 0}
-    assert verifier["use_official_parser"] is True
+
+def test_english_prepare_retains_row_format(tmp_path, monkeypatch):
+    import datasets
+
+    records = [record(index) for index in range(3)]
+    monkeypatch.setattr(datasets, "load_dataset", lambda *args, **kwargs: records)
+    monkeypatch.setattr(english_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(english_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(english_module, "OUTPUT_FPATH", tmp_path / "english.jsonl")
+    rows = [json.loads(line) for line in english_module.prepare().read_text().splitlines()]
+    assert rows == [english_module.build_row(row) for row in records]
+
+
+@pytest.mark.parametrize("questions", [[], [""], [None]])
+def test_invalid_canonical_questions(monkeypatch, questions):
+    monkeypatch.setattr(module, "EXPECTED_ROWS", 1)
+    with pytest.raises(ValueError, match="Canonical questions"):
+        module.build_rows([record()], language="en", canonical_ids=["id"], canonical_questions=questions)

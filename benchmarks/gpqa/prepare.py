@@ -26,6 +26,7 @@ import hashlib
 import json
 import random
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
@@ -35,6 +36,39 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "gpqa_diamond_benchmark.jsonl"
 OPTION_LETTERS = ["A", "B", "C", "D"]
+
+
+def build_row(example: Mapping[str, str], *, shuffle_question: str | None = None) -> dict[str, object]:
+    """Format a GPQA row; translations use their canonical English question for shuffling."""
+    choices = [
+        example["Correct Answer"],
+        example["Incorrect Answer 1"],
+        example["Incorrect Answer 2"],
+        example["Incorrect Answer 3"],
+    ]
+
+    seed_question = example["Question"] if shuffle_question is None else shuffle_question
+    seed = int(hashlib.md5(seed_question.encode()).hexdigest(), 16)
+    rng = random.Random(seed)
+    rng.shuffle(choices)
+
+    correct_idx = choices.index(example["Correct Answer"])
+    correct_letter = OPTION_LETTERS[correct_idx]
+
+    options = [{letter: text} for letter, text in zip(OPTION_LETTERS, choices)]
+    options_text = "\n".join(f"{letter}: {text}" for letter, text in zip(OPTION_LETTERS, choices))
+
+    return {
+        "question": example["Question"],
+        "options_text": options_text,
+        # `problem` mirrors the field name NeMo Skills' MCQ prompts use
+        # (eval/aai/mcq-Nchoices), so the shared prompt yaml can reference
+        # the canonical `{problem}` placeholder without per-benchmark drift.
+        "problem": f"{example['Question']}\n{options_text}",
+        "options": options,
+        "expected_answer": correct_letter,
+        "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),
+    }
 
 
 def prepare() -> Path:
@@ -49,38 +83,7 @@ def prepare() -> Path:
 
     rows = []
     for example in ds:
-        # Build options list from the dataset columns
-        choices = [
-            example["Correct Answer"],
-            example["Incorrect Answer 1"],
-            example["Incorrect Answer 2"],
-            example["Incorrect Answer 3"],
-        ]
-
-        # Shuffle options deterministically using the question as seed
-        seed = int(hashlib.md5(example["Question"].encode()).hexdigest(), 16)
-        rng = random.Random(seed)
-        rng.shuffle(choices)
-
-        # Find which letter is the correct answer after shuffle
-        correct_idx = choices.index(example["Correct Answer"])
-        correct_letter = OPTION_LETTERS[correct_idx]
-
-        # Format options as MCQA expects
-        options = [{letter: text} for letter, text in zip(OPTION_LETTERS, choices)]
-        options_text = "\n".join(f"{letter}: {text}" for letter, text in zip(OPTION_LETTERS, choices))
-
-        row = {
-            "question": example["Question"],
-            "options_text": options_text,
-            # `problem` mirrors the field name NeMo Skills' MCQ prompts use
-            # (eval/aai/mcq-Nchoices), so the shared prompt yaml can reference
-            # the canonical `{problem}` placeholder without per-benchmark drift.
-            "problem": f"{example['Question']}\n{options_text}",
-            "options": options,
-            "expected_answer": correct_letter,
-            "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),
-        }
+        row = build_row(example)
         rows.append(json.dumps(row) + "\n")
 
     with open(OUTPUT_FPATH, "w") as f:

@@ -7,26 +7,24 @@ This benchmark evaluates the 198 GPQA Diamond questions translated into 14 Indic
 
 The preparer pins both the translated dataset and [`Idavidrein/gpqa`](https://huggingface.co/datasets/Idavidrein/gpqa). It checks that the published English rows match all five canonical question/answer fields in source order, then uses the canonical `Record ID` for stable identity. The translations do not publish independent record IDs, so their alignment relies on that validated row order.
 
-The evaluation follows the original GPQA zero-shot chat baseline:
+The evaluation reuses `benchmarks/gpqa`: the shared English row formatter, `eval/aai/mcq-4choices.yaml` prompt, `simple_agent`, and `mcqa` verifier with `lenient_answer_colon_md` grading. Each question has eight responses, matching English GPQA. Report mean accuracy (`pass@1[avg-of-8]/accuracy`); the shared verifier also reports pass and majority metrics.
 
-- choice order starts with the three incorrect answers followed by the correct answer;
-- Python's seeded shuffle runs sequentially over all 198 rows and resets for each language;
-- the upstream system and user prompts are reproduced exactly, preserving source whitespace;
-- one deterministic response is sampled with temperature 0, seed 0, a 1,000-token cap, and model thinking disabled;
-- answer extraction uses the upstream ordered, case-sensitive regular expressions.
+Choices start with the correct answer followed by the three distractors and use the English preparer's MD5-seeded shuffle. Translations seed that same helper with the canonical English question so corresponding options occupy the same positions in every language. The question and option text remain translated. All 198 questions, including row 69, are retained.
 
-Unlike the original script's special handling for one long chain-of-thought prompt, row 69 is evaluated because this profile uses the zero-shot prompt. The Responses API carries structured reasoning separately; inline `<think>` or `<thinking>` blocks are removed before applying the upstream answer patterns so hidden reasoning is not scored.
+Generation settings, token budget, and thinking mode come from the selected model configuration, just as for English GPQA. Use identical model settings for both runs. Run each language separately for per-language scores; a combined run reports aggregate metrics.
+
+This replaces the previous original-repository zero-shot profile. Regenerate prepared JSONL: old prompts, the custom parser, the `--shuffle-seed` option, and the one-response/1,000-token/no-thinking defaults have been removed. Earlier results are not directly comparable.
 
 Prepare all default Indic languages:
 
 ```bash
-uv run python benchmarks/indic/gpqa_diamond/prepare.py
+uv run python -m benchmarks.indic.gpqa_diamond.prepare
 ```
 
 Prepare a small gated-data smoke sample:
 
 ```bash
-uv run python benchmarks/indic/gpqa_diamond/prepare.py \
+uv run python -m benchmarks.indic.gpqa_diamond.prepare \
   --languages hi \
   --question-ids 0 69 \
   --output-path /tmp/indic_gpqa_smoke.jsonl
@@ -40,5 +38,3 @@ uv run gym eval run \
   --agent indic_gpqa_diamond_agent \
   --model <model-name-or-path>
 ```
-
-The existing `benchmarks/gpqa` and `benchmarks/gpqa-x` integrations use different prompts, option shuffles, repetition counts, and answer extractors. Their results are not directly comparable to this original-protocol profile.
