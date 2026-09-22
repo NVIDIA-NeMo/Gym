@@ -63,6 +63,16 @@ class TestShippedConfig:
             standalone["verisoftbench_agent"]["responses_api_agents"]["verisoftbench_agent"]["max_repair_rounds"] == 3
         )
 
+    def test_benchmark_registration_uses_upstreams_draw_count(self) -> None:
+        bench = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/config.yaml").read_text())
+        agent = bench["verisoftbench_benchmark_agent"]
+        assert agent["_inherit_from"] == "verisoftbench_agent"
+        [dataset] = agent["responses_api_agents"]["verisoftbench_agent"]["datasets"]
+        assert dataset["num_repeats"] == 8 and dataset["type"] == "benchmark" and dataset["license"] == "MIT"
+        assert dataset["prepare_script"] == "benchmarks/verisoftbench/prepare.py"
+        manifest = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/manifest.yaml").read_text())
+        assert manifest["datasets"][0]["num_repeats"] == 8 and manifest["resources_server"] == "verisoftbench"
+
     def test_resources_server_block_comes_first(self) -> None:
         # The README-table hook reads the first top-level key.
         assert next(iter(_config())) == "verisoftbench"
