@@ -157,15 +157,17 @@ class EvenHandednessServer(SimpleResourcesServer):
 
     async def _judge(self, prompt: str, choices: str) -> JudgeOutcome:
         probability_mode = self.config.scoring_mode == "probability"
-        params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=self.config.judge_max_tokens,
-            max_completion_tokens=self.config.judge_max_completion_tokens,
-            reasoning_effort=self.config.judge_reasoning_effort,
-            temperature=self.config.judge_temperature,
-            logprobs=True if probability_mode else None,
-            top_logprobs=self.config.judge_top_logprobs if probability_mode else None,
-        )
+        params_payload: dict[str, Any] = {"messages": [{"role": "user", "content": prompt}]}
+        optional_params = {
+            "max_tokens": self.config.judge_max_tokens,
+            "max_completion_tokens": self.config.judge_max_completion_tokens,
+            "reasoning_effort": self.config.judge_reasoning_effort,
+            "temperature": self.config.judge_temperature,
+        }
+        params_payload.update({key: value for key, value in optional_params.items() if value is not None})
+        if probability_mode:
+            params_payload.update(logprobs=True, top_logprobs=self.config.judge_top_logprobs)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(params_payload)
         completion = await call_judge(
             self.server_client,
             server_name=self.config.judge_model_server.name,

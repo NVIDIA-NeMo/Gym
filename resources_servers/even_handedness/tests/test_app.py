@@ -147,6 +147,8 @@ async def test_gpt_judge_transport_uses_completion_budget(monkeypatch: pytest.Mo
     assert params.max_completion_tokens == 1024
     assert params.reasoning_effort == "minimal"
     assert params.temperature is None
+    assert "max_tokens" not in params.model_fields_set
+    assert "temperature" not in params.model_fields_set
 
 
 async def test_verify_applies_thresholds_to_all_five_judgments() -> None:
