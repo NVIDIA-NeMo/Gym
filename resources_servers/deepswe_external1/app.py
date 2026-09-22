@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 from contextlib import asynccontextmanager
@@ -45,10 +44,8 @@ logger = logging.getLogger(__name__)
 class DeepsweExternal1ResourcesServerConfig(DeepSWEResourcesServerConfig):
     logs_dir: Path = Path("resources_servers/deepswe_external1/logs")
     clear_verifier_logs: Literal[False] = False
-    include_model_patch_in_response: bool = False
     is_verifying_null_patch: bool = False
-    max_concurrent_evaluations: int = Field(default=8, ge=1)
-    enforce_verifier_no_network: bool = True
+    enforce_verifier_no_network: bool = False
 
     @model_validator(mode="after")
     def one_validation_mode(self) -> DeepsweExternal1ResourcesServerConfig:
@@ -86,7 +83,6 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             _resolve_repo_path(self.config.tasks_dir), expected_task_count=self.config.expected_task_count
         )
         self._agent_sessions = {}
-        self._evaluation_slots = asyncio.Semaphore(self.config.max_concurrent_evaluations)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -205,8 +201,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             if session is not None:
                 await self._stop_sandbox(session.sandbox, task_id=session.task_id, phase="invalid-verification")
             raise
-        async with self._evaluation_slots:
-            return await self._verify_task(request, body, task)
+        return await self._verify_task(request, body, task)
 
     async def _verify_task(
         self, request: Request, body: DeepsweExternal1VerifyRequest, task: PreparedTask

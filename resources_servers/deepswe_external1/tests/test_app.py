@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -60,8 +61,13 @@ def sandbox(sandbox_id: str, events: list[str]) -> AsyncMock:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["golden", "null", "agent"])
-async def test_entire_lifecycle_uses_distinct_sandboxes(task: PreparedTask, mode: str) -> None:
+@pytest.mark.parametrize("include_patch", [None, False])
+async def test_entire_lifecycle_uses_distinct_sandboxes(
+    task: PreparedTask, mode: str, include_patch: bool | None
+) -> None:
     server = make_server(task, mode=mode)
+    if include_patch is not None:
+        server.config.include_model_patch_in_response = include_patch
     events = []
     agent, verifier = sandbox("A", events), sandbox("B", events)
 
@@ -105,7 +111,48 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(task: PreparedTask, mode
     assert server._execute_golden.await_count == (mode == "golden")
     assert not server._agent_sessions
     assert Path(result.log_dir, "result.json").is_file()
-    assert Path(result.log_dir, "model.patch").read_bytes() == (b"" if mode == "null" else b"committed patch")
+    expected_patch = b"" if mode == "null" else b"committed patch"
+    assert Path(result.log_dir, "model.patch").read_bytes() == expected_patch
+    assert result.model_patch == (None if include_patch is False else expected_patch.decode())
+
+
+@pytest.mark.asyncio
+async def test_verification_does_not_impose_an_eight_request_limit(task: PreparedTask) -> None:
+    server = make_server(task, mode="null")
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+    sandboxes = []
+
+    async def create(_task: PreparedTask, *, phase: str) -> AsyncMock:
+        box = sandbox(f"{phase}-{len(sandboxes)}", [])
+        sandboxes.append(box)
+        return box
+
+    async def grade(*args) -> VerifierResult:
+        nonlocal started
+        started += 1
+        if started == 9:
+            all_started.set()
+        await release.wait()
+        return VerifierResult(evaluation_completed=True, reward=0)
+
+    server._create_sandbox = AsyncMock(side_effect=create)
+    server._collect_model_patch = AsyncMock(return_value=b"")
+    server._run_verifier = AsyncMock(side_effect=grade)
+    requests = [asyncio.create_task(server.verify(request(), body(task))) for _ in range(9)]
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=5)
+        assert started == 9
+        assert not any(pending.done() for pending in requests)
+    finally:
+        release.set()
+        results = await asyncio.gather(*requests)
+    assert all(result.evaluation_completed and result.reward == 0 for result in results)
+    assert len({result.log_dir for result in results}) == 9
+    assert len(sandboxes) == 18
+    for box in sandboxes:
+        box.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -194,9 +241,9 @@ async def test_shutdown_releases_unfinished_sessions(task: PreparedTask) -> None
 def test_network_and_validation_modes(task: PreparedTask) -> None:
     server = make_server(task)
     assert server._provider_options(phase="agent")["network_policy"] == {"defaultAction": "deny", "egress": []}
-    assert server._provider_options(phase="verifier")["network_policy"] == {"defaultAction": "deny", "egress": []}
-    server.config.enforce_verifier_no_network = False
     assert "network_policy" not in server._provider_options(phase="verifier")
+    server.config.enforce_verifier_no_network = True
+    assert server._provider_options(phase="verifier")["network_policy"] == {"defaultAction": "deny", "egress": []}
     settings = server.config.model_dump() | {"is_verifying_null_patch": True}
     with pytest.raises(ValueError, match="mutually exclusive"):
         DeepsweExternal1ResourcesServerConfig(**settings)
@@ -245,6 +292,10 @@ async def test_sandbox_spec_and_native_setup(
     assert spec.resources.cpu == 2 and spec.resources.memory_mib == 1536
     assert spec.ttl_s == 3600 and spec.ready_timeout_s == 60
     assert spec.env == {"EXPLICIT": "yes"}
+    if phase == "agent":
+        assert spec.provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+    else:
+        assert "network_policy" not in spec.provider_options
     assert spec.metadata == {
         "owner": "test",
         "task": task.definition.task_id,

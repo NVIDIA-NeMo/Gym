@@ -15,13 +15,12 @@ deepswe_external1_resources_server:
       expected_task_count: 5
       is_verifying_golden_patch: false
       is_verifying_null_patch: false
-      max_concurrent_evaluations: 8
       task_cpu_multiplier: 2.0
       task_memory_multiplier: 4.0
 
       sandbox_provider: sandbox
       enforce_agent_no_network: true
-      enforce_verifier_no_network: true
+      enforce_verifier_no_network: false
       sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
@@ -37,7 +36,7 @@ deepswe_external1_resources_server:
 
       logs_dir: resources_servers/deepswe_external1/logs
       clear_verifier_logs: false
-      include_model_patch_in_response: false
+      include_model_patch_in_response: true
 
       datasets:
         - name: example

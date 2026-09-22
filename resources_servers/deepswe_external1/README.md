@@ -32,6 +32,8 @@ attempt per example (three passes, two genuine failures). It retains the source
 task input and unchanged Gym-converted model/tool output, not raw per-turn model
 requests. Each row records the runtime commit and exported prompt quoting;
 operational logs, sandbox handles and the reconstructed system header are omitted.
+Those recorded runs used verifier network blocking and omitted patch text from
+verification responses; the defaults below now match upstream DeepSWE.
 
 For other prepared packages, override `tasks_dir` and `expected_task_count`, and
 collect against their matching JSONL. Keep local training data and asset caches
@@ -48,14 +50,17 @@ changes are not transferred. There is no additional filename/cache exclusion lis
 Only the patch crosses from agent to verifier. Trusted test files are staged
 separately in the fresh verifier; its original grader applies the patch and held-out
 tests. Each verifier image must already provide Git, Python and writable grading
-directories. Both phases deny external network by default, except the configured
-model endpoint for the agent. This is filesystem isolation, not proof against all
-grader exploits.
+directories. The agent denies external network except the configured model endpoint.
+Like upstream DeepSWE, the verifier adds no network deny policy by default; set
+`enforce_verifier_no_network: true` to opt in. This is filesystem isolation, not
+proof against all grader exploits.
 
 `is_verifying_golden_patch: true` runs the original solution in A before collection;
 `is_verifying_null_patch: true` collects from an untouched A. They are mutually
 exclusive. Missing artifacts and setup failures are masked infrastructure errors,
 not completed task failures. Attempts retain separate logs and sandbox IDs.
+Responses include the candidate patch by default. Concurrency is controlled by
+the caller, with no additional server-side cap.
 
 ## Licensing
 
