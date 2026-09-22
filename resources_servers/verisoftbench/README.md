@@ -166,11 +166,24 @@ docker run -d --name verisoftbench-lean verisoftbench/lean:d066523
 docker cp verisoftbench-lean:/workspace/repo_index cache/verisoftbench/VeriSoftBench-d066523/data/repo_index
 ```
 
-`docker/build_image.sh` assembles upstream's build context and applies two changes to
-the *tooling* (not to what is built): one image layer per repository, and Lake
-packages pre-seeded by SHA before `lake build`, because at least one revision upstream
-pins (`quote4` `9371548b`, needed by `iris-lean`) is no longer reachable from any
-branch and a stock `lake build` fails on it.
+`docker/build_image.sh` assembles upstream's build context and applies three changes to
+the *tooling* (not to what is built): one image layer per repository; Lake packages
+pre-seeded by SHA before `lake build`, because at least one revision upstream pins
+(`quote4` `9371548b`, needed by `iris-lean`) is no longer reachable from any branch and
+a stock `lake build` fails on it; and, after `lake build`, every manifest revision
+fetched and checked out, because `lake build` left `Cli` in `lean-mlir` at a revision
+other than the pinned one and `lake env lean` then failed with git exit 128 on every
+lean-mlir task. On an image built before that third step, the same fix can be applied
+to a running container:
+
+```bash
+docker exec verisoftbench-lean bash -c 'cd /workspace/lean_repos/lean-mlir/.lake/packages/Cli \
+  && git fetch --quiet origin d9fc8ae23024be37424a189982c92356e37935c8 \
+  && git checkout --quiet --detach d9fc8ae23024be37424a189982c92356e37935c8'
+```
+
+Five repositories report partial build failures upstream expects (`formal-snarks-project`,
+`loom`, `clean`, `veil`, `lean-mlir`); the model-free sweep records which tasks that costs.
 
 ## Quickstart
 

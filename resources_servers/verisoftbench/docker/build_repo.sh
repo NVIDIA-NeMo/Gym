@@ -223,5 +223,29 @@ fi
 echo "Running: lake build"
 lake build
 
+# --- Make every manifest revision checkout-able for `lake env` (NeMo Gym addition) ---
+# `lake build` may leave a transitive package at a revision other than the one the
+# top-level manifest pins (observed for Cli in lean-mlir). At verification time
+# `lake env lean` then tries `git checkout <rev>` and dies with git exit 128 because
+# the revision was never fetched. Fetch each pinned revision so that checkout succeeds.
+if [ -f "${REPO_OUT}/lake-manifest.json" ]; then
+    python3 - "${REPO_OUT}" <<'PYFETCH'
+import json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / "lake-manifest.json").read_text())
+pkgs_dir = root / manifest.get("packagesDir", ".lake/packages")
+for pkg in manifest.get("packages", []):
+    rev = pkg.get("rev")
+    dest = pkgs_dir / pkg["name"]
+    if pkg.get("type") != "git" or not rev or not (dest / ".git").exists():
+        continue
+    head = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if head != rev:
+        print(f"  {pkg['name']}: at {head[:8]}, manifest wants {rev[:8]}; fetching and checking out", flush=True)
+        subprocess.run(["git", "-C", str(dest), "fetch", "--quiet", "origin", rev], check=False)
+        subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", rev], check=False)
+PYFETCH
+fi
+
 echo "SUCCESS: ${REPO_NAME} built successfully"
 echo ""
