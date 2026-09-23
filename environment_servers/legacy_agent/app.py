@@ -22,7 +22,7 @@ from nemo_gym.base_environment_server import (
 )
 from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
 
 _UNUSED_LIMITS = frozenset(
@@ -133,3 +133,5 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
 
 if __name__ == "__main__":
     LegacyAgentEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LegacyAgentEnvironmentServer.run_webserver()  # noqa: F401

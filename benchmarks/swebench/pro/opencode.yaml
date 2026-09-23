@@ -23,6 +23,7 @@ swebench_pro_environment_server:
   environment_servers:
     legacy_agent:
       entrypoint: app.py
+      num_workers: 4
       agent_server:
         type: responses_api_agents
         name: swebench_pro_opencode_sandboxed_agent
