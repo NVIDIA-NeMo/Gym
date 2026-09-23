@@ -4695,9 +4695,16 @@ class TestEnvironmentServerRouting:
                 config,
             )
 
-    def test_legacy_mode_routes_flat_rows_to_one_server_and_materialized_rows_by_taskset(self) -> None:
+    async def test_legacy_mode_routes_flat_rows_to_one_server_and_materialized_rows_by_taskset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy mode: every flat row to the named server, materialized rows still by taskset, through dispatch."""
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = self._mixed_batch_config()
         materialized = self._materialized_row()
         flat = self._row()
+        del flat[ATTEMPT_INDEX_KEY_NAME]
         config = RolloutCollectionConfig(
             input_jsonl_fpath="input.jsonl",
             output_jsonl_fpath="output.jsonl",
@@ -4716,6 +4723,34 @@ class TestEnvironmentServerRouting:
         flat_row = next(row for row in rows if "task_input" not in row)
         assert native_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert flat_row[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+
+        # Dispatch validates the flat row against a legacy_agent server that binds no resources server,
+        # stamps the agent that server fronts, and sends today's flat body; the native row is unaffected.
+        for future in list(RolloutCollectionHelper().run_examples(rows)):
+            await future
+
+        calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
+        assert set(calls) == {"environment", "legacy_environment"}
+        assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
+        assert calls["legacy_environment"] is flat_row
+        assert flat_row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+
+    def test_materialized_row_rejects_num_repeats_add_seed(self) -> None:
+        """The seed lives in the top-level prompt, which a materialized row keeps under task_input."""
+        materialized = self._materialized_row()
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=2,
+            num_repeats_add_seed=True,
+        )
+
+        with pytest.raises(ValueError, match="num_repeats_add_seed is not supported for materialized task rows"):
+            RolloutCollectionHelper._preprocess_raw_rows(
+                [(0, orjson.dumps(materialized).decode(), materialized)],
+                config,
+            )
 
     def test_taskset_mode_stays_native_only(self) -> None:
         flat = self._row()

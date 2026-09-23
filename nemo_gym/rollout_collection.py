@@ -1258,6 +1258,10 @@ class RolloutCollectionHelper(BaseModel):
                     raise ValueError("responses_create_params overrides are not supported for materialized task rows")
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
+                if config.num_repeats_add_seed:
+                    # The seed is written into the top-level responses_create_params, which a
+                    # materialized row keeps under task_input; the planner does not modify task_input.
+                    raise ValueError("num_repeats_add_seed is not supported for materialized task rows")
             else:
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                     row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
