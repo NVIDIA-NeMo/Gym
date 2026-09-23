@@ -782,11 +782,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 detail="Transcript has no auxiliary-call usage counters; totals cover observed assistant calls only",
             )
         )
-        input_tokens = output_tokens = cached_tokens = 0
+        input_tokens = output_tokens = 0
+        cached_tokens: int | None = 0 if usage_messages else None
         for message in usage_messages:
             usage = message.get("usage")
             if not isinstance(usage, dict):
                 gaps.append(ObservationGap(code="model_call_usage_unavailable"))
+                gaps.append(ObservationGap(code="cached_token_usage_unavailable"))
+                cached_tokens = None
                 continue
             if any(type(usage.get(key)) is not int or usage[key] < 0 for key in ("input", "output")):
                 gaps.append(ObservationGap(code="model_call_usage_unavailable", detail="Incomplete usage counters"))
@@ -794,8 +797,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 gaps.append(
                     ObservationGap(code="model_call_usage_unavailable", detail="Harness reported only zero counters")
                 )
-            if "cacheRead" not in usage:
+            cache_read = usage.get("cacheRead")
+            if type(cache_read) is not int or cache_read < 0:
                 gaps.append(ObservationGap(code="cached_token_usage_unavailable"))
+                cached_tokens = None
+            elif cached_tokens is not None:
+                cached_tokens += cache_read
 
             def count(name: str) -> int:
                 value = usage.get(name)
@@ -805,11 +812,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # observed calls, including failed calls, without adding CLI aggregate mirrors.
             input_tokens += count("input") + count("cacheRead") + count("cacheWrite")
             output_tokens += count("output")
-            cached_tokens += count("cacheRead")
         if not assistants:
             input_tokens = envelope_usage["input_tokens"]
             output_tokens = envelope_usage["output_tokens"]
-            cached_tokens = envelope_usage.get("cached_tokens", 0)
+            # The legacy envelope parser defaults missing counters to zero.
+            # Keep native optional details unknown unless the artifact supplies them.
+            envelope = _decode_last_json_dict_suffix(stdout) or {}
+            meta = envelope.get("meta")
+            agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
+            raw_usage = agent_meta.get("usage") if isinstance(agent_meta, dict) else None
+            cache_read = raw_usage.get("cacheRead") if isinstance(raw_usage, dict) else None
+            cached_tokens = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            if cached_tokens is None:
+                gaps.append(ObservationGap(code="cached_token_usage_unavailable"))
             gaps.append(
                 ObservationGap(code="model_call_usage_unavailable", detail="Only CLI envelope totals available")
             )
@@ -845,7 +860,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             ),
             metadata={
                 "harness_execution": "sandbox",
