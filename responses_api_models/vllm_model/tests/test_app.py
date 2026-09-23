@@ -512,7 +512,7 @@ async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
         context.attempt_index = 2
         assert model._generation_cut_for_context() == receipt.prefixes[0]
         context.attempt_index = 1
-        model._retire_generation_cut_for_context()
+        await model._retire_generation_cut_for_context()
         assert model._generation_cut_for_context() is None
         await model.restore_generation_cut(
             receipt,
@@ -688,6 +688,91 @@ async def test_generation_cut_restore_rejects_process_local_multi_worker_registr
 
     with raises(RuntimeError, match="single Gym model-server worker"):
         await model.restore_generation_cut(receipt)
+
+
+@mark.asyncio
+async def test_generation_cut_shared_registry_claim_consume_and_release(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            num_workers=2,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    prefix = GenerationCutPrefixAck(
+        ticket_id="ticket-1",
+        rollout_id="rollout-1",
+        attempt_index=0,
+        model_call_id="old-call",
+        admitted_at=1.0,
+        disposition="durable_prefix",
+        cut_kind="active_prefix",
+        frozen_buffer_id="active/checkpoint-1",
+        staging_keys=("__generation_cut__/checkpoint-1/rollout-1/old-call",),
+        prefix_token_count=2,
+        prefix_digest="a" * 64,
+        effective_output_limit=128,
+    )
+    coordinator_client = MagicMock()
+    coordinator_client.has_restored_cuts = True
+    coordinator_client.request = AsyncMock(
+        side_effect=[
+            prefix.model_dump(mode="json"),
+            None,
+            prefix.model_dump(mode="json"),
+            None,
+        ]
+    )
+    model._checkpoint_coordinator_client = coordinator_client
+    context = CaptureContext(
+        rollout_id="rollout-1-a1",
+        model_call_id="new-call",
+        token_sink=None,
+        logical_rollout_id="rollout-1",
+        attempt_index=1,
+        external_staging=True,
+    )
+    token = set_token_sink(context)
+    try:
+        await model._claim_generation_cut_for_context()
+        assert model._generation_cut_for_context() == prefix
+        await model._settle_generation_cut_for_context(consume=False)
+        await model._claim_generation_cut_for_context()
+        await model._settle_generation_cut_for_context(consume=True)
+        coordinator_client.has_restored_cuts = False
+        await model._claim_generation_cut_for_context()
+    finally:
+        reset_token_sink(token)
+
+    operations = [call.args[0] for call in coordinator_client.request.await_args_list]
+    assert operations == [
+        "claim_generation_cut",
+        "release_generation_cut",
+        "claim_generation_cut",
+        "consume_generation_cut",
+    ]
 
 
 def test_strip_hosted_only_tool_fields_pops_strict() -> None:

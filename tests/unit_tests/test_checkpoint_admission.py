@@ -76,7 +76,6 @@ def test_new_root_operation_parks_while_draining() -> None:
     limiter.close()
     with pytest.raises(AdmissionParkedError):
         limiter.admit(rollout_id="9-9", attempt_index=0)
-    assert ("9-9", 0) not in limiter.seen_attempts()
     limiter.release(held)
 
 
@@ -398,7 +397,8 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
     assert pause_payload["response_inflight_total"] == 0
     assert pause_payload["generation_pending_total"] == 0
     assert pause_payload["waiters_total"] == 0
-    assert pause_payload["generation_cut_proof"]["frozen_tickets"] == []
+    assert pause_payload["generation_cut_summary"]["records"] == 0
+    assert len(pause_payload["generation_cut_summary"]["proof_digest"]) == 64
 
     # New generation parks; control routes stay reachable.
     parked = client.post("/v1/responses", json={"input": "hi"})

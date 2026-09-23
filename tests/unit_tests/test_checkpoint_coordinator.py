@@ -29,11 +29,14 @@ CPU-local simulation.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import socket
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -47,17 +50,32 @@ from nemo_gym._checkpoint import (
     AdmissionLimiter,
     AdmissionParkedError,
     AdmissionState,
+    CheckpointArtifactReference,
     ControlCapabilities,
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
-    GenerationCutWorkerProof,
+    MissingWorkersError,
     MultiProcessCapability,
     StaleAttemptError,
     WorkerAdmissionAgent,
     WorkerRegistrationError,
     build_coordinator_control_app,
 )
+from nemo_gym._checkpoint import coordinator as coordinator_module
+from nemo_gym._checkpoint.control import Deadline
+from nemo_gym._checkpoint.coordinator import (
+    CoordinatorServiceError,
+    RestoredCutAlreadyOwnedError,
+    RestoredCutConsumedError,
+    RestoredCutRegistry,
+)
+from nemo_gym._checkpoint.ledger import (
+    MODEL_LEDGER_SUBDIR,
+    LedgerMismatchError,
+    PolicyModelCheckpointCoordinatorService,
+)
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 
 
 class _Pool:
@@ -120,6 +138,695 @@ async def _stop_pool(pool: _Pool) -> None:
     for _, agent in pool.workers:
         await agent.stop()
     await pool.coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_protocol_round_trips_message_larger_than_stream_reader_default() -> None:
+    message = {"type": "ack", "proof": "x" * (128 * 1024)}
+    frame = coordinator_module._encode_message(message)
+    reader = asyncio.StreamReader()
+    for start in range(0, len(frame), 997):
+        reader.feed_data(frame[start : start + 997])
+    reader.feed_eof()
+
+    assert await coordinator_module._read_message(reader) == message
+    assert await coordinator_module._read_message(reader) is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_service_client_keeps_response_delivery_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = WorkerAdmissionAgent(
+        tmp_path / "unused.sock",
+        "worker-0",
+        AdmissionLimiter(),
+    )
+    observed_timeout: float | None = None
+
+    async def record_request(operation, payload, *, timeout_s=None, wait_without_timeout=False):
+        nonlocal observed_timeout
+        observed_timeout = timeout_s
+        return {"operation": operation, "payload": payload}
+
+    monkeypatch.setattr(agent, "_service_request", record_request)
+    deadline = Deadline(deadline_ts=time.time() + 0.05)
+
+    result = await agent.service_client().request_with_deadline(
+        "operation",
+        {"value": 1},
+        deadline=deadline,
+    )
+
+    assert result == {"operation": "operation", "payload": {"value": 1}}
+    assert observed_timeout is not None
+    assert observed_timeout > 5.0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_protocol_rejects_truncated_frame() -> None:
+    frame = coordinator_module._encode_message({"type": "ack", "proof": "complete"})
+    reader = asyncio.StreamReader()
+    reader.feed_data(frame[:-1])
+    reader.feed_eof()
+
+    with pytest.raises(ConnectionError, match="frame payload"):
+        await coordinator_module._read_message(reader)
+
+
+def test_coordinator_protocol_rejects_oversized_frame(monkeypatch) -> None:
+    monkeypatch.setattr(coordinator_module, "_MAX_COORDINATOR_MESSAGE_BYTES", 8)
+
+    with pytest.raises(ValueError, match="exceeds the configured frame limit"):
+        coordinator_module._encode_message({"type": "ack"})
+
+
+@pytest.mark.asyncio
+async def test_large_attempt_fence_inventory_is_sent_as_bounded_descriptor(tmp_path) -> None:
+    coordinator = AdmissionCoordinator(tmp_path / "coordinator.sock", expected_workers=0)
+    await coordinator.install_tombstones((f"rollout-{index}", 0) for index in range(10_000))
+
+    message = coordinator._state_message()
+    assert "tombstones" not in message
+    assert len(coordinator_module._encode_message(message)) < 4096
+    reference = CheckpointArtifactReference.model_validate(message["attempt_fence_index"])
+    assert reference.records == 10_000
+    records = coordinator_module.read_jsonl_artifact(
+        coordinator.artifact_root,
+        reference,
+        coordinator_module._WorkerAttemptIdentity,
+    )
+    assert (records[0].rollout_id, records[-1].rollout_id) == (
+        "rollout-0",
+        "rollout-9999",
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_attempt_fence_writes_cannot_lose_a_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = AdmissionCoordinator(tmp_path / "coordinator.sock", expected_workers=0)
+    release_first_write = threading.Event()
+    first_write_started = threading.Event()
+    second_write_finished = threading.Event()
+    write_count = 0
+    write_count_lock = threading.Lock()
+    original_write = coordinator_module.write_jsonl_artifact
+
+    def block_first_write(*args, **kwargs):
+        nonlocal write_count
+        with write_count_lock:
+            write_count += 1
+            current_write = write_count
+        if current_write == 1:
+            first_write_started.set()
+            assert release_first_write.wait(timeout=2.0)
+        result = original_write(*args, **kwargs)
+        if current_write == 2:
+            second_write_finished.set()
+        return result
+
+    monkeypatch.setattr(coordinator_module, "write_jsonl_artifact", block_first_write)
+    first = asyncio.create_task(coordinator.add_tombstone("rollout-a", 0))
+    try:
+        assert await asyncio.to_thread(first_write_started.wait, 1.0)
+        second = asyncio.create_task(coordinator.add_tombstone("rollout-b", 0))
+        # Without serialization the second write overtakes the blocked first
+        # write, after which the stale first descriptor wins.
+        await asyncio.to_thread(second_write_finished.wait, 0.05)
+        release_first_write.set()
+        await asyncio.gather(first, second)
+
+        reference = coordinator._attempt_fence_artifact
+        assert reference is not None
+        records = coordinator_module.read_jsonl_artifact(
+            coordinator.artifact_root,
+            reference,
+            coordinator_module._WorkerAttemptIdentity,
+        )
+        assert [(item.rollout_id, item.attempt_index) for item in records] == [
+            ("rollout-a", 0),
+            ("rollout-b", 0),
+        ]
+    finally:
+        release_first_write.set()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_worker_artifact_publication_cannot_restore_a_stale_reference(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = await _start_pool(sock_dir, expected=1, connect=1)
+    release_first_write = threading.Event()
+    first_write_started = threading.Event()
+    write_count = 0
+    write_count_lock = threading.Lock()
+    original_write = coordinator_module.write_jsonl_artifact
+
+    def block_first_write(*args, **kwargs):
+        nonlocal write_count
+        with write_count_lock:
+            write_count += 1
+            current_write = write_count
+        if current_write == 1:
+            first_write_started.set()
+            assert release_first_write.wait(timeout=2.0)
+        return original_write(*args, **kwargs)
+
+    try:
+        async with pool.client() as client:
+            assert (await pool.pause(client, checkpoint_id="ckpt-artifact-race")).status_code == 200
+
+        limiter, agent = pool.workers[0]
+        agent._checkpoint_artifact_fingerprint = None
+        agent._checkpoint_artifact_reference = None
+        monkeypatch.setattr(coordinator_module, "write_jsonl_artifact", block_first_write)
+
+        first = asyncio.create_task(agent._generation_cut_artifact_payload())
+        assert await asyncio.to_thread(first_write_started.wait, 1.0)
+
+        # Model the coordinator adding an abort fence while the earlier
+        # counter report is still writing its artifact.
+        limiter._checkpoint_exclusions.add(("rollout-late", 0))
+        second = asyncio.create_task(agent._generation_cut_artifact_payload())
+        await asyncio.sleep(0.05)
+        release_first_write.set()
+        first_payload, second_payload = await asyncio.gather(first, second)
+
+        reference = agent._checkpoint_artifact_reference
+        assert reference is not None
+        records = coordinator_module.read_jsonl_artifact(
+            agent.artifact_root,
+            reference,
+            coordinator_module._WorkerCheckpointIndexRecord,
+        )
+        assert [(item.rollout_id, item.attempt_index) for item in records if item.record_type == "exclusion"] == [
+            ("rollout-late", 0)
+        ]
+
+        worker = pool.coordinator._workers[agent.worker_id]
+        second_message = {
+            **second_payload,
+            "generation_cut_artifact_revision": agent._checkpoint_artifact_revision,
+        }
+        assert await pool.coordinator._accept_cut_proof(
+            worker,
+            second_message,
+            agent._coordinator_sequence,
+        )
+        accepted_reference = worker.cut_artifact
+        first_message = {
+            **first_payload,
+            "generation_cut_artifact_revision": agent._checkpoint_artifact_revision - 1,
+        }
+        assert await pool.coordinator._accept_cut_proof(
+            worker,
+            first_message,
+            agent._coordinator_sequence,
+        )
+        assert worker.cut_artifact == accepted_reference
+    finally:
+        release_first_write.set()
+        await _stop_pool(pool)
+
+
+def test_restored_cut_registry_leases_one_replacement_to_one_worker() -> None:
+    registry = RestoredCutRegistry()
+    value = {"rollout_id": "rollout-1", "attempt_index": 0}
+    registry.install({("rollout-1", 1): value})
+
+    assert registry.claim(("rollout-1", 1), worker_id="worker-1", model_call_id="call-1") == value
+    assert registry.claim(("rollout-1", 1), worker_id="worker-1", model_call_id="call-1") == value
+    with pytest.raises(RestoredCutAlreadyOwnedError):
+        registry.claim(("rollout-1", 1), worker_id="worker-2", model_call_id="call-2")
+
+    registry.release(("rollout-1", 1), worker_id="worker-1", model_call_id="call-1")
+    assert registry.claim(("rollout-1", 1), worker_id="worker-2", model_call_id="call-2") == value
+    registry.consume(("rollout-1", 1), worker_id="worker-2", model_call_id="call-2")
+    with pytest.raises(RestoredCutConsumedError):
+        registry.claim(("rollout-1", 1), worker_id="worker-3", model_call_id="call-3")
+
+
+def test_restored_cut_registry_releases_disconnected_worker_leases() -> None:
+    registry = RestoredCutRegistry()
+    value = {"rollout_id": "rollout-1", "attempt_index": 0}
+    registry.install({("rollout-1", 1): value})
+    registry.claim(("rollout-1", 1), worker_id="worker-1", model_call_id="call-1")
+
+    assert registry.release_worker("worker-1") == 1
+    assert registry.claim(("rollout-1", 1), worker_id="worker-2", model_call_id="call-2") == value
+
+
+@pytest.mark.asyncio
+async def test_worker_service_request_is_routed_through_coordinator(
+    sock_dir: Path,
+) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    async def handle(worker_id: str, operation: str, payload: dict):
+        if operation == "fail":
+            raise RuntimeError("service failed")
+        calls.append((worker_id, operation, payload))
+        return {"handled": True}
+
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(
+        coordinator.socket_path,
+        "worker-1",
+        AdmissionLimiter(),
+    )
+    try:
+        await agent.start()
+        result = await agent.service_client().request(
+            "claim_generation_cut",
+            {"rollout_id": "rollout-1", "attempt_index": 1},
+        )
+        assert result == {"handled": True}
+        assert calls == [
+            (
+                "worker-1",
+                "claim_generation_cut",
+                {"rollout_id": "rollout-1", "attempt_index": 1},
+            )
+        ]
+        with pytest.raises(CoordinatorServiceError) as failed:
+            await agent.service_client().request("fail", {})
+        assert failed.value.status_code == 500
+    finally:
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_reply_is_not_blocked_by_checkpoint_state_application(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker socket reader must stay live while its cut is in progress."""
+    entered_cut = asyncio.Event()
+    finish_cut = asyncio.Event()
+
+    async def handle(worker_id: str, operation: str, payload: dict):
+        del worker_id, operation, payload
+        return {"claimed": True}
+
+    limiter = AdmissionLimiter()
+
+    async def blocked_prepare(*args, **kwargs):
+        del args, kwargs
+        entered_cut.set()
+        await finish_cut.wait()
+        return True
+
+    monkeypatch.setattr(limiter, "prepare_generation_cut", blocked_prepare)
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", limiter)
+    try:
+        await agent.start()
+        await coordinator.close_admission("ckpt-1")
+        await asyncio.wait_for(entered_cut.wait(), timeout=1.0)
+
+        result = await asyncio.wait_for(
+            agent.service_client().request("claim_generation_cut", {}),
+            timeout=0.5,
+        )
+        assert result == {"claimed": True}
+    finally:
+        finish_cut.set()
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+@pytest.mark.asyncio
+async def test_interrupted_cut_claim_is_released_while_worker_stays_connected(
+    sock_dir: Path,
+    interruption: str,
+) -> None:
+    registry = RestoredCutRegistry()
+    key = ("rollout-1", 1)
+    registry.install({key: {"rollout_id": "rollout-1", "attempt_index": 0}})
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def handle(worker_id: str, operation: str, payload: dict):
+        if operation == "claim_generation_cut":
+            entered.set()
+            await proceed.wait()
+            return registry.claim(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        if operation == "abandon_generation_cut_claim":
+            return registry.release_if_owned(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        raise AssertionError(f"unexpected operation {operation!r}")
+
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        restored_cuts=registry,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    await agent.start()
+    request = asyncio.create_task(
+        agent.service_client().request(
+            "claim_generation_cut",
+            {
+                "rollout_id": key[0],
+                "attempt_index": key[1],
+                "model_call_id": "call-1",
+            },
+            timeout_s=0.01 if interruption == "timeout" else 10.0,
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        if interruption == "timeout":
+            await asyncio.sleep(0.02)
+        else:
+            request.cancel()
+        assert not request.done()
+        proceed.set()
+        expected_error = TimeoutError if interruption == "timeout" else asyncio.CancelledError
+        with pytest.raises(expected_error):
+            await request
+        assert registry.status() == {
+            "entries": 1,
+            "available": 1,
+            "leased": 0,
+            "consumed": 0,
+        }
+        assert coordinator.status()["workers"]["live"] == 1
+    finally:
+        proceed.set()
+        await asyncio.gather(request, return_exceptions=True)
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cut_claim_is_released_when_cancelled_during_send(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = RestoredCutRegistry()
+    key = ("rollout-1", 1)
+    registry.install({key: {"rollout_id": "rollout-1", "attempt_index": 0}})
+
+    async def handle(worker_id: str, operation: str, payload: dict):
+        if operation == "claim_generation_cut":
+            return registry.claim(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        if operation == "abandon_generation_cut_claim":
+            return registry.release_if_owned(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        raise AssertionError(f"unexpected operation {operation!r}")
+
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        restored_cuts=registry,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    await agent.start()
+    original_write = agent._write
+    claim_sent = asyncio.Event()
+    keep_send_open = asyncio.Event()
+
+    async def write_then_wait(message: dict) -> None:
+        await original_write(message)
+        if message.get("operation") == "claim_generation_cut":
+            claim_sent.set()
+            await keep_send_open.wait()
+
+    monkeypatch.setattr(agent, "_write", write_then_wait)
+    request = asyncio.create_task(
+        agent.service_client().request(
+            "claim_generation_cut",
+            {
+                "rollout_id": key[0],
+                "attempt_index": key[1],
+                "model_call_id": "call-1",
+            },
+        )
+    )
+    try:
+        await asyncio.wait_for(claim_sent.wait(), timeout=1.0)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert registry.status() == {
+            "entries": 1,
+            "available": 1,
+            "leased": 0,
+            "consumed": 0,
+        }
+        assert coordinator.status()["workers"]["live"] == 1
+    finally:
+        keep_send_open.set()
+        await asyncio.gather(request, return_exceptions=True)
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_policy_service_pause_and_status_use_distinct_wire_contracts(
+    sock_dir: Path,
+) -> None:
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    service = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: None,
+        file_ledger_root_provider=lambda: None,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=False,
+    )
+    coordinator.service_handler = service
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    await agent.start()
+    try:
+        pause = await service(
+            "worker-1",
+            "model_admission_pause",
+            {
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 10.0,
+            },
+        )
+
+        assert "missing_workers" not in pause
+
+        status = await service(
+            "worker-1",
+            "model_admission_status",
+            {"checkpoint_id": "checkpoint-1"},
+        )
+        assert status["workers"] == {
+            "acknowledged": 1,
+            "expected": 1,
+            "live": 1,
+        }
+        assert status["missing_workers"] == 0
+        assert status["per_worker"]["worker-1"]["connected"] is True
+    finally:
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_broken_pipe_during_pause_rolls_back_admission(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    service = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: None,
+        file_ledger_root_provider=lambda: None,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=False,
+    )
+    coordinator.service_handler = service
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    await agent.start()
+    original_write = coordinator._write_to_worker
+    failed = False
+
+    async def fail_first_write(record, message):
+        nonlocal failed
+        if not failed and message.get("state") == AdmissionState.DRAINING.value:
+            failed = True
+            raise BrokenPipeError("worker disappeared during pause broadcast")
+        await original_write(record, message)
+
+    monkeypatch.setattr(coordinator, "_write_to_worker", fail_first_write)
+    try:
+        with pytest.raises(MissingWorkersError, match="worker"):
+            await service(
+                "worker-1",
+                "model_admission_pause",
+                {
+                    "checkpoint_id": "checkpoint-1",
+                    "deadline_ts": time.time() + 0.05,
+                },
+            )
+        assert coordinator.status()["state"] == AdmissionState.ACCEPTING.value
+        assert service.fence.phase.value == "idle"
+    finally:
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [
+        ("claim_generation_cut", {"entries": 1, "available": 1, "leased": 0, "consumed": 0}),
+        ("consume_generation_cut", {"entries": 1, "available": 0, "leased": 0, "consumed": 1}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_worker_disconnect_settles_lease_mutation_before_reclaim(
+    sock_dir: Path,
+    operation: str,
+    expected_status: dict[str, int],
+) -> None:
+    registry = RestoredCutRegistry()
+    key = ("rollout-1", 1)
+    registry.install({key: {"rollout_id": "rollout-1", "attempt_index": 0}})
+    if operation == "consume_generation_cut":
+        registry.claim(key, worker_id="worker-1", model_call_id="call-1")
+
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def handle(worker_id: str, requested_operation: str, payload: dict):
+        entered.set()
+        await proceed.wait()
+        if requested_operation == "claim_generation_cut":
+            return registry.claim(
+                key,
+                worker_id=worker_id,
+                model_call_id=str(payload["model_call_id"]),
+            )
+        registry.consume(
+            key,
+            worker_id=worker_id,
+            model_call_id=str(payload["model_call_id"]),
+        )
+        return None
+
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        restored_cuts=registry,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", AdmissionLimiter())
+    request: asyncio.Task | None = None
+    try:
+        await agent.start()
+        request = asyncio.create_task(
+            agent.service_client().request(
+                operation,
+                {
+                    "rollout_id": key[0],
+                    "attempt_index": key[1],
+                    "model_call_id": "call-1",
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        await agent.stop()
+        proceed.set()
+        with pytest.raises(ConnectionError):
+            await request
+        status = await coordinator.wait_until(lambda value: value["workers"]["live"] == 0, timeout_s=1.0)
+        assert status["workers"]["live"] == 0
+        assert registry.status() == expected_status
+    finally:
+        proceed.set()
+        if request is not None:
+            await asyncio.gather(request, return_exceptions=True)
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_counter_reports_coalesce_while_transport_is_blocked(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = await _start_pool(sock_dir, expected=1, connect=1)
+    agent = pool.workers[0][1]
+    original_write = agent._write
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    reports: list[dict] = []
+
+    async def blocked_write(message: dict) -> None:
+        if message.get("type") != "counters":
+            await original_write(message)
+            return
+        reports.append(message)
+        write_started.set()
+        await release_write.wait()
+
+    monkeypatch.setattr(agent, "_write", blocked_write)
+    try:
+        for _ in range(5_000):
+            agent._on_limiter_change()
+        await asyncio.wait_for(write_started.wait(), timeout=1.0)
+        report_task = agent._counter_report_task
+        assert report_task is not None
+        assert len(reports) == 1
+
+        for _ in range(5_000):
+            agent._on_limiter_change()
+        assert agent._counter_report_task is report_task
+        assert len(reports) == 1
+
+        release_write.set()
+        await asyncio.wait_for(report_task, timeout=1.0)
+        assert len(reports) == 2
+        assert agent._counter_report_task is None
+    finally:
+        release_write.set()
+        await _stop_pool(pool)
 
 
 @pytest.mark.asyncio
@@ -286,12 +993,213 @@ async def test_coordinator_aggregates_complete_sequenced_worker_cut_proof(sock_d
         async with pool.client() as client:
             response = await pool.pause(client, checkpoint_id="ckpt-proof")
         assert response.status_code == 200
-        proof = response.json()["generation_cut_proof"]
-        assert proof["checkpoint_id"] == "ckpt-proof"
-        assert proof["expected_workers"] == 2
-        assert proof["frozen_worker_ids"] == ["w0", "w1"]
-        assert [worker["worker_id"] for worker in proof["workers"]] == ["w0", "w1"]
-        assert {worker["coordinator_sequence"] for worker in proof["workers"]} == {proof["coordinator_sequence"]}
+        summary = response.json()["generation_cut_summary"]
+        assert summary["checkpoint_id"] == "ckpt-proof"
+        assert summary["expected_workers"] == 2
+        assert summary["records"] == 0
+        assert [worker["worker_id"] for worker in summary["workers"]] == ["w0", "w1"]
+        assert len(summary["proof_digest"]) == 64
+        assert all(record.cut_artifact is not None for record in pool.coordinator._workers.values())
+    finally:
+        await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_index(sock_dir) -> None:
+    large_staging_key = f"prefix/{'x' * (128 * 1024)}"
+
+    class CutBackend:
+        async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+            prefix = inventory.active_prefixes[0]
+            return GenerationCutReceipt(
+                checkpoint_id=inventory.checkpoint_id,
+                cut_id="cut-large",
+                inventory_digest=inventory.inventory_digest,
+                inventory=inventory,
+                backend_snapshot_id="snapshot-large",
+                prefixes=(
+                    GenerationCutPrefixAck(
+                        **prefix.model_dump(mode="json"),
+                        disposition="durable_prefix",
+                        cut_kind="active_prefix",
+                        frozen_buffer_id="active/large",
+                        staging_keys=(large_staging_key,),
+                        prefix_token_count=1,
+                        prefix_digest="a" * 64,
+                        effective_output_limit=128,
+                    ),
+                ),
+            )
+
+    lineage = FileLineageStore(sock_dir / "lineage")
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    service = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: lineage,
+        file_ledger_root_provider=lambda: lineage.checkpoint_root,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=True,
+    )
+    coordinator.service_handler = service
+    await coordinator.start()
+    limiter = AdmissionLimiter(CutBackend())
+    agent = WorkerAdmissionAgent(
+        coordinator.socket_path,
+        "worker-0",
+        limiter,
+        capture_ledger=lineage,
+    )
+    await agent.start()
+    ticket = limiter.admit(rollout_id="rollout-large", attempt_index=0)
+    ticket.generation_started = True
+    ticket.model_call_id = "call-large"
+
+    try:
+        response = await agent.service_client().request(
+            "model_admission_pause",
+            {"checkpoint_id": "ckpt-large", "deadline_ts": 4e9},
+        )
+        assert response["generation_cut_summary"]["records"] == 1
+
+        worker = coordinator._workers["worker-0"]
+        assert worker.cut_artifact is not None
+        assert worker.cut_artifact.bytes < 1024
+        index = coordinator._worker_checkpoint_index(worker)
+        assert index is not None and len(index) == 1
+        assert index[0].cut_recorded is True
+        assert "staging_keys" not in index[0].model_dump()
+
+        receipts = await lineage.load_generation_cut_receipts(
+            ("rollout-large",),
+            checkpoint_id="ckpt-large",
+            server_name="policy",
+        )
+        assert receipts[0].prefixes[0].staging_keys == (large_staging_key,)
+
+        evidence = await coordinator.checkpoint_evidence()
+        assert len(await service._load_generation_cut_receipts(lineage, evidence)) == 1
+        commit_result = await agent.service_client().request(
+            "model_checkpoint_commit",
+            {
+                "checkpoint_id": "ckpt-large",
+                "deadline_ts": 4e9,
+                "checkpoint_dir": str(sock_dir / "checkpoint"),
+                "continuation_indexes": [],
+            },
+        )
+        assert commit_result["generation_cut_records"] == 1
+        assert "generation_cut_proof" not in commit_result
+        assert len(json.dumps(commit_result)) < 4096
+        assert not (sock_dir / "checkpoint" / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").exists()
+
+        (lineage.checkpoint_root / "rollout-large.lineage.jsonl").unlink()
+        with pytest.raises(LedgerMismatchError, match="lineage does not match"):
+            await service._load_generation_cut_receipts(lineage, evidence)
+    finally:
+        limiter.release(ticket)
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_dir) -> None:
+    class CutBackend:
+        async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+            prefix = inventory.active_prefixes[0]
+            return GenerationCutReceipt(
+                checkpoint_id=inventory.checkpoint_id,
+                cut_id="cut-fail",
+                inventory_digest=inventory.inventory_digest,
+                inventory=inventory,
+                backend_snapshot_id="snapshot-fail",
+                prefixes=(
+                    GenerationCutPrefixAck(
+                        **prefix.model_dump(mode="json"),
+                        disposition="durable_prefix",
+                        cut_kind="active_prefix",
+                        frozen_buffer_id="active/fail",
+                        staging_keys=("prefix/fail",),
+                        prefix_token_count=1,
+                        prefix_digest="b" * 64,
+                        effective_output_limit=128,
+                    ),
+                ),
+            )
+
+    class BrokenLineage:
+        async def record_generation_cut(self, receipt):
+            raise OSError("lineage disk unavailable")
+
+        async def load_generation_cut_receipts(self, capture_keys, *, checkpoint_id, server_name):
+            return ()
+
+    coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
+    await coordinator.start()
+    limiter = AdmissionLimiter(CutBackend())
+    agent = WorkerAdmissionAgent(
+        coordinator.socket_path,
+        "worker-0",
+        limiter,
+        capture_ledger=BrokenLineage(),
+    )
+    await agent.start()
+    ticket = limiter.admit(rollout_id="rollout-fail", attempt_index=0)
+    ticket.generation_started = True
+    ticket.model_call_id = "call-fail"
+    app = build_coordinator_control_app(
+        coordinator,
+        auth_token="secret",
+        capabilities=ControlCapabilities(
+            component="responses_api_models",
+            name="policy",
+            multi_process=MultiProcessCapability(mode="coordinator", num_workers=1),
+            instance_role="policy",
+        ),
+        ack_timeout_s=2.0,
+    )
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://coordinator",
+            headers={"authorization": "Bearer secret"},
+        ) as client:
+            response = await client.post(
+                f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+                json={"checkpoint_id": "ckpt-fail", "deadline_ts": 4e9},
+            )
+        assert response.status_code == 200
+        assert response.json()["state"] == "draining"
+        worker = coordinator._workers["worker-0"]
+        assert worker.cut_artifact is None
+        assert worker.proof_error == "OSError: lineage disk unavailable"
+    finally:
+        limiter.release(ticket)
+        await agent.stop()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_closed_cut_artifacts_exclude_lifetime_attempt_history(sock_dir) -> None:
+    pool = await _start_pool(sock_dir, expected=2, connect=2)
+    try:
+        for index in range(2):
+            ticket = pool.limiter(index).admit(
+                rollout_id=f"rollout-{index}",
+                attempt_index=index,
+            )
+            pool.limiter(index).release(ticket)
+        async with pool.client() as client:
+            response = await pool.pause(client, checkpoint_id="ckpt-seen")
+        assert response.status_code == 200
+        evidence = await pool.coordinator.checkpoint_evidence()
+        assert evidence.generation_cut_proof.checkpoint_id == "ckpt-seen"
+        assert evidence.checkpoint_exclusions == frozenset()
+        for record in pool.coordinator._workers.values():
+            index = pool.coordinator._worker_checkpoint_index(record)
+            assert index is not None
+            assert all("seen_attempts" not in row.model_dump() for row in index)
     finally:
         await _stop_pool(pool)
 
@@ -305,23 +1213,33 @@ async def test_coordinator_cut_proof_omission_and_sequence_mismatch_fail_closed(
         assert response.json()["state"] == "paused"
 
         records = sorted(pool.coordinator._workers.values(), key=lambda record: record.worker_id)
-        valid_proof = records[1].cut_proof
-        records[1].cut_proof = None
+        valid_reference = records[1].cut_artifact
+        records[1].cut_artifact = None
         assert pool.coordinator.status()["state"] == "draining"
         with pytest.raises(ValueError, match="omits frozen worker membership"):
             pool.coordinator.generation_cut_proof()
 
-        assert valid_proof is not None
-        records[1].cut_proof = GenerationCutWorkerProof.build(
-            checkpoint_id=valid_proof.checkpoint_id,
-            coordinator_sequence=valid_proof.coordinator_sequence + 1,
-            worker_id=valid_proof.worker_id,
-            frozen_tickets=list(valid_proof.frozen_tickets),
-            ready_ticket_ids=list(valid_proof.ready_ticket_ids),
-            generation_cut_receipt=valid_proof.generation_cut_receipt,
+        assert valid_reference is not None
+        index = coordinator_module.read_jsonl_artifact(
+            pool.coordinator.artifact_root,
+            valid_reference,
+            coordinator_module._WorkerCheckpointIndexRecord,
         )
-        assert pool.coordinator.status()["state"] == "draining"
-        with pytest.raises(ValueError, match="mismatched checkpoint or coordinator sequence"):
+        invalid_row = coordinator_module._WorkerCheckpointIndexRecord(
+            record_type="ticket",
+            ticket_id="late-ticket",
+            rollout_id="rollout-late",
+            attempt_index=0,
+            model_call_id="call-late",
+            generation_started=True,
+            response_started=False,
+        )
+        records[1].cut_artifact = coordinator_module.write_jsonl_artifact(
+            pool.coordinator.artifact_root,
+            valid_reference.relative_path,
+            (*index, invalid_row),
+        )
+        with pytest.raises(ValueError, match="membership does not match"):
             pool.coordinator.generation_cut_proof()
     finally:
         await _stop_pool(pool)
@@ -394,6 +1312,7 @@ async def test_partial_worker_cut_ack_remains_draining_until_abort(sock_dir) -> 
 
     coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=2)
     await coordinator.start()
+    lineage = InMemoryLineageStore()
     workers = []
     for index, backend in enumerate((CutBackend(), CutBackend(hang=True))):
         limiter = AdmissionLimiter(backend)
@@ -402,6 +1321,7 @@ async def test_partial_worker_cut_ack_remains_draining_until_abort(sock_dir) -> 
             f"w{index}",
             limiter,
             cut_timeout_s=0.01,
+            capture_ledger=lineage,
         )
         await agent.start()
         ticket = limiter.admit(rollout_id=f"rollout-{index}", attempt_index=0)
@@ -598,7 +1518,7 @@ async def test_closed_cut_rejects_disconnected_worker_replacement(sock_dir, repl
     try:
         async with pool.client() as client:
             paused = await pool.pause(client, checkpoint_id="ckpt-frozen-workers")
-        assert paused.json()["generation_cut_proof"]["frozen_worker_ids"] == ["w0", "w1"]
+        assert [worker["worker_id"] for worker in paused.json()["generation_cut_summary"]["workers"]] == ["w0", "w1"]
 
         await pool.workers[1][1].stop()
         disconnected = await pool.coordinator.wait_until(lambda status: status["workers"]["live"] == 1, timeout_s=2)
@@ -647,12 +1567,21 @@ def _unused_tcp_port() -> int:
 @pytest.mark.asyncio
 async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> None:
     coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=2)
+    coordinator.service_handler = PolicyModelCheckpointCoordinatorService(
+        coordinator,
+        ledger_provider=lambda: None,
+        file_ledger_root_provider=lambda: None,
+        instance_role="policy",
+        server_name="policy",
+        supports_generation_cuts=False,
+    )
     await coordinator.start()
     release_path = sock_dir / "release"
     port = _unused_tcp_port()
     env = {
         **os.environ,
         "NG_CHECKPOINT_COORDINATOR_SOCKET": str(coordinator.socket_path),
+        "NG_CHECKPOINT_CONTROL_TOKEN": "secret",
         "NG_CHECKPOINT_RELEASE_PATH": str(release_path),
     }
     process = await asyncio.create_subprocess_exec(
@@ -686,21 +1615,10 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
         assert inflight["inflight_total"] == 8
         assert all(worker["inflight"] > 0 for worker in inflight["per_worker"].values())
 
-        app = build_coordinator_control_app(
-            coordinator,
-            auth_token="secret",
-            capabilities=ControlCapabilities(
-                component="responses_api_models",
-                name="policy",
-                multi_process=MultiProcessCapability(mode="coordinator", num_workers=2),
-                instance_role="policy",
-            ),
-            ack_timeout_s=2.0,
-        )
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://coordinator",
+            base_url=f"http://127.0.0.1:{port}",
             headers={"authorization": "Bearer secret"},
+            timeout=10.0,
         ) as control:
             pause = await control.post(
                 f"{MODEL_ADMISSION_URL_PREFIX}/pause",
@@ -719,10 +1637,29 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
             assert all(response.status_code == 200 for response in await asyncio.gather(*held_requests))
             status = await control.get(
                 f"{MODEL_ADMISSION_URL_PREFIX}/status",
-                params={"checkpoint_id": "ckpt-real-workers", "wait_state": "paused", "timeout_s": 5.0},
+                params={
+                    "checkpoint_id": "ckpt-real-workers",
+                    "deadline_ts": 4e9,
+                    "wait_state": "paused",
+                    "timeout_s": 5.0,
+                },
             )
-            assert status.json()["state"] == "paused"
-            assert status.json()["inflight_total"] == 0
+            status_body = status.json()
+            assert status_body["state"] == "paused"
+            assert status_body["workers"] == {
+                "acknowledged": 2,
+                "expected": 2,
+                "live": 2,
+            }
+            assert status_body["missing_workers"] == 0
+            assert len(status_body["per_worker"]) == 2
+            assert status_body["inflight_total"] == 0
+            resumed = await control.post(
+                f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+                json={"checkpoint_id": "ckpt-real-workers", "deadline_ts": 4e9},
+            )
+            assert resumed.status_code == 200
+            assert resumed.json()["state"] == "accepting"
     finally:
         release_path.touch(exist_ok=True)
         if held_requests:

@@ -21,20 +21,26 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from nemo_gym._checkpoint import AdmissionLimiter, AdmissionMiddleware, WorkerAdmissionAgent
+from nemo_gym._checkpoint import (
+    AdmissionLimiter,
+    AdmissionMiddleware,
+    ControlFence,
+    WorkerAdmissionAgent,
+    install_model_admission,
+)
 
 
 limiter = AdmissionLimiter()
+agent = WorkerAdmissionAgent(
+    Path(os.environ["NG_CHECKPOINT_COORDINATOR_SOCKET"]),
+    worker_id=str(os.getpid()),
+    limiter=limiter,
+    pid=os.getpid(),
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    agent = WorkerAdmissionAgent(
-        Path(os.environ["NG_CHECKPOINT_COORDINATOR_SOCKET"]),
-        worker_id=str(os.getpid()),
-        limiter=limiter,
-        pid=os.getpid(),
-    )
     await agent.start()
     try:
         yield
@@ -43,6 +49,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+install_model_admission(
+    app,
+    limiter=limiter,
+    fence=ControlFence(),
+    instance_role="policy",
+    auth_token=os.environ["NG_CHECKPOINT_CONTROL_TOKEN"],
+    coordinator_client=agent.service_client(),
+)
 
 
 @app.get("/pid")
