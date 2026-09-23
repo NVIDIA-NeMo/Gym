@@ -17,8 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 
 
-UserSimAgentAlias = Literal["user_model", "assistant_model", "judge_model", "summary_model"]
-USERSIM_AGENT_ALIASES = frozenset({"user_model", "assistant_model", "judge_model", "summary_model"})
+UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
@@ -80,7 +79,7 @@ class UserSimTaskInput(BaseModel):
 
     sampling: UserSimSamplingRequest
     probe_data: dict[str, Any] = Field(default_factory=dict)
-    agent_responses_create_params: dict[UserSimAgentAlias, NeMoGymResponseCreateParamsNonStreaming] = Field(
+    agent_responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
         default_factory=dict
     )
 
@@ -129,12 +128,12 @@ class UserSimSimulationResult(BaseModel):
 
 
 class UserSimInvocation(BaseModel):
-    """One ordered UserSim participant or support-model activation."""
+    """One ordered UserSim Agent activation."""
 
     model_config = ConfigDict(extra="forbid")
 
     sequence: int = Field(ge=0)
-    role: Literal["user", "assistant", "judge", "summary"]
+    role: UserSimAgentRole
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
     observations: AgentObservationBundle | None = None
