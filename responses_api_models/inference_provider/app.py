@@ -51,6 +51,10 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool = False
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    default_headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra HTTP headers included with every provider request.",
+    )
 
 
 class InferenceProvider(SimpleResponsesAPIModel):
@@ -60,6 +64,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            default_headers=self.config.default_headers,
         )
         self._converter = ResponsesConverter(
             return_token_id_information=False,

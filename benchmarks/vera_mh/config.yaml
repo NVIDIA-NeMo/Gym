@@ -1,0 +1,24 @@
+# VERA-MH (https://arxiv.org/abs/2605.13318), recommended profile: 100 personas x 2 user simulators, one
+# 30-turn conversation each, judged by GPT 5.4 with the v1.2 rubric. See benchmarks/vera_mh/README.md and
+# METRICS.md.
+config_paths:
+  - resources_servers/vera_mh/configs/vera_mh.yaml
+
+# Inherits the resources server, judge, simulator and policy wiring from vera_mh_agent and points it at the
+# 200-row file prepare.py writes. Rows carry the chatbot's system prompt as `responses_create_params.input`
+# and the agent builds every turn, so no prompt template applies.
+vera_mh_recommended:
+  _inherit_from: vera_mh_agent
+  responses_api_agents:
+    vera_mh_agent:
+      datasets:
+        - name: vera_mh
+          type: benchmark
+          jsonl_fpath: benchmarks/vera_mh/data/vera_mh_recommended.jsonl
+          prepare_script: benchmarks/vera_mh/prepare.py
+          prompt_config: null
+          # Gym's entry for terms that match no named licence: the Spring Care VERA-MH license, reproduced at
+          # resources_servers/vera_mh/rubric/LICENSE.
+          license: TBD
+          # Upstream runs each (persona, simulator) pair once.
+          num_repeats: 1

@@ -91,6 +91,7 @@ class TestSanity:
         assert server.config.base_url == "https://api.example.com/v1"
         assert server.config.num_concurrent_requests == 1000
         assert server.config.uses_reasoning_parser is False
+        assert server.config.default_headers == {}
 
     async def test_server_with_custom_config(self) -> None:
         server = _make_server(
@@ -101,6 +102,10 @@ class TestSanity:
         assert server.config.num_concurrent_requests == 500
         assert server.config.uses_reasoning_parser is True
         assert server.config.extra_body == {"frequency_penalty": 0.5}
+
+    async def test_server_forwards_default_headers_to_client(self) -> None:
+        server = _make_server(default_headers={"x-provider-route": "primary"})
+        assert server._client.default_headers == {"x-provider-route": "primary"}
 
 
 class TestInferenceProvider:
