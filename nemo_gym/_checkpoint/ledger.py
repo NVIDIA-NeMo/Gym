@@ -1125,16 +1125,10 @@ async def _commit_model_ledger(
     ledger: Optional[CaptureLedger],
     file_ledger_root: Optional[Path],
     tombstones: set[tuple[str, int]],
-    generation_cut_proof: GenerationCutCoordinatorProof | None,
     continuation_roots: list[AgentContinuationRoot],
     generation_cut_receipts: tuple[GenerationCutReceipt, ...],
     generation_cuts_already_recorded: bool = False,
 ) -> dict[str, Any]:
-    participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
-    if generation_cut_proof is not None:
-        if generation_cut_proof.checkpoint_id != checkpoint_id:
-            raise LedgerMismatchError("coordinator generation-cut proof belongs to a different checkpoint")
-        await _run_sync(lambda: _store_generation_cut_proof(participant_dir, generation_cut_proof))
     if generation_cut_receipts and not generation_cuts_already_recorded:
         if not isinstance(ledger, GenerationCutCaptureLedger):
             raise LedgerNotCheckpointableError(
@@ -1144,6 +1138,7 @@ async def _commit_model_ledger(
             await ledger.record_generation_cut(receipt)
     expected_cut_records = sum(len(receipt.prefixes) for receipt in generation_cut_receipts)
     if isinstance(ledger, CheckpointableCaptureLedger):
+        participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
         commit_result = await ledger.checkpoint_capture_ledger(
             participant_dir,
             checkpoint_id=checkpoint_id,
@@ -1159,10 +1154,7 @@ async def _commit_model_ledger(
             checkpoint_dir,
             validated.storage_reference_index,
         )
-        if validated.generation_cut_proof is not None and validated.generation_cut_proof != generation_cut_proof:
-            raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
-        validated.generation_cut_proof = generation_cut_proof
-        return validated.model_dump(mode="json")
+        return validated.model_dump(mode="json", exclude={"generation_cut_proof"})
 
     if file_ledger_root is None:
         raise LedgerNotCheckpointableError(
@@ -1175,7 +1167,6 @@ async def _commit_model_ledger(
             checkpoint_dir,
             checkpoint_id=checkpoint_id,
             tombstones=sorted(tombstones),
-            generation_cut_proof=generation_cut_proof,
             continuation_roots=continuation_roots,
             generation_cut_receipts=generation_cut_receipts,
         )
@@ -1200,14 +1191,7 @@ async def _restore_model_ledger(
             checkpoint_dir,
             validated.storage_reference_index,
         )
-        sidecar_proof = await _run_sync(lambda: _load_generation_cut_proof(participant_dir))
-        if validated.generation_cut_proof is not None and sidecar_proof not in (
-            None,
-            validated.generation_cut_proof,
-        ):
-            raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
-        validated.generation_cut_proof = validated.generation_cut_proof or sidecar_proof
-        return validated.model_dump(mode="json")
+        return validated.model_dump(mode="json", exclude={"generation_cut_proof"})
 
     if file_ledger_root is None:
         raise LedgerNotCheckpointableError(
@@ -1215,7 +1199,9 @@ async def _restore_model_ledger(
             "Gym cannot infer how to restore a framework-owned backend"
         )
     checkpointer = CaptureLedgerCheckpointer(file_ledger_root, server_name=server_name)
-    return await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
+    result = await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
+    result.pop("generation_cut_proof", None)
+    return result
 
 
 def _consume_restored_tombstones(result: dict[str, Any]) -> tuple[AttemptIdentity, ...]:
@@ -1524,7 +1510,6 @@ class PolicyModelCheckpointCoordinatorService:
                 ledger=ledger,
                 file_ledger_root=self.file_ledger_root_provider(),
                 tombstones=set(evidence.checkpoint_exclusions),
-                generation_cut_proof=evidence.generation_cut_proof,
                 continuation_roots=continuation_roots,
                 generation_cut_receipts=generation_cut_receipts,
                 generation_cuts_already_recorded=True,

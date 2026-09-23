@@ -29,6 +29,7 @@ CPU-local simulation.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -1043,8 +1044,9 @@ async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_inde
             },
         )
         assert commit_result["generation_cut_records"] == 1
-        assert commit_result["generation_cut_proof"] == evidence.generation_cut_proof.model_dump(mode="json")
-        assert (sock_dir / "checkpoint" / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").is_file()
+        assert "generation_cut_proof" not in commit_result
+        assert len(json.dumps(commit_result)) < 4096
+        assert not (sock_dir / "checkpoint" / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").exists()
 
         (lineage.checkpoint_root / "rollout-large.lineage.jsonl").unlink()
         with pytest.raises(LedgerMismatchError, match="lineage does not match"):
