@@ -55,7 +55,13 @@ from nemo_gym.tool_access import ToolAccess
 
 
 class AgentSeedSessionRequest(BaseModel):
-    """Idempotently initialize agent-server state under a caller-assigned identifier."""
+    """Idempotently initialize agent-server state under a caller-assigned identifier.
+
+    Repeating the same identifier and episode must return the existing session.
+    Closing an unknown identifier must prevent a racing seed from creating it later.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
