@@ -32,7 +32,7 @@ from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -357,6 +357,8 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # None -> omit `model` from the generated config and use the Codex CLI's own default. Gym model
     # servers substitute their configured model anyway; set explicitly for direct endpoints.
     model: Optional[str] = None
+    model_context_window: Optional[int] = Field(default=None, gt=0, strict=True)
+    model_auto_compact_token_limit: Optional[int] = Field(default=None, gt=0, strict=True)
     openai_api_key: str = ""  # pragma: allowlist secret
     openai_base_url: Optional[str] = None
     sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] = "danger-full-access"
@@ -378,6 +380,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     session_close_retry_window_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_context_budget(self) -> "CodexAgentConfig":
+        """Reject explicit compaction limits that the pinned CLI would silently clamp."""
+        if (
+            self.model_context_window is not None
+            and self.model_auto_compact_token_limit is not None
+            and self.model_auto_compact_token_limit > self.model_context_window * 9 // 10
+        ):
+            raise ValueError("model_auto_compact_token_limit must not exceed 90% of model_context_window")
+        return self
 
 
 class CodexAgentRunRequest(BaseRunRequest):
@@ -892,6 +905,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         model = self._effective_model()
         if model:
             config["model"] = model
+        for name in ("model_context_window", "model_auto_compact_token_limit"):
+            value = getattr(self.config, name)
+            if value is not None:
+                config[name] = value
         if self.config.reasoning_effort:
             config["model_reasoning_effort"] = self.config.reasoning_effort
         if developer_instructions:

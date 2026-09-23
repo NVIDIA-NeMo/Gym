@@ -101,9 +101,35 @@ class TestSanity:
         assert cfg.concurrency == 32
         assert cfg.timeout == 600
         assert cfg.model is None
+        assert cfg.model_context_window is None
+        assert cfg.model_auto_compact_token_limit is None
         assert cfg.sandbox_mode == "danger-full-access"
         assert cfg.cwd is None
         assert cfg.extra_config == {}
+
+    @pytest.mark.parametrize("field", ["model_context_window", "model_auto_compact_token_limit"])
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5, "40960"])
+    def test_context_settings_require_positive_integers(self, field: str, value: object) -> None:
+        with pytest.raises(ValidationError, match=field):
+            _config(**{field: value})
+
+    def test_compaction_threshold_cannot_exceed_cli_context_limit(self) -> None:
+        with pytest.raises(ValidationError, match="must not exceed 90%"):
+            _config(model_context_window=40960, model_auto_compact_token_limit=36865)
+        assert _config(model_context_window=40960, model_auto_compact_token_limit=36864).model_context_window == 40960
+
+    @pytest.mark.parametrize(
+        "settings",
+        [{}, {"model_context_window": 40960}, {"model_auto_compact_token_limit": 32768}],
+    )
+    def test_optional_context_settings_preserve_unset_cli_defaults(self, settings: dict[str, int]) -> None:
+        config = _make_agent(**settings)._build_config("http://model:9000/v1")
+        emitted = {
+            key: value
+            for key, value in config.items()
+            if key in ("model_context_window", "model_auto_compact_token_limit")
+        }
+        assert emitted == settings
 
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)

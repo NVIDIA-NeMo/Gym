@@ -207,6 +207,25 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
     agent.server_client.post.assert_not_called()
 
 
+def test_native_custom_model_context_budget_reaches_sandbox_config(setup) -> None:
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(
+        **(agent.config.model_dump() | {"model_context_window": 40960, "model_auto_compact_token_limit": 32768})
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["model_context_window"] == 40960
+        assert config["model_auto_compact_token_limit"] == 32768
+        assert config["model"] == "test-model"
+        assert config["model_providers"]["gym"]["base_url"] == "http://model.example:9000/ng-rollout/codex-smoke-a2/v1"
+        assert config["features"] == {"multi_agent": False, "code_mode": False}
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert agent.config.extra_config == {}
+
+
 def test_direct_run_without_resources_rejected_before_execution(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:

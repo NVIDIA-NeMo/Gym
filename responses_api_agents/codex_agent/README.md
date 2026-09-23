@@ -74,6 +74,15 @@ and inspect captured requests to confirm the effective settings. Limits there ap
 A supplied request `model` must match the configured agent model. The Resources sandbox supplies
 isolation; Codex's inner policy must be `danger-full-access`.
 
+For custom models, set `model_context_window` to the endpoint's actual served context limit.
+Codex 0.144.4 otherwise uses a 272,000-token fallback for unknown models, which can delay compaction
+until after a smaller endpoint has overflowed. Optionally set `model_auto_compact_token_limit` below
+that window to leave room for tool output and the next model response; for a 40,960-token endpoint,
+40,960 and 32,768 respectively are a conservative starting point. Both settings must be positive
+integers, and an explicit compaction threshold cannot exceed 90% of an explicit context window.
+Omitted values preserve CLI defaults. These are harness context-management settings, not per-call
+generation limits; configure those on the Gym model server. Compaction remains owned by Codex.
+
 Native responses preserve completed text, reasoning, tool calls/results, and CLI aggregate usage,
 including cached-input tokens. Missing `turn.completed`, CLI errors, nonzero exit, and timeouts do
 not produce a successful completion. Partial transcripts, including the latest unfinished item updates, are retained in close observations on
@@ -215,6 +224,8 @@ codex_agent:
 - `openai_base_url`: if set, used as the provider `base_url` (include `/v1`; Codex appends `/responses`). Leave null for the real OpenAI API
 - `sandbox_mode`: Codex sandbox policy for model-generated shell commands (`read-only`, `workspace-write`, `danger-full-access`). The default is `danger-full-access` because Gym environments are expected to provide their own isolation (mirroring the Claude Code agent's skip-permissions default); OS-level sandboxing (Landlock/seccomp) is unavailable in many containers
 - `timeout`: per-request wall-clock seconds
+- `model_context_window`: optional served context window for Codex's context accounting
+- `model_auto_compact_token_limit`: optional compaction threshold, at most 90% of an explicit context window
 - `system_prompt`: inserted as a `developer` role message via Codex's `developer_instructions` config. The data's system message (if any) is appended after this
 - `reasoning_effort`: passed as `model_reasoning_effort` (e.g. `low`, `medium`, `high`)
 - `codex_version`: **required** — npm version pinned on auto-install. Every config must pin an explicit version so runs are reproducible and cannot silently drift as new Codex releases land; version bumps become explicit, tested changes
