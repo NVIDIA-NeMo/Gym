@@ -1995,6 +1995,46 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
     assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
 
 
+def _per_node_services():
+    services = _pd_services()
+    for tier in ("prefill", "decode"):
+        services[tier]["number_of_instances"] = 1
+        services[tier]["server_per_node"] = True
+    return services
+
+
+def test_a_per_node_tier_runs_one_plain_server_on_every_node(tmp_path):
+    # One srun over the pool, each task a standalone server: no data-parallel ranks.
+    script = _pd_script(tmp_path, services=_per_node_services())
+    prefill = script.split("# service: prefill")[1].split("# service: decode")[0]
+    assert '--nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4' in prefill
+    assert "vllm serve /ckpt --port 8001 --tensor-parallel-size 4" in prefill
+    assert "--data-parallel" not in prefill and "--headless" not in prefill
+
+
+def test_the_router_lists_every_node_of_a_per_node_tier(tmp_path):
+    router = _pd_script(tmp_path, services=_per_node_services()).split("# service: router")[1]
+    assert [f'--prefill "http://${{gym_nodes[{i}]}}:8001"' in router for i in range(4)] == [True] * 4
+    assert [f'--decode "http://${{gym_nodes[{i}]}}:8002"' in router for i in range(4, 10)] == [True] * 6
+    assert "gym_nodes[10]" not in router
+
+
+def test_a_per_node_tier_is_sized_as_one_node(tmp_path):
+    # TP4 on a 4-GPU node fills it; judged against the pool total it would warn of idle GPUs.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _pd_config(tmp_path, services=_per_node_services())
+
+
+def test_server_per_node_needs_a_pool_and_one_instance(tmp_path):
+    services = _per_node_services()
+    services["prefill"]["number_of_instances"] = 4
+    with pytest.raises(ValueError, match="number_of_instances must be 1"):
+        _pd_config(tmp_path, services=services)
+
+
 # ---------------------------------------------------------------------------
 # driver command
 # ---------------------------------------------------------------------------
