@@ -54,6 +54,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.failure_routing import (
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    build_failure_result,
+    minimal_failure_response,
+)
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -64,7 +71,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import (
     get_global_aiohttp_client,
     get_response_json,
@@ -458,35 +464,14 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         n = self._num_failures
         if n <= _FAILURE_PRINT_HEAD or n % _FAILURE_PRINT_INTERVAL == 0:
             print(f"[remote_agent] rollout failed (failure #{n}): {error}", flush=True)
-        routing: Dict[str, Any] = {NG_FAILURE_CLASS_KEY: REMOTE_AGENT_FAILURE_CLASS, "error": error}
-        if terminal:
-            routing[NG_TERMINAL_KEY] = True
-        # Dict-merge with later keys winning: `record` is sanitized of reserved keys, but merge
-        # order still guarantees fresh reward/response/routing even if a caller passes a raw dump.
         return RemoteAgentVerifyResponse.model_validate(
-            record | {"reward": 0.0, "response": self._empty_response().model_dump(mode="json")} | routing
-        )
-
-    def _empty_response(self) -> NeMoGymResponse:
-        """Minimal valid response for the failure path, so /run can return 200 with reward 0
-        (never 500) even when the remote service produced nothing."""
-        return NeMoGymResponse(
-            id="remote_agent_failure",
-            created_at=0.0,
-            model="remote_agent",
-            object="response",
-            output=[
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": "msg_0",
-                    "content": [{"type": "output_text", "text": "", "annotations": []}],
-                }
-            ],
-            parallel_tool_calls=False,
-            tools=[],
-            tool_choice="auto",
+            build_failure_result(
+                record,
+                failure_class=REMOTE_AGENT_FAILURE_CLASS,
+                error=error,
+                response=minimal_failure_response(response_id="remote_agent_failure", model="remote_agent"),
+                terminal=terminal,
+            )
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
