@@ -438,8 +438,8 @@ def test_judge_failure_is_not_scored(monkeypatch, tmp_path: Path, caplog, receip
             {
                 "api_exit_code": 0 if index == 0 else 2,
                 "error": "judge unavailable" if index else "",
-                "api_base": "https://user:secret@example.test",
-                "api_key": "secret",
+                "api_base": "https://user:secret@example.test",  # pragma: allowlist secret
+                "api_key": "secret",  # pragma: allowlist secret
                 "raw_response": "verdict",
             },
         ),
