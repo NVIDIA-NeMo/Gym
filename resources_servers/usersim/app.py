@@ -38,7 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
-from resources_servers.usersim.types import (
+from resources_servers.usersim.episode_contracts import (
     ResolvedUserSimContext,
     UserSimSamplingRequest,
     UserSimScenario,
