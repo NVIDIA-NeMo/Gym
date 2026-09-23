@@ -167,9 +167,7 @@ def _queue_success_responses(client: _Client) -> None:
             _Response({"agent_session_id": "user-session"}, cookie="user-cookie"),
             _Response({"agent_session_id": "assistant-session"}, cookie="assistant-cookie"),
             _Response(_model_response("user-response", "I need dinner advice.")),
-            _Response({"state": {"preference": "vegetarian"}, "terminated": False}),
             _Response(_model_response("assistant-response", "Try a lentil curry.")),
-            _Response({"state": {"preference": "vegetarian"}, "terminated": False}),
             _Response(_model_response("judge-response", "<rating>pass</rating>")),
             _Response(
                 {
@@ -264,21 +262,20 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
         "/v1/agent_sessions",
         "/v1/agent_sessions",
         "/ng-rollout/rollout-a2/v1/responses",
-        "/episode_status",
         "/ng-rollout/rollout-a2/v1/responses",
-        "/episode_status",
         "/ng-rollout/rollout-a2/v1/responses",
         "/v1/agent_sessions/close",
         "/v1/agent_sessions/close",
         "/verify",
         "/close_session",
     ]
-    [tool_access] = client.calls[1][2]["json"].tool_accesses
+    assert client.calls[1][2]["json"].tool_accesses == []
+    [tool_access] = client.calls[2][2]["json"].tool_accesses
     assert tool_access.name == "resources.direct_http"
     assert tool_access.cookies == {"session": "resources-cookie"}
     assert client.calls[3][2]["cookies"] == {"session": "user-cookie"}
-    assert client.calls[5][2]["cookies"] == {"session": "assistant-cookie"}
-    verify_body = client.calls[10][2]["json"]
+    assert client.calls[4][2]["cookies"] == {"session": "assistant-cookie"}
+    verify_body = client.calls[8][2]["json"]
     assert verify_body.task_id == TaskId(taskset="usersim:example", task_id="task")
     assert [invocation.alias for invocation in verify_body.verification_input.invocations] == [
         "user_model",
@@ -308,7 +305,7 @@ async def test_token_capture_uses_environment_episode_identity(monkeypatch) -> N
     await environment_server.run_request(_request())
 
     assert client.calls[3][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
-    assert client.calls[5][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
+    assert client.calls[4][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
 
 
 def test_dependency_retry_requires_transient_error() -> None:
