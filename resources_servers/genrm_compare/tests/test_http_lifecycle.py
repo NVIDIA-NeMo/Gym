@@ -36,6 +36,7 @@ import nemo_gym.server_utils as http
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.rollout_outcomes import RolloutFailure
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -183,7 +184,7 @@ async def test_incomplete_run_fails_without_reward(services):
     assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
 
 
-def assert_judge_failure(status, body, reason):
+def assert_judge_failure(status, body, reason, *, persisted=False):
     assert status == 200
     assert body["_ng_failure_class"] == "judge_failed"
     assert reason in body["_ng_failure_judge_error"]
@@ -194,9 +195,17 @@ def assert_judge_failure(status, body, reason):
     assert body["failure_kind"] == "judge_failed"
     assert body["failure_reason"] == body["_ng_failure_judge_error"]
     assert len(body["failure_reason"]) <= 2000
-    validated = BaseVerifyResponse.model_validate(body)
-    assert validated.mask_sample is True and validated.failure_kind == "judge_failed"
-    assert body["reward"] == 0  # Failsafe placeholder; never a scored result.
+    if persisted:
+        # Collection removes the producer's placeholder reward while retaining
+        # the answer and failure evidence outside the canonical failure record.
+        validated = RolloutFailure.model_validate(body["_ng_failure_record"])
+        assert validated.failure_kind == "judge_failed"
+        assert validated.failure_reason == body["failure_reason"]
+        assert "reward" not in body
+    else:
+        validated = BaseVerifyResponse.model_validate(body)
+        assert validated.mask_sample is True and validated.failure_kind == "judge_failed"
+        assert body["reward"] == 0  # Failsafe placeholder; never a scored result.
 
 
 async def test_judge_failure_preserves_answer_and_diagnostics_through_run(services):
@@ -344,7 +353,8 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(
     assert len(failures) == (4 if judge_failure else 1)
     for row in failures:
         if judge_failure:
-            assert_judge_failure(200, row, "judge unavailable")
+            assert_judge_failure(200, row, "judge unavailable", persisted=True)
+            assert row["_ng_group_id"] == "group" and row["_ng_group_attempt"] == 0
         else:
             assert row["_ng_failure_class"] == "agent_run_error"
             assert row["_ng_failure_http_status"] == 500
@@ -439,7 +449,7 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
     assert len(failures) == 4
     for row in failures:
-        assert_judge_failure(200, row, "judge unavailable")
+        assert_judge_failure(200, row, "judge unavailable", persisted=True)
     assert all(c.phase == "failed" for c in services.resource._verify_cohorts.values())
 
     services.judge_status = 200
@@ -450,7 +460,9 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     assert not output_path.read_text().strip()
     assert services.judge_calls == judge_calls
     retried_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
-    assert all("fresh _ng_group_id" in row["_ng_failure_judge_error"] for row in retried_failures)
+    assert len(retried_failures) == 8
+    assert retried_failures[:4] == failures
+    assert all("fresh _ng_group_id" in row["_ng_failure_judge_error"] for row in retried_failures[4:])
 
     # Recovery is explicitly coordinated as a fresh complete group, not a legacy-key restart.
     replacement_input = tmp_path / "replacement.jsonl"

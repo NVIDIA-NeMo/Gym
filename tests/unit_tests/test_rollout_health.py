@@ -20,6 +20,8 @@ from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.rollout_recovery import RunManifest
+from nemo_gym.rollout_store import RolloutStore
 
 
 MODEL_CALL_CHECKS = {
@@ -360,6 +362,12 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from uuid import UUID
+
+    import nemo_gym.rollout_recovery as recovery
+
+    # Hold run identity fixed while comparing the effect of health checks.
+    monkeypatch.setattr(recovery, "uuid4", lambda: UUID(int=1))
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = {
         "responses_create_params": {"input": []},
@@ -1210,6 +1218,129 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     rollout_path.rename(custom_path)
     file_result = health.health_check_run_dir(run_dir, rollout_file="custom-name.jsonl", workers=1)
     assert len(file_result.rollouts) == 2
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("change", ["replace", "append"])
+@pytest.mark.parametrize("journal_backed,timing", [(False, "indexed"), (True, "indexed"), (True, "store_read")])
+def test_health_rejects_replaced_files_but_allows_append(
+    tmp_path, monkeypatch, workers, change, journal_backed, timing
+):
+    path = tmp_path / "rollouts.jsonl"
+    rows = [_record(0, 0), _record(1, 0)]
+    if journal_backed:
+        inputs = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
+        source = tmp_path / "source.jsonl"
+        source.write_text("{}\n")
+        manifest = RunManifest.create(source, inputs, {}, {})
+        with RolloutStore.start_or_resume(path, lambda: (inputs, manifest), resume=False) as store:
+            for row, result in zip(store.pending(3), rows):
+                store.record_dispatch(row)
+                store.record_outcome(row | result | {"reward": 1.0})
+    else:
+        path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+    def change_source():
+        if change == "replace":
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_bytes(path.read_bytes().replace(b'"_ng_task_index":0', b'"_ng_task_index":9'))
+            replacement.replace(path)
+        else:
+            with path.open("ab") as file:
+                file.write(orjson.dumps(_record(9, 0)) + b"\n")
+
+    if timing == "indexed":
+        index = health._index_jsonl
+
+        def index_then_change(paths):
+            result = index(paths)
+            change_source()
+            return result
+
+        monkeypatch.setattr(health, "_index_jsonl", index_then_change)
+    else:
+        read = RolloutStore.read
+
+        def read_then_change(*args, **kwargs):
+            result = read(*args, **kwargs)
+            change_source()
+            return result
+
+        monkeypatch.setattr(RolloutStore, "read", read_then_change)
+    result = run_health_checks(path, workers=workers, output_dir=tmp_path / "report")
+    assert len(result.rollouts) == 2
+    assert 9 not in {row.task_index for row in result.rollouts}
+    if change == "replace":
+        assert result.summary["run"]["issues"]["record_unreadable"] == 2
+        assert all("replaced" in finding.detail["error"] for row in result.rollouts for finding in row.findings)
+    else:
+        assert {row.task_index for row in result.rollouts} == {0, 1}
+        assert result.summary["run"]["issues"]["record_unreadable"] == 0
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_journal_health_workers_read_selected_offsets_from_original_shards(tmp_path, monkeypatch, workers):
+    paths = []
+    selected = []
+    for shard in range(2):
+        output = tmp_path / f"shard-{shard}.jsonl"
+        rows = [{"_ng_task_index": shard * 10 + index, "_ng_rollout_index": 0} for index in range(3)]
+        source = tmp_path / f"source-{shard}.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        manifest = RunManifest.create(source, rows, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+            for index, row in enumerate(store.pending(3)):
+                original = row | _record(row["_ng_task_index"], 0, answer="old 雪")
+                store.record_dispatch(original)
+                store.record_outcome(original)
+                retry = original | {"_ng_attempt_index": 1}
+                store.record_dispatch(retry)
+                if index == 0:
+                    completed = retry | _record(row["_ng_task_index"], 0, answer="new 雪")
+                    store.record_outcome(completed)
+                    selected.append(completed)
+                elif index == 2:
+                    store.record_outcome(retry | {"_ng_failure_class": "judge_failed"})
+                # Index 1's newer dispatch has no outcome: its old success is stale.
+        paths.append(output)
+    legacy = tmp_path / "legacy.jsonl"
+    legacy_row = _record(100, 0, answer="legacy 雪")
+    legacy.write_bytes(b"\n" + orjson.dumps(legacy_row) + b"\n[]\n")
+    paths.append(legacy)
+    original_bytes = [path.read_bytes() for path in paths]
+
+    def unexpected_materialization(*args):
+        pytest.fail("Health selection must not materialize a list of trajectories")
+
+    monkeypatch.setattr(RolloutStore, "selected", unexpected_materialization)
+    slices = health._index_jsonl(paths)
+    assert [(line.path, line.source_index) for line in slices] == [
+        (str(paths[0]), 0),
+        (str(paths[1]), 1),
+        (str(legacy), 2),
+        (str(legacy), 2),
+    ]
+    for line, expected in zip(slices, [*selected, legacy_row]):
+        with open(line.path, "rb") as file:
+            file.seek(line.offset)
+            assert orjson.loads(file.read(line.length)) == expected
+    assert slices[-1].line_number == 3
+
+    report_dir = tmp_path / "reports"
+    original_open = Path.open
+
+    def no_trajectory_copies(path, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in "wax+"):
+            assert path in (report_dir / "quality_summary.json", report_dir / "rollout_verdicts.jsonl")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", no_trajectory_copies)
+    result = run_health_checks(paths, workers=workers, output_dir=report_dir)
+    assert result.summary["run"]["artifacts"]["records"] == 4
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert result.summary["run"]["issues"]["record_unreadable"] == 1
+    assert {digest.task_index for digest in result.rollouts} == {0, 10, 100, "__unreadable_record__:input-2:line-3"}
+    assert [path.read_bytes() for path in paths] == original_bytes
 
 
 @pytest.mark.parametrize(

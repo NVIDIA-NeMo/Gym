@@ -61,6 +61,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.rollout_store import RolloutStore
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -93,6 +94,9 @@ def _process_pool_chunksize(item_count: int, workers: int) -> int:
 
 def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
     with open(line.path, "rb") as handle:
+        stat = os.fstat(handle.fileno())
+        if (stat.st_dev, stat.st_ino) != line.file_identity:
+            return {}, "rollout file was replaced after indexing"
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
     try:
@@ -237,10 +241,32 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
 
 
 def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
+    """Index selected attempts in place; loose legacy files retain every line."""
     slices: list[_LineSlice] = []
     ordinal = 0
     for source_index, path in enumerate(paths):
+        if not path.is_file():
+            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
+        store = RolloutStore.read(path, import_legacy=False)
+        if store is not None:
+            for record in store.selected_records("success").values():
+                assert record.file_identity is not None  # Captured by the store's index scan.
+                slices.append(
+                    _LineSlice(
+                        path=str(record.path),
+                        offset=record.offset,
+                        length=record.length,
+                        ordinal=ordinal,
+                        source_index=source_index,
+                        line_number=record.line_number,
+                        file_identity=record.file_identity,
+                    )
+                )
+                ordinal += 1
+            continue
         with path.open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            file_identity = (stat.st_dev, stat.st_ino)
             line_number = 0
             while True:
                 offset = handle.tell()
@@ -258,6 +284,7 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                         ordinal=ordinal,
                         source_index=source_index,
                         line_number=line_number,
+                        file_identity=file_identity,
                     )
                 )
                 ordinal += 1
@@ -460,15 +487,17 @@ def run_health_checks(
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
 ) -> HealthCheckResult:
-    """Run the RFC's map/group/reduce pipeline and write both reports."""
-    ignored = frozenset(normalize_ignored_checks(ignored_checks))
+    """Check selected completed attempts, or raw records for loose legacy files.
+
+    Journal-backed JSONL files are append-only histories. Pass the store's
+    selected byte locations to workers so health and scoring agree, without
+    retaining trajectory contents, copying files, or sending records over IPC.
+    Explicit failure-sidecar inputs remain available for diagnostic inspection.
+    """
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
-    for path in paths:
-        if not path.is_file():
-            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
-
+    ignored = frozenset(normalize_ignored_checks(ignored_checks))
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
@@ -514,8 +543,7 @@ def run_health_checks(
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
-    report_dir = output_dir or paths[0].parent
-    summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
+    summary_path, verdicts_path = _write_reports(summary, digests, output_dir or paths[0].parent)
     return HealthCheckResult(
         summary=summary,
         rollouts=digests,

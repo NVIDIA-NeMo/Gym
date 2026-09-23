@@ -1001,7 +1001,7 @@ class TestRolloutCollection:
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
             if url_path == "/run":
                 dispatched.append(json)
-                return FakeResponse(200, {"reward": 1.0})
+                return FakeResponse(200, {"reward": 1.0, "response": {}})
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
@@ -1010,6 +1010,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(output_jsonl_fpath),
             resume_from_cache=True,
+            allow_unsafe_resume=True,
             disable_health_check=True,
         )
         await RolloutCollectionHelper().run_from_config(config)
@@ -1099,7 +1100,7 @@ class TestRolloutCollection:
             if url_path == "/run":
                 if json["x"] == 0:
                     raise http_error(500, "unhandled tool-call json")
-                return FakeResponse(200, {"reward": 1.0})
+                return FakeResponse(200, {"reward": 1.0, "response": {}})
             aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
             return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
 
@@ -1159,7 +1160,7 @@ class TestRolloutCollection:
 
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
-                return FakeResponse(200, failure if json["x"] == 0 else {"reward": 1.0})
+                return FakeResponse(200, failure if json["x"] == 0 else {"reward": 1.0, "response": {}})
             metric_inputs.append(json.verify_responses)
             result = compute_aggregate_metrics(json.verify_responses)
             metrics.append(result)
@@ -1194,7 +1195,9 @@ class TestRolloutCollection:
             assert all("failure_kind" not in row and "failure_reason" not in row for row in inputs)
         assert sidecar_path.read_bytes() == original_sidecar
         saved_failure = orjson.loads(original_sidecar)
-        assert all(saved_failure[key] == value for key, value in failure.items())
+        assert all(saved_failure[key] == value for key, value in failure.items() if key != "reward")
+        assert "reward" not in saved_failure
+        assert saved_failure["_ng_failure_record"]["failure_kind"] == "judge_failed"
         assert len(output_path.read_text().splitlines()) == 3
 
     @pytest.mark.parametrize("num_failures", [1, 4])
@@ -1257,7 +1260,10 @@ class TestRolloutCollection:
         original_sidecar = sidecar_path.read_bytes()
         saved = [orjson.loads(line) for line in original_sidecar.splitlines()]
         assert len(saved) == num_failures
-        assert all(all(row[key] == value for key, value in failure.items()) for row in saved)
+        assert all(all(row[key] == value for key, value in failure.items() if key != "reward") for row in saved)
+        assert all(
+            "reward" not in row and row["_ng_failure_record"]["failure_kind"] == "judge_failed" for row in saved
+        )
         assert output_path.read_bytes() == b""
         online_path = output_path.with_stem("output_aggregate_metrics").with_suffix(".json")
         if counted and not disable_aggregation:
@@ -1521,6 +1527,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(output_jsonl_fpath),
             resume_from_cache=True,
+            allow_unsafe_resume=True,
             disable_health_check=True,
         )
         await Helper().run_from_config(config)
@@ -2019,6 +2026,9 @@ class TestRolloutCollection:
             },
         ]
 
+        manifest = json.loads((tmp_path / "output_manifest.json").read_text())
+        for expected in expected_results:
+            expected["_ng_run_id"] = manifest["run_id"]
         assert expected_results == actual_returned_results
 
         expected_materialized_inputs_len = 6
@@ -2325,6 +2335,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(input_fpath),
             output_jsonl_fpath=str(output_fpath),
             resume_from_cache=resume_from_cache,
+            allow_unsafe_resume=True,  # This fixture represents artifacts from before manifests existed.
             disable_aggregation=True,
         )
         if resume_from_cache:
@@ -2663,6 +2674,9 @@ class TestRolloutCollection:
             },
         ]
 
+        manifest = json.loads((tmp_path / "output_manifest.json").read_text())
+        for expected in expected_results:
+            expected["_ng_run_id"] = manifest["run_id"]
         assert expected_results == actual_returned_results
 
     async def test_run_from_config_aggregate_metrics_excludes_non_persisted_rows(
@@ -2716,7 +2730,7 @@ class TestRolloutCollection:
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
-        assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
+        assert [result.get("case") for result in actual_returned_results] == ["case-0", None, "case-2"]
         assert [result["case"] for result in captured["results"]] == ["case-0"]
         assert [row["x"] for row in captured["rows"]] == [0]
 
@@ -2727,7 +2741,10 @@ class TestRolloutCollection:
         failures_fpath = _failures_path_for(output_jsonl_fpath)
         with failures_fpath.open() as f:
             actual_failure_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_failure_results] == ["case-1"]
+        assert len(actual_failure_results) == 1
+        assert actual_failure_results[0][TASK_INDEX_KEY_NAME] == 1
+        assert "response" not in actual_failure_results[0]
+        assert actual_failure_results[0]["_ng_failure_record"]["type"] == "failure"
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
 
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
@@ -2739,6 +2756,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
             resume_from_cache=True,
+            allow_unsafe_resume=True,
         )
 
         materialized_rows = [
@@ -4203,6 +4221,24 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+@pytest.mark.parametrize("alias_kind", ["dotdot", "symlink"])
+def test_aggregate_expansion_deduplicates_legacy_path_aliases(tmp_path, alias_kind):
+    directory = tmp_path / "shard"
+    directory.mkdir()
+    output = directory / "rollouts.jsonl"
+    output.write_text("{}\n")
+    if alias_kind == "dotdot":
+        alias = directory / ".." / "shard" / "rollouts.jsonl"
+    else:
+        alias = tmp_path / "alias.jsonl"
+        alias.symlink_to(output)
+    assert _expand_input_glob(f"{output},{alias}") == [str(output)]
+    # Independent runs may have identical input inventories and results.
+    independent = tmp_path / "independent.jsonl"
+    independent.write_bytes(output.read_bytes())
+    assert _expand_input_glob(f"{output},{independent}") == [str(output), str(independent)]
 
 
 class TestMaskingStepMetrics:
