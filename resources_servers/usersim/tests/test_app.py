@@ -19,6 +19,7 @@ from resources_servers.usersim.app import (
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
 )
+from resources_servers.usersim.types import UserSimTaskInput
 
 
 PERSONAS = [
@@ -37,6 +38,7 @@ PERSONAS = [
         "persona": "Avery is a patient teacher who enjoys explaining unfamiliar topics.",
     },
 ]
+EXAMPLES_PATH = Path(__file__).parents[1] / "data" / "example.jsonl"
 
 
 def _write_parquet(path: Path) -> None:
@@ -158,6 +160,16 @@ def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> No
     assert response.status_code == 200
     assert response.json()["scenario"]["probe_type"] == "general_educational"
     assert response.json()["scenario"]["theme"]["type"] == "local ecology"
+
+
+def test_examples_cover_every_supported_probe() -> None:
+    rows = [json.loads(line) for line in EXAMPLES_PATH.read_text().splitlines()]
+    tasks = [UserSimTaskInput.model_validate(row["task_input"]) for row in rows]
+
+    assert {task.sampling.probe_type for task in tasks} == SUPPORTED_PROBES
+    assert len({row["task_id"]["task_id"] for row in rows}) == len(rows)
+    tool_calling = next(task for task in tasks if task.sampling.probe_type == "tool_calling")
+    assert tool_calling.probe_data["tools"][0]["function"]["name"] == "get_weather"
 
 
 def test_supported_probes_match_pinned_usersim_registry() -> None:

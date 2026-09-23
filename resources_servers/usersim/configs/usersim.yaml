@@ -83,7 +83,7 @@ usersim:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Deterministic NeMo UserSim persona and general-probe initialization.
+      description: Deterministic NeMo UserSim persona, probe runtime, and verification.
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
       usersim_revision: dabc14c970aa5a60b8bbef36016fd6ddbed00bb6
@@ -99,6 +99,9 @@ usersim:
         general_open_ended: 0.5
         general_educational: 0.5
       probe_themes:
+        tool_calling:
+        - topic: weather and location lookup
+          goal: Ask for current weather information that requires the available tool.
         general_open_ended:
         - topic: local food and dining
           goal: Seek a practical recommendation about local food and dining.

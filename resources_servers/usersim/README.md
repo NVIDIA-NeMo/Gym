@@ -3,7 +3,9 @@
 This environment initializes one deterministic NeMo UserSim scenario at the
 beginning of each `UserSimEnvironmentServer` episode. The Resources Server
 loads a persona panel previously created by `usersim panel` during
-`gym eval prepare`. It does not construct or sample the panel at runtime.
+`gym eval prepare`, hosts episode-scoped simulated tools for agentic probes,
+and retains native verification evidence. It does not construct or sample the
+panel at runtime.
 
 ## Environment initialization
 
@@ -84,43 +86,37 @@ At `/seed_session`, the server:
    invocation.
 
 The Environment Server gives the scenario to NeMo UserSim's conversation
-generator, routes its participant and support-model calls through Gym, and submits the completed
+generator, routes its User, Assistant, Judge, and Summary calls through Agent Servers, and submits the completed
 episode to `/verify`. It then closes the Resources session on every outcome.
 
 `UserSimEnvironmentServer` directly owns this protocol; there is no generic
 multi-agent engine. Its native `UserSimEpisodeResponse` contains exactly one
 of `result` or `failure`. A successful result retains the verifier output,
 native UserSim result, and one ordered `UserSimInvocation` list for User,
-Assistant, judge, summary, and API-response calls. Each invocation contains
-its model alias, executor, exact Responses API request and response, optional
+Assistant, judge, and summary calls owned by the Environment Server. Each
+invocation contains its semantic role, exact Responses API request and response, optional
 `AgentObservationBundle`, the environment `state_after` that activation, and
 an optional final `termination_reason`. Function calls and
 their model-visible results remain ordered inside `response.output`.
+Probe API-response calls are Resources Server implementation details and are
+retained with probe runtime evidence rather than added to this invocation list.
 
-## Participant tools and shared state
+## Probe tools and episode state
 
-Probe tools are resolved by the Resources Server and exposed only to the
-Assistant Agent. Each Agent executes its own tool loop against this Resources
-Server while the Environment Server forwards one shared Resources session
-cookie.
+NeMo UserSim selects any Assistant tool schemas required by the resolved probe.
+The Environment Server passes those schemas only to the Assistant Agent, which
+owns the model/tool iteration. Each selected tool is exposed through the
+standard Resources Server `POST /{tool_name}` route. The shared Resources
+session cookie selects that episode's allowlist, simulated state, and verifier
+evidence, so another episode cannot call or mutate those tools.
 
-The agents also have independent model-server references:
-`user_policy_model` and `assistant_policy_model`. Resources-owned tool-result
-synthesis uses `tool_simulation_model`, while probe scoring uses
-`probe_scorer_model`. These references can share a Model Server with another
-role when they use the same provider and model.
-
-The runnable example demonstrates three idempotent endpoints:
-
-- `record_user_context`: the User stores context without repeating it in a
-  message.
-- `read_user_context`: the Assistant reads that task-scoped context on a later
-  activation.
-- `finish_episode`: the User records the environment termination reason.
-
-`/episode_status` lets the Environment Server snapshot state after every participant
-activation. `/close_session` removes both the resolved scenario and mutable
-state. Different Resources session cookies never share state.
+The four Agents have independent model-server references:
+`user_policy_model`, `assistant_policy_model`, `judge_policy_model`, and
+`summary_policy_model`. Resources-owned tool-result synthesis uses
+`tool_simulation_model`, while native probe scoring uses
+`probe_scorer_model`, which references `judge_policy_model` by default.
+These references can share a Model Server when they use the same provider and
+model. `/close_session` removes the resolved scenario and mutable runtime state.
 
 ## Static and dynamic configuration
 
@@ -146,19 +142,35 @@ Changing the dataset version selects a different prepared-panel cache path.
 
 ## Supported probes
 
-This first implementation supports:
+`data/example.jsonl` contains one runnable row for every first-party NeMo
+UserSim probe:
 
-- `general_open_ended`
-- `general_educational`
+- General: `general_open_ended`, `general_educational`, and `tool_calling`
+- Sovereign AI: `sov_ai_facts`, `sov_ai_dynamic`, and
+  `sov_ai_multilingual_parity`
+- Safety: `safety_chat_pressure` and `safety_agentic`
+- Financial services: `financial_services`
+- Health disclosure: `health_general_disclosure`,
+  `health_therapy_disclosure`, `health_triage_disclosure`, and
+  `health_decision_support_disclosure`
 
-These probes resolve a theme and user goal. The included general-open-ended
-example adds Gym Agent-owned tools around that conversation. NeMo UserSim's own
-tool-calling, safety, sovereign-AI, finance, health, and trajectory-evaluator
-probe semantics still require probe-specific Resources Server adapters.
+The three probes that expose Assistant tools—`tool_calling`,
+`safety_agentic`, and `financial_services`—use the episode-scoped external
+runtime in the Resources Server. The remaining probes execute their native
+UserSim conversation shape through the Environment Server. Asset-backed probes
+derive their task from the selected persona and pinned UserSim assets; the
+dataset row only needs a stable locale, seed, and probe name. The
+`tool_calling` row additionally supplies its candidate tool schema.
 
-The current reward is an integration signal: `1.0` when both assistant and
-simulated-user trajectories contain at least one turn, otherwise `0.0`. It is
-not an assistant-quality benchmark score.
+During `/verify`, the Resources Server invokes UserSim's registered scorer for
+tool use, sovereign-AI, safety, financial-services, and guarded
+health-disclosure trajectories. The four health labels share
+`health_disclosure_concealment`; the default health variant has no concealment
+ground truth, so that scorer is intentionally not applied. The two general
+probes have no registered dedicated scorer in UserSim and retain native
+conversation-completion verification. A scorer rejection, inconclusive status,
+structured error, or raised exception fails verification. The scorer name and
+complete result envelope are retained in `verifier_data`.
 
 ## Run
 
@@ -178,8 +190,8 @@ gym eval prepare --benchmark usersim
 
 ## Evaluation and training attribution
 
-The native episode result preserves all calls under `invocations`; select
-either participant policy without relabeling the other participant's outputs:
+The native episode result preserves every Environment-owned call under
+`invocations`; select either participant policy by semantic role:
 
 ```python
 selected = [
