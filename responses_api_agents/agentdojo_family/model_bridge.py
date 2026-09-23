@@ -218,6 +218,8 @@ class NeMoGymAgentDojoLLM(OpenAILLM):
         self._cookies: Any = None
         self.responses: list[NeMoGymResponse] = []
         self.last_messages: Sequence[ChatMessage] = []
+        # Set only under the tool_filter defense: the tool names its selection call kept.
+        self.tool_filter_kept_tools: list[str] | None = None
 
     async def _request_chat(self, payload: dict[str, Any]) -> NeMoGymChatCompletion:
         response = await self._server_client.post(

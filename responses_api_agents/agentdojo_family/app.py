@@ -10,6 +10,7 @@ import os
 from typing import Any, Literal
 
 from agentdojo.agent_pipeline.agent_pipeline import AgentPipeline, PipelineConfig
+from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLMToolFilter
 from agentdojo.attacks import load_attack
 from agentdojo.task_suite.load_suites import get_suite
 from fastapi import Body
@@ -77,6 +78,7 @@ class AgentDojoFamilyVerifyResponse(BaseVerifyResponse):
     benchmark_version: str
     adapter_error: str | None = None
     mask_sample: bool = False
+    tool_filter_kept_tools: list[str] | None = None
 
 
 def _empty_response() -> dict[str, Any]:
@@ -105,6 +107,25 @@ def _request_options(params: NeMoGymResponseCreateParamsNonStreaming) -> dict[st
     if "reasoning" in params.model_fields_set and params.reasoning is not None and params.reasoning.effort is not None:
         values["reasoning_effort"] = params.reasoning.effort
     return values
+
+
+def _record_tool_filter_selection(tool_filter: OpenAILLMToolFilter, bridge: NeMoGymAgentDojoLLM) -> None:
+    """Record which tools the tool_filter defense kept, so an empty selection is visible in the results.
+
+    The filter asks the model to name the tools a task needs, sending the tool list with
+    `tool_choice="none"`, and keeps only tools whose names appear in the reply. Some serving
+    configurations drop `tools` from the prompt whenever `tool_choice` is `"none"` (vLLM's
+    `--exclude-tools-when-tool-choice-none`); the model then cannot name a real tool, the task runs
+    with none, and the collapse would otherwise read as the defense's cost.
+    """
+    original_query = tool_filter.query
+
+    def recording_query(query, runtime, *args, **kwargs):
+        result = original_query(query, runtime, *args, **kwargs)
+        bridge.tool_filter_kept_tools = sorted(result[1].functions)
+        return result
+
+    tool_filter.query = recording_query
 
 
 class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
@@ -185,6 +206,7 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
                 reward_utility=reward_utility,
                 reward_security=reward_security,
                 model_call_count=max(len(bridge.responses), generated_turns),
+                tool_filter_kept_tools=bridge.tool_filter_kept_tools,
             )
 
     def _run_agentdojo(
@@ -214,6 +236,9 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
             return result
 
         pipeline.query = recording_query
+        for element in pipeline.elements:
+            if isinstance(element, OpenAILLMToolFilter):
+                _record_tool_filter_selection(element, bridge)
         if body.injection_task_id is None:
             utility, _ = suite.run_task_with_pipeline(pipeline, user_task, injection_task=None, injections={})
             return utility, True
@@ -301,6 +326,7 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
             reward_utility=0.0,
             reward_security=0.0,
             model_call_count=len(bridge.responses) if bridge is not None else 0,
+            tool_filter_kept_tools=bridge.tool_filter_kept_tools if bridge is not None else None,
             adapter_error=error,
             mask_sample=True,
             failure_reason=error,
@@ -328,6 +354,11 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
             if attacked
             else 0.0,
         }
+        filtered = [row for row in scored if row.get("tool_filter_kept_tools") is not None]
+        if filtered:
+            metrics[f"{prefix}/tool_filter_empty_selection_rate"] = sum(
+                1.0 for row in filtered if not row["tool_filter_kept_tools"]
+            ) / len(filtered)
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -338,6 +369,7 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
                 f"{prefix}/benign_utility",
                 f"{prefix}/utility_under_attack",
                 f"{prefix}/attack_success_rate",
+                f"{prefix}/tool_filter_empty_selection_rate",
             )
             if key in agent_metrics
         }

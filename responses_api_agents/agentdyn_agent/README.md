@@ -92,6 +92,15 @@ adapter -- and the model server's logs are the authoritative count.
 - **Sampling comes from the run.** The bridge forwards only the sampling settings present on the request
   (`gym eval run --temperature`, `--top-p`, ...), so with none set the endpoint's default applies. Upstream's harness
   samples at temperature 0; pass `--temperature 0.0` to match it. CaMeL requests 0 from its own client regardless.
+- **`tool_filter` needs tools in the prompt under `tool_choice="none"`.** The defense sends the task's tool list with
+  `tool_choice="none"`, asks the model to name the tools it needs, and keeps only names that appear in the reply. A
+  server that drops `tools` from the prompt for `tool_choice="none"` (vLLM's
+  `--exclude-tools-when-tool-choice-none`) leaves the model nothing to name: it invents a tool or says it has none, the
+  task runs with an empty tool set, and benign utility falls to about zero -- which reads as the defense's cost. Each
+  rollout records the tools kept in `tool_filter_kept_tools`, and the aggregate reports
+  `agentdyn/tool_filter_empty_selection_rate`; a rate near 1 means the serving stack, not the defense. To check an
+  endpoint, send one request with tools under `tool_choice="auto"` and again under `"none"`: `usage.prompt_tokens`
+  must match.
 - **`model_system_role`.** Some OpenAI-compatible endpoints reject the `developer` role (Qwen3.5 served by SGLang
   does); set `system` for those. The configured role applies to policy calls and to the defenses' own clients alike.
 - **Reasoning envelopes.** Gym's Chat Completions path returns reasoning models' output wrapped in `<think>` tags. The
