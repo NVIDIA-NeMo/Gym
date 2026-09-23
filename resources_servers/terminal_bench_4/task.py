@@ -10,6 +10,7 @@ import re
 import tarfile
 import tempfile
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -200,6 +201,7 @@ class Task:
     ref: str
     config: TaskSettings
     instruction: str
+    stage_tests: bool = False
 
     @classmethod
     def read(cls, path, name, ref):
@@ -259,11 +261,27 @@ def resolve_env(values):
 
 
 class PackageLoader:
-    def __init__(self, download_dir=None):
+    def __init__(
+        self, download_dir: str | Path | None = None, *, local_paths: Mapping[str, Path] | None = None
+    ) -> None:
         self.root = Path(download_dir or Path.home() / ".cache/harbor/tasks/packages")
+        self.local_paths = dict(local_paths) if local_paths is not None else None
         self._locks = {}
 
-    async def load(self, name, ref):
+    async def load(self, name: str, ref: str) -> Task:
+        if self.local_paths is not None:
+            if name not in self.local_paths or not re.fullmatch(r"sha256:[a-f0-9]{64}", ref):
+                raise ValueError("A configured local task and SHA256 pin are required")
+            target = Path(self.local_paths[name])
+            if not target.is_absolute():
+                raise ValueError("Configured local task paths must be absolute")
+            async with self._locks.setdefault((name, ref), asyncio.Lock()):
+                actual = await asyncio.to_thread(content_hash, target)
+                if actual != ref[7:]:
+                    raise ValueError(f"Package content hash mismatch for {name}: expected {ref}, got sha256:{actual}")
+                task = await asyncio.to_thread(Task.read, target, name, ref)
+                task.stage_tests = True
+                return task
         if not re.fullmatch(r"terminal-bench/[a-z0-9][a-z0-9-]*", name) or not re.fullmatch(
             r"sha256:[a-f0-9]{64}", ref
         ):

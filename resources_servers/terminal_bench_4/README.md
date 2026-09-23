@@ -38,6 +38,32 @@ Model calls use Gym's model server with the incoming cookies and rollout/token
 capture routing. Harness trajectories live in the trial's `harness/` directory;
 remote `/logs/agent` files are collected separately into `agent/`.
 
+## Optional local training packages and reference solutions
+
+The official public-package path remains the default. Set `local_task_packages:
+true` and `manifest_path` to a trusted host manifest to use prebuilt training
+images. The manifest has `format: "gym-tb4-local-v1"`, a dataset `ref`, and
+`tasks` entries containing `name`, content-pinned `ref` (`sha256:...`), and
+absolute host `path`. Names are used verbatim in this mode. Each package uses
+the same strict task schema and content-hash check as public packages; rows
+cannot supply arbitrary package paths. Shared-verifier tasks remain unsupported.
+
+Local packages stage their host-owned `tests/` tree into `/tests` in the fresh
+verifier, as root, after restoring the declared artifacts. They do not inject
+tests into the agent's working directory. The test command still runs as
+`verifier.user`; when absent, the existing image-default behavior is preserved.
+Images must support the requested identities and root setup operations.
+
+Set `execution_mode: oracle` for a reference-solution check instead of Mini-SWE.
+The runner stages the trusted `solution/` directory into `/solution` as root,
+makes these reference assets readable, then executes `bash /solution/solve.sh`
+as `agent.user` (image default when absent), with the same discovered working
+directory and task timeout. It does not change workspace permissions or invoke
+a model. Artifact collection, separate grading and cleanup use the normal
+lifecycle. `oracle/identity.json`, stdout/stderr and `oracle_exit_code` distinguish
+solution failures from verifier errors; reward 1 is still required for a golden
+pass. `execution_mode: miniswe` is the default for ordinary rollouts.
+
 ## Non-root Compose services
 
 When loading agent Compose YAML, two task-specific adaptations use the

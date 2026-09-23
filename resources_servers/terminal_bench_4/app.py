@@ -43,6 +43,7 @@ from resources_servers.terminal_bench_4.models import (
     SandboxedVerifyResponse,
     SessionRequest,
 )
+from resources_servers.terminal_bench_4.oracle import OracleHarness
 from resources_servers.terminal_bench_4.task import PackageLoader
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
 
@@ -62,6 +63,8 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     max_concurrent_sessions: int = Field(default=8, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     task_download_dir: Path | None = None
+    local_task_packages: bool = False
+    execution_mode: Literal["miniswe", "oracle"] = "miniswe"
 
 
 class TerminalBench4RunRequest(BaseRunRequest):
@@ -102,11 +105,19 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context):
         super().model_post_init(context)
         self._manifest = json.loads(self.config.manifest_path.read_text())
-        self._tasks = {"terminal-bench/" + task["name"]: task for task in self._manifest["tasks"]}
+        prefix = "" if self.config.local_task_packages else "terminal-bench/"
+        self._tasks = {prefix + task["name"]: task for task in self._manifest["tasks"]}
+        if len(self._tasks) != len(self._manifest["tasks"]):
+            raise ValueError("Task manifest contains duplicate names")
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
-        self._loader = PackageLoader(self.config.task_download_dir)
+        local_paths = None
+        if self.config.local_task_packages:
+            if self._manifest.get("format") != "gym-tb4-local-v1":
+                raise ValueError("Local tasks require a gym-tb4-local-v1 manifest")
+            local_paths = {name: Path(task["path"]) for name, task in self._tasks.items()}
+        self._loader = PackageLoader(self.config.task_download_dir, local_paths=local_paths)
         self._closing = False
         self.config.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -281,6 +292,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         if body.artifact_directory
                         else session.directory / "harness",
                     )
+                    if self.config.execution_mode == "oracle":
+                        harness = OracleHarness(
+                            sandbox=session.environment.main,
+                            context=context,
+                            solution_dir=session.task.path / "solution",
+                            directory=session.directory / "oracle",
+                            response=response,
+                        )
                     await harness.setup()
                 session.result["agent_setup"]["finished_at"] = lifecycle.now()
                 session.phase = "agent_running"
@@ -291,6 +310,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 session.persist()
                 grade = True
                 response, outcome, extra = await harness.execute(max(0, deadline - monotonic()))
+                extra["execution_mode"] = self.config.execution_mode
                 session.termination = AgentTermination.model_validate(outcome.model_dump())
                 if monotonic() >= deadline:
                     session.termination.reason = "timeout"

@@ -10,6 +10,46 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
+from nemo_gym.sandbox import AsyncSandbox
+
+
+async def stage_trusted_directory(sandbox: AsyncSandbox, source: Path, target: str) -> None:
+    """Stage host-owned solution/tests as root, without changing task workspace permissions."""
+    source = source.resolve()
+    if target not in ("/solution", "/tests") or not source.is_dir():
+        raise ValueError("Trusted staging requires a solution/tests directory and a fixed destination")
+    for path in source.rglob("*"):
+        if path.is_symlink() and not path.resolve().is_relative_to(source):
+            raise ValueError(f"Staged link escapes its directory: {path.relative_to(source)}")
+
+    def metadata(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        member.uid = member.gid = 0
+        member.uname = member.gname = "root"
+        if target == "/solution":
+            # The declared agent must be able to read reference assets staged by
+            # the harness. This grants no new access to the image's workspace.
+            member.mode |= 0o555 if member.isdir() else 0o444
+        return member
+
+    remote = f"/tmp/.nemo-gym-trusted-{uuid4().hex}.tar.gz"
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "trusted.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname=".", filter=metadata)
+        await sandbox.upload(archive, remote)
+    try:
+        result = await sandbox.exec(
+            f"test ! -L {target} && mkdir -p {target} && "
+            f"find {target} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + && "
+            f"tar --no-same-owner --same-permissions -xzf {remote} -C {target}",
+            user="root",
+            timeout_s=600,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Trusted staging into {target} failed: {result.stderr}")
+    finally:
+        await sandbox.exec(f"rm -f {remote}", user="root", timeout_s=60)
+
 
 async def upload_file(sandbox, source, target):
     await sandbox.exec(f"mkdir -p {shlex.quote(str(PurePosixPath(target).parent))}", timeout_s=60)

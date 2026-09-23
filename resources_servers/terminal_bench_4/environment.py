@@ -236,6 +236,7 @@ class Environment:
         # Published images with a build spec already contain these files.
         if (
             not self.uses_compose
+            and not (self.log_role == "verifier" and getattr(self.task, "stage_tests", False))
             and not (self.environment_dir / "Dockerfile").exists()
             and self.environment_dir.is_dir()
         ):

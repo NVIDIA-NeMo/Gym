@@ -587,3 +587,37 @@ async def test_harness_observability_follows_global_opt_in(fixture, global_confi
     f.server.server_client.global_config_dict = global_config
     await f.server.run(f.request, f.body)
     assert f.harnesses[0].observability_enabled is global_config.get("observability_enabled", False)
+
+
+async def test_oracle_uses_same_separate_verifier_and_cleanup(fixture, monkeypatch, tmp_path):
+    f = fixture
+    f.server.config.execution_mode = "oracle"
+    f.server._loader.load.return_value.path = tmp_path
+    oracle = SimpleNamespace(
+        setup=AsyncMock(),
+        execute=AsyncMock(
+            return_value=(
+                module.empty_response(f.body.responses_create_params, "unused"),
+                HarnessOutcome(reason="completed", exit_code=0),
+                {"oracle_exit_code": 0},
+            )
+        ),
+    )
+    factory = MagicMock(return_value=oracle)
+    monkeypatch.setattr(module, "OracleHarness", factory)
+    result = await f.server.run(f.request, f.body)
+    context = factory.call_args.kwargs["context"]
+    assert context.user == "task-user" and context.workdir == "/task"
+    assert result.execution_mode == "oracle" and result.oracle_exit_code == 0
+    assert result.evaluation_completed and result.reward == 0.75
+    assert f.events == [
+        "agent_start",
+        "quiesce",
+        "collect",
+        "agent_stop",
+        "verifier_start",
+        "restore",
+        "grade",
+        "verifier_stop",
+    ]
+    f.server.server_client.post.assert_not_called()

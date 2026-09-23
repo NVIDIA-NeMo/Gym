@@ -10,7 +10,13 @@ import shlex
 from pathlib import Path, PurePosixPath
 
 from resources_servers.terminal_bench_4.task import resolve_env
-from resources_servers.terminal_bench_4.transfers import download_dir, prepare_directory, upload_dir, upload_file
+from resources_servers.terminal_bench_4.transfers import (
+    download_dir,
+    prepare_directory,
+    stage_trusted_directory,
+    upload_dir,
+    upload_file,
+)
 
 
 class RewardFileNotFoundError(FileNotFoundError):
@@ -85,6 +91,8 @@ async def run_verifier(environment, directory, diagnostics):
     logs.mkdir(parents=True, exist_ok=True)
 
     async def execute():
+        if getattr(environment.task, "stage_tests", False):
+            await stage_trusted_directory(environment.main, environment.task.path / "tests", "/tests")
         await environment.exec("chmod +x /tests/test.sh", user="root")
         result = await environment.exec(
             "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
