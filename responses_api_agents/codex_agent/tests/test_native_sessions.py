@@ -207,6 +207,81 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
     agent.server_client.post.assert_not_called()
 
 
+@pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "3"])
+def test_native_usage_details_without_measured_positive_counts_are_unknown(setup, value) -> None:
+    agent, sandbox = setup
+    records = [json.loads(line) for line in sandbox.events.splitlines()]
+    records[-1][1]["usage"].update(cached_input_tokens=value, reasoning_output_tokens=value)
+    sandbox.events = "\n".join(json.dumps(record) for record in records)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        response = result.json()
+        assert response["status"] == "completed"
+        assert response["usage"]["total_tokens"] == 22
+        assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        gaps = {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+        assert {"cached_token_usage_unavailable", "reasoning_token_usage_unavailable"} <= gaps
+
+
+@pytest.mark.parametrize("unknown_turn", [None, 0, 1])
+def test_native_usage_details_require_known_counts_from_every_completed_turn(setup, unknown_turn) -> None:
+    agent, sandbox = setup
+    records = [json.loads(line) for line in sandbox.events.splitlines()]
+    records[-1][1]["usage"]["reasoning_output_tokens"] = 1
+    second_usage = {"input_tokens": 7, "output_tokens": 3, "cached_input_tokens": 4, "reasoning_output_tokens": 2}
+    if unknown_turn is not None:
+        # Missing details at either end must not turn a subtotal into a complete measurement.
+        unknown = records[-1][1]["usage"] if unknown_turn == 0 else second_usage
+        unknown.pop("cached_input_tokens")
+        unknown.pop("reasoning_output_tokens")
+    records.append([float(len(records)), {"type": "turn.completed", "usage": second_usage}])
+    sandbox.events = "\n".join(json.dumps(record) for record in records)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        response = result.json()
+        assert response["status"] == "completed"
+        assert response["usage"]["total_tokens"] == 32
+        assert response["usage"]["input_tokens_details"]["cached_tokens"] == (6 if unknown_turn is None else None)
+        assert response["usage"]["output_tokens_details"]["reasoning_tokens"] == (3 if unknown_turn is None else None)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        gaps = {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+        assert ("cached_token_usage_unavailable" in gaps) == (unknown_turn is not None)
+        assert ("reasoning_token_usage_unavailable" in gaps) == (unknown_turn is not None)
+
+
+def test_recovered_stream_error_keeps_success_and_available_usage_with_coverage_gap(setup) -> None:
+    agent, sandbox = setup
+    records = [json.loads(line) for line in sandbox.events.splitlines()]
+    records.insert(
+        0, [0.0, {"type": "error", "message": "Reconnecting... 1/5 (stream disconnected before completion)"}]
+    )
+    sandbox.events = "\n".join(json.dumps(record) for record in records)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        response = result.json()
+        assert response["status"] == "completed"
+        assert response["error"] is None
+        assert response["usage"]["total_tokens"] == 22
+        assert [item["type"] for item in response["output"]] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        assert closed["agent_observations"]["records"][0]["status"] == "completed"
+        gaps = {gap["code"]: gap for gap in closed["agent_observations"]["gaps"]}
+        assert "recovered retries" in gaps["partial_model_usage_unavailable"]["detail"]
+
+
 def test_native_custom_model_context_budget_reaches_sandbox_config(setup) -> None:
     agent, sandbox = setup
     agent.config = CodexAgentConfig(
