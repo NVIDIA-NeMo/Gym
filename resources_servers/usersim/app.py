@@ -38,7 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.usersim_episode_types import (
+from resources_servers.usersim.types import (
     ResolvedUserSimContext,
     UserSimSamplingRequest,
     UserSimScenario,
@@ -208,9 +208,7 @@ def _external_probe_transcript(
     invocations: Sequence[Any],
 ) -> list[dict[str, Any]]:
     """Replace collapsed Assistant turns with the Agent's full tool transcript."""
-    assistant_responses = iter(
-        invocation.response for invocation in invocations if invocation.alias == "assistant_model"
-    )
+    assistant_responses = iter(invocation.response for invocation in invocations if invocation.role == "assistant")
     transcript: list[dict[str, Any]] = []
     for message in messages:
         if message.get("role") != "assistant":
