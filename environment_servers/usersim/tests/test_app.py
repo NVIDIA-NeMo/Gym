@@ -160,6 +160,7 @@ def _queue_success_responses(client: _Client) -> None:
                         "seed": 42,
                         "personas_dataset_version": "0.0.2",
                         "personas_panel_sha256": "a" * 64,
+                        "usersim_revision": "b" * 40,
                     },
                 },
                 cookie="resources-cookie",
