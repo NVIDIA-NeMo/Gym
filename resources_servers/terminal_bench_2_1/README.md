@@ -16,6 +16,8 @@ gym env start \
 ### Full Terminal Bench 2.1 golden patch smoke test
 In a separate terminal:
 ```bash
+gym eval prepare --config benchmarks/terminal_bench_2_1/terminus_2.yaml
+
 python resources_servers/terminal_bench_2_1/apply_golden_patch.py \
     +benchmark_jsonl=benchmarks/terminal_bench_2_1/data/benchmark.jsonl \
     +limit=...  # No limit for full samples

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import re
 import warnings
 from typing import Annotated, Any, Literal
 
@@ -22,6 +24,49 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator,
 # Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
+# (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
+# of a literal, so the value is picked up from the job's actual environment at run time.
+RUNTIME_ENV_PREFIX = "runtime:"
+
+
+def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
+    """Resolve `lit:`/`host:`/`runtime:` prefixes on `env` values. Every value must use one
+    of these prefixes; a missing or misspelled prefix raises rather than being guessed at.
+
+    - `lit:VALUE` -> literal VALUE.
+    - `host:VAR` -> read from os.environ[VAR] on the machine running `gym eval submit`;
+      raises if VAR isn't set there.
+    - `runtime:VAR` -> left unresolved; canonicalized to `runtime:VAR` for executors to
+      pick up and reference from the job's own environment at run time.
+    """
+    resolved = {}
+    for key, raw in env.items():
+        if raw.startswith("lit:"):
+            resolved[key] = raw[len("lit:") :]
+        elif raw.startswith("host:"):
+            var = raw[len("host:") :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for host:{var}")
+            value = os.environ.get(var)
+            if value is None:
+                raise ValueError(
+                    f"env[{key!r}] references host:{var}, but {var!r} is not set in the submitting shell's environment"
+                )
+            resolved[key] = value
+        elif raw.startswith(RUNTIME_ENV_PREFIX):
+            var = raw[len(RUNTIME_ENV_PREFIX) :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for runtime:{var}")
+            resolved[key] = f"{RUNTIME_ENV_PREFIX}{var}"
+        else:
+            raise ValueError(
+                f"env[{key!r}]: {raw!r} must start with one of the prefixes 'lit:', 'host:', or 'runtime:'"
+            )
+    return resolved
 
 
 class HealthCheckConfig(_StrictModel):
@@ -36,10 +81,26 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+    # Raw shell statements run before the service command starts, in the same
+    # shell (so export/unset and dynamic values like $(hostname -I) work
+    # normally) -- e.g. working around an image or engine-version bug that
+    # needs an env var set to a real address or a stale one unset before the
+    # service binary runs. Unlike `env` (literal key=value pairs only) or a
+    # service-specific extra_args (appended to that service's own command
+    # line), this runs as its own statement(s) ahead of the command.
+    pre_command: str = ""
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -47,6 +108,7 @@ class BaseModelServiceConfig(BaseServiceConfig):
 
     model: str
     port: int = 8000
+    served_model_name: str | None = None
 
 
 class VllmServiceConfig(BaseModelServiceConfig):
@@ -55,6 +117,9 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
+    use_ray_serve: bool = False
+    # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
+    extra_args: str = ""
 
     @field_validator("number_of_instances")
     @classmethod
@@ -72,6 +137,17 @@ class VllmServiceConfig(BaseModelServiceConfig):
         elif self.health_check.port is None:
             self.health_check.port = self.port
         return self
+
+
+def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per_node_values: list[int]) -> bool:
+    """Whether the Ray Serve gateway manages this service's instances/routing instead of vLLM's own DP."""
+    if service.use_ray_serve:
+        return True
+    if not gpus_per_node_values:
+        return False
+    max_gpus_per_node = max(gpus_per_node_values)
+    tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+    return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
 class RayServiceConfig(BaseServiceConfig):
@@ -133,11 +209,28 @@ class DriverConfig(_StrictModel):
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
+    # Which responses_api_models asset serves as the policy, passed as
+    # `--model-type`. Not every benchmark wants the same one: Gym permits exactly
+    # one entry under `policy_model.responses_api_models`, so composing
+    # openai_model against a benchmark that ships its own vllm_model policy (e.g.
+    # lmarena_v3) fails validation with "Dictionary should have at most 1 item
+    # after validation, not 2", and overrides keyed on `vllm_model.*` land on a
+    # server that was never composed. Set to "" to compose no policy model config
+    # at all, for a benchmark whose own config already declares a complete one.
+    policy_model_type: str = "openai_model"
     benchmarks: dict[str, BenchmarkRunConfig]
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class JobConfig(_StrictModel):
@@ -164,6 +257,11 @@ class SubmitConfig(_StrictModel):
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
         is_multi_node = total_nodes > 1
+        gpus_per_node_values = (
+            [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+            if isinstance(compute, SlurmComputeConfig)
+            else []
+        )
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -174,11 +272,16 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if not isinstance(service, VllmServiceConfig):
+                continue
+
+            is_ray_serve = effective_ray_serve(service, total_nodes, gpus_per_node_values)
+
             if (
                 is_multi_node
-                and isinstance(service, VllmServiceConfig)
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
+                and not is_ray_serve
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
@@ -186,8 +289,9 @@ class SubmitConfig(_StrictModel):
                     "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
-            if isinstance(service, VllmServiceConfig):
-                self._validate_vllm_gpu_footprint(service_name, service, total_nodes)
+            self._validate_vllm_gpu_footprint(
+                service_name, service, total_nodes, compute, gpus_per_node_values, is_ray_serve
+            )
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
@@ -207,42 +311,40 @@ class SubmitConfig(_StrictModel):
                             f"but driver.policy_model is also set. Remove one."
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
-                    benchmark.run["policy_model_name"] = service.model
+                    benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
         return self
 
-    def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig", total_nodes: int) -> None:
-        compute = self.compute[service.placement]
-        if not isinstance(compute, SlurmComputeConfig):
-            return
-
-        gpus_per_node_values = [
-            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
-        ]
+    def _validate_vllm_gpu_footprint(
+        self,
+        service_name: str,
+        service: "VllmServiceConfig",
+        total_nodes: int,
+        compute: "SlurmComputeConfig",
+        gpus_per_node_values: list[int],
+        is_ray_serve: bool,
+    ) -> None:
         if not gpus_per_node_values:
             return
 
         max_gpus_per_node = max(gpus_per_node_values)
         tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
 
-        if total_nodes > 1 and service.number_of_instances > 1:
-            if tp_pp > max_gpus_per_node:
-                # Each instance's own TP/PP footprint already exceeds a single node's GPU count, so
-                # spreading multiple such instances across nodes would require every instance to
-                # itself span multiple nodes. That's not supported: multi-node data-parallel only
-                # distributes whole instances across nodes with tensor/pipeline parallelism kept
-                # local to each node (see _build_vllm_multi_instance_multi_node_command).
-                raise ValueError(
-                    f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
-                    f"tensor_parallel_size={service.tensor_parallel_size} x "
-                    f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
-                    f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
-                    "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
-                    "tensor_parallel_size/pipeline_parallel_size to fit within one node, or set "
-                    "number_of_instances=1 to let a single instance span nodes."
-                )
+        if total_nodes > 1 and is_ray_serve:
+            # Ray Serve's placement-group scheduler packs the aggregate footprint across the cluster.
+            gpus_needed = tp_pp * service.number_of_instances
+            gpus_available = sum(
+                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
+            )
+            footprint = (
+                f"tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
+                f"number_of_instances={service.number_of_instances} (ray_serve gateway)"
+            )
+            scope = f"the total GPUs across all nodes ({gpus_available})"
+        elif total_nodes > 1 and service.number_of_instances > 1:
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
             # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
             # the per-node share, not the total footprint, has to fit in that node's GPU count.

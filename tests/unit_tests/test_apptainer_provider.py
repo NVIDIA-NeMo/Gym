@@ -129,6 +129,7 @@ def test_coerce_config() -> None:
     existing = cls(concurrency=4)
     assert coerce(existing, cls) is existing
     assert coerce({"concurrency": 7}, cls).concurrency == 7
+    assert coerce({"timeout_grace_s": 0.5}, cls).timeout_grace_s == 0.5
     with pytest.raises(TypeError):
         coerce(123, cls)
 
@@ -140,6 +141,8 @@ def test_config_validation() -> None:
         apptainer_provider.ApptainerCreateConfig(mount_point="relative")
     with pytest.raises(ValueError, match="default_timeout_s"):
         apptainer_provider.ApptainerExecConfig(default_timeout_s=-1)
+    with pytest.raises(ValueError, match="timeout_grace_s"):
+        apptainer_provider.ApptainerExecConfig(timeout_grace_s=-1)
     with pytest.raises(ValueError, match="concurrency"):
         apptainer_provider.ApptainerExecConfig(concurrency=0)
     with pytest.raises(ValueError, match="timeout_s"):
@@ -907,7 +910,7 @@ async def test_run_real_stdin(fake_binary: str) -> None:
 
 @pytest.mark.skipif(shutil.which("sleep") is None, reason="sleep not available")
 async def test_run_real_timeout(fake_binary: str) -> None:
-    provider = apptainer_provider.ApptainerProvider()
+    provider = apptainer_provider.ApptainerProvider(exec={"timeout_grace_s": 0})
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
 

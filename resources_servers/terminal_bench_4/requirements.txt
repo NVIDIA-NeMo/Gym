@@ -1,0 +1,4 @@
+-e nemo-gym[dev,sandbox] @ ../../
+pathspec==1.1.1
+opensandbox==0.1.16
+httpx-aiohttp

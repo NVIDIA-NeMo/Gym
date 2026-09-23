@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import logging
 import resource
 import socket
 import sys
@@ -22,6 +23,7 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -44,15 +46,17 @@ from aiohttp import (
     TCPConnector,
 )
 from aiohttp.client import _RequestOptions
+from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -80,9 +84,150 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_a
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
+logger = logging.getLogger(__name__)
+
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
+# Bound both the raw request prefix and its escaped representation to 4 KiB.
+_VALIDATION_ERROR_LOG_BODY_CHARS = 4096
+_VALIDATION_ERROR_LOG_MAX_ERRORS = 20
+_VALIDATION_ERROR_LOG_FIELD_CHARS = 256
+_VALIDATION_ERROR_LOG_LOC_ITEMS = 8
+
+
+def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
+    """Return bounded, control-safe text with a visible marker when truncated."""
+    raw_prefix = value[:max_chars]
+    rendered = json.dumps(raw_prefix, ensure_ascii=True)[1:-1]
+    truncated = len(value) > len(raw_prefix) or len(rendered) > max_chars
+    suffix = "...[truncated]" if truncated else ""
+    # The marker shares the existing budget; preserve complete JSON escapes.
+    content_limit = max_chars - len(suffix)
+    safe_end = 0
+    index = 0
+    while index < len(rendered) and index < content_limit:
+        escape_chars = 1
+        if rendered[index] == "\\":
+            escape_chars = 6 if index + 1 < len(rendered) and rendered[index + 1] == "u" else 2
+        if index + escape_chars > content_limit:
+            break
+        index += escape_chars
+        safe_end = index
+
+    return rendered[:safe_end] + suffix, truncated
+
+
+def _escaped_log_prefix(value: str, max_chars: int) -> tuple[str, bool]:
+    """Return a quoted, control-safe prefix bounded by ``max_chars``."""
+    escaped, truncated = _escaped_log_text(value, max_chars - 2)
+    return f'"{escaped}"', truncated
+
+
+def _bounded_validation_error_value(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        return _escaped_log_text(value, _VALIDATION_ERROR_LOG_FIELD_CHARS)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, False
+    return f"<{type(value).__name__}>", True
+
+
+def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    summaries = []
+    truncated = len(errors) > _VALIDATION_ERROR_LOG_MAX_ERRORS
+    for error in errors[:_VALIDATION_ERROR_LOG_MAX_ERRORS]:
+        error_type, type_truncated = _bounded_validation_error_value(error.get("type"))
+        message, message_truncated = _bounded_validation_error_value(error.get("msg"))
+        location = error.get("loc")
+        if isinstance(location, (list, tuple)):
+            location_items = []
+            location_truncated = len(location) > _VALIDATION_ERROR_LOG_LOC_ITEMS
+            for item in location[:_VALIDATION_ERROR_LOG_LOC_ITEMS]:
+                bounded_item, item_truncated = _bounded_validation_error_value(item)
+                location_items.append(bounded_item)
+                location_truncated = location_truncated or item_truncated
+        else:
+            bounded_location, location_truncated = _bounded_validation_error_value(location)
+            location_items = [bounded_location]
+
+        summaries.append({"type": error_type, "loc": location_items, "msg": message})
+        truncated = truncated or type_truncated or location_truncated or message_truncated
+
+    return summaries, truncated
+
+
+async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
+    errors = exc.errors()
+    error_summaries, errors_truncated = _validation_error_summaries(errors)
+    errors_suffix = " ...[truncated]" if errors_truncated else ""
+    extra = {
+        "validation_error_count": len(errors),
+        "validation_errors": error_summaries,
+        "validation_errors_truncated": errors_truncated,
+    }
+
+    has_body_error = any(
+        isinstance(error.get("loc"), (list, tuple)) and error["loc"] and error["loc"][0] == "body" for error in errors
+    )
+    if not has_body_error:
+        logger.warning(
+            "Request validation failed; validation_error_count=%d validation_errors_truncated=%s%s",
+            len(errors),
+            errors_truncated,
+            errors_suffix,
+            extra=extra,
+        )
+        return
+
+    try:
+        body = await request.body()
+    except Exception:
+        logger.warning(
+            "Request validation failed; request body unavailable; "
+            "validation_error_count=%d validation_errors_truncated=%s%s",
+            len(errors),
+            errors_truncated,
+            errors_suffix,
+            extra=extra,
+        )
+        return
+
+    raw_prefix = body[:_VALIDATION_ERROR_LOG_BODY_CHARS]
+    escaped_prefix, prefix_truncated = _escaped_log_prefix(
+        raw_prefix.decode("utf-8", errors="replace"), _VALIDATION_ERROR_LOG_BODY_CHARS
+    )
+    body_truncated = len(body) > len(raw_prefix) or prefix_truncated
+    extra.update(
+        {
+            "request_body_size_bytes": len(body),
+            "request_body_prefix": escaped_prefix,
+            "request_body_truncated": body_truncated,
+        }
+    )
+    logger.warning(
+        "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
+        "validation_error_count=%d validation_errors_truncated=%s%s",
+        len(body),
+        body_truncated,
+        escaped_prefix,
+        len(errors),
+        errors_truncated,
+        errors_suffix,
+        extra=extra,
+    )
+
+
+async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
+    try:
+        await _log_validation_exception(request, exc)
+    except Exception:
+        # Diagnostics must not alter FastAPI's response contract.
+        pass
+    return await request_validation_exception_handler(request, exc)
+
+
+NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
+NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 
 class _PickleSafeRequestInfo(NamedTuple):
@@ -381,6 +526,9 @@ async def _request_with_retries(
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
+            if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                raise
+
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
@@ -396,9 +544,10 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
-async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover
     if not response.ok:
-        content = await response.content.read()
+        if content is None:
+            content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
@@ -484,7 +633,15 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        base_url = self._resolve_base_url(server_name)
+        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
+        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        if model_server_base_url and server_name == model_server_name:
+            # Subprocess agents do not inherit the current rollout context.
+            # The launcher provides a model URL that already contains the rollout prefix.
+            # Use that URL instead of rebuilding it from global server configuration.
+            base_url = model_server_base_url.rstrip("/")
+        else:
+            base_url = self._resolve_base_url(server_name)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:
@@ -613,6 +770,10 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
@@ -630,6 +791,49 @@ class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
 class UvicornLoggingConfig(BaseModel):
     # Default to False for regular use cases.
     uvicorn_logging_show_200_ok: bool = False
+
+
+# Every IPv4 address as it appears on a dual-stack socket.
+_ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
+
+
+class UvicornProxyHeadersConfig(BaseModel):
+    # Gym servers call each other directly, so proxy headers stay off: uvicorn would otherwise let
+    # any caller rewrite its own client host and URL scheme through X-Forwarded-*.
+    uvicorn_proxy_headers: bool = False
+    # Trusted proxy addresses. Required when uvicorn_proxy_headers is enabled.
+    uvicorn_forwarded_allow_ips: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _require_trusted_proxy_allowlist(self) -> "UvicornProxyHeadersConfig":
+        if not self.uvicorn_proxy_headers:
+            return self
+
+        allow_ips = [ip.strip() for ip in (self.uvicorn_forwarded_allow_ips or []) if ip.strip()]
+        if not allow_ips:
+            raise ValueError("uvicorn_proxy_headers=True requires a non-empty uvicorn_forwarded_allow_ips allowlist.")
+        if "*" in allow_ips:
+            raise ValueError("uvicorn_forwarded_allow_ips must not be '*': it trusts forwarded headers from any peer.")
+        for address in allow_ips:
+            try:
+                network = ip_network(address)
+            except ValueError as exc:
+                # Anything uvicorn cannot parse as an address is kept as a literal it will never
+                # match against a TCP peer, so the entry would silently trust nothing.
+                raise ValueError(
+                    f"uvicorn_forwarded_allow_ips entry {address!r} is not a valid IP address or CIDR range: {exc}"
+                ) from exc
+            # prefixlen 0 covers a whole family; an IPv6 supernet of ::ffff:0:0/96 covers all of
+            # IPv4 once peers arrive IPv4-mapped on a dual-stack socket.
+            covers_all_v4_mapped = network.version == 6 and network.supernet_of(_ALL_V4_MAPPED)
+            if network.prefixlen == 0 or covers_all_v4_mapped:
+                raise ValueError(
+                    f"uvicorn_forwarded_allow_ips entry {address!r} covers every address: "
+                    "it trusts forwarded headers from any peer."
+                )
+
+        self.uvicorn_forwarded_allow_ips = allow_ips
+        return self
 
 
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
@@ -718,6 +922,7 @@ _TELEMETRY_SERVER_TYPE_BY_BASE = {
     "SimpleResourcesServer": "resources_servers",
     "SimpleResponsesAPIAgent": "responses_api_agents",
     "SimpleResponsesAPIModel": "responses_api_models",
+    "BaseEnvironmentServer": "environment_servers",
 }
 
 
@@ -728,6 +933,74 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
         if server_type is not None:
             return server_type
     return None
+
+
+class ClientDisconnectCancellationMiddleware:
+    """Cancel an in-flight HTTP request when its client disconnects."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.num_cancelled = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        received_messages: asyncio.Queue[Message] = asyncio.Queue()
+        client_disconnected = asyncio.Event()
+        response_complete = asyncio.Event()
+
+        async def receive_message() -> Message:
+            return await received_messages.get()
+
+        async def send_message(message: Message) -> None:
+            if client_disconnected.is_set():
+                return
+
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_complete.set()
+
+        # The listener is the sole reader of the original ASGI receive channel.
+        # Forwarding request messages keeps the body available to the app while
+        # also allowing disconnects to cancel handlers that no longer call receive.
+        async with create_task_group() as task_group:
+
+            async def run_app() -> None:
+                try:
+                    await self.app(scope, receive_message, send_message)
+                finally:
+                    task_group.cancel_scope.cancel()
+
+            async def listen_for_disconnect() -> None:
+                while True:
+                    message = await receive()
+                    if message["type"] != "http.disconnect":
+                        await received_messages.put(message)
+                        continue
+
+                    # Uvicorn returns http.disconnect from receive() once the response is complete,
+                    # even if the peer did not disconnect early. Only cancel requests whose response
+                    # has not finished being sent.
+                    if response_complete.is_set():
+                        return
+
+                    await received_messages.put(message)
+                    client_disconnected.set()
+                    self.num_cancelled += 1
+                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                        client = scope.get("client")
+                        client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        print(
+                            f'{client_address} - "{scope["method"]} {scope["path"]}" '
+                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                        )
+                    task_group.cancel_scope.cancel()
+                    return
+
+            task_group.start_soon(run_app)
+            task_group.start_soon(listen_for_disconnect)
 
 
 class SimpleServer(BaseServer):
@@ -817,7 +1090,7 @@ class SimpleServer(BaseServer):
 
                 return JSONResponse(content=response_content, status_code=500)
             except CancelledError:
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+                return JSONResponse(content="Request was cancelled", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
@@ -831,6 +1104,9 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_cancellation_middleware(self, app: FastAPI) -> None:
+        app.add_middleware(ClientDisconnectCancellationMiddleware)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
@@ -944,26 +1220,22 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        # Register last so cancellation wraps the complete request stack.
+        server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
         # started. This is the ingress half of cross-process propagation — the instrumentor
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
 
-        @app.exception_handler(RequestValidationError)
-        async def validation_exception_handler(request: Request, exc):
-            print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
-"""
-            )
-            return await request_validation_exception_handler(request, exc)
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -983,6 +1255,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             # A missing or incompatible httptools wheel now fails during startup.
             http="httptools",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
+            # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
+            # so forwarded headers are never honored from an arbitrary peer.
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
@@ -1019,17 +1295,34 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    _ready: bool = PrivateAttr(default=False)
     # Serialized global config returned to clients.
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
-        self.setup_liveness(app)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
+        async def _readiness(response: Response):
+            if not self._ready:
+                response.status_code = 503
+                return {"status": "starting"}
+            return {"status": "ok"}
+
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 
         return app
+
+    def mark_ready(self) -> None:
+        self._ready = True
 
     def get_server_instances(self) -> List[dict]:
         return self._server_instances
@@ -1042,9 +1335,10 @@ class HeadServer(BaseServer):
         self._cached_yaml = None
 
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
 
         app = server.setup_webserver()
 
@@ -1052,6 +1346,8 @@ class HeadServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
         uvicorn_server = uvicorn.Server(config=config)
 

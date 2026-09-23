@@ -464,6 +464,8 @@ class TestApp:
             },
             "response": full_tool_call_response,
             "reward": 1,
+            "mask_sample": False,
+            "failure_kind": None,
             "failure_reason": None,
         }
         assert _drop_nulls(expected_valid_verify_response_json) == _drop_nulls(valid_verify_response.json())

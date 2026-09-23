@@ -297,6 +297,16 @@ def decimal_lines_match(
     )
 
 
+CASE_INSENSITIVE_VERDICTS = ("yes", "no")
+
+
+def is_case_insensitive_verdict(expected_line: str, predicted_line: str) -> bool:
+    predicted = predicted_line.strip().lower()
+    if predicted not in CASE_INSENSITIVE_VERDICTS:
+        return False
+    return predicted == expected_line.strip().lower()
+
+
 def get_stripped_lines(val: str):
     ## you don't want empty lines to add empty list after splitlines!
     val = val.strip()
@@ -501,6 +511,9 @@ def grade_stdio(
 
             ## CASE 1: exact match
             if stripped_prediction_line == stripped_gt_out_line:
+                continue
+
+            if is_case_insensitive_verdict(stripped_gt_out_line, stripped_prediction_line):
                 continue
 
             ## CASE 2: element-wise comparision

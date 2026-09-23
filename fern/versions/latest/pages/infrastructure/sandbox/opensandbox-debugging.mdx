@@ -1,0 +1,142 @@
+---
+title: "Debugging OpenSandbox Sandboxes"
+description: "How to see what CPU and memory a sandbox is getting and using, and how to detect OOM kills from the client."
+position: 3
+---
+
+Companion to [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices). That
+page says what to configure; this one says how to check what you actually got. Everything in the
+first two sections runs **inside** the sandbox through `sandbox.exec()` (or a bash tool call in the
+agent) — no cluster access needed. Sandboxes run on cgroup v2 with `/sys/fs/cgroup` mounted
+read-only, so the files below are always readable.
+
+## What am I getting? The enforced limits
+
+```bash
+cat /sys/fs/cgroup/cpu.max      # "400000 100000" = 4 CPUs (quota µs / period µs); "max" = unlimited
+cat /sys/fs/cgroup/memory.max   # bytes; "max" = unlimited
+nproc; python3 -c 'import os; print(os.cpu_count())'   # what tools will SEE — compare to cpu.max
+```
+
+If `cpu.max` says 4 CPUs but `nproc` says 192, this cluster does not overlay CPU counts and the
+[host-core fan-out trap](/infrastructure/sandbox/opensandbox-best-practices#the-host-core-fan-out-trap)
+applies.
+
+## How much am I using?
+
+```bash
+cat /sys/fs/cgroup/memory.current   # bytes in use now
+cat /sys/fs/cgroup/memory.peak      # high-water mark since start — the number to size limits from
+grep -E '^(anon|file) ' /sys/fs/cgroup/memory.stat   # anon = process memory, file = page cache (reclaimable)
+cat /sys/fs/cgroup/cpu.stat
+#   usage_usec      CPU time consumed
+#   nr_throttled    periods in which the quota ran out
+#   throttled_usec  time processes sat waiting for quota — the throttling signal
+```
+
+Throttling ratio = `throttled_usec / (usage_usec + throttled_usec)`. A few percent means the CPU
+limit is binding; above ~30% your commands are running dramatically slower than they look.
+
+### Did I hit the ceiling?
+
+```bash
+cat /sys/fs/cgroup/memory.events
+#   max        usage hit memory.max and the kernel had to reclaim — near-misses, i.e. thrashing
+#   oom        OOM events
+#   oom_kill   processes killed
+```
+
+`memory.peak == memory.max` with a large `max` count means you are living at the ceiling even if
+nothing has died yet. `oom_kill > 0` with the sandbox still alive means a child process was killed.
+If the whole sandbox died you will not get to read this file — see
+[detecting OOM from the client](#detecting-oom-from-the-client).
+
+### One-shot snapshot for the end of a rollout
+
+```bash
+sh -c 'echo "cpu.max=$(cat /sys/fs/cgroup/cpu.max)"; echo "mem.max=$(cat /sys/fs/cgroup/memory.max)"; \
+echo "mem.peak=$(cat /sys/fs/cgroup/memory.peak)"; \
+grep -E "^(usage_usec|nr_throttled|throttled_usec)" /sys/fs/cgroup/cpu.stat; \
+grep -E "^(max|oom|oom_kill)" /sys/fs/cgroup/memory.events; echo "nproc=$(nproc)"'
+```
+
+Capture this into your rollout record and you can size limits from real peaks across a whole run
+instead of from one failure message.
+
+## Detecting OOM from the client
+
+An OOM has one of two shapes, depending on what the kernel killed.
+
+### A child process died, the sandbox survived
+
+From the client this is an ordinary command failure:
+
+- `exec()` returns normally with `return_code == 137` (or `-9`), usually `Killed` in stderr and
+  truncated output.
+- Confirm from inside: `memory.events` shows `oom_kill > 0`, and `memory.peak` is at or near
+  `memory.max`.
+- The sandbox is fine to keep using; the agent can retry a smaller step.
+
+### The whole sandbox died
+
+Kubernetes group-OOM kills the entire cgroup, so the next operation cannot reach the exec daemon.
+The provider recognises this, polls the sandbox status for up to 5 seconds to learn *why*, and
+raises a typed error with the reason attached:
+
+```python
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+
+try:
+    result = await sandbox.exec(cmd, timeout_s=120)
+except SandboxBackendUnreachableError as e:
+    if "OOM-killed" in str(e):
+        # message quotes the server's record: state=..., reason='OOMKilled', message=..., sandbox_id=...
+        ...  # record as OOM; recreate the sandbox or fail the rollout
+    else:
+        ...  # backend gone for another reason (node loss, TTL); same handling, different tag
+```
+
+Afterwards `await sandbox.status()` returns `SandboxStatus.ERROR` or `SandboxStatus.STOPPED` — that
+is the provider-neutral check if you do not want to import the provider's exception type. The same
+notice surfaces on the PTY path as
+`SandboxPtyError("PTY attach takeover kept being refused: Sandbox was OOM-killed. ...")`.
+
+<Note>
+Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`; a
+wedged command raises `TimeoutError` mentioning the hard cap. Neither is an OOM — when in doubt,
+read `memory.events` before deciding.
+</Note>
+
+### Counting OOMs across a run
+
+Rollout records carry sandbox observations under `ng_agent_observations`: each record has
+`outcome` (`completed`, `failed`, `timeout`, `sandbox_error`), `exit_code`, and `error_type`.
+`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError`, or `exit_code: 137`, is
+your OOM census. Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code
+in those repos; OOMs spread evenly mean the limit is genuinely too small.
+
+## Cluster-side checks
+
+If you have `kubectl` access to the sandbox namespace. The pod name is the sandbox id the SDK
+returned with `-0` appended; sandboxes also carry the `opensandbox.io/id` label.
+
+```bash
+kubectl top pod <sandbox-id>-0 -n <namespace>          # live CPU/memory as the node sees it
+kubectl get pod <sandbox-id>-0 -n <namespace> \
+  -o jsonpath='{.spec.containers[0].resources}'        # requests AND limits actually applied
+kubectl describe pod <sandbox-id>-0 -n <namespace> | grep -A3 'Last State'
+#   "Reason: OOMKilled, Exit Code: 137" = whole-sandbox OOM
+```
+
+The `resources` jsonpath is the fastest way to confirm you did not accidentally set the same map
+for requests and limits.
+
+## Reading the signals together
+
+| Observation | Meaning | Action |
+| --- | --- | --- |
+| `throttled_usec` ≫ 0, memory fine | CPU limit binding — usually fan-out | Fix parallelism caps before raising the limit. |
+| `memory.peak` near `memory.max`, many `max` events | Memory ceiling, thrashing | Find the fan-out or runaway code; raise the limit only if the peak is legitimate. |
+| `oom_kill > 0`, sandbox alive | A child process was killed | Command output is probably truncated; safe to retry a smaller step. |
+| Pod `OOMKilled` / `137`, no in-sandbox data | Group OOM kill | Same causes; add a bash timeout so the agent fails fast. |
+| `nproc` ≠ CPUs in `cpu.max` | This cluster does not overlay CPU counts | Rely on `derive_cpu_env`; cap environment-blind runners in the image. |

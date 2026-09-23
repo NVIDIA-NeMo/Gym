@@ -12,34 +12,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import logging
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from fastapi import Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pydantic import ValidationError
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
+from nemo_gym.config_types import BaseRunServerInstanceConfig
 from nemo_gym.global_config import (
+    DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
 from nemo_gym.server_utils import (
+    NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
+    NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
+    ClientDisconnectCancellationMiddleware,
     ConnectionError,
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
     ServerClient,
     SimpleServer,
+    UvicornProxyHeadersConfig,
     _format_upstream_error_log,
+    _log_validation_exception,
     _make_keepalive_socket_factory,
+    _validation_exception_handler,
     initialize_ray,
     raise_for_status,
 )
@@ -116,6 +131,33 @@ class TestServerUtils:
         assert isinstance(restored_error.headers, CIMultiDict)
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
+
+    async def test_raise_for_status_accepts_prefetched_content(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://judge.test/v1/responses"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://judge.test/v1/responses"),
+        )
+        original_error = ClientResponseError(
+            request_info=request_info,
+            history=(),
+            status=429,
+            message="Too Many Requests",
+            headers=CIMultiDictProxy(CIMultiDict()),
+        )
+        response = MagicMock()
+        response.ok = False
+        response.content.read = AsyncMock(side_effect=AssertionError("body already consumed"))
+        response.request_info = request_info
+        response.raise_for_status.side_effect = original_error
+        content = b'{"error":"rate_limit_exceeded"}'
+
+        with raises(ClientResponseError) as exc_info:
+            await raise_for_status(response, content)
+
+        assert exc_info.value.response_content == content
+        response.content.read.assert_not_awaited()
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
@@ -267,6 +309,37 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
+    async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=12345),
+            global_config_dict=DictConfig(
+                {"policy_model": {"responses_api_models": {"vllm_model": {"host": "plain-host", "port": 54321}}}}
+            ),
+        )
+        monkeypatch.setenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME, "policy_model")
+        monkeypatch.setenv(
+            NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
+            "http://model/ng-rollout/rollout-1/training-token-capture",
+        )
+
+        request_mock = AsyncMock(return_value="response")
+        client_mock = MagicMock()
+        client_mock.return_value.request = request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        response = await server_client.post(
+            server_name="policy_model",
+            url_path="/v1/chat/completions",
+            headers={"x-existing": "value"},
+        )
+
+        assert response == "response"
+        request_mock.assert_awaited_once_with(
+            method="POST",
+            url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
+            headers={"x-existing": "value"},
+        )
+
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "my_server")
@@ -286,6 +359,29 @@ class TestServerUtils:
     def test_HeadServer_setup_webserver_sanity(self) -> None:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         head_server.setup_webserver()
+
+    def test_HeadServer_health_reports_readiness_without_changing_liveness(self) -> None:
+        from fastapi.testclient import TestClient
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+
+        with TestClient(head_server.setup_webserver()) as client:
+            for path in ("/", "/livez"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 503
+                assert response.json() == {"status": "starting"}
+
+            head_server.mark_ready()
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
 
     async def test_HeadServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig({"a": 2})
@@ -506,12 +602,24 @@ class TestServerUtils:
 
         TestSimpleServer.run_webserver()
 
+    def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        BaseServer.setup_liveness(MagicMock(), app)
+
+        with TestClient(app) as client:
+            for path in ("/", "/health", "/healthz", "/livez", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
     def test_setup_session_middleware_idempotent(self) -> None:
         from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
         from starlette.middleware.sessions import SessionMiddleware
 
-        from nemo_gym.config_types import BaseRunServerInstanceConfig
         from nemo_gym.server_utils import SESSION_ID_KEY
 
         class TestSimpleServer(SimpleServer):
@@ -543,6 +651,153 @@ class TestServerUtils:
             assert response.json()["session_id"]
             assert 1 == len(response.headers.get_list("set-cookie"))
 
+    def test_cancellation_middleware_preserves_request_body(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                assert False
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="my_server", host="", port=0, entrypoint=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        app = FastAPI()
+        server.setup_cancellation_middleware(app)
+
+        @app.post("/echo")
+        async def echo(body: dict) -> dict:
+            return body
+
+        with TestClient(app) as client:
+            response = client.post("/echo", json={"message": "hello"})
+
+        assert response.status_code == 200
+        assert response.json() == {"message": "hello"}
+
+    async def test_cancellation_middleware_cancels_handler_on_disconnect(self) -> None:
+        from fastapi import FastAPI, Request
+
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                assert False
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="my_server", host="", port=0, entrypoint=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        app = FastAPI()
+        server.setup_exception_middleware(app)
+        server.setup_cancellation_middleware(app)
+        handler_started = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+
+        @app.post("/work")
+        async def work(request: Request) -> None:
+            assert await request.json() == {"message": "hello"}
+            handler_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+
+        incoming_messages = asyncio.Queue()
+        await incoming_messages.put({"type": "http.request", "body": b'{"message":"hello"}', "more_body": False})
+
+        async def receive():
+            return await incoming_messages.get()
+
+        sent_messages = []
+
+        async def send(message):
+            sent_messages.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/work",
+            "raw_path": b"/work",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        app_task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+        await incoming_messages.put({"type": "http.disconnect"})
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert handler_cancelled.is_set()
+        assert sent_messages == []
+
+    async def test_cancellation_middleware_ignores_disconnect_after_response_completion(self) -> None:
+        response_sent = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            assert await receive() == {"type": "http.request", "body": b"", "more_body": False}
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+            try:
+                await finish_cleanup.wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+            cleanup_completed.set()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            await response_sent.wait()
+            return {"type": "http.disconnect"}
+
+        sent_messages = []
+
+        async def send(message):
+            sent_messages.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_sent.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/work",
+            "raw_path": b"/work",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        app_task = asyncio.create_task(middleware(scope, receive, send))
+        await asyncio.wait_for(response_sent.wait(), timeout=1)
+        await asyncio.sleep(0)
+        finish_cleanup.set()
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert cleanup_completed.is_set()
+        assert not handler_cancelled.is_set()
+        assert middleware.num_cancelled == 0
+        assert sent_messages == [
+            {"type": "http.response.start", "status": 200, "headers": []},
+            {"type": "http.response.body", "body": b"ok", "more_body": False},
+        ]
+
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses?api_key=secret"),
@@ -569,6 +824,271 @@ class TestServerUtils:
         assert "api_key=secret" not in message
         assert message.endswith("…")
         assert len(message) < 2200
+
+    @mark.parametrize(
+        ("body", "expected_truncated"),
+        [
+            (b"", False),
+            (b'{"nested":{"value":"small"}}', False),
+            (b"not-json\nwith-control-\x00", False),
+            (b'{"credentials":{"password":"secret"}}', False),
+            (b"x" * 4094, False),
+            (b"x" * 4095, True),
+            (b"\x00" * 4096, True),
+            ("中文".encode() * 4096, True),
+            (b"\\" * 4096, True),
+            (b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}', True),
+        ],
+        ids=[
+            "empty",
+            "small-json",
+            "non-json-control",
+            "credentials",
+            "at-limit",
+            "over-limit",
+            "escape-boundary",
+            "unicode",
+            "backslashes",
+            "multi-megabyte",
+        ],
+    )
+    async def test_validation_exception_log_bounds_body_before_rendering(
+        self, body: bytes, expected_truncated: bool, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=body)
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body", "required_field"),
+                "msg": "Field required",
+                "input": {"password": "value that must not be copied into the error log"},
+            }
+        ]
+        exc = RequestValidationError(errors, body={"original": "body"})
+        rendered_body_sizes = []
+        escaped_log_prefix = nemo_gym.server_utils._escaped_log_prefix
+
+        def tracking_escaped_log_prefix(value: str, max_chars: int):
+            rendered_body_sizes.append(len(value))
+            return escaped_log_prefix(value, max_chars)
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_escaped_log_prefix", tracking_escaped_log_prefix)
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, exc)
+
+        record = caplog.records[-1]
+        assert record.request_body_size_bytes == len(body)
+        assert len(rendered_body_sizes) == 1
+        assert rendered_body_sizes[0] <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert len(record.request_body_prefix) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert record.request_body_truncated is expected_truncated
+        decoded_prefix = nemo_gym.server_utils.json.loads(record.request_body_prefix)
+        assert decoded_prefix.endswith("...[truncated]") is expected_truncated
+        assert ("...[truncated]" in record.getMessage()) is expected_truncated
+        if not expected_truncated:
+            assert decoded_prefix == body.decode("utf-8", errors="replace")
+        assert "request_body_size_bytes=" in record.getMessage()
+        assert "request_body_truncated=" in record.getMessage()
+        assert "request_body_prefix=" in record.getMessage()
+        assert record.validation_error_count == 1
+        assert record.validation_errors == [
+            {
+                "type": "missing",
+                "loc": ["body", "required_field"],
+                "msg": "Field required",
+            }
+        ]
+        assert "value that must not be copied into the error log" not in str(record.validation_errors)
+        if body == b"not-json\nwith-control-\x00":
+            assert "\n" not in record.request_body_prefix
+            assert "\x00" not in record.request_body_prefix
+            assert "\\n" in record.request_body_prefix
+            assert "\\u0000" in record.request_body_prefix
+
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_log_bounds_error_count(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        errors = [
+            {
+                "type": "missing",
+                "loc": (location, f"field_{index}"),
+                "msg": "Field required",
+                "input": None,
+            }
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 5)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        assert record.validation_error_count == len(errors)
+        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+
+    async def test_validation_exception_log_marks_omitted_location_items(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body", *("field" for _ in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS))),
+                "msg": "Field required",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        assert len(record.validation_errors[0]["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+
+    async def test_validation_exception_detects_body_error_after_error_log_cap(
+        self, caplog: LogCaptureFixture
+    ) -> None:
+        body = b'{"required":null}'
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=body)
+        errors = [
+            {"type": "missing", "loc": ("query", f"field_{index}"), "msg": "Field required", "input": None}
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 1)
+        ]
+        errors.append({"type": "missing", "loc": ("body", "required"), "msg": "Field required", "input": None})
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        request.body.assert_awaited_once()
+        record = caplog.records[-1]
+        assert record.request_body_size_bytes == len(body)
+        assert record.request_body_prefix == '"{\\"required\\":null}"'
+        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert record.validation_errors_truncated is True
+
+    async def test_validation_exception_log_bounds_error_fields(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        large_value = "unsafe\n\x00" + "x" * (2 * 1024 * 1024)
+        errors = [
+            {
+                "type": large_value,
+                "loc": ("body", *([large_value] * (nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS + 1))),
+                "msg": large_value,
+                "input": None,
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        summary = record.validation_errors[0]
+        assert len(summary["type"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert len(summary["msg"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert summary["type"].endswith("...[truncated]")
+        assert summary["msg"].endswith("...[truncated]")
+        assert len(summary["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert all(
+            not isinstance(value, str) or len(value) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+            for value in summary["loc"]
+        )
+        assert "\n" not in str(summary)
+        assert "\x00" not in str(summary)
+        assert all(value.endswith("...[truncated]") for value in summary["loc"][1:])
+        assert record.validation_errors_truncated is True
+        assert record.getMessage().endswith("...[truncated]")
+        assert len(record.getMessage()) < 5000
+
+    async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"password=must-not-be-logged")
+        errors = [{"type": "missing", "loc": ("query", "required"), "msg": "Field required", "input": None}]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors, body=None))
+
+        request.body.assert_not_awaited()
+        record = caplog.records[-1]
+        assert not hasattr(record, "request_body_prefix")
+        assert "must-not-be-logged" not in record.getMessage()
+        assert "must-not-be-logged" not in str(record.validation_errors)
+
+    def test_validation_exception_query_error_does_not_disclose_body(self, caplog: LogCaptureFixture) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
+
+        @app.post("/query")
+        async def query(required: str) -> dict:
+            return {"required": required}
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+            response = client.post("/query", content=b"password=must-not-be-logged")
+
+        assert response.status_code == 422
+        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        assert not hasattr(record, "request_body_prefix")
+        assert "must-not-be-logged" not in record.getMessage()
+        assert "must-not-be-logged" not in str(record.validation_errors)
+
+    async def test_validation_exception_body_unavailable_is_logged(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(side_effect=RuntimeError("body unavailable"))
+        errors = [{"type": "missing", "loc": ("body", "field"), "msg": "Field required", "input": {}}]
+        exc = RequestValidationError(errors, body={"field": None})
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, exc)
+
+        record = caplog.records[-1]
+        assert record.getMessage().startswith("Request validation failed; request body unavailable")
+        assert record.validation_error_count == 1
+        assert exc.errors() == errors
+        assert exc.body == {"field": None}
+
+    async def test_validation_exception_logging_failure_does_not_mask_422(self, monkeypatch: MonkeyPatch) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        exc = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "field"), "msg": "Field required", "input": None}]
+        )
+        expected = await request_validation_exception_handler(request, exc)
+        monkeypatch.setattr(
+            nemo_gym.server_utils.logger, "warning", MagicMock(side_effect=RuntimeError("sink failed"))
+        )
+
+        actual = await _validation_exception_handler(request, exc)
+
+        assert actual.status_code == expected.status_code == 422
+        assert actual.body == expected.body
+        assert actual.headers == expected.headers
+
+    async def test_validation_exception_handler_preserves_fastapi_response(self, caplog: LogCaptureFixture) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b'{"field":null}')
+        exc = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "required"), "msg": "Field required", "input": None}]
+        )
+        expected = await request_validation_exception_handler(request, exc)
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            actual = await _validation_exception_handler(request, exc)
+
+        assert actual.status_code == expected.status_code == 422
+        assert actual.body == expected.body
+        assert actual.headers == expected.headers
 
     async def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
@@ -629,3 +1149,297 @@ class TestServerUtils:
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+
+_SPOOFED_HOST = "203.0.113.99"
+_LOOPBACK = "127.0.0.1"
+
+
+async def _scope_seen_by_app(*, uvicorn_kwargs: dict, peer: str, forwarded: bool) -> dict:
+    """Drive uvicorn's loaded app with one request and return the scope the inner app observed."""
+    seen: dict = {}
+
+    async def recorder(scope, receive, send) -> None:
+        seen["client"] = scope.get("client")
+        seen["scheme"] = scope["scheme"]
+
+    # Take the proxy settings straight from what run_webserver produced, so this exercises
+    # Gym's wiring rather than restating uvicorn's defaults.
+    config = uvicorn.Config(
+        app=recorder,
+        proxy_headers=uvicorn_kwargs["proxy_headers"],
+        forwarded_allow_ips=uvicorn_kwargs["forwarded_allow_ips"],
+    )
+    config.load()
+
+    headers = []
+    if forwarded:
+        headers = [(b"x-forwarded-for", _SPOOFED_HOST.encode()), (b"x-forwarded-proto", b"https")]
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "method": "GET",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "headers": headers,
+        "client": (peer, 54321),
+        "server": (_LOOPBACK, 8000),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message) -> None:
+        return None
+
+    await config.loaded_app(scope, receive, send)
+    return seen
+
+
+class TestUvicornProxyHeadersConfig:
+    def test_disabled_by_default(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate({})
+
+        assert config.uvicorn_proxy_headers is False
+        assert config.uvicorn_forwarded_allow_ips is None
+
+    def test_unrelated_config_keys_are_ignored(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate({"uvicorn_logging_show_200_ok": True, "port": 1234})
+
+        assert config.uvicorn_proxy_headers is False
+
+    def test_enabling_without_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            UvicornProxyHeadersConfig.model_validate({"uvicorn_proxy_headers": True})
+
+    def test_enabling_with_empty_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            UvicornProxyHeadersConfig.model_validate(
+                {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["  "]}
+            )
+
+    def test_wildcard_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="must not be"):
+            UvicornProxyHeadersConfig.model_validate(
+                {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1", "*"]}
+            )
+
+    def test_all_address_networks_are_rejected(self) -> None:
+        for network in ("0.0.0.0/0", "::/0"):
+            with raises(ValidationError, match="covers every address"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [network]}
+                )
+
+    def test_unparseable_allowlist_entries_are_rejected(self) -> None:
+        """uvicorn keeps an unparseable entry as a literal that never matches a TCP peer, so the
+        allowlist would look populated while trusting nobody."""
+        for bad in ("10.0.0.5/24", "proxy.internal", "not an ip", "0/0"):
+            with raises(ValidationError, match="is not a valid IP address or CIDR range"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [bad]}
+                )
+
+    def test_ipv4_mapped_all_address_network_is_rejected(self) -> None:
+        """::ffff:0:0/96 has prefixlen 96 but trusts every IPv4 peer on a dual-stack socket."""
+        for bad in ("::ffff:0:0/96", "::ffff:0.0.0.0/96"):
+            with raises(ValidationError, match="covers every address"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [bad]}
+                )
+
+    def test_valid_cidr_ranges_are_accepted(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate(
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.1.0/24", "10.0.0.1"]}
+        )
+
+        assert ["10.0.1.0/24", "10.0.0.1"] == config.uvicorn_forwarded_allow_ips
+
+    def test_allowlist_is_normalized(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate(
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [" 10.0.0.1 ", "", "10.0.0.2"]}
+        )
+
+        assert ["10.0.0.1", "10.0.0.2"] == config.uvicorn_forwarded_allow_ips
+
+
+class TestUvicornProxyHeadersBehavior:
+    """End-to-end: the kwargs run_webserver builds are fed to uvicorn and the resulting
+    middleware stack is driven with a real request."""
+
+    def _kwargs(self, monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
+        return TestRunWebserverProxyKwargs()._capture_uvicorn_kwargs(monkeypatch, config_dict, num_workers=1)
+
+    async def test_forwarded_headers_ignored_on_the_default_internal_path(self, monkeypatch: MonkeyPatch) -> None:
+        """Gym's default config must leave the real peer and scheme intact despite forged headers."""
+        seen = await _scope_seen_by_app(uvicorn_kwargs=self._kwargs(monkeypatch, {}), peer=_LOOPBACK, forwarded=True)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+    async def test_real_peer_reported_when_no_forwarded_headers_are_sent(self, monkeypatch: MonkeyPatch) -> None:
+        seen = await _scope_seen_by_app(uvicorn_kwargs=self._kwargs(monkeypatch, {}), peer=_LOOPBACK, forwarded=False)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+    async def test_forwarded_headers_honored_for_trusted_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._kwargs(monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [_LOOPBACK]})
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer=_LOOPBACK, forwarded=True)
+
+        assert (_SPOOFED_HOST, 0) == seen["client"]
+        assert "https" == seen["scheme"]
+
+    async def test_forwarded_headers_honored_for_trusted_cidr_range(self, monkeypatch: MonkeyPatch) -> None:
+        """A CIDR allowlist entry, as the configuration docs advertise, must actually match."""
+        kwargs = self._kwargs(
+            monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.1.0/24"]}
+        )
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer="10.0.1.55", forwarded=True)
+
+        assert (_SPOOFED_HOST, 0) == seen["client"]
+        assert "https" == seen["scheme"]
+
+    async def test_forwarded_headers_ignored_from_untrusted_peer(self, monkeypatch: MonkeyPatch) -> None:
+        """Opt-in enabled, but the caller is not on the allowlist, so its claims are discarded."""
+        kwargs = self._kwargs(
+            monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]}
+        )
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer=_LOOPBACK, forwarded=True)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+
+class TestRunWebserverProxyKwargs:
+    """run_webserver must forward the proxy config into uvicorn on both launch paths."""
+
+    def _capture_uvicorn_kwargs(self, monkeypatch: MonkeyPatch, config_dict: dict, num_workers: int) -> dict:
+        from fastapi import FastAPI
+
+        global_config = DictConfig({DRY_RUN_KEY_NAME: False, "my_server": {"a": {"b": {}}}, **config_dict})
+        monkeypatch.setattr(nemo_gym.server_utils.ray, "is_initialized", MagicMock(return_value=True))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config))
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+        )
+        server_client_mock = MagicMock(return_value=server_client)
+        server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
+        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", server_client_mock)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", MagicMock(return_value=False))
+
+        captured: dict = {}
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+
+        server_config = BaseRunServerInstanceConfig(
+            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
+        )
+
+        class TestSimpleServer(SimpleServer):
+            @classmethod
+            def load_config_from_global_config(cls):
+                return server_config
+
+            def setup_webserver(self) -> FastAPI:
+                return FastAPI()
+
+            def setup_telemetry(self) -> None: ...
+            def set_ulimit(self) -> None: ...
+            def prefix_server_logs(self) -> None: ...
+            def setup_exception_middleware(self, app) -> None: ...
+            def setup_cancellation_middleware(self, app) -> None: ...
+            def instrument_app_for_telemetry(self, app) -> None: ...
+
+        TestSimpleServer.run_webserver()
+        return captured
+
+    def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        assert kwargs["proxy_headers"] is False
+        assert [] == kwargs["forwarded_allow_ips"]
+        # A single worker passes the app object itself rather than an import string.
+        assert not isinstance(kwargs["app"], str)
+        assert "workers" not in kwargs
+
+    def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
+
+        # Multi-worker launches re-import the app, so uvicorn receives an import string.
+        assert isinstance(kwargs["app"], str)
+        assert kwargs["app"].endswith(":app")
+        assert 4 == kwargs["workers"]
+        assert kwargs["proxy_headers"] is False
+        assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_unrelated_uvicorn_settings_are_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        assert "httptools" == kwargs["http"]
+        assert 30 == kwargs["timeout_keep_alive"]
+        assert kwargs["access_log"] is False
+        assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]},
+            num_workers=1,
+        )
+
+        assert kwargs["proxy_headers"] is True
+        assert ["10.0.0.1"] == kwargs["forwarded_allow_ips"]
+
+    def test_enabling_without_allowlist_fails_startup(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_proxy_headers": True}, num_workers=1)
+
+
+class TestHeadServerProxyKwargs:
+    """The independently launched head server must use the same proxy-header policy."""
+
+    @staticmethod
+    def _capture_uvicorn_kwargs(monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
+        monkeypatch.setattr(
+            ServerClient,
+            "load_head_server_config",
+            MagicMock(return_value=BaseServerConfig(host="127.0.0.1", port=11000)),
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            MagicMock(return_value=DictConfig(config_dict)),
+        )
+
+        captured: dict = {}
+
+        def capture_config(app, **kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Config", capture_config)
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Server", MagicMock(return_value=MagicMock()))
+        monkeypatch.setattr(nemo_gym.server_utils, "Thread", MagicMock(return_value=MagicMock()))
+
+        HeadServer.run_webserver()
+        return captured
+
+    def test_proxy_headers_are_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {})
+
+        assert kwargs["proxy_headers"] is False
+        assert kwargs["forwarded_allow_ips"] == []
+
+    def test_trusted_proxy_opt_in_is_forwarded(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]},
+        )
+
+        assert kwargs["proxy_headers"] is True
+        assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
