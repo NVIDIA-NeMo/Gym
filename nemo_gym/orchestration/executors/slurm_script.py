@@ -167,7 +167,7 @@ def _render_service_command(
     pre_command: str = "",
     workdir: str | None = None,
     single_node: bool = False,
-    relative: int | None = None,
+    nodelist: str | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -176,10 +176,10 @@ def _render_service_command(
         node_flags = " --nodes=1 --ntasks=1"
     else:
         node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
-    # --relative=N starts the step at node N of the allocation. With --overlap it is
-    # what gives a pinned service nodes of its own while other steps run elsewhere.
-    if relative is not None:
-        node_flags = f" --relative={relative} --nodes={nodes} --ntasks={ntasks}"
+    # --nodelist names the exact hosts. --relative is only a starting point Slurm may
+    # move off when that node's resources are taken, landing a service on the wrong node.
+    if nodelist is not None:
+        node_flags = f' --nodelist="${nodelist}" --nodes={nodes} --ntasks={ntasks}'
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     workdir_flag = f" --container-workdir={shlex.quote(workdir)}" if workdir else ""
     if pre_command:
@@ -382,6 +382,25 @@ def _build_ray_command(service: RayServiceConfig) -> str:
     return cmd
 
 
+_NODE_ARRAY = 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))'
+
+
+def pool_nodes_var(pool: str) -> str:
+    """The env var build_sbatch_script exports with a node pool's comma-separated hosts."""
+    return f"GYM_POOL_{bash_var(pool)}_NODES"
+
+
+def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> str:
+    """Export each node pool's hosts, so a pinned service can name them in --nodelist."""
+    if not any(s.node_pool for s in config.services.values()):
+        return ""
+    lines = [_NODE_ARRAY]
+    for name, (start, count) in _pool_offsets(compute).items():
+        if count:
+            lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
+    return "\n".join(lines)
+
+
 def ray_head_address_var(head_service: str) -> str:
     """The env var build_sbatch_script exports with a ray head service's host:port."""
     return f"GYM_RAY_ADDRESS_{bash_var(head_service)}"
@@ -397,10 +416,11 @@ def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig
     if not heads:
         return ""
     offsets = _pool_offsets(compute)
-    lines = ['gym_ray_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))']
+    # _render_pool_nodes already declared the host array when any service is pinned.
+    lines = [] if any(s.node_pool for s in config.services.values()) else [_NODE_ARRAY]
     for name, service in heads.items():
         index = offsets[service.node_pool][0] if service.node_pool else 0
-        ip = f"$(getent hosts ${{gym_ray_nodes[{index}]}} | awk '{{print $1}}')"
+        ip = f"$(getent hosts ${{gym_nodes[{index}]}} | awk '{{print $1}}')"
         lines.append(f'export {ray_head_address_var(name)}="{ip}:{service.port}"')
     return "\n".join(lines)
 
@@ -581,6 +601,7 @@ def build_sbatch_script(
             render_ray_prelude()
             if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
             else "",
+            _render_pool_nodes(config, compute),
             _render_ray_head_addresses(config, compute),
         )
         if block
@@ -588,7 +609,6 @@ def build_sbatch_script(
 
     observed = otel_active(config)
 
-    offsets = _pool_offsets(compute)
     service_commands = "\n\n".join(
         ([_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node)] if observed else [])
         + [
@@ -601,11 +621,11 @@ def build_sbatch_script(
                 # Only services that actually span multiple nodes need --nodes/--ntasks - not every
                 # service in a multi-node job (e.g. a plain Ray head service runs on a single node
                 # regardless of how many nodes the overall job spans). A pinned service always gets
-                # them, since --relative is meaningless without a node count.
+                # them, so the node list and the step size agree.
                 nodes=_srun_nodes(service, compute, total_nodes),
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
                 pre_command=service.pre_command,
-                relative=offsets[service.node_pool][0] if service.node_pool else None,
+                nodelist=pool_nodes_var(service.node_pool) if service.node_pool else None,
             )
             for name, service in config.services.items()
         ]

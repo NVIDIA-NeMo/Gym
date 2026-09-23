@@ -1636,7 +1636,8 @@ def _render(tmp_path, services, pools=None):
 
 
 def test_pinned_services_take_contiguous_node_ranges(tmp_path):
-    # --relative is what gives a service nodes of its own; without it both steps
+    # --nodelist names each pool's hosts; --relative is only a hint Slurm can move a
+    # step off (seen on a cluster run: the head landed on the worker's node). Without it both steps
     # start at node 0 and the second one shares the first one's GPUs.
     script = _render(
         tmp_path,
@@ -1645,8 +1646,10 @@ def test_pinned_services_take_contiguous_node_ranges(tmp_path):
             "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
         },
     )
-    assert "--relative=0 --nodes=1 --ntasks=1" in script.split("# service: policy")[1]
-    assert "--relative=1 --nodes=1 --ntasks=1" in script.split("# service: scorer")[1]
+    assert 'export GYM_POOL_GPU_NODES="$(IFS=,; echo "${gym_nodes[*]:0:1}")"' in script
+    assert 'export GYM_POOL_AUX_NODES="$(IFS=,; echo "${gym_nodes[*]:1:1}")"' in script
+    assert '--nodelist="$GYM_POOL_GPU_NODES" --nodes=1 --ntasks=1' in script.split("# service: policy")[1]
+    assert '--nodelist="$GYM_POOL_AUX_NODES" --nodes=1 --ntasks=1' in script.split("# service: scorer")[1]
 
 
 def test_a_pinned_single_node_service_is_not_built_as_multi_node(tmp_path):
@@ -1668,7 +1671,7 @@ def test_an_unpinned_service_keeps_the_whole_allocation(tmp_path):
         tmp_path,
         {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
     )
-    assert "--relative=" not in script
+    assert "--nodelist" not in script
 
 
 def test_an_unknown_node_pool_is_named(tmp_path):
@@ -1728,7 +1731,7 @@ def test_a_worker_joins_a_head_service_by_its_placed_address(tmp_path):
     # exports it and the worker reads it rather than a hard-coded address.
     config = _head_worker_config(tmp_path, {"head": "ray_head", "resources": {"extra_gpu": 4}})
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
-    assert 'export GYM_RAY_ADDRESS_RAY_HEAD="$(getent hosts ${gym_ray_nodes[0]}' in script
+    assert 'export GYM_RAY_ADDRESS_RAY_HEAD="$(getent hosts ${gym_nodes[0]}' in script
     assert ':6380"' in script
     assert '--address "$GYM_RAY_ADDRESS_RAY_HEAD"' in script.split("# service: scorer")[1]
 
@@ -1740,7 +1743,7 @@ def test_a_head_on_a_later_pool_exports_that_pools_node(tmp_path):
         _TWO_POOLS,
     )
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
-    assert "${gym_ray_nodes[1]}" in script
+    assert "${gym_nodes[1]}" in script
 
 
 def test_ray_extra_args_are_appended():
