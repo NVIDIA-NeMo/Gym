@@ -69,6 +69,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.token_id_capture import (
     current_capture_context,
+    mark_current_generation_started,
     mark_no_generation,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
@@ -308,6 +309,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 class VLLMModel(SimpleResponsesAPIModel):
+    def _defer_generation_started_to_backend_dispatch(self) -> bool:
+        # Prefix recovery may need an asynchronous coordinator claim before a
+        # physical backend request exists, and several validation branches return
+        # locally. Keep those calls pre-generation so checkpoint prepare can park
+        # them instead of trying to cut a generation that was never dispatched.
+        return True
+
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -713,6 +721,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
+        mark_current_generation_started()
         response_dict = await client.create_response(**body_dict)
 
         return NeMoGymResponse.model_validate(response_dict)
@@ -1194,6 +1203,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        mark_current_generation_started()
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
@@ -1556,6 +1566,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
 
+        mark_current_generation_started()
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
