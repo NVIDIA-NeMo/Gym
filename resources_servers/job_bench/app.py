@@ -30,7 +30,7 @@ from nemo_gym.judge import JudgeError
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
-from resources_servers.job_bench.task_data import resolve_task_path
+from resources_servers.job_bench.dataset import resolve_task_path
 from resources_servers.job_bench.vendor import judge
 
 

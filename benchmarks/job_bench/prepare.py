@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from resources_servers.job_bench.task_data import snapshot_root
+from resources_servers.job_bench.dataset import snapshot_root
 
 
 DATA_DIR = Path(__file__).parent / "data"
