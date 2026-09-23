@@ -275,6 +275,9 @@ class OtelConfig(_StrictModel):
     node_metrics_port: int | None = 9100
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
+    # POC: also forward everything, unchanged, to a second OTLP/gRPC endpoint (plaintext), e.g. a
+    # node-local collector on `http://localhost:44327` that feeds ClickHouse.
+    forward_grpc_endpoint: str | None = None
 
     @field_validator("token_env")
     @classmethod

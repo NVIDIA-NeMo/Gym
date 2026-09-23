@@ -256,4 +256,8 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             },
         },
     }
+    if obs.forward_grpc_endpoint:
+        doc["exporters"]["otlp/forward"] = {"endpoint": obs.forward_grpc_endpoint, "tls": {"insecure": True}}
+        for pipeline in doc["service"]["pipelines"].values():
+            pipeline["exporters"].append("otlp/forward")
     return yaml.safe_dump(doc, sort_keys=False)
