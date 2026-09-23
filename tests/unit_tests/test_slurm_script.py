@@ -1698,10 +1698,62 @@ def test_a_ray_worker_joins_the_head_and_advertises_its_resources():
 
 
 def test_a_ray_worker_without_an_address_is_refused():
-    with pytest.raises(ValueError, match="needs `address`"):
+    with pytest.raises(ValueError, match="exactly one of `address` or `head`"):
         RayServiceConfig(type="ray", container="img", mode="worker")
 
 
 def test_a_ray_head_with_an_address_is_refused():
     with pytest.raises(ValueError, match="starts its own cluster"):
         RayServiceConfig(type="ray", container="img", address="10.0.0.1:6379")
+
+
+def _head_worker_config(tmp_path, worker):
+    return _placement_config(
+        tmp_path,
+        {
+            "ray_head": {"type": "ray", "container": "img", "mode": "head", "port": 6380, "node_pool": "gpu"},
+            "scorer": {"type": "ray", "container": "img", "mode": "worker", "node_pool": "aux", **worker},
+        },
+        _TWO_POOLS,
+    )
+
+
+def test_a_worker_joins_a_head_service_by_its_placed_address(tmp_path):
+    # The head's host is only known once Slurm places the job, so the script
+    # exports it and the worker reads it rather than a hard-coded address.
+    config = _head_worker_config(tmp_path, {"head": "ray_head", "resources": {"extra_gpu": 4}})
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert 'export GYM_RAY_ADDRESS_RAY_HEAD="$(getent hosts ${gym_ray_nodes[0]}' in script
+    assert ':6380"' in script
+    assert '--address "$GYM_RAY_ADDRESS_RAY_HEAD"' in script.split("# service: scorer")[1]
+
+
+def test_a_head_on_a_later_pool_exports_that_pools_node(tmp_path):
+    config = _placement_config(
+        tmp_path,
+        {"ray_head": {"type": "ray", "container": "img", "mode": "head", "node_pool": "aux"}},
+        _TWO_POOLS,
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert "${gym_ray_nodes[1]}" in script
+
+
+def test_ray_extra_args_are_appended():
+    command = _build_ray_command(
+        RayServiceConfig(type="ray", container="img", extra_args="--include-dashboard=false --node-manager-port=8366")
+    )
+    assert command.endswith("--include-dashboard=false --node-manager-port=8366")
+
+
+def test_a_worker_naming_something_other_than_a_head_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="must name a ray service with mode='head'"):
+        _placement_config(
+            tmp_path,
+            {"scorer": {"type": "ray", "container": "img", "mode": "worker", "head": "missing", "node_pool": "aux"}},
+            _TWO_POOLS,
+        )
+
+
+def test_a_worker_with_both_address_and_head_is_refused():
+    with pytest.raises(ValueError, match="exactly one of `address` or `head`"):
+        RayServiceConfig(type="ray", container="img", mode="worker", address="h:1", head="ray_head")

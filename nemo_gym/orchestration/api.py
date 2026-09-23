@@ -162,8 +162,10 @@ class RayServiceConfig(BaseServiceConfig):
     # second node joins the driver's Ray cluster and offers its GPUs to actors the
     # benchmark schedules (e.g. a scorer that runs off the policy's node).
     mode: Literal["head", "worker"] = "head"
-    # Required for mode="worker": the head's host:port.
+    # For mode="worker": the head's host:port, or `head`, the name of a ray head
+    # service in this config whose address is only known once the job is placed.
     address: str | None = None
+    head: str | None = None
     # Head only; ignored by a worker, which takes the port from `address`.
     port: int = 6379
     # Custom Ray resources this node advertises, e.g. {"extra_gpu": 4}. A benchmark
@@ -172,13 +174,15 @@ class RayServiceConfig(BaseServiceConfig):
     resources: dict[str, float] = {}
     num_cpus: int | None = None
     num_gpus: int | None = None
+    # Raw extra flags appended verbatim to `ray start` (e.g. fixed ports).
+    extra_args: str = ""
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "RayServiceConfig":
-        if self.mode == "worker" and not self.address:
-            raise ValueError("A ray service with mode='worker' needs `address` set to the head's host:port.")
-        if self.mode == "head" and self.address:
-            raise ValueError("A ray service with mode='head' starts its own cluster; remove `address`.")
+        if self.mode == "worker" and bool(self.address) == bool(self.head):
+            raise ValueError("A ray service with mode='worker' needs exactly one of `address` or `head`.")
+        if self.mode == "head" and (self.address or self.head):
+            raise ValueError("A ray service with mode='head' starts its own cluster; remove `address`/`head`.")
         return self
 
 
@@ -295,6 +299,13 @@ class SubmitConfig(_StrictModel):
                     f"Service '{service_name}' placement '{service.placement}' does not match any compute resource "
                     f"({', '.join(sorted(compute_names))})."
                 )
+
+            if isinstance(service, RayServiceConfig) and service.head is not None:
+                head = self.services.get(service.head)
+                if not isinstance(head, RayServiceConfig) or head.mode != "head":
+                    raise ValueError(
+                        f"Service '{service_name}' head '{service.head}' must name a ray service with mode='head'."
+                    )
 
             if service.node_pool is not None and service.node_pool not in pool_names:
                 raise ValueError(
