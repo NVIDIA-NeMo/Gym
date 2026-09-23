@@ -218,6 +218,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
+| Agent Security Bench (ASB) prompt set | MIT (original); Apache-2.0 (NVIDIA modifications) | `benchmarks/asb/upstream_spec.py` (injected-prompt assembly, system-instruction assembly, defense texts and the refusal-judge prompt, transcribed verbatim from `ReactAgentAttack` and `build_system_instruction`) | https://github.com/agiresearch/ASB |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -225,6 +226,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - tau2-bench: original MIT notices preserved in each vendored file; NVIDIA modifications noted in-file and in `resources_servers/indian_banking/README.md`
 - AssayBench: original MIT notice preserved in the vendored file; the `assaybench` metric package itself is a pinned PyPI dependency of that server (`resources_servers/assaybench/requirements.txt`), not vendored
 - ReactionMechanismReasoning: pinned at upstream revision `63bb79f912f0b2de593996b80ffeea894f6f1a59`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications to the ported scorer are documented at their call sites in `metrics.py` and summarised in `resources_servers/fukuyamabench/README.md`. Benchmark data is **not** vendored; it is downloaded at runtime by `scripts/prepare_fukuyamabench.py`.
+- ASB: only the prompt strings are checked in, so that a run is reproducible without a network fetch and so drift is detectable; the upstream repository itself is cloned at a pinned revision by `benchmarks/asb/prepare.py` and is not vendored. Provenance and the SHA-256 of every input it reads are recorded in `benchmarks/asb/upstream_spec.py`
 
 ---
 
