@@ -199,7 +199,7 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
                 "message",
             ]
             assert body["usage"]["total_tokens"] == 22
-            assert body["usage"]["input_tokens_details"]["cached_tokens"] == 2
+            assert body["usage"]["input_tokens_details"]["cached_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
             assert "_ng_agent_observations" not in body
             payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
@@ -733,7 +733,7 @@ def test_multiturn_message_ids_are_unique_and_tool_ids_preserved(setup):
 
 
 @pytest.mark.parametrize(
-    "cache_read, expected", [(0, 2), (3, 5), (None, None), (-1, None), ("3", None), ("invalid", None), (True, None)]
+    "cache_read, expected", [(0, None), (3, 5), (None, None), (-1, None), ("3", None), ("invalid", None), (True, None)]
 )
 def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read, expected):
     agent, sandbox = setup
@@ -743,15 +743,18 @@ def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read,
         final_usage.pop("cacheRead")
     else:
         final_usage["cacheRead"] = cache_read
-    response, _ = native_event_response(agent, sandbox, recorded)
+    response, observations = native_event_response(agent, sandbox, recorded)
     assert response["usage"]["input_tokens_details"]["cached_tokens"] == expected
+    gaps = {gap["code"] for gap in observations["gaps"]}
+    assert ("cached_token_usage_unavailable" in gaps) is (expected is None)
+    assert "reasoning_token_usage_unavailable" in gaps
     assert response["usage"]["input_tokens"] == (20 if cache_read == 3 and type(cache_read) is int else 17)
     assert response["usage"]["output_tokens"] == 5
     assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
     assert response["output"][0]["type"] == "reasoning"
 
 
-def test_reported_cache_zero_remains_known(setup):
+def test_defaulted_cache_zero_remains_unknown(setup):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events().splitlines()]
     for event in recorded:
@@ -759,4 +762,4 @@ def test_reported_cache_zero_remains_known(setup):
         if message.get("role") == "assistant":
             message["usage"]["cacheRead"] = 0
     response, _ = native_event_response(agent, sandbox, recorded)
-    assert response["usage"]["input_tokens_details"]["cached_tokens"] == 0
+    assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
