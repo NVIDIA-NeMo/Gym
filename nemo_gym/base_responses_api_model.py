@@ -64,7 +64,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER, maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1431,6 +1431,13 @@ class _CaptureMiddleware:
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
 
+        async def _send_with_model_call_id(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
+            await send(message)
+
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
         # Middleware cannot recover token ids from SSE.
@@ -1467,7 +1474,7 @@ class _CaptureMiddleware:
                         terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
                     if terminal is not None or not message.get("more_body", False):
                         await _fail_uncommitted_external_call(capture_context)
-                await send(message)
+                await _send_with_model_call_id(message)
 
             try:
                 await self._app(scope, receive, _send_training_only)
@@ -1502,6 +1509,9 @@ class _CaptureMiddleware:
             nonlocal defer_response
             message_type = message.get("type")
             if message_type == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
                 state["status"] = message.get("status")
                 content_type = _headers_content_type(message.get("headers") or [])
                 state["streaming"] = content_type.startswith(b"text/event-stream")
