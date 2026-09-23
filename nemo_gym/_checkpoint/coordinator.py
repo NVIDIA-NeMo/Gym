@@ -1264,13 +1264,40 @@ class WorkerAdmissionAgent:
         self._service_requests.clear()
 
     async def _listen(self, reader: asyncio.StreamReader) -> None:
-        try:
+        state_messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def read_messages() -> None:
             async for message in _read_messages(reader):
                 if message.get("type") in {"service_result", "service_error"}:
                     self._complete_service_request(message)
                 else:
+                    # State application may cut hundreds of generations or read
+                    # checkpoint artifacts. Keep it off the socket reader so a
+                    # generation-cut claim reply cannot sit behind that work.
+                    state_messages.put_nowait(message)
+
+        async def apply_state_messages() -> None:
+            while True:
+                message = await state_messages.get()
+                try:
                     await self._apply_state_message(message)
+                finally:
+                    state_messages.task_done()
+
+        reader_task = asyncio.create_task(read_messages())
+        state_task = asyncio.create_task(apply_state_messages())
+        try:
+            done, _ = await asyncio.wait(
+                (reader_task, state_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                task.result()
         finally:
+            for task in (reader_task, state_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(reader_task, state_task, return_exceptions=True)
             for future in tuple(self._service_requests.values()):
                 if not future.done():
                     future.set_exception(ConnectionError("checkpoint coordinator connection closed"))
