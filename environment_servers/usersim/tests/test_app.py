@@ -17,7 +17,7 @@ from nemo_gym.base_environment_server import BaseEnvironmentServer
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.usersim_episode_types import UserSimEpisodeRequest, UserSimTaskInput
+from resources_servers.usersim.types import UserSimEpisodeRequest, UserSimTaskInput
 
 
 class _Cookie:
@@ -118,7 +118,6 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
         assistant_agent=AgentServerRef(type="responses_api_agents", name="assistant"),
         judge_model=ModelServerRef(type="responses_api_models", name="support"),
         summary_model=ModelServerRef(type="responses_api_models", name="support"),
-        api_response_model=ModelServerRef(type="responses_api_models", name="support"),
         resources_tool_transports=["direct_http"],
         max_turns=2,
     )
@@ -250,12 +249,7 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
     assert response.failure is None
     assert response.result is not None
     assert response.result.verification.reward == 1.0
-    assert [invocation.alias for invocation in response.result.invocations] == [
-        "user_model",
-        "assistant_model",
-        "judge_model",
-    ]
-    assert [invocation.executor for invocation in response.result.invocations] == ["agent", "agent", "model"]
+    assert [invocation.role for invocation in response.result.invocations] == ["user", "assistant", "judge"]
     assert response.result.invocations[1].request.max_output_tokens == 128
     assert response.result.invocations[1].termination_reason == "usersim_early_stop"
     assert [path for _, path, _ in client.calls] == [
@@ -278,10 +272,10 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
     assert client.calls[4][2]["cookies"] == {"session": "assistant-cookie"}
     verify_body = client.calls[8][2]["json"]
     assert verify_body.task_id == TaskId(taskset="usersim:example", task_id="task")
-    assert [invocation.alias for invocation in verify_body.verification_input.invocations] == [
-        "user_model",
-        "assistant_model",
-        "judge_model",
+    assert [invocation.role for invocation in verify_body.verification_input.invocations] == [
+        "user",
+        "assistant",
+        "judge",
     ]
 
 
