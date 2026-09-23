@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.usersim.app import (
+    PROBE_SCORERS,
+    SUPPORTED_PROBES,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
 )
@@ -157,6 +159,30 @@ def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> No
     assert response.json()["scenario"]["theme"]["type"] == "local ecology"
 
 
+def test_supported_probes_match_pinned_usersim_registry() -> None:
+    pytest.importorskip("usersim.engine.generator")
+    from usersim.engine.core.probes import known_probes
+
+    assert set(known_probes()) == SUPPORTED_PROBES
+
+
+def test_probe_scorers_cover_every_probe_with_a_dedicated_scorer() -> None:
+    assert set(PROBE_SCORERS) == SUPPORTED_PROBES - {"general_open_ended", "general_educational"}
+
+
+def test_persona_derived_probe_does_not_require_a_theme() -> None:
+    config = UserSimResourcesServerConfig(
+        host="127.0.0.1",
+        port=12345,
+        entrypoint="app.py",
+        name="usersim",
+        probe_mix={"sov_ai_facts": 1.0},
+        probe_themes={},
+    )
+
+    assert config.probe_mix == {"sov_ai_facts": 1.0}
+
+
 def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
     _write_personas(tmp_path)
     app = _app(tmp_path)
@@ -287,6 +313,96 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     assert verified["verifier_data"]["usersim_context"]["seed"] == 7
     assert incomplete["reward"] == 0.0
     assert incomplete["scenario_completed"] is False
+
+
+@pytest.mark.parametrize(
+    ("status_proposal", "error", "expected_reward"),
+    [(True, None, 1.0), (False, None, 0.0), (True, "judge failed", 0.0)],
+)
+def test_verify_applies_native_scorer_to_non_tool_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_proposal: bool,
+    error: str | None,
+    expected_reward: float,
+) -> None:
+    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
+    calls: list[tuple[str, dict, dict]] = []
+
+    def fake_get_scorer(name: str):
+        def score(trajectory: dict, models: dict) -> dict:
+            calls.append((name, trajectory, models))
+            return {"status_proposal": status_proposal, "error": error}
+
+        return score
+
+    monkeypatch.setattr(scorers, "get_scorer", fake_get_scorer)
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post(
+            "/seed_session",
+            json=_seed_body(seed=7, probe_type="safety_chat_pressure"),
+        ).json()
+        verified = client.post("/verify", json=_verify_body(seed)).json()
+
+    assert calls[0][0] == "safety_chat_pressure"
+    assert calls[0][1]["probe_type"] == "safety_chat_pressure"
+    assert calls[0][2] == {}
+    assert verified["reward"] == expected_reward
+    assert verified["reward_components"]["native_scorer_applied"] == 1.0
+    assert verified["verifier_data"]["native_scorer_name"] == "safety_chat_pressure"
+    assert verified["verifier_data"]["native_scores"]["error"] == error
+
+
+def test_verify_skips_concealment_scorer_for_default_health_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
+    monkeypatch.setattr(
+        scorers,
+        "get_scorer",
+        lambda _name: pytest.fail("default health variant has no concealment ground truth"),
+    )
+    _write_personas(tmp_path)
+    seed_body = _seed_body(seed=7, probe_type="health_general_disclosure")
+    seed_body["task_data"]["probe_data"] = {"probe_variant": "default"}
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post("/seed_session", json=seed_body).json()
+        verified = client.post("/verify", json=_verify_body(seed)).json()
+
+    assert verified["reward"] == 1.0
+    assert verified["reward_components"]["native_scorer_applied"] == 0.0
+    assert verified["verifier_data"]["native_scorer_name"] is None
+    assert verified["verifier_data"]["native_scores"] is None
+
+
+def test_verify_translates_native_scorer_exception_to_failed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
+
+    def fake_get_scorer(_name: str):
+        def score(_trajectory: dict, _models: dict) -> dict:
+            raise RuntimeError("scorer unavailable")
+
+        return score
+
+    monkeypatch.setattr(scorers, "get_scorer", fake_get_scorer)
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post(
+            "/seed_session",
+            json=_seed_body(seed=7, probe_type="sov_ai_facts"),
+        ).json()
+        verified = client.post("/verify", json=_verify_body(seed)).json()
+
+    assert verified["reward"] == 0.0
+    assert verified["verifier_data"]["native_scores"] == {
+        "status_proposal": False,
+        "error": "RuntimeError: scorer unavailable",
+    }
 
 
 def test_verify_rejects_context_from_another_seeded_episode(tmp_path: Path) -> None:
