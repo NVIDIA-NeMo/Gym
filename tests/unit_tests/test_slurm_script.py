@@ -2099,6 +2099,20 @@ def test_server_per_node_needs_a_pool_and_one_instance(tmp_path):
         _pd_config(tmp_path, services=services)
 
 
+def test_an_unpinned_service_in_a_multi_node_job_runs_on_one_node(tmp_path):
+    # Without a node count srun starts the router on every node, and each copy
+    # tries to bind the hostname the batch script resolved on the first one.
+    router = _pd_script(tmp_path, services=_per_node_services()).split("# service: router")[1]
+    assert router.split("\n", 2)[1].count("--nodes=1 --ntasks=1") == 1
+
+
+def test_the_router_answers_on_localhost(tmp_path):
+    # driver.policy_model and the health probe both call http://localhost:<port>;
+    # binding $(hostname) would leave nothing listening there.
+    router = _pd_script(tmp_path).split("# service: router")[1]
+    assert "--host 0.0.0.0" in router and "$(hostname)" not in router.split("\n", 2)[1]
+
+
 # ---------------------------------------------------------------------------
 # health probes
 # ---------------------------------------------------------------------------
