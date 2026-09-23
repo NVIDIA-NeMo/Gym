@@ -52,7 +52,37 @@ from nemo_gym.usersim_episode_types import (
 
 
 TOOL_PROBES = frozenset({"tool_calling", "safety_agentic", "financial_services"})
-SUPPORTED_PROBES = frozenset({"general_open_ended", "general_educational", *TOOL_PROBES})
+THEME_DRIVEN_PROBES = frozenset({"tool_calling", "general_open_ended", "general_educational"})
+PROBE_SCORERS = {
+    "financial_services": "financial_services",
+    "health_decision_support_disclosure": "health_disclosure_concealment",
+    "health_general_disclosure": "health_disclosure_concealment",
+    "health_therapy_disclosure": "health_disclosure_concealment",
+    "health_triage_disclosure": "health_disclosure_concealment",
+    "safety_agentic": "safety_agentic",
+    "safety_chat_pressure": "safety_chat_pressure",
+    "sov_ai_dynamic": "sov_ai_dynamic",
+    "sov_ai_facts": "sov_ai_facts",
+    "sov_ai_multilingual_parity": "sov_ai_multilingual_parity",
+    "tool_calling": "tool_use",
+}
+SUPPORTED_PROBES = frozenset(
+    {
+        "financial_services",
+        "general_educational",
+        "general_open_ended",
+        "health_decision_support_disclosure",
+        "health_general_disclosure",
+        "health_therapy_disclosure",
+        "health_triage_disclosure",
+        "safety_agentic",
+        "safety_chat_pressure",
+        "sov_ai_dynamic",
+        "sov_ai_facts",
+        "sov_ai_multilingual_parity",
+        "tool_calling",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -107,7 +137,9 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
         if sum(self.probe_mix.values()) <= 0:
             raise ValueError("probe_mix weights must sum to more than zero")
         missing_themes = {
-            probe for probe, weight in self.probe_mix.items() if weight > 0 and not self.probe_themes.get(probe)
+            probe
+            for probe, weight in self.probe_mix.items()
+            if probe in THEME_DRIVEN_PROBES and weight > 0 and not self.probe_themes.get(probe)
         }
         if missing_themes:
             raise ValueError(f"Missing themes for probe types: {sorted(missing_themes)}")
@@ -508,6 +540,55 @@ class UserSimResourcesServer(SimpleResourcesServer):
             profile=compute_behavioral_profile(scenario.persona),
         )
 
+    async def _score_native_result(
+        self,
+        seeded: SeededUserSimEpisode,
+        native_result: UserSimSimulationResult,
+    ) -> tuple[str | None, dict[str, Any] | None, bool]:
+        scenario = seeded.seed.scenario
+        scorer_name = PROBE_SCORERS.get(scenario.probe_type)
+        if (
+            scorer_name == "health_disclosure_concealment"
+            and scenario.probe_data.get("probe_variant", "default") != "guarded"
+        ):
+            return None, None, True
+        if scorer_name is None:
+            return None, None, True
+
+        result_extras = seeded.runtime.evidence()["result_extras"] if seeded.runtime is not None else {}
+        trajectory = {
+            **native_result.model_dump(mode="python"),
+            **result_extras,
+            "locale": scenario.locale,
+            "persona": scenario.persona,
+            "probe_type": scenario.probe_type,
+        }
+        if seeded.runtime is not None:
+            scorer_models = {alias: model for alias, model in seeded.runtime.models.items() if alias == "judge_model"}
+        elif self.config.judge_model is not None:
+            scorer_models = {
+                "judge_model": _ResourcesModelFacade(
+                    self,
+                    self.config.judge_model,
+                    asyncio.get_running_loop(),
+                )
+            }
+        else:
+            scorer_models = {}
+
+        try:
+            from usersim.engine.evaluator.scorers import get_scorer
+
+            scores = await asyncio.to_thread(get_scorer(scorer_name), trajectory, scorer_models)
+        except Exception as error:
+            logger.exception("Native UserSim scorer %s failed", scorer_name)
+            scores = {
+                "status_proposal": False,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        passed = scores.get("status_proposal") is True and not scores.get("error")
+        return scorer_name, scores, passed
+
     async def invoke_probe_tool(
         self,
         request: Request,
@@ -553,25 +634,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
             native_result = UserSimSimulationResult.model_validate(
                 await asyncio.to_thread(seeded.runtime.finalize, transcript)
             )
-        native_scores: dict[str, Any] | None = None
-        native_scorer_pass = True
-        if seeded.runtime is not None:
-            from usersim.engine.evaluator.scorers import get_scorer, load_default_scorers
-
-            load_default_scorers()
-            scorer_name = (
-                "tool_use" if seeded.seed.scenario.probe_type == "tool_calling" else seeded.seed.scenario.probe_type
-            )
-            trajectory = {
-                **native_result.model_dump(mode="python"),
-                **seeded.runtime.evidence()["result_extras"],
-                "locale": seeded.seed.scenario.locale,
-                "persona": seeded.seed.scenario.persona,
-                "probe_type": seeded.seed.scenario.probe_type,
-            }
-            scorer_models = {alias: model for alias, model in seeded.runtime.models.items() if alias == "judge_model"}
-            native_scores = await asyncio.to_thread(get_scorer(scorer_name), trajectory, scorer_models)
-            native_scorer_pass = bool(native_scores.get("status_proposal", False)) and not native_scores.get("error")
+        native_scorer_name, native_scores, native_scorer_pass = await self._score_native_result(
+            seeded,
+            native_result,
+        )
         participants_completed = {"user", "assistant"} <= _conversation_roles(native_result)
         scenario_completed = native_result.conversation_status and participants_completed and native_scorer_pass
         return UserSimVerification(
@@ -579,16 +645,18 @@ class UserSimResourcesServer(SimpleResourcesServer):
             reward_components={
                 "participants_completed": float(participants_completed),
                 "native_conversation_status": float(native_result.conversation_status),
+                "native_scorer_applied": float(native_scorer_name is not None),
                 "native_scorer_pass": float(native_scorer_pass),
             },
             scenario_completed=scenario_completed,
-            native_usersim_result=native_result if seeded.runtime is not None else None,
+            native_usersim_result=native_result,
             verifier_data={
                 "invocations": [invocation.model_dump(mode="json") for invocation in verification_input.invocations],
                 "episode_interaction_protocol": verification_input.episode_interaction_protocol,
                 "scenario": verification_input.scenario.model_dump(mode="json"),
                 "usersim_context": verification_input.usersim_context.model_dump(mode="json"),
                 "usersim_result": native_result.model_dump(mode="json"),
+                "native_scorer_name": native_scorer_name,
                 "native_scores": native_scores,
                 "scenario_completed": scenario_completed,
             },
