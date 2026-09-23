@@ -21,8 +21,9 @@ benchmarks/usersim/data/personas/
 ```
 
 It also materializes `benchmarks/usersim/data/usersim.jsonl`, the lightweight
-Gym task dataset. The Resources Server validates and loads this prepared panel;
-it does not duplicate Data Designer's person-sampling logic.
+Gym task dataset. Its 13 rows provide one example for every first-party UserSim
+probe. The Resources Server validates and loads the prepared panel; it does not
+duplicate UserSim's person-sampling logic.
 
 While UserSim is private, the Environment Server installs the pinned source
 revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
@@ -38,11 +39,15 @@ Dataset rows contain only per-task sampling inputs and optional model-call
 parameter overrides. Resolved scenarios are output-only and cannot be supplied
 by a dataset row.
 
-The included example independently configures User tools
-(`record_user_context`, `finish_episode`) and the Assistant tool
-(`read_user_context`). Their calls share one task-scoped Resources session.
-The resulting ordered `agent_turns` retain both participants, tool calls and
-results, post-turn state, observations, and the final termination reason.
+`tool_calling`, `safety_agentic`, and `financial_services` expose
+probe-selected tool schemas to the Assistant Agent. The Agent owns model/tool
+iteration and invokes standard Resources Server `POST /{tool_name}` endpoints.
+The Resources Server owns the episode-scoped tool implementation, mutable
+state, and native verification evidence. All other probes execute their native
+UserSim conversation shape without Assistant tools.
+
+The resulting ordered `result.invocations` retain participant and support-model
+calls, tool calls and results, post-activation state, and observations.
 
 The Assistant, simulated User, and NeMo UserSim support calls use three explicit
 model-server references: `assistant_policy_model`, `user_policy_model`, and
