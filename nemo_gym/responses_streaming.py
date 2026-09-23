@@ -134,6 +134,26 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "message":
+                content = item.get("content")
+                if (
+                    item.get("role") == "assistant"
+                    and isinstance(content, list)
+                    and content
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") in ("output_text", "refusal")
+                ):
+                    # Codex compaction replays output messages without these
+                    # response-only fields. Fill absent defaults without changing
+                    # text, supplied values, or malformed values such as null.
+                    item.setdefault("id", f"msg_{uuid4().hex}")
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "output_text":
+                            part.setdefault("annotations", [])
+                # Known messages must reach strict validation: silently dropping
+                # malformed history would let the model answer a different task.
+                kept_items.append(item)
+                continue
             if isinstance(item, dict) and item.get("type") == "reasoning":
                 # Codex 0.144.4 replays complete reasoning content without its ID.
                 # Supply only that missing identifier; retain malformed reasoning
@@ -185,6 +205,12 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         # strict chat backends require.
         leading_parts = [body.get("instructions") or ""]
         while kept_items and _is_system_like_message(kept_items[0]):
+            try:
+                _INPUT_ITEM_ADAPTER.validate_python(kept_items[0])
+            except ValidationError:
+                # Keep malformed leading messages for the strict request error,
+                # rather than losing their invalid content while hoisting text.
+                break
             leading_parts.append(_input_message_text(kept_items.pop(0)))
         hoisted = "\n\n".join(part for part in leading_parts if part)
         if hoisted:
