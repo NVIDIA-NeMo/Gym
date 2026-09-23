@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.reward_profile import restate_expected_rollouts
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -963,6 +964,21 @@ def _coverage_report(expected: int, scored: int, failure_counts: Counter, failur
     )
 
 
+def _expected_rollouts_by_agent_task(materialized_jsonl_fpath: Path) -> Counter:
+    """Count dispatched rollouts per ``(agent_name, task_index)`` from the materialized inputs.
+
+    Streams the file so a large input set costs a counter, not a second copy of the rows.
+    """
+    counts: Counter = Counter()
+    with materialized_jsonl_fpath.open("rb") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = orjson.loads(line)
+            counts[((row.get(AGENT_REF_KEY_NAME) or {}).get("name"), row.get(TASK_INDEX_KEY_NAME))] += 1
+    return counts
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -1642,6 +1658,14 @@ class RolloutCollectionHelper(BaseModel):
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
+        # Read once, up front: the rollouts that survived scoring cannot say how many were
+        # dispatched, and both the completion numbers and the health report need that count.
+        expected_by_agent_task = (
+            _expected_rollouts_by_agent_task(config.materialized_jsonl_fpath)
+            if config.materialized_jsonl_fpath.exists()
+            else None
+        )
+
         counted: List[Dict] = []
         if config.disable_aggregation:
             print(
@@ -1661,12 +1685,12 @@ class RolloutCollectionHelper(BaseModel):
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                persisted_results + counted, persisted_rows + counted, output_fpath
+                persisted_results + counted, persisted_rows + counted, output_fpath, expected_by_agent_task
             )
 
         expected_rollouts = (
-            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
-            if config.materialized_jsonl_fpath.exists()
+            sum(expected_by_agent_task.values())
+            if expected_by_agent_task is not None
             else len(input_rows) + len(persisted_results)
         )
         scored_rollouts = len(persisted_results) + len(counted)
@@ -1694,6 +1718,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    expected_rollouts=expected_rollouts,
                 )
             except Exception:
                 logger.exception(
@@ -1709,6 +1734,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         results: List[Dict],
         rows: List[Dict],
         output_fpath: Path,
+        expected_rollouts_by_agent_task: Optional[Counter] = None,
     ) -> Optional[Path]:
         """Call /aggregate_metrics on each agent server after rollouts complete.
 
@@ -1764,6 +1790,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
             await raise_for_status(agg_response)
             agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+
+            # The endpoint only ever sees the rollouts that survived scoring, so its
+            # completion numbers are computed against themselves. Restate them against the
+            # inputs the run actually dispatched.
+            if expected_rollouts_by_agent_task is not None:
+                restate_expected_rollouts(
+                    agg_result.group_level_metrics,
+                    {
+                        task_index: count
+                        for (name, task_index), count in expected_rollouts_by_agent_task.items()
+                        if name == agent_name
+                    },
+                )
 
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
@@ -2227,6 +2266,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    expected_rollouts=scored_rollouts + sum(dropped.values()),
                 )
             except Exception:
                 logger.exception(

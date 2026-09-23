@@ -63,6 +63,7 @@ from nemo_gym.rollout_collection import (
     _build_trajectory_record,
     _CompletedRollout,
     _expand_input_glob,
+    _expected_rollouts_by_agent_task,
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
@@ -1308,7 +1309,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 return None
 
         config = RolloutCollectionConfig(
@@ -1357,7 +1358,7 @@ class TestRolloutCollection:
                 assert examples == []
                 return []
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 return None
 
         config = RolloutCollectionConfig(
@@ -1806,7 +1807,7 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 """Compute aggregate metrics locally (no server needed)."""
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
@@ -1956,7 +1957,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -2035,7 +2036,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -2133,7 +2134,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
                 metrics_fpath.write_bytes(orjson.dumps([]))
                 return metrics_fpath
@@ -2462,7 +2463,7 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
@@ -2550,7 +2551,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 captured["results"] = results
                 captured["rows"] = rows
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -2611,7 +2612,7 @@ class TestRolloutCollection:
                 future.set_result(_CompletedRollout(row=example, result={"case": "new"}, rollout_latency_ms=None))
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 captured["results"] = results
                 captured["rows"] = rows
                 return None
@@ -2985,7 +2986,7 @@ class TestDisableAggregationAndCallerTaskIndex:
                     futures.append(fut)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
                 raise AssertionError("aggregator must not run when disable_aggregation=True")
 
         await Helper().run_from_config(config)
@@ -4142,3 +4143,64 @@ class TestAnAgentThatOnlyEverFails:
 
         assert set(agent_name_to_scored) == {"healthy_agent"}
         assert set(agent_name_to_dropped) == {"broken_agent"}
+
+
+class TestExpectedRollouts:
+    """The dispatched count has to come from the inputs; the rollouts file lost the dropped ones."""
+
+    def test_counts_materialized_inputs_per_agent_and_task(self, tmp_path: Path) -> None:
+        materialized = tmp_path / "inputs.jsonl"
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+            {AGENT_REF_KEY_NAME: {"name": "b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        with materialized.open("wb") as handle:
+            for row in rows:
+                handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+            handle.write(b"\n")
+
+        counts = _expected_rollouts_by_agent_task(materialized)
+
+        assert dict(counts) == {("a", 0): 2, ("b", 0): 1}
+        assert sum(counts.values()) == 3
+
+    async def test_call_aggregate_metrics_restates_completion_against_the_inputs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The endpoint only sees the scored rows, so it reports every run as complete."""
+        agg = AggregateMetrics(
+            group_level_metrics=[
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    "num_rollouts": 1,
+                    "expected_num_rollouts": 1,
+                    "missing_num_rollouts": 0,
+                    "reward_profile_completion_pct": 100.0,
+                }
+            ],
+        )
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}}]
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            results,
+            rows,
+            tmp_path / "output.jsonl",
+            Counter({("my_agent", 0): 4, ("other_agent", 0): 9}),
+        )
+
+        [group] = json.loads(metrics_fpath.read_text())[0]["group_level_metrics"]
+        assert group["expected_num_rollouts"] == 4
+        assert group["missing_num_rollouts"] == 3
+        assert group["reward_profile_completion_pct"] == 25.0

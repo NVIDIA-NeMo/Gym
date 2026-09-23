@@ -24,6 +24,7 @@ from nemo_gym.reward_profile import (
     RewardProfiler,
     compute_aggregate_metrics,
     coverage_by_agent,
+    restate_expected_rollouts,
     select_measured,
 )
 
@@ -892,3 +893,64 @@ class TestCoverageBelongsToTheAgentThatEarnedIt:
         results = [self._result(0, 0)]
 
         assert coverage_by_agent(rows, results) == {}
+
+
+class TestRestateExpectedRollouts:
+    """Completion counted from the scored rows is a tautology, not a measurement.
+
+    Rollouts dropped before scoring leave the numerator and the denominator together, so
+    `missing_num_rollouts` is structurally 0 and `reward_profile_completion_pct` is
+    structurally 100 no matter how much of the run was lost.
+    """
+
+    @staticmethod
+    def _group(task_idx: int, num_rollouts: int) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task_idx,
+            "num_rollouts": num_rollouts,
+            "expected_num_rollouts": num_rollouts,
+            "missing_num_rollouts": 0,
+            "reward_profile_completion_pct": 100.0,
+        }
+
+    def test_dropped_rollouts_show_up_as_missing(self) -> None:
+        groups = [self._group(0, 1), self._group(1, 4)]
+
+        restate_expected_rollouts(groups, {0: 4, 1: 4})
+
+        assert groups[0]["expected_num_rollouts"] == 4
+        assert groups[0]["missing_num_rollouts"] == 3
+        assert groups[0]["reward_profile_completion_pct"] == 25.0
+        assert groups[1]["missing_num_rollouts"] == 0
+        assert groups[1]["reward_profile_completion_pct"] == 100.0
+
+    def test_a_clean_run_is_unchanged(self) -> None:
+        groups = [self._group(0, 4)]
+
+        restate_expected_rollouts(groups, {0: 4})
+
+        assert groups == [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                "num_rollouts": 4,
+                "expected_num_rollouts": 4,
+                "missing_num_rollouts": 0,
+                "reward_profile_completion_pct": 100.0,
+            }
+        ]
+
+    def test_a_task_with_no_known_denominator_is_left_alone(self) -> None:
+        """An absent expectation is unknown, not zero -- publishing a number here invents one."""
+        groups = [self._group(7, 2)]
+
+        restate_expected_rollouts(groups, {0: 4})
+
+        assert groups[0]["expected_num_rollouts"] == 2
+        assert groups[0]["missing_num_rollouts"] == 0
+
+    def test_an_expectation_of_zero_does_not_divide(self) -> None:
+        groups = [self._group(0, 0)]
+
+        restate_expected_rollouts(groups, {0: 0})
+
+        assert groups[0]["reward_profile_completion_pct"] == 100.0

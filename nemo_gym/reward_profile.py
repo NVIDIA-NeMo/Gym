@@ -948,6 +948,32 @@ def _coverage_metrics(
     }
 
 
+def restate_expected_rollouts(
+    group_level_metrics: List[Dict[str, Any]],
+    expected_by_task: Dict[Any, int],
+) -> None:
+    """Restate per-task completion against the materialized inputs, in place.
+
+    ``profile_from_data`` can only count the rollouts it was handed, and the aggregation
+    path is handed the rollouts that survived scoring. Counting those against themselves
+    makes ``missing_num_rollouts`` structurally zero and ``reward_profile_completion_pct``
+    structurally 100 -- a run that lost half its rollouts to failed judge calls reports as
+    complete. ``expected_by_task`` comes from the materialized inputs, which is the only
+    set that knows a rollout was dispatched at all.
+
+    Tasks absent from ``expected_by_task`` are left untouched: an unknown denominator must
+    not be published as a new number.
+    """
+    for group in group_level_metrics:
+        expected = expected_by_task.get(group.get(TASK_INDEX_KEY_NAME))
+        if expected is None:
+            continue
+        completed = group.get("num_rollouts", 0)
+        group["expected_num_rollouts"] = expected
+        group["missing_num_rollouts"] = expected - completed
+        group["reward_profile_completion_pct"] = 100.0 if expected == 0 else 100.0 * completed / expected
+
+
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Group verify responses by task index, returning a list of per-task rollout lists."""
     groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)

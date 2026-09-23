@@ -393,7 +393,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
                 futures.append(future)
             return futures
 
-        async def _call_aggregate_metrics(self, results, rows, output_fpath):
+        async def _call_aggregate_metrics(self, results, rows, output_fpath, expected_rollouts_by_agent_task=None):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_bytes(orjson.dumps([{"key_metrics": {"reward": 1.0}}]))
             return metrics_path
@@ -1271,3 +1271,59 @@ def test_health_check_config_accepts_csv_and_rejects_unknown_ids(tmp_path: Path)
             upload_rollouts=False,
             health_check_ignored_checks=["not_a_check"],
         )
+
+
+def test_run_coverage_counts_rollouts_that_never_reached_the_health_check(tmp_path: Path) -> None:
+    """The rollouts file only holds what survived scoring, so it cannot report its own gaps.
+
+    A run whose judge calls fail drops those rollouts before they are ever written, and
+    without an outside denominator the summary reads as a complete, healthy run.
+    """
+    rows = [(_record(task, 0), [_call()]) for task in range(2)]
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1, expected_rollouts=6)
+
+    assert result.summary["run"]["coverage"] == {
+        "expected": 6,
+        "scored": 2,
+        "missing": 4,
+        "scored_fraction": pytest.approx(1 / 3),
+    }
+    assert "Rollout coverage: 2 of 6 rollouts scored, 4 never checked" in health.format_health_report(result)
+
+
+def test_run_coverage_on_a_complete_run_reports_nothing_missing(tmp_path: Path) -> None:
+    rows = [(_record(task, 0), [_call()]) for task in range(2)]
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1, expected_rollouts=2)
+
+    assert result.summary["run"]["coverage"] == {
+        "expected": 2,
+        "scored": 2,
+        "missing": 0,
+        "scored_fraction": 1.0,
+    }
+    assert "Rollout coverage" not in health.format_health_report(result)
+
+
+def test_run_coverage_is_unknown_rather_than_complete_without_a_denominator(tmp_path: Path) -> None:
+    """`gym eval health` on a bare rollouts file has nothing to compare against.
+
+    Reporting the survivors as the expected count would be the same tautology stated by a
+    different caller, so the block says it does not know.
+    """
+    rows = [(_record(0, 0), [_call()])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1)
+
+    assert result.summary["run"]["coverage"] == {
+        "expected": None,
+        "scored": 1,
+        "missing": None,
+        "scored_fraction": None,
+    }
+    assert "Rollout coverage" not in health.format_health_report(result)
+
+
+def test_run_coverage_of_an_empty_expectation_is_not_a_division(tmp_path: Path) -> None:
+    rows = [(_record(0, 0), [_call()])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1, expected_rollouts=0)
+
+    assert result.summary["run"]["coverage"]["scored_fraction"] == 1.0
