@@ -37,7 +37,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
-    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -127,7 +126,9 @@ class TestLegacyOpenCodeAgent:
     def test_opencode_export_to_output_items(
         self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_agent.artifacts.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
 
         actual_output_items = LegacyOpenCodeAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
@@ -143,16 +144,18 @@ class TestLegacyOpenCodeAgent:
                 status="completed",
                 type="message",
             ),
-            NeMoGymResponseReasoningItem(
-                id="rs_",
-                summary=[
-                    NeMoGymSummary(
-                        text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
-                        type="summary_text",
+            NeMoGymResponseOutputMessage(
+                id="msg_",
+                content=[
+                    NeMoGymResponseOutputText(
+                        annotations=[],
+                        text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                        type="output_text",
                     )
                 ],
-                type="reasoning",
-                encrypted_content=None,
+                role="assistant",
+                status="completed",
+                type="message",
             ),
             NeMoGymResponseFunctionToolCall(
                 arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
@@ -172,6 +175,24 @@ class TestLegacyOpenCodeAgent:
         ]
 
         assert expected_output_items == actual_output_items
+
+    @mark.parametrize("part_type", ["text", "reasoning"])
+    @mark.parametrize(
+        "text", ["", " \n\t", "literal <think> opening", "literal </think> closing", " <think>x</think> \n"]
+    )
+    def test_export_preserves_explicit_part_type_and_exact_text(self, part_type: str, text: str) -> None:
+        export = {"messages": [{"info": {"role": "assistant"}, "parts": [{"type": part_type, "text": text}]}]}
+        items = LegacyOpenCodeAgent._opencode_export_to_output_items(None, export)
+        assert len(items) == 1
+        item = items[0]
+        if part_type == "text":
+            assert isinstance(item, NeMoGymResponseOutputMessage)
+            assert len(item.content) == 1
+            assert item.content[0].text == text
+        else:
+            assert isinstance(item, NeMoGymResponseReasoningItem)
+            assert len(item.summary) == 1
+            assert item.summary[0].text == text
 
     def test_opencode_export_to_usages(self, opencode_export_test_data: Dict[str, Any]) -> None:
         actual_usages = LegacyOpenCodeAgent._opencode_export_to_usages(None, opencode_export_test_data)
@@ -223,7 +244,9 @@ class TestLegacyOpenCodeAgent:
         monkeypatch.setattr(
             "responses_api_agents.opencode_agent.legacy.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_agent.artifacts.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
         monkeypatch.setattr("responses_api_agents.opencode_agent.legacy.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
@@ -257,16 +280,18 @@ class TestLegacyOpenCodeAgent:
                     status="completed",
                     type="message",
                 ),
-                NeMoGymResponseReasoningItem(
-                    id="rs_",
-                    summary=[
-                        NeMoGymSummary(
-                            text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
-                            type="summary_text",
+                NeMoGymResponseOutputMessage(
+                    id="msg_",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            annotations=[],
+                            text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                            type="output_text",
                         )
                     ],
-                    type="reasoning",
-                    encrypted_content=None,
+                    role="assistant",
+                    status="completed",
+                    type="message",
                 ),
                 NeMoGymResponseFunctionToolCall(
                     arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
