@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig
 
-from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
+from nemo_gym.cli.eval import (
+    _materialized_rollout_input_path,
+    _validate_prepared_split_file_exists,
+    _validate_split_datasets_declared,
+)
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 
 
@@ -102,3 +106,17 @@ class TestValidatePreparedSplitFileExists:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(ConfigError, match=r"none"):
             _validate_prepared_split_file_exists(missing_dir / "train.jsonl", "train", missing_dir)
+
+
+class TestMaterializedRolloutInput:
+    def test_existing_materialized_input_is_selected_directly(self, tmp_path: Path) -> None:
+        input_path = tmp_path / "tasks.jsonl"
+        input_path.write_text("{}\n")
+
+        assert _materialized_rollout_input_path(str(input_path)) == input_path
+
+    def test_missing_input_fails_before_server_startup(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.jsonl"
+
+        with pytest.raises(ConfigError, match=f"Materialized environment input was not found: {missing}"):
+            _materialized_rollout_input_path(str(missing))

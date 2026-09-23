@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+instruction: instruction.md
+verifier:
+  implementation: nemo_gym.verifiers.files:text_file_equals
+  verifier_input:
+    path: /workspace/hello-gym.txt
+    content: Hello from NeMo Gym!

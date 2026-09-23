@@ -129,6 +129,30 @@ class TestSanity:
         assert sandbox.exec.await_count == 2
         assert sandbox.upload.await_count == 3
 
+        sandbox.exec.reset_mock()
+        sandbox.upload.reset_mock()
+        sandbox.exec.side_effect = [
+            MagicMock(return_code=0, stdout="nemo-gym-sandbox-uv", stderr=""),
+            MagicMock(return_code=0, stdout="", stderr=""),
+        ]
+        await hermes._initialize_agent_session_state(
+            "sandbox-uv-session",
+            AgentSeedSessionRequest(
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(
+                        provider_config_ref="runtime",
+                        descriptor={"sandbox_id": "sandbox"},
+                    ),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        assert sandbox.exec.await_count == 2
+        assert sandbox.upload.await_count == 2
+
     async def test_sandbox_access_requires_terminal_only_mode(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         body = AgentSeedSessionRequest(

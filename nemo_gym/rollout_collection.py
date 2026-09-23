@@ -781,6 +781,13 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         return self
 
 
+class MaterializedTasksInput(BaseModel):
+    """Tasks already compiled into the episode protocol's JSONL representation."""
+
+    type: Literal["materialized_tasks"]
+    path: str
+
+
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
     Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
@@ -794,8 +801,19 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     ```
     """
 
-    split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
+    split: Optional[Union[Literal["train"], Literal["validation"], Literal["benchmark"]]] = None
     reuse_existing_data_preparation: bool = False
+    rollout_input: Optional[MaterializedTasksInput] = None
+
+    @model_validator(mode="after")
+    def _validate_input_source(self) -> "E2ERolloutCollectionConfig":
+        if self.rollout_input is None and self.split is None:
+            raise ConfigError("End-to-end rollout collection requires `split` or `rollout_input`.")
+        if self.rollout_input is not None and self.split is not None:
+            raise ConfigError("`split` cannot be combined with pre-materialized `rollout_input`.")
+        if self.rollout_input is not None and self.reuse_existing_data_preparation:
+            raise ConfigError("`reuse_existing_data_preparation` does not apply to pre-materialized `rollout_input`.")
+        return self
 
     @model_validator(mode="before")
     @classmethod

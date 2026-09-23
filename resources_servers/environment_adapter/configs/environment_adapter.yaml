@@ -1,0 +1,11 @@
+environment_adapter_resources_server:
+  resources_servers:
+    environment_adapter:
+      entrypoint: app.py
+      environment_root: ???
+      runtime_image: ???
+      sandbox_provider: sandbox
+      sandbox_config: {}
+      trusted_environment_code: false
+      domain: other
+      verified: false
