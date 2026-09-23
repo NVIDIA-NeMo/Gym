@@ -225,5 +225,11 @@ class SlurmExecutor(BaseExecutor):
             (bench_dir / "logs").mkdir()
             (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
-            (bench_dir / "job.sh").write_text(script)
+            job_script = bench_dir / "job.sh"
+            job_script.write_text(script)
+            # Owner-only: every secret the config resolves at submit time -- `host:`
+            # env values and any credential passed as a run arg -- is rendered into
+            # this file in cleartext. rsync -a carries the mode to the cluster, so
+            # setting it here is what the submitted copy gets.
+            job_script.chmod(0o600)
         return staging

@@ -388,3 +388,17 @@ class TestValidateMounts:
                 raise AssertionError("no mounts, so there is nothing to check")
 
         _validate_mounts(_config_with_driver_mounts(tmp_path, []), _Explodes())
+
+
+def test_the_staged_job_script_is_owner_only(tmp_path):
+    # Every secret the config resolves at submit time is rendered into job.sh in
+    # cleartext, so the file itself has to be unreadable to anyone else. rsync -a
+    # carries this mode to the cluster.
+    config = _submit_config(tmp_path, ["bench_a"])
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    SlurmExecutor()._stage(config, config.compute["hsg"], Path("/jobs/run"), staging)
+
+    mode = (staging / "bench_a" / "job.sh").stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
