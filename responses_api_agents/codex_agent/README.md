@@ -49,6 +49,27 @@ with that recipe. It sets `environment_routing_mode: taskset` and maps `swebench
 EnvironmentServer `/run`; the environment calls Codex's session and `/v1/responses` routes.
 The agent's `/run` remains a legacy entrypoint and is not used by this native recipe.
 
+For a one-task native smoke run, first prepare the benchmark's pinned flat JSONL using
+`benchmarks/swebench/pro/prepare.py`. In the commands below, `model-provider.yaml` is your deployment
+config defining the sandbox provider and `policy_model`, including the served model name and a
+sandbox-reachable endpoint. Pass the same configs to both commands: `--no-serve` reuses the running
+servers but still loads the collector's routing configuration locally.
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
+  benchmarks/swebench/data/swebench_pro_benchmark.jsonl /tmp/swebench_pro_native.jsonl
+
+gym env start \
+  --config benchmarks/swebench/pro/codex_native.yaml \
+  --config model-provider.yaml
+
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/codex_native.yaml \
+  --config model-provider.yaml \
+  --input /tmp/swebench_pro_native.jsonl \
+  --output results/codex_native.jsonl --limit 1
+```
+
 Use a sandbox-reachable address for `policy_model`; loopback on the agent host is generally not
 reachable from a container. Codex uses the Gym model server's streaming Responses API with the
 seeded episode's capture key in its URL. Chat-only backends need Gym's Responses-to-Chat adapter;
