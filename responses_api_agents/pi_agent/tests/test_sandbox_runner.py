@@ -129,3 +129,48 @@ finally:
     assert summary["timed_out"] is True
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
+
+
+def test_spawned_child_is_reaped_when_popen_loses_handle(tmp_path):
+    # A constructor failure after process creation must still drain the subreaper's children.
+    driver = """
+import json, os, runpy, subprocess, sys
+runner = runpy.run_path(sys.argv[1])
+spawn = subprocess.Popen
+children = []
+def lost_handle(*args, **kwargs):
+    child = spawn(*args, **kwargs)
+    children.append(child)
+    raise OSError('launch handle lost after process creation')
+subprocess.Popen = lost_handle
+try:
+    summary = runner['run']({
+        'directory': sys.argv[2], 'cwd': sys.argv[2], 'env': {}, 'prompt': 'task',
+        'command': [sys.executable, '-c', 'import time; time.sleep(60)'],
+        'timeout': 5, 'cleanup_timeout': 2,
+    })
+    try:
+        os.kill(children[0].pid, 0)
+        summary['child_alive'] = True
+    except ProcessLookupError:
+        summary['child_alive'] = False
+    print(json.dumps(summary))
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["return_code"] != 0
+    assert summary["error"] == "launch handle lost after process creation"
+    assert summary["cleanup_confirmed"] is True
+    assert summary["child_alive"] is False
