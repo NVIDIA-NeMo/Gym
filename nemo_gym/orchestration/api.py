@@ -307,6 +307,10 @@ class DriverConfig(_StrictModel):
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
+    # Host in the injected policy_base_url. localhost suits clients on the driver's
+    # node; an agent in a remote sandbox needs an address it can route to, e.g.
+    # "${oc.env:HEAD_NODE_IP}", resolved when the driver runs.
+    policy_host: str = "localhost"
     # Which responses_api_models asset serves as the policy, passed as
     # `--model-type`. Not every benchmark wants the same one: Gym permits exactly
     # one entry under `policy_model.responses_api_models`, so composing
@@ -497,7 +501,7 @@ class SubmitConfig(_StrictModel):
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
                             f"but driver.policy_model is also set. Remove one."
                         )
-                    benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
+                    benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
