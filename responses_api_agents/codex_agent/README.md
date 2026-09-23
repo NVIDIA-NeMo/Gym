@@ -4,7 +4,7 @@ Runs the OpenAI Codex CLI (`codex exec`) as a NeMo Gym agent server.
 
 ## Native EnvironmentServer sessions
 
-For sandbox tasks, bind `single_agent` to the Codex agent and a Resources server that returns
+For sandbox tasks, bind `single_agent_turn` to the Codex agent and a Resources server that returns
 `SandboxAccess`. Submit episodes to the **EnvironmentServer `/run`** endpoint. Resources creates
 and prepares the task sandbox; Codex borrows it, installs the pinned CLI, runs the harness and its
 own shell/file tools inside `SandboxAccess.workdir`, confirms process cleanup, and disconnects.
@@ -27,9 +27,9 @@ codex_agent:
       resources_server: null
       openai_api_key: ""
 
-single_agent_environment_server:
+single_agent_turn_environment_server:
   environment_servers:
-    single_agent:
+    single_agent_turn:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -37,7 +37,17 @@ single_agent_environment_server:
       agent_server:
         type: responses_api_agents
         name: codex_agent
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
 ```
+
+The native SWE-bench Pro recipe is `benchmarks/swebench/pro/codex_native.yaml`. Compose it with
+sandbox-provider and Gym model configs, materialize the benchmark into task rows, then run collection
+with that recipe. It sets `environment_routing_mode: taskset` and maps `swebench_pro:smoke` to
+`swebench_pro_codex`. Each input row must contain `task_id: {taskset, task_id}` and
+`task_input: {responses_create_params, task_data}`. The collector posts that typed episode to the
+EnvironmentServer `/run`; the environment calls Codex's session and `/v1/responses` routes.
+The agent's `/run` remains a legacy entrypoint and is not used by this native recipe.
 
 Use a sandbox-reachable address for `policy_model`; loopback on the agent host is generally not
 reachable from a container. Codex uses the Gym model server's streaming Responses API with the
@@ -103,7 +113,15 @@ A Linux child-subreaper supervisor runs once per activation and kills/reaps deta
 A successful runner exit alone cannot authorize verification: close requires its cleanup receipt,
 runner-handle release, removal of session files, and successful disconnect. Unknown launches and
 unconfirmed cleanup fail close and retain session state for retry. Resources always owns sandbox
-destruction. Successful close receipts are retained for `session_close_retry_window_seconds` (300s
+destruction. The EnvironmentServer supplies the session ID. Repeating an identical seed returns that session;
+reusing the ID with changed task, episode, or sandbox access fails. Close also accepts the explicit
+ID and episode without a cookie, so a lost seed response can still be cleaned up. Closing an unknown
+ID prevents a delayed seed from creating it during the close retry window. Caller IDs are never used
+as filesystem paths. Sessions expire after `session_lifetime_seconds` (21,600s by default), measured
+from completed initialization; expiry uses the same cleanup path and blocks further activation if
+cleanup fails. Failed cleanup retains state and logs the need for owner recovery.
+
+Successful close receipts are retained for `session_close_retry_window_seconds` (300s
 default); retries do not extend this window. Concurrent close requests share one receipt. Stale cookies
 remain invalid after expiry and cannot fall back to host execution. Use a fresh cookie session for a
 new episode. State is process-local; permanently failed sessions require owner recovery and worker

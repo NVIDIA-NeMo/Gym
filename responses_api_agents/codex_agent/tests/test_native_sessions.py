@@ -25,6 +25,7 @@ from responses_api_agents.codex_agent.sandbox import CodexSandboxResult
 
 def seed() -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
+        agent_session_id="codex-test-session",
         episode_id=EpisodeId(rollout_id="codex-smoke", attempt=2),
         task_id=TaskId(taskset="swe-pro", task_id="task"),
         sandbox_access={
@@ -161,7 +162,7 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = f"/tmp/nemo-gym-codex-sessions/{session_id}"
+            directory = agent._sandbox_sessions[session_id].directory
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -336,7 +337,7 @@ def test_cookie_identity_and_single_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
-        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 409
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/wrong-a2/v1/responses", json={"input": "task"}).status_code == 409
         bad = close_body(session_id)
@@ -676,6 +677,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
         def seed_and_close(index):
             client.cookies.clear()
             body = seed().model_dump(mode="json")
+            body["agent_session_id"] = f"codex-test-session-{index}"
             body["episode_id"] = {"rollout_id": f"episode-{index}"}
             created = client.post("/v1/agent_sessions", json=body)
             assert created.status_code == 200
@@ -712,6 +714,9 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
     assert not agent._closed_sandbox_sessions
+    with pytest.raises(HTTPException) as stale_seed:
+        await agent.seed_agent_session(request, seed())
+    assert stale_seed.value.status_code == 409
     with patch.object(agent, "_create_response", AsyncMock(side_effect=AssertionError("host fallback"))):
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -843,7 +848,8 @@ async def test_provider_error_type_blocks_success_even_with_zero_exit(setup, sta
         assert not request.session
         sandbox.disconnect.assert_awaited_once()
         if stage == "prepare":
-            sandbox.exec.assert_awaited_once()
+            assert sandbox.exec.await_count == 2
+            assert sandbox.exec.await_args.args[0].startswith("rm -rf -- /tmp/nemo-gym-codex-sessions/")
         return
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     sandbox.exec.return_value = error
@@ -874,7 +880,7 @@ async def test_independent_sessions_do_not_share_identity_or_configuration(setup
     first = Request({"type": "http", "session": {}})
     second = Request({"type": "http", "session": {}})
     a = (await agent.seed_agent_session(first, seed())).agent_session_id
-    other = seed().model_copy(update={"episode_id": EpisodeId(rollout_id="other")})
+    other = seed().model_copy(update={"agent_session_id": "codex-other", "episode_id": EpisodeId(rollout_id="other")})
     b = (await agent.seed_agent_session(second, other)).agent_session_id
     assert a != b
     assert agent._sandbox_sessions[a].directory != agent._sandbox_sessions[b].directory
@@ -1009,3 +1015,273 @@ def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     assert result.returncode == 0, result.stderr
     assert (directory / "home/.codex").is_dir()
     assert not list(repository.iterdir())
+
+
+async def test_seed_is_idempotent_and_binds_complete_payload(setup):
+    agent, sandbox = setup
+    first = Request({"type": "http", "session": {}})
+    second = Request({"type": "http", "session": {}})
+    body = seed()
+    with patch.object(
+        agent, "_initialize_agent_session_state", wraps=agent._initialize_agent_session_state
+    ) as initialize:
+        results = await asyncio.gather(agent.seed_agent_session(first, body), agent.seed_agent_session(second, body))
+        assert [result.agent_session_id for result in results] == [body.agent_session_id] * 2
+        assert initialize.await_count == 1
+        changed = body.model_copy(deep=True)
+        changed.sandbox_access.workdir = "/other"
+        with pytest.raises(HTTPException) as error:
+            await agent.seed_agent_session(second, changed)
+        assert error.value.status_code == 409
+    await agent.close_agent_session(second, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_cookie_less_close_cleans_lost_seed_response(setup):
+    agent, sandbox = setup
+    body = seed()
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    request = Request({"type": "http", "session": {}})
+    close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    first = await agent.close_agent_session(request, close)
+    assert await agent.close_agent_session(Request({"type": "http", "session": {}}), close) == first
+    assert not agent._sandbox_sessions
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.codex_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    body = seed()
+    close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    receipt = await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
+    assert receipt.agent_session_id == body.agent_session_id
+    with pytest.raises(HTTPException) as error:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    assert error.value.status_code == 409
+    sandbox.exec.assert_not_awaited()
+    clock[0] = 110.0
+    agent._expire_closed_agent_sessions()
+    assert not agent._closed_sandbox_sessions
+    assert not agent._session_locks
+
+
+async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):
+    agent, sandbox = setup
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    initialize = agent._initialize_agent_session_state
+
+    async def blocked_initialize(session_id, body):
+        entered.set()
+        await release.wait()
+        return await initialize(session_id, body)
+
+    with patch.object(agent, "_initialize_agent_session_state", side_effect=blocked_initialize):
+        creation = asyncio.create_task(agent.seed_agent_session(Request({"type": "http", "session": {}}), seed()))
+        await entered.wait()
+        closure = asyncio.create_task(
+            agent.close_agent_session(
+                Request({"type": "http", "session": {}}),
+                AgentCloseSessionRequest(**close_body(seed().agent_session_id)),
+            )
+        )
+        await asyncio.sleep(0)
+        assert not closure.done()
+        release.set()
+        await asyncio.gather(creation, closure)
+    assert not agent._sandbox_sessions
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_caller_identifier_is_not_a_filesystem_path(setup):
+    agent, sandbox = setup
+    body = seed().model_copy(update={"agent_session_id": "../caller supplied/id"})
+    request = Request({"type": "http", "session": {}})
+    created = await agent.seed_agent_session(request, body)
+    assert created.agent_session_id == body.agent_session_id
+    directory = Path(agent._sandbox_sessions[created.agent_session_id].directory)
+    assert directory.parent == Path("/tmp/nemo-gym-codex-sessions")
+    assert len(directory.name) == 32
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(created.agent_session_id)))
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_abandoned_session_expiry_uses_confirmed_close(setup, cleanup_fails, caplog):
+    agent, sandbox = setup
+    agent.config.session_lifetime_seconds = 0.001
+    request = Request({"type": "http", "session": {}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    reaper = agent._session_reapers[session_id]
+    if cleanup_fails:
+        sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
+    await asyncio.wait_for(asyncio.shield(reaper), timeout=1)
+    if cleanup_fails:
+        assert agent._sandbox_sessions[session_id].closing
+        assert "owner recovery required" in caplog.text
+        request.scope["path_params"] = {"rollout_id": seed().episode_id.capture_key}
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert error.value.status_code == 409
+        sandbox.disconnect.side_effect = None
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert not agent._sandbox_sessions
+    assert session_id in agent._closed_sandbox_sessions
+    assert not agent._session_reapers
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_native_recipe_collects_through_environment_run(setup, monkeypatch):
+    """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle."""
+    from environment_servers.single_agent_turn.app import (
+        SingleAgentTurnEnvironmentServer,
+        SingleAgentTurnEnvironmentServerConfig,
+    )
+    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.server_utils import BaseServerConfig
+    from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
+
+    agent, sandbox = setup
+    recipe_path = Path(__file__).parents[3] / "benchmarks/swebench/pro/codex_native.yaml"
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths([str(recipe_path)])
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    assert config.environment_routing_mode == "taskset"
+    environment_name = config.environment_server_routes["swebench_pro:smoke"]
+    environment_config = config[environment_name].environment_servers.single_agent_turn
+    agent_name = environment_config.agent_server.name
+    resources_name = environment_config.resources_server.name
+    assert config[agent_name].responses_api_agents.codex_agent.resources_server is None
+    agent.config = CodexAgentConfig(
+        name=agent_name,
+        host="localhost",
+        port=8001,
+        **OmegaConf.to_container(config[agent_name].responses_api_agents.codex_agent, resolve=True),
+    )
+    config.policy_model = {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}
+    transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
+    agent.server_client = transport
+    environment = SingleAgentTurnEnvironmentServer(
+        config=SingleAgentTurnEnvironmentServerConfig(
+            name=environment_name,
+            host="localhost",
+            port=8002,
+            **OmegaConf.to_container(environment_config, resolve=True),
+        ),
+        server_client=transport,
+    )
+    calls = []
+    cookies = {}
+
+    class Response:
+        ok = True
+
+        def __init__(self, body, *, cookie=None):
+            self.body = json.dumps(body).encode()
+            self.cookies = {} if cookie is None else {"session": SimpleNamespace(value=cookie)}
+
+        async def read(self):
+            return self.body
+
+    async def post(self, server_name, url_path, **kwargs):
+        body = kwargs["json"]
+        calls.append((server_name, url_path))
+        if server_name == environment_name:
+            assert url_path == "/run"
+            result = await environment.run_request(SingleAgentTurnRequest.model_validate(body))
+            return Response(result.model_dump(mode="json"))
+        if server_name == resources_name:
+            if url_path == "/seed_session":
+                assert body.task_data == {"instance_id": "instance"}
+                return Response(
+                    {
+                        "resources_session_id": body.resources_session_id,
+                        "sandbox_access": seed().sandbox_access.model_dump(),
+                    },
+                    cookie="resources-cookie",
+                )
+            assert kwargs["cookies"] == {"session": "resources-cookie"}
+            if url_path == "/verify":
+                assert not agent._sandbox_sessions
+                assert sandbox.disconnect.await_count == 1
+                return Response({**body.verification_input.model_dump(mode="json"), "reward": 1.0})
+            assert url_path == "/close_session"
+            return Response({"resources_session_id": body.resources_session_id})
+        assert server_name == agent_name
+        request = Request({"type": "http", "session": cookies})
+        if url_path == "/v1/agent_sessions":
+            result = await agent.seed_agent_session(request, body)
+            assert result.agent_session_id == body.agent_session_id
+        elif url_path == "/v1/agent_sessions/close":
+            result = await agent.close_agent_session(request, body)
+        else:
+            assert url_path.endswith("/v1/responses")
+            request.scope["path_params"] = {"rollout_id": url_path.split("/")[2]}
+            result = await agent.responses(request, body)
+        return Response(result.model_dump(mode="json"), cookie="agent-cookie")
+
+    monkeypatch.setattr(ServerClient, "post", post)
+    monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: f"http://{name}:8000")
+    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self, head=None: transport)
+    materialized = {
+        "task_id": {"taskset": "swebench_pro:smoke", "task_id": "instance"},
+        "task_input": {"responses_create_params": {"input": "Fix it"}, "task_data": {"instance_id": "instance"}},
+    }
+    collection_config = RolloutCollectionConfig(
+        input_jsonl_fpath="input.jsonl",
+        output_jsonl_fpath="output.jsonl",
+        environment_routing_mode=config.environment_routing_mode,
+        environment_server_routes=OmegaConf.to_container(config.environment_server_routes),
+        num_repeats=1,
+    )
+    rows = RolloutCollectionHelper._preprocess_raw_rows(
+        [(0, json.dumps(materialized), materialized)], collection_config
+    )
+    _, result = await next(RolloutCollectionHelper().run_examples(rows))
+    assert result["failure"] is None
+    assert result["result"]["verification"]["reward"] == 1.0
+    assert result["result"]["verification"]["response"]["usage"]["total_tokens"] == 22
+    assert result["result"]["agent_observations"]["source"] == "codex"
+    assert calls == [
+        (environment_name, "/run"),
+        (resources_name, "/seed_session"),
+        (agent_name, "/v1/agent_sessions"),
+        (agent_name, "/ng-rollout/0-0/v1/responses"),
+        (agent_name, "/v1/agent_sessions/close"),
+        (resources_name, "/verify"),
+        (resources_name, "/close_session"),
+    ]
+    sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_failed_setup_preserves_handle_until_cleanup_confirmed(setup, cleanup_fails):
+    agent, sandbox = setup
+    ok = SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+    failed = SimpleNamespace(error_type=None, return_code=1, stdout="", stderr="install failed")
+    sandbox.exec.side_effect = [ok, failed, ok]
+    if cleanup_fails:
+        sandbox.disconnect.side_effect = RuntimeError("disconnect failed")
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(RuntimeError, match="installer exited"):
+        await agent.seed_agent_session(request, seed())
+    session_id = seed().agent_session_id
+    if cleanup_fails:
+        assert agent._sandbox_sessions[session_id].closing
+        with pytest.raises(HTTPException):
+            await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    else:
+        assert not agent._sandbox_sessions
+    sandbox.exec.side_effect = None
+    sandbox.disconnect.side_effect = None
+    result = await agent.close_agent_session(
+        Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(session_id))
+    )
+    assert result.agent_session_id == session_id
+    assert not agent._sandbox_sessions
+    assert not agent._session_reapers
+    sandbox.stop.assert_not_awaited()

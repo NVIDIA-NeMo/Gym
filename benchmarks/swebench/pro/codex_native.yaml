@@ -1,0 +1,41 @@
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench_pro:smoke": swebench_pro_codex
+
+swebench_pro_codex_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [codex_agent]
+
+swebench_pro_codex_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      openai_api_key: ""
+      openai_base_url: null
+      sandbox_mode: danger-full-access
+      codex_version: 0.144.4
+      timeout: 600
+      session_lifetime_seconds: 21600
+
+swebench_pro_codex:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_codex_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_codex_agent
