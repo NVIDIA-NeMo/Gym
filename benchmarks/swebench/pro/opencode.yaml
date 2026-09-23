@@ -27,4 +27,4 @@ swebench_pro_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: swebench_pro_opencode_sandboxed_agent
+        name: swebench_pro_opencode_agent

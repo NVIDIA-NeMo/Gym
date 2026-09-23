@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Use materialize_single_agent_tasks.py output with gym eval run --no-serve --input.
+# Native collection calls EnvironmentServer /run, which activates agent /v1/responses.
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench_pro:smoke": swebench_pro_opencode
+
+swebench_pro_opencode_resources_server:
+  _inherit_from: swebench_pro_resources_server
+
+swebench_pro_opencode_agent:
+  _inherit_from: opencode_agent
+
+swebench_pro_opencode:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_opencode_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_opencode_agent

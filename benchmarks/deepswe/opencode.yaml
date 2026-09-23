@@ -37,4 +37,4 @@ deepswe_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: deepswe_opencode_sandboxed_agent
+        name: deepswe_opencode_agent
