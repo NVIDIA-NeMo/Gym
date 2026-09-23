@@ -6,13 +6,21 @@
 Translated AIME 2026 from `ai4bharat/indic-aime-2026`: 30 problems per language
 across 14 Indic languages. Uses the English [`aime26`](../../aime26) benchmark's
 math prompt, `simple_agent`, and symbolic math verifier with the LLM judge disabled.
-Preparation validates problem IDs, English text, and answers against the pinned
-`MathArena/aime_2026` dataset.
+Preparation loads the dataset's `train` split with Hugging Face `load_dataset`,
+then validates problem IDs, translations, and integer answers.
 
 ## Configuration
 
 Defaults: four independently seeded responses per question, 120,000 output tokens,
 thinking enabled, temperature 1.0, top-p 0.95, and top-k 64.
+
+Generation defaults live in `responses_create_params`, so selecting `--model-type`
+preserves them and `--temperature`, `--top-p`, and `--max-output-tokens` can override
+them. vLLM receives top-k through `metadata.extra_body` and thinking through
+`metadata.chat_template_kwargs`; both metadata values are JSON strings.
+
+The dataset supplies four repeats. With a raw `--input` file instead of the
+benchmark split, pass `--num-repeats 4` and the shared math `--prompt-config`.
 
 `pass@4/symbolic_accuracy` measures questions answered correctly at least once in
 four responses. `pass@1[avg-of-4]/symbolic_accuracy` measures average accuracy.
