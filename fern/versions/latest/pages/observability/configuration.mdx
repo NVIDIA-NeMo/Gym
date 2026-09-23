@@ -117,6 +117,10 @@ Two consequences are worth knowing:
 
 - A variable you export in your shell reaches every server, because the orchestrator
   copies its own environment into each child.
+- A job submitted with `gym eval submit` needs none of this by hand: the submit sets
+  `NEMO_GYM_OTEL_ENABLED`, the run id, the span groups, the logs switch and the exporter endpoint
+  for the driver from its `observability:` block, pointing at the collector that runs beside the
+  job. See [Collector for Submitted Jobs](/main/observability/eval-submit-collector).
 - The orchestrator generates one `run_id` and shares it with the fleet, so every process
   in a run reports the same `nemo.run.id` resource attribute.
 
