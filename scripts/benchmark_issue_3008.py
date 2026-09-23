@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from aiohttp import ClientSession, TCPConnector, TraceConfig, web
+from aiohttp import TraceConfig, web
 
 from nemo_gym import server_utils
 from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
@@ -200,33 +200,41 @@ def _free_ports(count: int) -> list[int]:
 
 async def _run_worker_async(spec: dict) -> dict:
     queue_probe_ms: list[float] = []
-    trace_configs = []
-    if spec["mode"] == "baseline_queue_probe":
-        trace_configs.append(_measurement_trace(queue_probe_ms))
-    elif spec["mode"] == "telemetry_on":
-        trace_configs.append(server_utils._connection_queue_trace_config())
 
     cfg = server_utils.GlobalAIOHTTPAsyncClientConfig(
         global_aiohttp_connector_limit=spec["aggregate_limit"],
         global_aiohttp_connector_limit_per_host=spec["aggregate_limit_per_host"],
     )
     capacity = server_utils._connection_pool_capacity(cfg, spec["workers"])
-    connector = TCPConnector(limit=capacity.total, limit_per_host=capacity.per_host)
     provider = exporter = None
     if spec["mode"] != "telemetry_off":
         provider, exporter = _recording_telemetry()
 
     old_client = server_utils._GLOBAL_AIOHTTP_CLIENT
     old_gate = server_utils.is_span_group_enabled
+    old_workers = server_utils.get_nemo_gym_fastapi_num_workers
     errors = Counter()
     client_call_ms = []
     full_response_ms = []
     service_ms = []
     sampling = True
 
-    async with ClientSession(connector=connector, trace_configs=trace_configs) as session:
-        server_utils._GLOBAL_AIOHTTP_CLIENT = session
-        server_utils.is_span_group_enabled = lambda _group: spec["mode"] == "telemetry_on"
+    # Build the session through the production entrypoint so the benchmark exercises the real
+    # connector configuration (keepalive timeout, keepalive socket factory, DummyCookieJar,
+    # ClientTimeout) and the startup capacity report, rather than a bare ClientSession.
+    server_utils.is_span_group_enabled = lambda _group: spec["mode"] == "telemetry_on"
+    server_utils.get_nemo_gym_fastapi_num_workers = lambda: spec["workers"]
+    server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    session = server_utils.set_global_aiohttp_client(cfg)
+    if spec["mode"] == "baseline_queue_probe":
+        # aiohttp reads _trace_configs per request, so appending after construction is honoured,
+        # but ClientSession freezes the configs it was built with and refuses to dispatch a
+        # non-frozen signal, so the late addition has to be frozen explicitly.
+        probe = _measurement_trace(queue_probe_ms)
+        probe.freeze()
+        session._trace_configs.append(probe)
+
+    async with session:
 
         async def perform(index: int, *, record: bool) -> None:
             started_at = time.perf_counter()
@@ -287,6 +295,7 @@ async def _run_worker_async(spec: dict) -> dict:
         finally:
             server_utils._GLOBAL_AIOHTTP_CLIENT = old_client
             server_utils.is_span_group_enabled = old_gate
+            server_utils.get_nemo_gym_fastapi_num_workers = old_workers
 
     spans = []
     if provider is not None:
@@ -299,14 +308,17 @@ async def _run_worker_async(spec: dict) -> dict:
         queue_ms = queue_probe_ms
 
     expected = spec["requests"]
-    if errors:
-        raise RuntimeError(f"Benchmark requests failed: {dict(errors)}")
-    if len(client_call_ms) != expected or len(service_ms) != expected or len(full_response_ms) != expected:
+    # Errors are a recorded measurement, not a fatal condition. The undersized cells are exactly
+    # where timeouts and connection errors appear, so aborting there discarded the data the
+    # benchmark plan asks for. Every attempted request must still be accounted for.
+    if len(full_response_ms) != expected:
         raise RuntimeError("Benchmark request sample count does not match the requested count")
+    if len(client_call_ms) > expected or len(service_ms) > expected:
+        raise RuntimeError("Benchmark recorded more samples than requests")
     if spec["mode"] != "telemetry_off" and len(spans) != expected:
         raise RuntimeError("Exported CLIENT span count does not match the requested count")
-    if spec["mode"] in {"baseline_queue_probe", "telemetry_on"} and len(queue_ms) != expected:
-        raise RuntimeError("Queue sample count does not match the requested count")
+    if spec["mode"] in {"baseline_queue_probe", "telemetry_on"} and len(queue_ms) > expected:
+        raise RuntimeError("Queue sample count exceeds the requested count")
     end_fds, end_sockets = _open_resource_counts()
     if end_fds < 0 or end_sockets < 0:
         raise RuntimeError("FD/socket resource sampling is unavailable")
