@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import NodePool, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
@@ -87,22 +87,44 @@ def test_deeply_nested():
 
 
 def test_render_pool_directives_basic(pool):
-    lines = _render_pool_directives("main", pool)
-    assert "#SBATCH --partition=batch  # pool: main" in lines
+    lines = _render_pool_directives({"main": pool})
+    assert "#SBATCH --partition=batch" in lines
     assert "#SBATCH --nodes=1" in lines
     assert "#SBATCH --ntasks-per-node=4" in lines
 
 
 def test_render_pool_directives_gpus(pool):
     pool.gpus_per_node = 4
-    lines = _render_pool_directives("main", pool)
+    lines = _render_pool_directives({"main": pool})
     assert "#SBATCH --gpus-per-node=4" in lines
 
 
 def test_render_pool_directives_extra_args(pool):
     pool.extra_args["gres"] = "shard:8"
-    lines = _render_pool_directives("main", pool)
+    lines = _render_pool_directives({"main": pool})
     assert "#SBATCH --gres=shard:8" in lines
+
+
+def test_pools_ask_for_the_sum_of_their_nodes_once(pool):
+    # One #SBATCH --nodes for the allocation, not one per pool. Emitting them per
+    # pool made every pool but the last a no-op while the rest of the executor
+    # sized itself on the sum, so a two-pool job asked for one pool's nodes.
+    aux = NodePool(partition="batch", nodes=3, ntasks_per_node=4)
+    lines = _render_pool_directives({"main": pool, "aux": aux})
+    assert [line for line in lines if line.startswith("#SBATCH --nodes")] == ["#SBATCH --nodes=4"]
+
+
+def test_pools_that_disagree_on_a_whole_allocation_directive_are_refused(pool):
+    other = NodePool(partition="interactive", nodes=1, ntasks_per_node=4)
+    with pytest.raises(ValueError, match="disagree on partition"):
+        _render_pool_directives({"main": pool, "other": other})
+
+
+def test_pools_that_disagree_on_extra_args_are_refused(pool):
+    pool.extra_args["gres"] = "shard:8"
+    other = NodePool(partition="batch", nodes=1, ntasks_per_node=4, extra_args={"gres": "shard:4"})
+    with pytest.raises(ValueError, match="conflicts with another pool"):
+        _render_pool_directives({"main": pool, "other": other})
 
 
 # ---------------------------------------------------------------------------
@@ -1565,3 +1587,84 @@ def test_gym_install_runs_from_the_install_root():
     assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
     # The only `cd` is into the clone -- nothing else may move cwd.
     assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')
+
+
+# ---------------------------------------------------------------------------
+# node_pool placement
+# ---------------------------------------------------------------------------
+
+
+def _placement_config(tmp_path, services, pools):
+    return SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _vllm(port, pool, **extra):
+    return {
+        "type": "vllm",
+        "container": "img",
+        "model": "/ckpt",
+        "port": port,
+        "node_pool": pool,
+        **extra,
+    }
+
+
+_TWO_POOLS = {
+    "gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4},
+    "aux": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4},
+}
+
+
+def _render(tmp_path, services, pools=None):
+    config = _placement_config(tmp_path, services, pools or _TWO_POOLS)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_pinned_services_take_contiguous_node_ranges(tmp_path):
+    # --relative is what gives a service nodes of its own; without it both steps
+    # start at node 0 and the second one shares the first one's GPUs.
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+    assert "--relative=0 --nodes=1 --ntasks=1" in script.split("# service: policy")[1]
+    assert "--relative=1 --nodes=1 --ntasks=1" in script.split("# service: scorer")[1]
+
+
+def test_a_pinned_single_node_service_is_not_built_as_multi_node(tmp_path):
+    # The job spans two nodes, but each service owns one. Sizing them by the
+    # allocation total would build both as multi-node Ray deployments.
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+    assert "ray start" not in script
+    assert script.count("vllm serve") == 2
+
+
+def test_an_unpinned_service_keeps_the_whole_allocation(tmp_path):
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
+    )
+    assert "--relative=" not in script
+
+
+def test_an_unknown_node_pool_is_named(tmp_path):
+    with pytest.raises(ValueError, match="node_pool 'nope' does not match any node pool"):
+        _placement_config(tmp_path, {"policy": _vllm(8000, "nope", tensor_parallel_size=4)}, _TWO_POOLS)
