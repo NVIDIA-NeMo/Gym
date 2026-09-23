@@ -14,7 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
+from shlex import quote
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -229,6 +232,7 @@ async def test_extract_model_patch_includes_commits_and_untracked_files() -> Non
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="complete patch", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("complete patch")),
         stop=AsyncMock(),
     )
     server._session_id_to_sandbox["session"] = sandbox
@@ -236,7 +240,7 @@ async def test_extract_model_patch_includes_commits_and_untracked_files() -> Non
     patch = await server._extract_model_patch("session", "abc123")
 
     assert patch == "complete patch"
-    command = sandbox.exec.await_args.args[0]
+    command = sandbox.exec.await_args_list[0].args[0]
     assert "git -C /app add -N ." in command
     assert "git -C /app --no-pager diff abc123" in command
     sandbox.stop.assert_awaited_once()
@@ -253,6 +257,7 @@ async def test_extract_model_patch_drops_untracked_files_the_image_already_shipp
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=artifact + fix, stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text(artifact + fix)),
         stop=AsyncMock(),
     )
     server._session_id_to_sandbox["session"] = sandbox
@@ -261,6 +266,131 @@ async def test_extract_model_patch_drops_untracked_files_the_image_already_shipp
     patch = await server._extract_model_patch("session", "abc123")
 
     assert patch == fix
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during", ["git", "download", "cleanup"])
+async def test_extract_model_patch_cleans_up_after_cancellation(cancel_during: str) -> None:
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_for_cancellation(stage: str) -> None:
+        if stage == cancel_during:
+            entered.set()
+            await blocked.wait()
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        await wait_for_cancellation("cleanup" if command.startswith("rm -f -- ") else "git")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text("complete patch\n")
+        await wait_for_cancellation("download")
+
+    sandbox = SimpleNamespace(exec=exec_command, download=AsyncMock(side_effect=download), stop=AsyncMock())
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    task = asyncio.create_task(server._extract_model_patch("session", "abc123"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_pristine_untracked
+    if sandbox.download.await_count:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+@pytest.mark.parametrize("new_content", [b"new\n", b"new\r\n", b"new"])
+async def test_extract_model_patch_survives_lossy_exec_logs(tmp_path: Path, new_content: bytes) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, **kwargs)
+
+    git("init")
+    git("config", "core.autocrlf", "false")
+    git("config", "apply.whitespace", "nowarn")
+    (repo / "tracked.txt").write_bytes(b"old\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+    base_commit = git("rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "tracked.txt").write_bytes(new_content)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-am", "agent commit")
+    (repo / "untracked.txt").write_bytes(b"created\n")
+    git("add", "-N", ".")
+    expected = git("diff", base_commit).stdout
+    # Reproduce the provider's line-log transport dropping the terminal LF.
+    with pytest.raises(subprocess.CalledProcessError, match="returned non-zero"):
+        git("apply", "--numstat", "-", input=expected.rstrip(b"\n"))
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        result = subprocess.run(command.replace("/app", quote(str(repo))), shell=True, capture_output=True)
+        return SimpleNamespace(
+            return_code=result.returncode,
+            stdout=result.stdout.decode().rstrip("\n"),
+            stderr=result.stderr.decode(),
+        )
+
+    sandbox = SimpleNamespace(
+        exec=exec_command,
+        download=AsyncMock(side_effect=shutil.copyfile),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    patch = await server._extract_model_patch("session", base_commit)
+
+    assert patch.encode() == expected
+    remote_patch, local_patch = sandbox.download.await_args.args
+    assert not Path(remote_patch).exists()
+    assert not local_patch.exists()
+    git("reset", "--hard", base_commit)
+    git("clean", "-fd")
+    git("apply", "-", input=patch.encode())
+    assert (repo / "tracked.txt").read_bytes() == new_content
+    assert (repo / "untracked.txt").read_bytes() == b"created\n"
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["git", "download"])
+async def test_extract_model_patch_cleans_up_after_failure(failure: str) -> None:
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=1 if failure == "git" else 0, stdout="", stderr="git diff failed"),
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+            ]
+        ),
+        download=AsyncMock(side_effect=RuntimeError("download failed")),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset()
+
+    with pytest.raises(RuntimeError, match="git diff failed" if failure == "git" else "download failed"):
+        await server._extract_model_patch("session", "abc123")
+
+    assert sandbox.exec.await_args.args[0].startswith("rm -f -- /tmp/nemo-gym-swebench-pro-")
+    if failure == "git":
+        sandbox.download.assert_not_awaited()
+    else:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
     assert "session" not in server._session_id_to_pristine_untracked
 
 

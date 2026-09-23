@@ -544,14 +544,13 @@ class AsyncSandbox:
     async def stop(self) -> None:
         if self._closed:
             return
-        try:
-            if self._handle is not None and not self._stopped:
-                await self._provider.close(self._handle)
-                self._stopped = True
-        finally:
-            if self._owns_provider:
-                await self._provider.aclose()
-                self._closed = True
+        # A failed remote stop is retryable. Do not close its client or mark the
+        # wrapper closed until the provider confirms container teardown.
+        if self._handle is not None and not self._stopped:
+            await self._provider.close(self._handle)
+            self._stopped = True
+        if self._owns_provider:
+            await self._provider.aclose()
         self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:

@@ -286,6 +286,15 @@ def inconclusive_reason(result: VerificationResult) -> str | None:
     if result.test_results is None:
         return "parser produced no usable output"
 
+    # An empty report alone can be a model compile failure. A dependency download
+    # with an explicit DNS failure, however, never reached the tests: retry it.
+    if not result.test_results.get("tests") and re.search(
+        r"\b(?:EAI_AGAIN|ENOTFOUND)\b|Could not resolve host|Temporary failure in name resolution",
+        result.test_output,
+        re.IGNORECASE,
+    ):
+        return "dependency network failure before any test results"
+
     # Some upstream parsers report only passing tests, and a broken model patch
     # can prevent test collection entirely. Completed, valid parser output is
     # graded by Pro's required-pass rule, even when its test list is empty.

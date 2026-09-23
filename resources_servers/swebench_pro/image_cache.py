@@ -9,7 +9,17 @@ import json
 import re
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
+from threading import Lock
+
+
+_VALIDATION_LOCK = Lock()
+
+
+def _file_identity(path: Path) -> tuple[int, ...]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def digest_hex(digest: str) -> str:
@@ -29,6 +39,24 @@ def verify_local_image(path: Path, source_uri: str) -> dict:
     An OCI digest and a SIF checksum hash different formats. They cannot be
     compared directly, so provenance is recorded at conversion time.
     """
+    path = path.resolve()
+    manifest_path = path.with_suffix(path.suffix + ".json")
+    # Serialize cold checks so concurrent rollouts do not all hash the same SIF.
+    # Only successful validations are cached; either file changing invalidates it.
+    with _VALIDATION_LOCK:
+        try:
+            manifest_identity = _file_identity(manifest_path)
+        except OSError as exc:
+            raise ValueError(
+                f"Missing or invalid image provenance: {manifest_path}; prepare this cache again"
+            ) from exc
+        return dict(_verify_unchanged_image(path, source_uri, _file_identity(path), manifest_identity))
+
+
+@lru_cache(maxsize=1024)
+def _verify_unchanged_image(
+    path: Path, source_uri: str, image_identity: tuple[int, ...], manifest_identity: tuple[int, ...]
+) -> dict:
     manifest_path = path.with_suffix(path.suffix + ".json")
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -39,6 +67,8 @@ def verify_local_image(path: Path, source_uri: str) -> dict:
     actual = sif_checksum(path)
     if manifest.get("sif_sha256") != actual:
         raise ValueError(f"Cached SIF checksum mismatch: {path}")
+    if _file_identity(path) != image_identity or _file_identity(manifest_path) != manifest_identity:
+        raise ValueError(f"Cached image changed during validation: {path}; retry validation")
     return {"image": str(path.resolve()), "source_uri": source_uri, "sif_sha256": actual}
 
 

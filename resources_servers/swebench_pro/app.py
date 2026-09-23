@@ -16,14 +16,17 @@
 """SWE-bench Pro resources server."""
 
 import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -56,6 +59,7 @@ from resources_servers.swebench_pro.verification import (
 
 # K8s maps localhost to ::1 and Node 17+ honours that, but servers under test bind IPv4.
 SANDBOX_ENV_OVERRIDES = {"NODE_OPTIONS": "--dns-result-order=ipv4first"}
+LOG = logging.getLogger(__name__)
 
 
 # Blanked on the spec so the agent sees a clean env; the entryscript unsets them for real.
@@ -219,22 +223,23 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id is None:
             return {"closed": True}
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = self._session_id_to_sandbox.pop(session_id, None)
+        await self._stop_session_sandbox(session_id)
+        return {"closed": True}
+
+    async def _stop_session_sandbox(self, session_id: str) -> None:
+        sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
             async with asyncio.timeout(self.config.verification_stop_timeout):
                 await sandbox.stop()
-        return {"closed": True}
+            self._session_id_to_sandbox.pop(session_id, None)
+        self._session_id_to_pristine_untracked.pop(session_id, None)
 
     async def shutdown(self) -> None:
-        sandboxes = list(self._session_id_to_sandbox.values())
-        self._session_id_to_sandbox.clear()
-        self._session_id_to_pristine_untracked.clear()
-        for sandbox in sandboxes:
+        for session_id in list(self._session_id_to_sandbox):
             try:
-                await sandbox.stop()
+                await self._stop_session_sandbox(session_id)
             except Exception:
-                print("Failed to stop abandoned SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
+                LOG.exception("Failed to stop abandoned SWE-bench Pro sandbox %s", session_id)
 
     def _image(self, body: SWEBenchProInstanceRequest) -> str:
         if self.config.image_template:
@@ -306,15 +311,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self, request: Request, body: SWEBenchProSeedSessionRequest
     ) -> SWEBenchProSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        previous = self._session_id_to_sandbox.pop(session_id, None)
-        if previous is not None:
-            try:
-                await previous.stop()
-            except Exception:
-                print("Failed to stop previous SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
-
+        await self._stop_session_sandbox(session_id)
         sandbox = await self._create_sandbox(body)
+        # Keep ownership before initialization, including when cleanup itself fails.
+        self._session_id_to_sandbox[session_id] = sandbox
         try:
             if self.config.apply_anti_cheating:
                 anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"
@@ -341,8 +341,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 image_provenance=await asyncio.to_thread(self._image_info, body),
             )
         except BaseException:
-            async with asyncio.timeout(self.config.verification_stop_timeout):
-                await sandbox.stop()
+            try:
+                await self._stop_session_sandbox(session_id)
+            except Exception:
+                LOG.exception("Failed to stop partially initialized SWE-bench Pro sandbox %s", session_id)
             raise
         self._session_id_to_pristine_untracked[session_id] = pristine
         self._session_id_to_sandbox[session_id] = sandbox
@@ -375,20 +377,34 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return frozenset()
 
     async def _extract_model_patch(self, session_id: str, base_commit: str) -> str:
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
+        original_sandbox = self._session_id_to_sandbox[session_id]
+        pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
+        patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
             result = await original_sandbox.exec(
-                f"git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                f" > {quote(patch_path)}"
             )
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "git diff failed")
-            return drop_patch_sections(result.stdout or "", pristine_untracked)
+            # Command logs can drop line endings; download the patch bytes instead.
+            with TemporaryDirectory(prefix="nemo-gym-swebench-pro-") as directory:
+                local_patch = Path(directory) / "model.diff"
+                await original_sandbox.download(patch_path, local_patch)
+                patch = local_patch.read_bytes().decode("utf-8", errors="replace")
+            return drop_patch_sections(patch, pristine_untracked)
         finally:
             try:
-                await original_sandbox.stop()
+                cleanup = await original_sandbox.exec(f"rm -f -- {quote(patch_path)}")
+                if cleanup.return_code != 0:
+                    LOG.warning("Failed to remove agent patch file: %s", cleanup.stderr)
             except Exception:
-                print("Failed to stop agent sandbox", format_exc(), file=sys.stderr)
+                LOG.exception("Failed to remove agent patch file")
+            finally:
+                try:
+                    await self._stop_session_sandbox(session_id)
+                except Exception:
+                    LOG.exception("Failed to stop agent sandbox %s", session_id)
 
     async def verify(self, request: Request, body: SWEBenchProVerifyRequest) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]

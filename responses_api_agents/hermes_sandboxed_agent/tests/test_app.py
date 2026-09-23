@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -70,9 +71,9 @@ def run(params):
     logging.getLogger("tools.lazy_deps").info("Dependencies ready")
     print("Hermes stdout")
     return {"completed": True}
-runner["main"].__globals__["run"] = run
+runner["_run_worker"].__globals__["run"] = run
 sys.argv = sys.argv[1:]
-sys.exit(runner["main"]())
+sys.exit(runner["_run_worker"]())
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", probe, str(runner), str(request)],
@@ -157,12 +158,19 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     )
 
     async def download(remote, local):
+        if remote.endswith("/cleanup.json"):
+            local.write_text(json.dumps({"cleanup_confirmed": True, "return_code": 0}))
+            return
         local.write_text(json.dumps({"completed": True, "api_calls": 2, "messages": []}))
 
     sandbox.download = download
     monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/ng-rollout/id/v1")
     response, metrics = await agent._run_in_sandbox(
-        sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix it"), "id"
+        sandbox,
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="fix it", instructions="Keep the public API", temperature=0, max_output_tokens=128
+        ),
+        "id",
     )
     uploaded = sandbox.upload.call_args_list[0].args[0]
     params = json.loads(uploaded.read_text())
@@ -170,6 +178,9 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert params["workdir"] == "/app"
     assert params["base_url"] == "http://proxy/ng-rollout/id/v1"
     assert params["context_length"] == 262144
+    assert params["temperature"] == 0
+    assert params["max_tokens"] == 128
+    assert params["instructions"] == "Keep the public API"
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
     command = sandbox.exec.call_args.args[0]
     assert " -I " in command
@@ -193,20 +204,18 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
         download=AsyncMock(side_effect=FileNotFoundError("result.json")),
     )
     monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/v1")
-    response, metrics = await agent._run_in_sandbox(
-        sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None
-    )
-    assert response.status == "failed"
-    assert metrics["hermes_return_code"] == 125
-    assert metrics["hermes_error_type"] == "timeout"
+    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+        await agent._run_in_sandbox(sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None)
     from pathlib import Path
 
-    persisted = json.loads(Path(metrics["hermes_result_path"]).read_text())
+    persisted = json.loads(next(Path(agent.config.results_dir).glob("*/agent_result.json")).read_text())
     assert persisted["stderr"] == "deadline expired"
+    assert persisted["return_code"] == 125
+    assert persisted["error_type"] == "timeout"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_endpoint", [None, "/verify", "/close_session"])
+@pytest.mark.parametrize("failed_endpoint", [None, "/verify", "/close_session", "/cleanup_timeout"])
 @pytest.mark.parametrize(
     ("finished", "budget_exhausted", "evaluation_completed", "failure"),
     [
@@ -234,16 +243,26 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     )
 
     async def post(*, url_path, **kwargs):
+        if failed_endpoint == "/cleanup_timeout" and url_path == "/close_session":
+            await asyncio.Event().wait()
         if url_path == failed_endpoint:
             raise RuntimeError(f"{url_path} unavailable")
         return {"/seed_session": seeded, "/verify": verified, "/close_session": SimpleNamespace()}[url_path]
 
     agent.server_client.post = AsyncMock(side_effect=post)
     sandbox = SimpleNamespace(stop=AsyncMock())
+    if failed_endpoint == "/cleanup_timeout":
+        agent.config.cleanup_timeout = 0.01
+
+        async def hung_stop():
+            await asyncio.Event().wait()
+
+        sandbox.stop.side_effect = hung_stop
     connected = AsyncMock(return_value=sandbox)
     monkeypatch.setattr(module.AsyncSandbox, "connect", connected)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"fake": {}}})
-    monkeypatch.setattr(module, "create_provider", lambda config: "provider")
+    provider = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: provider)
     monkeypatch.setattr(module, "raise_for_status", AsyncMock())
     monkeypatch.setattr(module, "get_response_json", AsyncMock(side_effect=lambda r: r.data))
     monkeypatch.setattr(
@@ -284,8 +303,9 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             assert "_ng_failure_class" not in wire
     assert agent.server_client.post.call_args.kwargs["url_path"] == "/close_session"
     assert agent.server_client.post.call_args.kwargs["cookies"] == {"original": "cookie", "session": "seeded"}
-    connected.assert_awaited_once_with({"sandbox_id": "box"}, provider="provider")
-    assert sandbox.stop.await_count == (1 if failed_endpoint == "/close_session" else 0)
+    connected.assert_awaited_once_with({"sandbox_id": "box"}, provider=provider)
+    provider.aclose.assert_awaited_once()
+    assert sandbox.stop.await_count == (1 if failed_endpoint in ("/close_session", "/cleanup_timeout") else 0)
 
 
 @pytest.mark.asyncio
@@ -301,7 +321,8 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
         seed.data = {"sandbox_handle": "box"}
     agent.server_client.post = AsyncMock(side_effect=[seed, SimpleNamespace()])
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"fake": {}}})
-    monkeypatch.setattr(module, "create_provider", lambda config: "provider")
+    provider = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: provider)
     monkeypatch.setattr(module, "raise_for_status", AsyncMock())
     monkeypatch.setattr(module, "get_response_json", AsyncMock(return_value=seed.data))
     monkeypatch.setattr(module.AsyncSandbox, "connect", AsyncMock(side_effect=RuntimeError("cannot attach")))
@@ -318,6 +339,7 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
     cleanup = agent.server_client.post.call_args.kwargs
     assert cleanup["url_path"] == "/close_session"
     assert cleanup["cookies"] == {"session": "seeded"}
+    assert provider.aclose.await_count == (0 if bare_handle else 1)
 
 
 @pytest.mark.asyncio
@@ -340,6 +362,9 @@ async def test_timeout_recovers_checkpoint_and_keeps_verifier_eligible_trajector
     )
 
     async def download(remote, local):
+        if remote.endswith("/cleanup.json"):
+            local.write_text(json.dumps({"cleanup_confirmed": True, "return_code": 0}))
+            return
         if remote.endswith("/result.json"):
             raise FileNotFoundError(remote)
         local.write_text(json.dumps(progress))
@@ -387,3 +412,53 @@ def test_timeout_preserves_tool_call_while_tool_is_blocked():
         session_reasoning_tokens=0,
     )
     assert progress_result(agent, 1)["messages"] == [user, assistant]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"input": []},
+        {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "image", "detail": "auto"}]}]},
+        {"top_p": 0.9},
+        {"previous_response_id": "old-response"},
+        {"tool_choice": "none"},
+        {"tools": [{"type": "function", "name": "custom", "parameters": {}, "strict": False}]},
+        {"reasoning": {"effort": "high"}},
+    ],
+)
+async def test_unsupported_request_does_not_create_sandbox(agent, overrides):
+    from fastapi import HTTPException
+
+    body = HermesSandboxedRunRequest.model_validate({"responses_create_params": {"input": "fix"} | overrides})
+    with pytest.raises(HTTPException) as exc:
+        await agent.run(SimpleNamespace(cookies={}), body)
+    assert exc.value.status_code == 422
+    agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "receipt", [None, {}, {"cleanup_confirmed": "true"}, {"cleanup_confirmed": True, "error": "cleanup failed"}]
+)
+async def test_missing_or_uncertain_cleanup_never_returns_a_verifier_eligible_response(agent, monkeypatch, receipt):
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SandboxExecResult(return_code=0, stdout="/app\n", stderr=""),
+                SandboxExecResult(return_code=0, stdout="", stderr=""),
+            ]
+        ),
+        upload=AsyncMock(),
+    )
+
+    async def download(remote, local):
+        if remote.endswith("/cleanup.json"):
+            if receipt is None:
+                raise FileNotFoundError(remote)
+            local.write_text(json.dumps(receipt))
+        else:
+            local.write_text(json.dumps({"completed": True}))
+
+    sandbox.download = download
+    monkeypatch.setattr(HermesSandboxedAgent, "resolve_model_base_url", lambda *args: "http://proxy/v1")
+    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+        await agent._run_in_sandbox(sandbox, NeMoGymResponseCreateParamsNonStreaming(input="fix"), None)

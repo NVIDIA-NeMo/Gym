@@ -25,6 +25,12 @@ resolved dependency versions and a commit manifest. Preparation resolves the req
 task startup records it without downloading or installing Hermes. The default `hermes-python`
 launcher selects the interpreter for each task image.
 
+Preparing outside the task keeps installs off the rollout path and supports
+network-restricted, mixed glibc/musl images with an isolated Python environment.
+The runner checks the mounted manifest against the checkout before calling the
+model. This check runs inside each task container: the agent server cannot check
+a remote mount or choose the task's libc at server startup.
+
 ## Launch with Pro
 
 Compose the same four components used by the OpenCode sandboxed agent: model,
@@ -89,15 +95,28 @@ For a reference-patch control, use Pro's existing
 
 The agent runs through `/run`, which prepares a benchmark session. Text input and
 terminal/file tools are supported. Unsupported multimodal or tool-history input
-fails explicitly. Harness failures retain `verifier_reward`, omit
+fails explicitly, before seeding. Request `temperature` and `max_output_tokens`
+override agent defaults; `instructions` are combined with configured and input
+system messages. Custom tools, `tool_choice` other than `auto`, `top_p`, request
+reasoning controls and `previous_response_id` are rejected rather than ignored.
+Harness failures retain `verifier_reward`, omit
 `reward` and `response` from their HTTP result, and set Gym's existing
 `_ng_failure_class=agent_run_error` marker. Gym's collector puts them in its
 `*_failures.jsonl` sidecar and excludes them from scores. Incomplete verification
 is excluded too. Reaching a turn, output-token or wall-time budget after model
 output retains the patch's score and records
 `response.metadata.budget_exhausted=true`. Explicitly failing graded tests score zero;
-missing test results remain inconclusive unless a required test already failed.
+Completed parser reports follow Pro's required-pass rule, including empty reports;
+execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
+
+The runner confirms that its worker and detached tool descendants have stopped
+before verification. Missing cleanup confirmation skips verification and stops
+the task sandbox. Resources cleanup retains failed handles for retry; final agent
+cleanup is bounded by `cleanup_timeout` (default 120 seconds per attempt) and does
+not replace a received verifier result. Cleanup is cooperative, not a security
+boundary. Empty reports with an explicit DNS failure remain inconclusive; model
+compile failures without infrastructure evidence keep their zero score.
 
 ```bash
 pytest responses_api_agents/hermes_sandboxed_agent/tests \
