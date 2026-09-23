@@ -248,6 +248,20 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxBackgroundServices(Protocol):
+    """Optional execution override for services needed by a later command."""
+
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
 class SupportsSandboxNetwork(Protocol):
     """Optional direct networking between sandboxes, preserving service ports."""
 
