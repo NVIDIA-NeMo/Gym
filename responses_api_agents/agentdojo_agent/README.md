@@ -102,10 +102,10 @@ A per-row `defense` value takes precedence.
 
 ```bash
 gym eval prepare --benchmark agentdojo          # 1,046 rows, see benchmarks/agentdojo/README.md
-gym env start --config benchmarks/agentdojo/config.yaml --config <model server config>
-gym eval run --no-serve --config benchmarks/agentdojo/config.yaml --config <model server config> \
+gym env start --benchmark agentdojo --model-type vllm_model
+gym eval run --no-serve --benchmark agentdojo --model-type vllm_model \
     --agent agentdojo_benchmark --input benchmarks/agentdojo/data/agentdojo_benchmark.jsonl \
-    --output results/agentdojo.jsonl --num-repeats 1 --temperature 0.0
+    --temperature 0.0 --output results/agentdojo-undefended.jsonl
 ```
 
 The first start builds the agent's own virtual environment, which installs AgentDojo and `torch`.
