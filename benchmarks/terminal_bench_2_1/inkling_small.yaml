@@ -6,7 +6,6 @@
 # and provide the remote_tmux_binary_path available on that service.
 # Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small_fast_parsers.sh
 config_paths:
-  - benchmarks/terminal_bench_2_1/terminus_2_noninteractive.yaml
   - benchmarks/terminal_bench_2_1/terminus_2_reasoning_retention.yaml
 
 terminal_bench_2_1_terminus_2_sandboxed_agent:
@@ -28,6 +27,10 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
   resources_servers:
     terminal_bench_2_1:
       evaluation_timeout: 1800
+      sandbox_config:
+        env:
+          # Use package defaults instead of interactive configuration prompts.
+          DEBIAN_FRONTEND: noninteractive
 
 policy_model:
   responses_api_models:
