@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare pinned Nemotron Personas assets and Gym rows for NeMo UserSim."""
+"""Prepare NeMo UserSim persona panels and Gym rows."""
 
 import hashlib
 import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
-
-from nemo_gym.global_config import get_global_config_dict
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -21,19 +18,13 @@ DATA_DIR = BENCHMARK_DIR / "data"
 PERSONAS_CACHE_DIR = DATA_DIR / "personas"
 OUTPUT_FPATH = DATA_DIR / "usersim.jsonl"
 EXAMPLE_FPATH = BENCHMARK_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
-NEMOTRON_PERSONAS_TEAM = "nvidia/nemotron-personas"
-NEMOTRON_PERSONAS_DATASET_PREFIX = "nemotron-personas-dataset-"
 DEFAULT_PERSONAS_DATASET_VERSION = "0.0.2"
 DEFAULT_PERSONAS_LOCALES = ("en_US",)
+DEFAULT_PERSONAS_PANEL_SIZE = 1_000
 
 
-def _resource(locale: str) -> str:
-    dataset_name = f"{NEMOTRON_PERSONAS_DATASET_PREFIX}{locale.lower()}"
-    return f"{NEMOTRON_PERSONAS_TEAM}/{dataset_name}"
-
-
-def _source_path(cache_dir: Path, version: str, locale: str) -> Path:
-    return cache_dir / version / "source" / f"{locale}.parquet"
+def _panel_path(cache_dir: Path, version: str, locale: str) -> Path:
+    return cache_dir / version / "panels" / f"{locale}.parquet"
 
 
 def _sha256_file(path: Path) -> str:
@@ -54,81 +45,82 @@ def _validate_parquet(path: Path) -> int:
     return rows
 
 
-def _ngc_environment() -> dict[str, str]:
-    global_config = get_global_config_dict()
-    environment = os.environ.copy()
-    api_key = global_config.get("ngc_cli_api_key")
-    org = global_config.get("ngc_cli_org")
-    if api_key:
-        environment["NGC_CLI_API_KEY"] = str(api_key)
-    if org:
-        environment["NGC_CLI_ORG"] = str(org)
-    return environment
-
-
-def _download_personas(
+def _prepare_panel(
     *,
     cache_dir: Path,
     version: str,
     locale: str,
-    ngc_executable: str,
+    panel_size: int,
+    usersim_executable: str,
     timeout_seconds: float,
 ) -> Path:
-    destination = _source_path(cache_dir, version, locale)
+    destination = _panel_path(cache_dir, version, locale)
+    manifest_path = destination.with_suffix(".manifest.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_file():
-        print(f"Reusing prepared persona dataset: {destination}")
-    else:
-        executable = shutil.which(ngc_executable)
-        if executable is None:
-            raise RuntimeError(
-                f"{ngc_executable!r} is not on PATH. Install the NGC CLI, then configure "
-                "ngc_cli_api_key and ngc_cli_org in env.yaml or run `ngc config set`."
-            )
-        versioned_resource = f"{_resource(locale)}:{version}"
-        print(f"Downloading {versioned_resource}")
-        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary_dir:
-            command = [
-                executable,
-                "registry",
-                "resource",
-                "download-version",
-                versioned_resource,
-                "--dest",
-                temporary_dir,
-            ]
-            try:
-                subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=timeout_seconds,
-                    env=_ngc_environment(),
-                )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                stderr = getattr(exc, "stderr", "") or ""
-                raise RuntimeError(f"Failed to download {versioned_resource}: {stderr.strip() or exc}") from exc
 
-            parquet_files = list(Path(temporary_dir).rglob("*.parquet"))
-            if len(parquet_files) != 1:
-                raise RuntimeError(f"Expected one Parquet file in {versioned_resource}, found {len(parquet_files)}")
-            temporary_destination = destination.with_suffix(".parquet.tmp")
-            shutil.copyfile(parquet_files[0], temporary_destination)
-            _validate_parquet(temporary_destination)
-            os.replace(temporary_destination, destination)
+    if destination.is_file() and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            manifest = {}
+        rows = _validate_parquet(destination)
+        sha256 = _sha256_file(destination)
+        if (
+            manifest.get("locale") == locale
+            and manifest.get("personas_dataset_version") == version
+            and manifest.get("panel_rows") == rows == panel_size
+            and manifest.get("panel_sha256") == sha256
+        ):
+            print(f"Reusing prepared NeMo UserSim panel: {destination}")
+            return destination
 
-    rows = _validate_parquet(destination)
+    executable = shutil.which(usersim_executable)
+    if executable is None:
+        raise RuntimeError(
+            f"{usersim_executable!r} is not on PATH. Install the pinned NeMo UserSim package "
+            "before running `gym eval prepare --benchmark usersim`."
+        )
+    temporary_destination = destination.with_suffix(".parquet.tmp")
+    temporary_destination.unlink(missing_ok=True)
+    command = [
+        executable,
+        "panel",
+        "--locale",
+        locale,
+        "--num-personas",
+        str(panel_size),
+        "--out",
+        str(temporary_destination),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stderr = getattr(exc, "stderr", "") or ""
+        raise RuntimeError(f"Failed to prepare NeMo UserSim panel for {locale}: {stderr.strip() or exc}") from exc
+
+    try:
+        rows = _validate_parquet(temporary_destination)
+        if rows != panel_size:
+            raise RuntimeError(f"NeMo UserSim panel for {locale} contains {rows} rows; expected {panel_size}")
+        os.replace(temporary_destination, destination)
+    finally:
+        temporary_destination.unlink(missing_ok=True)
+
     manifest = {
         "locale": locale,
-        "resource": _resource(locale),
-        "version": version,
-        "sha256": _sha256_file(destination),
-        "size_bytes": destination.stat().st_size,
-        "rows": rows,
+        "personas_dataset_version": version,
+        "panel_sha256": _sha256_file(destination),
+        "panel_size_bytes": destination.stat().st_size,
+        "panel_rows": rows,
+        "generator": "usersim panel",
     }
-    manifest_path = destination.with_suffix(".manifest.json")
     temporary_manifest = manifest_path.with_suffix(".json.tmp")
     temporary_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
     os.replace(temporary_manifest, manifest_path)
@@ -139,18 +131,20 @@ def prepare(
     personas_cache_dir: str | Path = PERSONAS_CACHE_DIR,
     personas_dataset_version: str = DEFAULT_PERSONAS_DATASET_VERSION,
     personas_locales: list[str] | tuple[str, ...] = DEFAULT_PERSONAS_LOCALES,
-    ngc_executable: str = "ngc",
-    personas_download_timeout_seconds: float = 3_600,
+    personas_panel_size: int = DEFAULT_PERSONAS_PANEL_SIZE,
+    usersim_executable: str = "usersim",
+    usersim_panel_timeout_seconds: float = 3_600,
 ) -> Path:
-    """Download pinned persona sources and materialize the benchmark JSONL."""
+    """Materialize UserSim persona panels and the benchmark JSONL."""
     cache_dir = Path(personas_cache_dir)
     for locale in personas_locales:
-        _download_personas(
+        _prepare_panel(
             cache_dir=cache_dir,
             version=personas_dataset_version,
             locale=locale,
-            ngc_executable=ngc_executable,
-            timeout_seconds=personas_download_timeout_seconds,
+            panel_size=personas_panel_size,
+            usersim_executable=usersim_executable,
+            timeout_seconds=usersim_panel_timeout_seconds,
         )
 
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)

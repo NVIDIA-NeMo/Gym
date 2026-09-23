@@ -52,8 +52,6 @@ usersim:
       personas_dataset_version: 0.0.2
       personas_locales:
       - en_US
-      personas_panel_size: 1000
-      personas_panel_seed: 42
       probe_mix:
         general_open_ended: 0.5
         general_educational: 0.5

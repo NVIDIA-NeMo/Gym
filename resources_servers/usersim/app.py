@@ -4,17 +4,12 @@
 """Deterministic NeMo UserSim scenario initialization backed by managed personas."""
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import logging
-import os
-import random
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -47,8 +42,6 @@ from nemo_gym.usersim_episode_types import (
 
 
 SUPPORTED_PROBES = frozenset({"general_open_ended", "general_educational"})
-NEMOTRON_PERSONAS_TEAM = "nvidia/nemotron-personas"
-NEMOTRON_PERSONAS_DATASET_PREFIX = "nemotron-personas-dataset-"
 logger = logging.getLogger(__name__)
 
 
@@ -56,8 +49,6 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
-    personas_panel_size: int = Field(1_000, ge=1)
-    personas_panel_seed: int = 42
     probe_mix: dict[str, float] = Field(
         default_factory=lambda: {
             "general_open_ended": 0.5,
@@ -107,21 +98,11 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
 
 class PreparedPersonaDataset(BaseModel):
     locale: str
-    resource: str
-    version: str
-    source_sha256: str
-    source_rows: int
-    panel_seed: int
+    personas_dataset_version: str
+    panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    panel_size_bytes: int = Field(ge=1)
     panel_rows: int
-
-
-class CachedPersonaSource(BaseModel):
-    locale: str
-    resource: str
-    version: str
-    sha256: str
-    size_bytes: int
-    rows: int
+    generator: str
 
 
 class UserSimEpisodeState(BaseModel):
@@ -164,17 +145,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-@contextmanager
-def _exclusive_file_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-
 def _persona_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
     nested_persona = row.get("persona")
     if isinstance(nested_persona, dict) and nested_persona:
@@ -207,7 +177,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         for locale in self.config.personas_locales:
-            personas, dataset = self._prepare_locale(locale)
+            personas, dataset = self._load_prepared_panel(locale)
             self.locale_to_personas[locale] = personas
             self.locale_to_dataset[locale] = dataset
 
@@ -226,152 +196,37 @@ class UserSimResourcesServer(SimpleResourcesServer):
             cache_dir = WORKING_DIR / cache_dir
         return cache_dir / self.config.personas_dataset_version
 
-    def _source_path(self, locale: str) -> Path:
-        return self._version_dir() / "source" / f"{locale}.parquet"
-
     def _panel_path(self, locale: str) -> Path:
-        filename = f"{locale}-n{self.config.personas_panel_size}-seed{self.config.personas_panel_seed}.parquet"
-        return self._version_dir() / "panels" / filename
-
-    def _source_manifest_path(self, locale: str) -> Path:
-        return self._source_path(locale).with_suffix(".manifest.json")
+        return self._version_dir() / "panels" / f"{locale}.parquet"
 
     def _manifest_path(self, locale: str) -> Path:
         return self._panel_path(locale).with_suffix(".manifest.json")
 
-    def _resource(self, locale: str) -> str:
-        dataset_name = f"{NEMOTRON_PERSONAS_DATASET_PREFIX}{locale.lower()}"
-        return f"{NEMOTRON_PERSONAS_TEAM}/{dataset_name}"
-
-    def _validate_parquet(self, path: Path) -> int:
-        try:
-            row_count = pq.ParquetFile(path).metadata.num_rows
-        except Exception as exc:
-            raise RuntimeError(f"Persona dataset at {path} is not valid Parquet: {exc}") from exc
-        if row_count < 1:
-            raise RuntimeError(f"Persona dataset at {path} contains no rows")
-        return row_count
-
-    def _ensure_source(self, locale: str) -> tuple[Path, int, str]:
-        source_path = self._source_path(locale)
-        manifest_path = self._source_manifest_path(locale)
-        lock_path = self._version_dir() / "locks" / f"{locale}.lock"
-        with _exclusive_file_lock(lock_path):
-            if not source_path.is_file():
-                raise RuntimeError(
-                    f"Prepared persona dataset {self._resource(locale)}:"
-                    f"{self.config.personas_dataset_version} is missing at {source_path}. "
-                    "Run `gym eval prepare --benchmark usersim` before starting the Resources Server."
-                )
-            logger.info("Loading prepared persona dataset at %s", source_path)
-            source_rows = self._validate_parquet(source_path)
-            if manifest_path.is_file():
-                try:
-                    manifest = CachedPersonaSource.model_validate_json(manifest_path.read_text())
-                except ValueError:
-                    manifest = None
-                if (
-                    manifest is not None
-                    and manifest.resource == self._resource(locale)
-                    and manifest.version == self.config.personas_dataset_version
-                    and manifest.size_bytes == source_path.stat().st_size
-                    and manifest.rows == source_rows
-                ):
-                    logger.info("Reusing cached persona source manifest at %s", manifest_path)
-                    return source_path, source_rows, manifest.sha256
-
-            logger.info("Recording persona source checksum for %s", source_path)
-            source_sha256 = _sha256_file(source_path)
-            manifest = CachedPersonaSource(
-                locale=locale,
-                resource=self._resource(locale),
-                version=self.config.personas_dataset_version,
-                sha256=source_sha256,
-                size_bytes=source_path.stat().st_size,
-                rows=source_rows,
-            )
-            temporary_manifest = manifest_path.with_suffix(".json.tmp")
-            temporary_manifest.write_text(manifest.model_dump_json(indent=2))
-            os.replace(temporary_manifest, manifest_path)
-        return source_path, source_rows, source_sha256
-
-    def _sample_panel(self, source_path: Path, locale: str) -> list[dict[str, Any]]:
-        sample_size = self.config.personas_panel_size
-        random_generator = random.Random(
-            f"{self.config.personas_dataset_version}:{locale}:{self.config.personas_panel_seed}"
-        )
-        personas: list[dict[str, Any]] = []
-        usable_rows = 0
-        for batch in pq.ParquetFile(source_path).iter_batches(batch_size=1_024):
-            for row in batch.to_pylist():
-                persona = _persona_from_row(row)
-                if persona is None:
-                    continue
-                usable_rows += 1
-                if len(personas) < sample_size:
-                    personas.append(persona)
-                    continue
-                replacement_index = random_generator.randrange(usable_rows)
-                if replacement_index < sample_size:
-                    personas[replacement_index] = persona
-        if not personas:
-            raise RuntimeError(f"Persona dataset at {source_path} contains no usable personas")
-        return personas
-
-    def _write_panel(self, panel_path: Path, personas: list[dict[str, Any]]) -> None:
-        panel_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = panel_path.with_suffix(".parquet.tmp")
-        pq.write_table(pa.Table.from_pylist(personas), temporary_path)
-        os.replace(temporary_path, panel_path)
-
-    def _prepare_locale(self, locale: str) -> tuple[list[dict[str, Any]], PreparedPersonaDataset]:
-        source_path, source_rows, source_sha256 = self._ensure_source(locale)
+    def _load_prepared_panel(self, locale: str) -> tuple[list[dict[str, Any]], PreparedPersonaDataset]:
         panel_path = self._panel_path(locale)
         manifest_path = self._manifest_path(locale)
-        lock_path = self._version_dir() / "locks" / f"{panel_path.stem}.lock"
-        with _exclusive_file_lock(lock_path):
-            if panel_path.is_file() and manifest_path.is_file():
-                try:
-                    manifest = PreparedPersonaDataset.model_validate_json(manifest_path.read_text())
-                except ValueError:
-                    manifest = None
-                manifest_matches = (
-                    manifest is not None
-                    and manifest.locale == locale
-                    and manifest.resource == self._resource(locale)
-                    and manifest.version == self.config.personas_dataset_version
-                    and manifest.source_sha256 == source_sha256
-                    and manifest.panel_seed == self.config.personas_panel_seed
-                )
-                if not manifest_matches:
-                    panel_path.unlink()
-                    manifest_path.unlink()
-                else:
-                    try:
-                        panel_rows = pq.read_table(panel_path).to_pylist()
-                    except Exception:
-                        panel_rows = []
-                    personas = [persona for row in panel_rows if (persona := _persona_from_row(row)) is not None]
-                    if personas and len(personas) == manifest.panel_rows:
-                        logger.info("Reusing prepared persona panel at %s", panel_path)
-                        return personas, manifest
-
-            logger.info("Preparing deterministic persona panel at %s", panel_path)
-            personas = self._sample_panel(source_path, locale)
-            self._write_panel(panel_path, personas)
-            dataset = PreparedPersonaDataset(
-                locale=locale,
-                resource=self._resource(locale),
-                version=self.config.personas_dataset_version,
-                source_sha256=source_sha256,
-                source_rows=source_rows,
-                panel_seed=self.config.personas_panel_seed,
-                panel_rows=len(personas),
+        if not panel_path.is_file() or not manifest_path.is_file():
+            raise RuntimeError(
+                f"Prepared NeMo UserSim panel for {locale!r} is missing at {panel_path}. "
+                "Run `gym eval prepare --benchmark usersim` before starting the Resources Server."
             )
-            temporary_manifest = manifest_path.with_suffix(".json.tmp")
-            temporary_manifest.write_text(dataset.model_dump_json(indent=2))
-            os.replace(temporary_manifest, manifest_path)
-            return personas, dataset
+        try:
+            manifest = PreparedPersonaDataset.model_validate_json(manifest_path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Prepared NeMo UserSim panel manifest at {manifest_path} is invalid: {exc}") from exc
+        if manifest.locale != locale or manifest.personas_dataset_version != self.config.personas_dataset_version:
+            raise RuntimeError(f"Prepared NeMo UserSim panel manifest at {manifest_path} does not match configuration")
+        if manifest.panel_size_bytes != panel_path.stat().st_size or manifest.panel_sha256 != _sha256_file(panel_path):
+            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} does not match its manifest")
+        try:
+            panel_rows = pq.read_table(panel_path).to_pylist()
+        except Exception as exc:
+            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} is not valid Parquet: {exc}") from exc
+        personas = [persona for row in panel_rows if (persona := _persona_from_row(row)) is not None]
+        if not personas or len(personas) != manifest.panel_rows:
+            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} contains invalid persona rows")
+        logger.info("Loaded prepared NeMo UserSim panel at %s", panel_path)
+        return personas, manifest
 
     def _load_personas(self, locale: str) -> list[dict[str, Any]]:
         personas = self.locale_to_personas.get(locale)
@@ -418,9 +273,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
             usersim_context=ResolvedUserSimContext(
                 locale=sampling.locale,
                 seed=sampling.seed,
-                personas_dataset_version=dataset.version,
-                personas_source_sha256=dataset.source_sha256,
-                personas_panel_seed=dataset.panel_seed,
+                personas_dataset_version=dataset.personas_dataset_version,
+                personas_panel_sha256=dataset.panel_sha256,
             ),
         )
 

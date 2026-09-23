@@ -2,43 +2,32 @@
 
 This environment initializes one deterministic NeMo UserSim scenario at the
 beginning of each `UserSimEnvironmentServer` episode. The Resources Server
-prepares a deterministic panel from a previously downloaded, versioned
-Nemotron Personas source. It does not access NGC, generate personas with an
-LLM, or run a complete Data Designer pipeline.
+loads a persona panel previously created by `usersim panel` during
+`gym eval prepare`. It does not construct or sample the panel at runtime.
 
 ## Environment initialization
 
-The benchmark configuration pins the NGC resource version to `0.0.2` and uses:
+The benchmark configuration pins the persona dataset version to `0.0.2` and
+uses:
 
 ```text
 benchmarks/usersim/data/personas/
 └── 0.0.2/
-    ├── source/
-    │   ├── en_US.parquet
-    │   └── en_US.manifest.json
-    ├── panels/
-    │   ├── en_US-n1000-seed42.parquet
-    │   └── en_US-n1000-seed42.manifest.json
-    └── locks/
+    └── panels/
+        ├── en_US.parquet
+        └── en_US.manifest.json
 ```
 
 For every configured locale, server startup:
 
-1. Requires the pinned source Parquet prepared by the benchmark recipe.
-2. Validates the Parquet and records its row count, size, and SHA-256.
-3. Reuses a matching deterministic panel when present; otherwise streams the
-   source dataset once and materializes a bounded panel.
-4. Loads only the panel into memory for episode sampling.
+1. Requires the panel and manifest prepared by the benchmark recipe.
+2. Validates the panel's version, size, row count, and SHA-256.
+3. Loads the panel into memory for episode sampling.
 
-File locks and atomic replacement prevent concurrent server processes sharing
-the prepared assets from publishing partial panels. A matching source manifest
-avoids hashing or scanning the full source again.
-
-NGC and its credentials are preparation-time concerns. Run
-`gym eval prepare --benchmark usersim` before starting the Resources Server.
-Startup fails with that instruction when the pinned source is absent. See
-[`benchmarks/usersim`](../../benchmarks/usersim/) for credential and artifact
-details.
+Run `gym eval prepare --benchmark usersim` before starting the Resources
+Server. Preparation delegates population sampling to NeMo UserSim and treats
+the resulting panel as the immutable artifact. Startup fails with that
+instruction when the panel is absent or does not match its manifest.
 
 ## Episode data contracts
 
@@ -78,8 +67,7 @@ returns both the executable scenario and its immutable selection provenance:
     "locale": "en_US",
     "seed": 1042,
     "personas_dataset_version": "0.0.2",
-    "personas_source_sha256": "sha256-without-prefix",
-    "personas_panel_seed": 42
+    "personas_panel_sha256": "sha256-without-prefix"
   }
 }
 ```
@@ -92,7 +80,7 @@ At `/seed_session`, the server:
 1. Selects one persona from the prepared panel, plus one probe and theme,
    deterministically.
 2. Stores the resolved context in task-scoped session state.
-3. Records the source version, SHA-256, and panel seed for replay.
+3. Records the persona dataset version and panel SHA-256 for replay.
 4. Returns a `UserSimScenario` to the Environment Server before its first participant
    invocation.
 
@@ -144,7 +132,6 @@ The YAML config owns static population and probe policy:
 - `personas_cache_dir`
 - `personas_dataset_version`
 - `personas_locales`
-- `personas_panel_size` and `personas_panel_seed`
 - `probe_mix`
 - `probe_themes`
 - agent, model, and resources-server references
@@ -158,8 +145,7 @@ Each dataset row owns dynamic task identity:
 - optional `usersim_sampling.probe_type`
 - focal and optional per-alias Responses API parameters
 
-Changing the dataset version or panel configuration creates a different cache
-path rather than silently overwriting an existing panel.
+Changing the dataset version selects a different prepared-panel cache path.
 
 ## Supported probes
 
@@ -180,7 +166,7 @@ not an assistant-quality benchmark score.
 ## Run
 
 Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`, then
-prepare the pinned persona source before collecting rollouts:
+prepare the UserSim panel before collecting rollouts:
 
 ```bash
 gym eval prepare --benchmark usersim
