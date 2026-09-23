@@ -56,7 +56,7 @@ from nemo_gym.tool_access import (
     MCPToolAccess,
     ToolAccess,
 )
-from resources_servers.usersim.types import (
+from resources_servers.usersim.episode_contracts import (
     USERSIM_MODEL_ALIASES,
     UserSimEpisodeFailure,
     UserSimEpisodeRequest,
