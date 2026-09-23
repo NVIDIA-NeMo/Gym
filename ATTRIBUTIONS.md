@@ -224,18 +224,8 @@ upstream copyright header and adds an NVIDIA modifications block.
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
 - tau2-bench: original MIT notices preserved in each vendored file; NVIDIA modifications noted in-file and in `resources_servers/indian_banking/README.md`
 - AssayBench: original MIT notice preserved in the vendored file; the `assaybench` metric package itself is a pinned PyPI dependency of that server (`resources_servers/assaybench/requirements.txt`), not vendored
+- AgentDojo (MIT, https://github.com/ethz-spylab/agentdojo, tag `v0.1.35`, commit `a75aba7631d3ca5fb7ab938965c97ead2f9ff84b`): a pinned git dependency of `responses_api_agents/agentdojo_agent` (`pyproject.toml`), not vendored; its suites, tools, attacks, defenses and verifiers run unmodified, and `responses_api_agents/agentdojo_family/` imports and subclasses its pipeline and `OpenAILLM` classes without copying them
 - ReactionMechanismReasoning: pinned at upstream revision `63bb79f912f0b2de593996b80ffeea894f6f1a59`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications to the ported scorer are documented at their call sites in `metrics.py` and summarised in `resources_servers/fukuyamabench/README.md`. Benchmark data is **not** vendored; it is downloaded at runtime by `scripts/prepare_fukuyamabench.py`.
-
----
-
-## Pinned Upstream Dependencies (not vendored)
-
-These are installed from a pinned upstream revision into a server's own virtual environment.
-No upstream source is copied into this repository; the adapter imports and subclasses it.
-
-| Component | License | Pinned revision | Used by | Upstream |
-|-----------|---------|-----------------|---------|----------|
-| AgentDojo | MIT | `a75aba7631d3ca5fb7ab938965c97ead2f9ff84b` (tag `v0.1.35`) | `responses_api_agents/agentdojo_agent/` (suites, tools, attacks, defenses and verifiers run unmodified; `responses_api_agents/agentdojo_family/model_bridge.py` subclasses `agentdojo.agent_pipeline.llms.openai_llm.OpenAILLM` and reuses its message and tool converters) | https://github.com/ethz-spylab/agentdojo |
 
 ---
 
