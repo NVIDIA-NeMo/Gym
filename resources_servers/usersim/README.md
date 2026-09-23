@@ -42,7 +42,7 @@ selectors and optional per-role Agent request parameters:
     "seed": 1042,
     "probe_type": "general_open_ended"
   },
-  "agent_responses_create_params": {}
+  "responses_create_params": {}
 }
 ```
 
@@ -141,7 +141,7 @@ Each dataset row owns dynamic task identity:
 - `sampling.locale`
 - `sampling.seed`
 - optional `sampling.probe_type`
-- optional per-role `agent_responses_create_params`
+- optional per-role `responses_create_params`
 
 Changing the dataset version selects a different prepared-panel cache path.
 
