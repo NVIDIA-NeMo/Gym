@@ -27,3 +27,40 @@ The Archipelago image is reused when present. If it is missing and automatic bui
 configured pinned Archipelago commit and builds the SIF once. The lightweight Stirrup runtime is pinned in
 `stirrup-requirements.txt`, built once inside that image, and cached under `deps/`; it does not vendor either source
 repository into Gym.
+
+## Input row modes
+
+The default row format is the public Apex Agents benchmark format. Those rows omit `runtime_mode`, include
+`task_input_files`, and run as `runtime_mode: "world_zip"`. Gym downloads or restores the world ZIP, seeds the
+session, and then starts the standard Apex/Archipelago gateway path. This default keeps the original benchmark data
+schema backward-compatible.
+
+Private prebuilt deliveries use `runtime_mode: "prebuilt_world"`. These rows do not carry `task_input_files`; instead
+they must include a `task_slug`, and the agent must be configured with `prebuilt_world_manifest`. The manifest maps the
+row's `world_id` to a trusted local SIF image. The prebuilt path uploads only the lightweight Stirrup runtime helpers,
+bootstraps them inside the task SIF, and runs the delivered startup command for that task slug.
+
+## Fixed-port worlds and network isolation
+
+Some prebuilt world images start their gateway, app services, and MCP servers on fixed ports (for example
+8000 and 8100-8107). Several rollouts on one node then collide in the shared host network namespace. The prebuilt-world
+launcher can give each sandbox its own private Apptainer network namespace:
+
+```bash
+++apex_agent_apptainer_extra_start_args='[--net,"--network=none",--writable-tmpfs,--cleanenv,--pid,--no-mount,"home,tmp,bind-paths",--home,/root]'
+```
+
+Unprivileged Apptainer only offers the `none` network, so the sandbox loses its route to the model server, and the
+Stirrup client runs inside the sandbox. With `policy_egress_relay: auto` (the default) the agent enables the relay when
+the apptainer start arguments contain `--net` or a `--network` option (`always` and `never` force it), opens
+a unix socket on the host that forwards to the model server, binds it into the sandbox at `/egress/policy.sock`, and
+`run_stirrup_rollout` points the client at a loopback listener that forwards to that socket. Unix sockets ignore
+network namespaces. Only plain-HTTP model endpoints are supported.
+
+Private network namespaces also mean the prebuilt world's own app hostnames no longer have upstream DNS. With
+`local_dns: auto` (the default) the prebuilt path starts `sandbox_local_dns.py` inside the sandbox, points
+`/etc/resolv.conf` at it, and answers local A/AAAA lookups with loopback. This is intentionally generic: it lets
+names such as ERPNext, wiki, or other in-sandbox services resolve to `127.0.0.1` without enumerating each delivered
+hostname. Use this isolated mode only for worlds whose tools are expected to be offline except for the model-policy
+request; worlds that legitimately need internet access should stay on the shared-network path until they have a
+different egress policy.

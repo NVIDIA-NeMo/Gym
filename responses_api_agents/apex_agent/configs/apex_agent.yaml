@@ -54,6 +54,19 @@ apex_agent:
       # Shares the verifier's output root. Incomplete/max-turn runs are saved
       # here without being sent to the grader.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # Optional trusted world_id -> SIF manifest for prebuilt world deliveries.
+      # Ordinary Hugging Face APEX rows continue to use the shared image above.
+      prebuilt_world_manifest: ${oc.select:apex_prebuilt_world_manifest,null}
+      # Relay policy traffic through a unix socket bound into the sandbox:
+      # auto | always | never. "auto" turns it on when
+      # apex_agent_apptainer_extra_start_args contains --net or a --network
+      # option, i.e. the sandbox has its own network namespace, which lets
+      # worlds with fixed service ports run several rollouts per node.
+      policy_egress_relay: ${oc.select:apex_agent_policy_egress_relay,auto}
+      # Run a catch-all DNS resolver inside private-network prebuilt worlds so
+      # fake app hostnames like erpnext.io resolve to the sandbox loopback.
+      # auto | always | never.
+      local_dns: ${oc.select:apex_agent_local_dns,auto}
       datasets:
       - name: example
         type: example
