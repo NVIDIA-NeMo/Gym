@@ -108,7 +108,9 @@ provider overrides. With sandbox and policy model configuration ready:
 python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
   resources_servers/swebench_pro/data/example.jsonl /tmp/swe-pro-native.jsonl
 
-gym eval run --config benchmarks/swebench/pro/openclaw_native.yaml \
+gym env start --config benchmarks/swebench/pro/openclaw_native.yaml --model-type openai_model
+
+gym eval run --no-serve --config benchmarks/swebench/pro/openclaw_native.yaml \
   --model-type openai_model --input /tmp/swe-pro-native.jsonl \
   --output outputs/openclaw-native.jsonl --limit 1
 ```
