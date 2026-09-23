@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import json
+import zlib
 from asyncio import Semaphore
 from time import time
 from typing import Any, Dict, List, Optional, Union
@@ -156,7 +159,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 difficulty=difficulty,
             )
 
-        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
+        # Tests are stored compressed by benchmarks/livecodebench/prepare_utils.py
+        # (_pack_unit_tests) to keep the materialized-inputs file from reaching
+        # 12 GB. Decode here, immediately before use, so the plaintext exists only
+        # for this verification instead of for the whole run. Falls back to the
+        # old plaintext shape so pre-patch artifacts still verify.
+        _raw_tests = body.verifier_metadata["unit_tests"]
+        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+            _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
+            _raw_tests = {
+                "inputs": _decoded["inputs"],
+                "outputs": _decoded["outputs"],
+                "fn_name": _raw_tests.get("fn_name"),
+            }
+        tests = UnitTests.model_validate(_raw_tests)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)

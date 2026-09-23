@@ -17,7 +17,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 from time import sleep
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
@@ -74,6 +74,7 @@ class GetInnerVLLMConfigResponse(BaseModel):
 
 
 class LocalVLLMModel(VLLMModel):
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("GET", "/get_inner_vllm_config")})
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor

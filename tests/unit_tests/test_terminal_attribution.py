@@ -33,6 +33,7 @@ from nemo_gym.token_id_capture.consumer import _assemble
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TERMINAL_CALL_KEY,
+    TERMINAL_RESPONSE_ID_KEY,
     TOKEN_CAPTURE_KEY,
     finalize_rollout_token_capture,
 )
@@ -440,6 +441,39 @@ def test_finalize_honors_an_explicit_terminal_key(tmp_path):
     assert built[MASK_SAMPLE_KEY] is False
     attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
     assert attribution["method"] == "explicit" and attribution["chain"] == "delivered"
+
+
+def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {"id": "", "model": "m", "object": "response", "output": []},
+        TERMINAL_RESPONSE_ID_KEY: "resp_2",
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
+    assert attribution["method"] == "declared" and attribution["chain"] == "delivered"
+    assert attribution["call_id"] == "call2"
+
+
+def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": _response(
+            [_assistant_item("step one"), _assistant_item("final answer")],
+            response_id="resp_2",
+        ),
+        TERMINAL_RESPONSE_ID_KEY: "resp_unknown",
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    # A declaration the records cannot confirm never falls back to weaker witnesses.
+    assert built[MASK_SAMPLE_KEY] is True
+    assert result[MASK_SAMPLE_KEY] is True
+    attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
+    assert attribution["method"] == "none"
+    assert "declared_terminal_not_captured" in attribution["reason"]
 
 
 def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):

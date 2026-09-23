@@ -197,6 +197,10 @@ class EnvironmentManifest(_ManifestModel):
     version: NonEmptyString = Field(
         description="Version of the resolved composition; Semantic Versioning is recommended."
     )
+    experimental: bool = Field(
+        default=True,
+        description="Manual experimental flag; false does not imply certificate-backed validation.",
+    )
     kind: EnvironmentKind
     integration_profile: IntegrationProfile
     domain: Domain

@@ -4,23 +4,19 @@
 """vLLM model server with exact-prefix context-compaction support."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import Body, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
+from nemo_gym.base_responses_api_model import _orjson_dispatch_response
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_streaming import (
-    sanitize_streaming_responses_body,
-    synthesize_responses_failure_sse,
-    synthesize_responses_sse,
-)
+from nemo_gym.responses_streaming import sanitize_streaming_responses_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
@@ -52,6 +48,7 @@ def _validate_context_compaction_params(body: Dict[str, Any]) -> VLLMContextComp
 class VLLMModelWithCompaction(VLLMModel):
     """Dedicated vLLM adapter for context-compacted generation."""
 
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 
     def setup_webserver(self):
@@ -81,23 +78,14 @@ class VLLMModelWithCompaction(VLLMModel):
 
         if not body.get("stream"):
             params = _validate_context_compaction_params(body)
-            return await self._invoke_responses(request, params)
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, namespace_map = sanitize_streaming_responses_body(body)
         params = _validate_context_compaction_params(cleaned)
-        try:
-            response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
-        except Exception as exc:
-            LOG.exception("responses() failed while serving a streaming /v1/responses request")
-            return StreamingResponse(
-                synthesize_responses_failure_sse(str(exc)),
-                media_type="text/event-stream",
-            )
-        return StreamingResponse(
-            synthesize_responses_sse(response_json, namespace_map),
-            media_type="text/event-stream",
-        )
+        return await self._stream_responses(request, params, namespace_map)
 
     async def tokenize(
         self,
@@ -151,6 +139,9 @@ class VLLMModelWithCompaction(VLLMModel):
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,
+            # Keep the backend envelope id only for captured requests. Terminal
+            # attribution matches it to the ledger row.
+            preserve_envelope_id=self._preserve_envelope_id(),
         )
 
 

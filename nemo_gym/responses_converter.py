@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -95,13 +96,14 @@ class ResponsesConverterState(BaseModel):
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
     content_buffer: str = ""
+    refusal_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
-        if not (self.assistant_item_buffered or self.content_buffer or self.tool_calls_buffer):
+        if not (self.assistant_item_buffered or self.content_buffer or self.refusal_buffer or self.tool_calls_buffer):
             self.token_information = None
             return
 
@@ -112,6 +114,8 @@ class ResponsesConverterState(BaseModel):
         # Omit rather than send `tool_calls: []` — OpenAI rejects empty arrays.
         if self.tool_calls_buffer:
             shared_params["tool_calls"] = self.tool_calls_buffer
+        if self.refusal_buffer:
+            shared_params["refusal"] = self.refusal_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -124,6 +128,7 @@ class ResponsesConverterState(BaseModel):
         self.messages.append(message)
 
         self.content_buffer = ""
+        self.refusal_buffer = ""
         self.tool_calls_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
@@ -416,8 +421,19 @@ class ResponsesConverter(BaseModel):
                     # Tool-call only turns have "None" according to the official API spec.
                     pass
                 elif isinstance(content, list):
-                    content_str = "".join([part.get("text", "") for part in content])
-                    final_content += content_str
+                    text_parts: list[str] = []
+                    refusal_parts: list[str] = []
+                    for part in content:
+                        text = part.get("text")
+                        refusal = part.get("refusal")
+                        if isinstance(text, str):
+                            text_parts.append(text)
+                        if isinstance(refusal, str):
+                            refusal_parts.append(refusal)
+                        if not isinstance(text, str) and not isinstance(refusal, str):
+                            raise NotImplementedError(f"Unsupported assistant content part: {part!r}")
+                    final_content += "".join(text_parts)
+                    state.refusal_buffer += "".join(refusal_parts)
                 elif isinstance(content, str):
                     final_content += content
                 else:
@@ -647,6 +663,7 @@ class ResponsesConverter(BaseModel):
         response_output = []
 
         content = message_dict.get("content") or ""
+        refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
         else:
@@ -663,20 +680,30 @@ class ResponsesConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = message_dict.get("tool_calls", []) or []
-        has_empty_output = not (response_output or tool_calls_raw)
+        has_empty_output = not (response_output or tool_calls_raw or refusal)
 
-        if content or has_empty_output:
+        if content or refusal or has_empty_output:
+            message_content = []
+            if content or has_empty_output:
+                message_content.append(
+                    NeMoGymResponseOutputText(
+                        type="output_text",
+                        text=content,
+                        annotations=[],
+                    )
+                )
+            if refusal:
+                message_content.append(
+                    NeMoGymResponseOutputRefusal(
+                        type="refusal",
+                        refusal=str(refusal),
+                    )
+                )
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
                     role=message_dict.get("role"),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=content,
-                            annotations=[],
-                        )
-                    ],
+                    content=message_content,
                     status="completed",
                     type="message",
                 )
@@ -742,6 +769,8 @@ class ResponsesConverter(BaseModel):
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
         chat_completion: NeMoGymChatCompletion,
+        *,
+        preserve_envelope_id: bool = False,
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
@@ -780,9 +809,21 @@ class ResponsesConverter(BaseModel):
         elif choice.finish_reason == "content_filter":
             incomplete_details = {"reason": "content_filter"}
 
+        native_finish_reason = getattr(choice, "native_finish_reason", None)
+        provider_metadata = (
+            {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
+        )
+
         # Chat Completion -> Response
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            # Under external token capture the chat completion's envelope id is
+            # reused instead of minting one: capture records the id of the served
+            # payload, and the id the client keeps must match it for terminal
+            # attribution to join the scored response back to its captured call.
+            # Everywhere else Gym mints the id, keeping the resp_* format and
+            # uniqueness independent of the backend.
+            id=(str(getattr(chat_completion, "id", "") or "") if preserve_envelope_id else "")
+            or f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
             model=responses_create_params.model,
             object="response",
@@ -810,6 +851,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
+            **provider_metadata,
         )
 
 

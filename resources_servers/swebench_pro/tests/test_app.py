@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -27,6 +28,8 @@ from resources_servers.swebench_pro.app import (
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
     SWEBenchProSeedSessionRequest,
+    _attempt_budget,
+    _budget_spent,
 )
 from resources_servers.swebench_pro.verification import VerificationResult
 
@@ -60,13 +63,12 @@ def request_body() -> dict:
     }
 
 
-def fake_pty(session_id: str = "pty-session") -> SimpleNamespace:
-    """A stand-in for ``sandbox.pty``; seed_session opens a terminal for the agent."""
-    session = SimpleNamespace(session_id=session_id, close=AsyncMock())
-    return SimpleNamespace(create=AsyncMock(return_value=session))
-
-
-def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchProResourcesServer:
+def make_server(
+    *,
+    golden: bool,
+    apply_anti_cheating: bool = True,
+    **overrides: object,
+) -> SWEBenchProResourcesServer:
     config = SWEBenchProResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -77,6 +79,7 @@ def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchPr
         is_verifying_golden_patch=golden,
         apply_anti_cheating=apply_anti_cheating,
         prefetch_go_modules=True,
+        **overrides,
     )
     return SWEBenchProResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -169,7 +172,6 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
-        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
     )
@@ -196,7 +198,6 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     server = make_server(golden=False, apply_anti_cheating=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
-        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(),
     )
@@ -270,7 +271,6 @@ async def test_seed_session_normalizes_the_agent_environment_before_snapshotting
         upload=AsyncMock(),
         stop=AsyncMock(),
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
-        pty=fake_pty(),
     )
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
@@ -296,7 +296,6 @@ async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
         upload=AsyncMock(),
         stop=AsyncMock(),
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
-        pty=fake_pty(),
     )
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
@@ -304,47 +303,6 @@ async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
     # A container that cannot be normalized is still worth running.
     await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
     assert server._session_id_to_sandbox["session"] is sandbox
-
-
-@pytest.mark.asyncio
-async def test_seed_session_returns_the_pty_session_the_agent_attaches_to() -> None:
-    """The agent needs both ids; given only one it silently builds its own sandbox instead."""
-    server = make_server(golden=False)
-    sandbox = SimpleNamespace(
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
-        upload=AsyncMock(),
-        stop=AsyncMock(),
-        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
-        pty=fake_pty("pty-id"),
-    )
-    server._create_sandbox = AsyncMock(return_value=sandbox)
-    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
-
-    response = await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
-
-    assert response.sandbox_handle == "sandbox-id"
-    assert response.pty_session_id == "pty-id"
-    sandbox.pty.create.assert_awaited_once()
-    assert server._session_id_to_pty["session"].session_id == "pty-id"
-
-
-@pytest.mark.asyncio
-async def test_extract_model_patch_closes_the_pty_before_stopping_the_sandbox() -> None:
-    """A session that outlives its sandbox leaks its connection to the sandbox API."""
-    server = make_server(golden=False)
-    order: list[str] = []
-    session = SimpleNamespace(session_id="pty-id", close=AsyncMock(side_effect=lambda: order.append("close")))
-    sandbox = SimpleNamespace(
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
-        stop=AsyncMock(side_effect=lambda: order.append("stop")),
-    )
-    server._session_id_to_sandbox["session"] = sandbox
-    server._session_id_to_pty["session"] = session
-
-    await server._extract_model_patch("session", "abc123")
-
-    assert order == ["close", "stop"], "the terminal must be closed before its sandbox goes away"
-    assert "session" not in server._session_id_to_pty
 
 
 @pytest.mark.asyncio
@@ -374,3 +332,75 @@ async def test_shutdown_stops_abandoned_session_sandboxes() -> None:
     first.stop.assert_awaited_once()
     second.stop.assert_awaited_once()
     assert server._session_id_to_sandbox == {}
+
+
+def inconclusive_result() -> VerificationResult:
+    """A verdict-less run: `inconclusive_reason` reports "no usable output"."""
+    return VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+
+
+def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -> None:
+    """A hung attempt must fail the rollout, not hold the run open until the wall clock."""
+    server = make_server(golden=True, verification_attempt_timeout=0.05, inconclusive_verification_retries=0)
+
+    async def _hang(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_create_sandbox", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["reward"] == 0.0
+    assert "Verification failed" in response.json()["error"]
+
+
+def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:
+    """The retry sequence is bounded in aggregate, not just per attempt."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: clock["t"])
+    server = make_server(golden=True, verification_total_timeout=1500.0)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    async def _verify(**kwargs: object) -> VerificationResult:
+        clock["t"] += 1000.0
+        return inconclusive_result()
+
+    verify = AsyncMock(side_effect=_verify)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    # Budget is 1500s and each attempt burns 1000s: the second attempt still
+    # starts (500s left, which is what its own ceiling is clamped to) and the
+    # third never does.
+    assert verify.await_count == 2
+
+
+def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
+    """Leaving both ceilings unset preserves the previous unbounded behaviour."""
+    server = make_server(golden=True, verification_attempt_timeout=None, verification_total_timeout=None)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(return_value=inconclusive_result())
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert verify.await_count == 3
+
+
+def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: 100.0)
+    assert _attempt_budget(None, None) is None
+    assert _attempt_budget(30.0, None) == 30.0
+    assert _attempt_budget(None, 150.0) == 50.0
+    assert _attempt_budget(30.0, 150.0) == 30.0
+    assert _attempt_budget(80.0, 150.0) == 50.0
+    # A spent budget yields zero rather than a negative timeout.
+    assert _attempt_budget(30.0, 90.0) == 0.0
+    assert _budget_spent(None) is False
+    assert _budget_spent(90.0) is True
+    assert _budget_spent(150.0) is False

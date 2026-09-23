@@ -29,11 +29,9 @@ set -euo pipefail
 
 CONTAINER=$CONTAINER
 OUTPUT_DIR=${OUTPUT_DIR:-$(pwd)/results/vllm_router}
-VLLM_ROUTER_GIT_URL=${VLLM_ROUTER_GIT_URL:-https://github.com/vllm-project/router}
-# Head of vllm-project/router#216 ("[Bugfix]: Fix health checker to preserve
-# worker load during checks"). Fetching a bare SHA works because GitHub serves
-# any commit reachable from a ref, and PR heads are refs.
-VLLM_ROUTER_COMMIT=${VLLM_ROUTER_COMMIT:-9e6fce282a877c65185468692c6ba8a483409d9b}
+VLLM_ROUTER_GIT_URL=${VLLM_ROUTER_GIT_URL:-https://github.com/bxyu-nvidia/router}
+# See the PR stack at https://github.com/bxyu-nvidia/router/pull/3
+VLLM_ROUTER_COMMIT=${VLLM_ROUTER_COMMIT:-e7dda77989fc75d878da8071031de58e519d2415}
 RUST_TOOLCHAIN=${RUST_TOOLCHAIN:-1.95.0}
 # Load-accounting unit tests from the fix. Compiling the test binary roughly
 # doubles the job, so it is opt-out.

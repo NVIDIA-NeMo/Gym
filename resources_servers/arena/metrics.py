@@ -128,19 +128,24 @@ class ArenaMetrics:
 
                 # Only complete, parsed judge pairs contribute to either win rate.
                 total_rollouts += 1
-                reasoning_only_response_rollouts += int(bool(reasoning) and not response)
+                reasoning_only = bool(reasoning) and not response
+                reasoning_only_response_rollouts += int(reasoning_only)
                 incomplete_reason = ((rollout.get("response") or {}).get("incomplete_details") or {}).get("reason")
-                if self.config.style_control_method == "reference_length" and incomplete_reason == "max_output_tokens":
-                    # Context-window rejections have no usage because generation never started.
-                    if (rollout.get("response") or {}).get("usage") is None:
-                        context_window_exceeded_rollouts += 1
-                    else:
-                        max_token_reached_rollouts += 1
+                if self.config.style_control_method == "reference_length" and (
+                    incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
+                ):
+                    if incomplete_reason == "max_output_tokens":
+                        # Context-window rejections have no usage because generation never started.
+                        if (rollout.get("response") or {}).get("usage") is None:
+                            context_window_exceeded_rollouts += 1
+                        else:
+                            max_token_reached_rollouts += 1
                     category = rollout.get("category")
                     if not category:
                         raise ValueError("category is required for scoring")
 
-                    # A response that reaches the generation limit is a zero, not an infrastructure failure.
+                    # These unjudged v3 rollouts (generation limit or reasoning only) score zero
+                    # and do not count as rollout failures.
                     scores = np.zeros(2)
                     scores_by_category[category].append(scores)
                     if rollout.get("is_lmarena_v2_prompt"):
