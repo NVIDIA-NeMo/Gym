@@ -445,7 +445,10 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
                 200,
                 {
                     "_ng_failure_class": "judge_failed",
+                    "failure_kind": "judge_failed",
                     "failure_reason": "Judge unavailable",
+                    "mask_sample": True,
+                    "instance_config": {"mask_sample": True},
                     "reward": 0.0,
                     "response": generated_response,
                     "ng_trajectory": {
@@ -483,6 +486,7 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
     successes = list(read_records(output))
     failures = {row["_ng_task_index"]: row for row in read_records(collection.failures_path_for(output))}
     assert failures[1]["response"] == generated_response
+    assert failures[1]["mask_sample"] is True and failures[1]["instance_config"]["mask_sample"] is True
     assert "reward" not in failures[1]
     assert "response" not in failures[2]
     for row in failures.values():
@@ -509,6 +513,11 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
     by_task = {row["_ng_task_index"]: row for row in returned}
     assert by_task[0] == successes[0]
     assert by_task[1]["reward"] == 1.0 and by_task[1]["response"] == generated_response
+    assert not by_task[1].get("mask_sample") and "failure_kind" not in by_task[1]
+    verify_request = next(
+        call.kwargs["json"] for call in client.post.await_args_list if call.kwargs["url_path"] == "/verify"
+    )
+    assert "mask_sample" not in verify_request and "instance_config" not in verify_request
     assert set(by_task) == {0, 1}
     assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/run") == 3
     assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/verify") == 1

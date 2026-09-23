@@ -340,8 +340,9 @@ def test_killed_worker_leaves_durable_unknown_attempt(run):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])
 @pytest.mark.parametrize("merge_shards", [False, True])
+@pytest.mark.parametrize("failure_class", ["agent_run_error", "judge_failed"])
 async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
-    run, monkeypatch, masked, count_failures_as_zero, merge_shards
+    run, monkeypatch, masked, count_failures_as_zero, merge_shards, failure_class
 ):
     import nemo_gym.rollout_collection as collection
     from nemo_gym.rollout_collection import (
@@ -359,9 +360,13 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         save(run, history, retry | {"mask_sample": masked}, reward=0.0)
         save(run, history, rows[0] | {"mask_sample": not masked}, reward=1.0)
         history.dispatch(rows[1])
-        save(run, history, rows[1], failure="agent_run_error")
+        save(run, history, rows[1] | {"mask_sample": True, "failure_kind": failure_class}, failure=failure_class)
         history.omit(rows[2], "No cached deliverable")
-        history.dispatch(rows[3])  # Dispatched unknown; row 4 was never dispatched.
+        history.dispatch(rows[3])
+        save(run, history, rows[3] | {"mask_sample": True}, failure=failure_class)
+        # The newer unknown attempt must fence the old, explicitly countable failure.
+        history.dispatch(rows[3] | {"_ng_attempt_index": 1})  # Row 4 was never dispatched.
+    original_failures = failures_path_for(output).read_bytes()
 
     scored = []
 
@@ -380,11 +385,14 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
             output_jsonl_fpath=str(merged),
             merge_shards=merge_shards,
             health_check_workers=1,
-            count_failure_classes_as_zero=["agent_run_error"] if count_failures_as_zero else [],
+            count_failure_classes_as_zero=[failure_class] if count_failures_as_zero else [],
         )
     )
     assert [row["_ng_task_index"] for row in scored] == ([0, 1] if count_failures_as_zero else [0])
     assert all(row["reward"] == 0.0 for row in scored)
+    if count_failures_as_zero:
+        assert scored[1]["mask_sample"] is False and "failure_kind" not in scored[1]
+    assert failures_path_for(output).read_bytes() == original_failures
     if merge_shards:
         assert [row["reward"] for row in read_records(merged)] == [0.0]
     report = orjson.loads(coverage_path_for(merged).read_bytes())

@@ -974,7 +974,19 @@ def _failure_diagnostics(result: Any) -> Dict:
     return {
         key: value
         for key, value in result.items()
-        if key in {"ng_agent_observations", "ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY}
+        if key
+        in {
+            "ng_agent_observations",
+            "ng_model_call_capture",
+            NG_TRAJECTORY_KEY,
+            NG_PERF_KEY,
+            MASK_SAMPLE_KEY,
+            "failure_kind",
+            "failure_reason",
+            "instance_config",
+            "_ng_group_id",
+            "_ng_group_attempt",
+        }
         or key.startswith("_ng_failure_")
     }
 
@@ -1027,7 +1039,15 @@ def _counted_failure_rows(rows: List[Dict], failure_classes: List[str]) -> List[
     for row in rows:
         if row.get(NG_FAILURE_CLASS_KEY) not in failure_classes:
             continue
-        scored = {key: value for key, value in row.items() if not key.startswith("_ng_failure_")}
+        # Match the legacy sidecar path: failure diagnostics are not measurements.
+        scored = {
+            key: value
+            for key, value in row.items()
+            if not key.startswith("_ng_failure_") and key not in ("failure_kind", "failure_reason")
+        }
+        # Only this metrics copy is unmasked. Saved failure/training evidence
+        # stays unchanged even when the caller opts into zero-counting.
+        scored[MASK_SAMPLE_KEY] = False
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted
@@ -1751,7 +1771,14 @@ class RolloutCollectionHelper(BaseModel):
             f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
             f"{completion['unknown']} unknown. Details: {coverage_path_for(output_fpath)}"
         )
-        if input_rows and not persisted_results:
+        # Explicitly counted failures can provide a score even when no rollout
+        # succeeded. Select attempts before applying that scoring policy.
+        counted = (
+            _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
+            if config.count_failure_classes_as_zero
+            else []
+        )
+        if input_rows and not persisted_results and not counted:
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
@@ -1766,10 +1793,8 @@ class RolloutCollectionHelper(BaseModel):
         persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics using only the
-        # rows written to the main rollouts jsonl so runtime aggregation matches
-        # `gym eval aggregate`.
-        counted: List[Dict] = []
+        # Aggregate persisted results plus explicitly counted metrics-only failures,
+        # matching `gym eval aggregate` without changing either rollout artifact.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1778,7 +1803,6 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted[:] = _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"

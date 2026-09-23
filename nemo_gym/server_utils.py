@@ -526,6 +526,9 @@ async def _request_with_retries(
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
+            if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                raise
+
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
@@ -541,9 +544,10 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
-async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover
     if not response.ok:
-        content = await response.content.read()
+        if content is None:
+            content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
