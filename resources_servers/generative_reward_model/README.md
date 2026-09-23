@@ -132,6 +132,7 @@ generative_reward_model/
 │   └── genrm_train.yaml          # Configuration
 ├── data/
 │   ├── example.jsonl             # Example samples
+│   ├── example_rollouts.jsonl    # Those samples scored, one rollout each
 │   └── example_metrics.json
 ├── tests/
 │   ├── __init__.py
