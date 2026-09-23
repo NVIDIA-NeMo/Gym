@@ -370,6 +370,89 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
 
 
 @pytest.mark.parametrize(
+    "condition",
+    ["completed", "failed-turn", "failed-exit", "timed-out", "no-terminal", "other-error", "near-match", "no-start"],
+)
+def test_compaction_advisories_require_clean_completion_and_remain_visible(setup, condition) -> None:
+    agent, sandbox = setup
+    warning = (
+        "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
+        "Start a new thread when possible to keep threads small and targeted."
+    )
+    startup = (
+        "Model metadata for `test-model` not found. Defaulting to fallback metadata; "
+        "this can degrade performance and cause issues."
+    )
+    transcript = [
+        {"type": "item.completed", "item": {"id": "startup", "type": "error", "message": startup}},
+        *([] if condition == "no-start" else [{"type": "turn.started"}]),
+    ]
+    transcript.extend(json.loads(line)[1] for line in events().splitlines())
+    # The real long Ansible trace had six successful compactions followed by a
+    # normal final message and turn.completed, with all usage still available.
+    for index in range(6):
+        transcript.insert(
+            -2,
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": f"compaction-warning-{index}",
+                    "type": "error",
+                    "message": warning + (" Extra error" if condition == "near-match" else ""),
+                },
+            },
+        )
+    if condition == "failed-turn":
+        transcript.append({"type": "turn.failed", "error": {"message": "Final model call failed"}})
+    elif condition == "failed-exit":
+        sandbox.result["return_code"] = 1
+    elif condition == "timed-out":
+        sandbox.result["timed_out"] = True
+    elif condition == "no-terminal":
+        transcript.pop()
+    elif condition == "other-error":
+        transcript.insert(
+            -1, {"type": "item.completed", "item": {"type": "error", "message": "Unknown model call error"}}
+        )
+    sandbox.events = "\n".join(json.dumps([float(index), event]) for index, event in enumerate(transcript))
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert [item["type"] for item in body["output"]] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert body["output"][-1]["content"][0]["text"] == "Fixed"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    observations = closed.json()["agent_observations"]
+    advisories = [gap for gap in observations["gaps"] if gap["code"] == "compaction_accuracy_advisory"]
+    startup_gaps = [gap for gap in observations["gaps"] if gap["code"] == "model_metadata_fallback"]
+    if condition == "completed":
+        assert body["status"] == "completed"
+        assert body["error"] is None
+        assert body["usage"]["total_tokens"] == 22
+        assert [gap["detail"] for gap in advisories] == [warning] * 6
+        assert [gap["detail"] for gap in startup_gaps] == [startup]
+        assert observations["records"][0]["status"] == "completed"
+    else:
+        assert body["status"] == "failed"
+        assert warning in body["error"]["message"]
+        assert startup in body["error"]["message"]
+        if condition == "other-error":
+            assert "Unknown model call error" in body["error"]["message"]
+        if condition == "failed-turn":
+            assert "Final model call failed" in body["error"]["message"]
+        assert not advisories
+        assert not startup_gaps
+        assert observations["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
     "override",
     [
         {"max_output_tokens": 123},

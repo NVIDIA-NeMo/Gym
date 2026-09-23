@@ -72,6 +72,10 @@ from responses_api_agents.codex_agent.setup_codex import ensure_codex
 
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+_COMPACTION_ADVISORY = (
+    "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
+    "Start a new thread when possible to keep threads small and targeted."
+)
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
@@ -691,6 +695,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         ]
         parse_events = []
         startup_warnings = []
+        compaction_warnings = []
         started = False
         successful_exit = (
             result is not None
@@ -705,28 +710,30 @@ class CodexAgent(SimpleResponsesAPIAgent):
             started = started or event.get("type") == "turn.started"
             item = event.get("item") or {}
             message = item.get("message") or ""
-            # Codex 0.144.4 reports missing custom-model metadata as an error item
-            # before starting a successful turn. Retain this exact advisory in
-            # observations; all in-turn errors and failed exits remain failures.
-            if (
-                successful_exit
-                and not started
-                and event.get("type") == "item.completed"
-                and item.get("type") == "error"
-                and message.startswith("Model metadata for `")
-                and message.endswith(
-                    "` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
-                )
-            ):
-                startup_warnings.append(message)
-            else:
-                parse_events.append(event)
+            # Codex 0.144.4 serializes these known warnings as error items.
+            # Its compaction warning can occur during a successful turn. Keep
+            # exact advisories visible without masking other errors or failed exits.
+            if successful_exit and event.get("type") == "item.completed" and item.get("type") == "error":
+                if message == _COMPACTION_ADVISORY:
+                    compaction_warnings.append(message)
+                    continue
+                if (
+                    not started
+                    and message.startswith("Model metadata for `")
+                    and message.endswith(
+                        "` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+                    )
+                ):
+                    startup_warnings.append(message)
+                    continue
+            parse_events.append(event)
         output, usage = parse_exec_jsonl(
             "\n".join(json.dumps(event) for event in parse_events), structured_reasoning=True, include_partial=True
         )
-        if startup_warnings and usage.get("errors"):
-            usage["errors"] = [*startup_warnings, *usage["errors"]]
+        if (startup_warnings or compaction_warnings) and usage.get("errors"):
+            usage["errors"] = [*startup_warnings, *compaction_warnings, *usage["errors"]]
             startup_warnings = []
+            compaction_warnings = []
         error = result.error if result else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         if errors:
@@ -746,6 +753,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ObservationGap(code="subagent_hierarchy_unavailable"),
             ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
+            *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
         ]
         if not completed:
             gaps.append(ObservationGap(code="partial_model_usage_unavailable"))
