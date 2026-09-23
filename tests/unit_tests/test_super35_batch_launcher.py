@@ -380,10 +380,54 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
             "lmarena_v2_benchmark_agent": True,
             "_default": False,
         }
-        assert (
-            config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server.name
-            == "Qwen3-235B-A22B-Instruct-2507-FP8"
+        assert config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server.name == "gpt-5_2-2025-12-11"
+        # Check the resolved consumer bindings, not just unused model definitions.
+        reference = OmegaConf.load(ROOT / BENCHMARK / "eval_container_config.yaml")
+        reference.nv_inference_api_key = "fixture-key"
+        reference.judge_model = OmegaConf.load(ROOT / "resources_servers/arena/configs/lmarena_v2.yaml").judge_model
+        bindings = [
+            (config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server, "gpt-5_2-2025-12-11"),
+            (
+                config.tau2_banking_knowledge_bm25_grep_artificial_analysis_agent.responses_api_agents.tau2.user_model_server,
+                "gpt-5_4-mini-2026-03-17",
+            ),
+            (
+                config.hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.judge_model_server,
+                "hle_benchmark_equivalence_judge_model",
+            ),
+            (
+                config.aalcr_benchmark_resources_server.resources_servers.aalcr.judge_model_server,
+                "Qwen3-235B-A22B-Instruct-2507-FP8",
+            ),
+            (
+                config.omniscience_omniscience_resources_server.resources_servers.omniscience.judge_model_server,
+                "genrm_model",
+            ),
+            (config.lmarena_v2_benchmark_resources_server.resources_servers.arena.judge_model_server, "judge_model"),
+        ]
+        for binding, reference_name in bindings:
+            models = config[binding.name].responses_api_models
+            expected_models = reference[reference_name].responses_api_models
+            assert set(models) == set(expected_models)
+            backend = next(iter(models))
+            prefix = "openai_" if backend == "openai_model" else ""
+            for field in ("model", "base_url"):
+                assert models[backend][prefix + field] == expected_models[backend][prefix + field]
+            assert models[backend][prefix + "api_key"] == "fixture-key"
+        assert "aalcr_batch_judge" not in config
+        for name in ("hle_batch_judge", "genrm_model"):
+            model = config[name].responses_api_models.openai_model
+            assert model.max_concurrent_requests == 32
+            assert "reasoning_effort" not in model.get("extra_body", {})
+        # GPT-4o's structured verdict must match the labels consumed by the scorer.
+        hle = config.hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge
+        hle_reference = OmegaConf.load(ROOT / BENCHMARK / "benchmark_configs/hle_no_tools.yaml")
+        hle_reference = (
+            hle_reference.hle_benchmark_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge
         )
+        for field in ("judge_responses_create_params", "judge_equal_label", "judge_not_equal_label"):
+            assert hle[field] == hle_reference[field]
+        assert hle.judge_endpoint_max_concurrency == 32
 
 
 def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch) -> None:
