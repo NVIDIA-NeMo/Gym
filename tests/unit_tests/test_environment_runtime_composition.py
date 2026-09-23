@@ -11,15 +11,16 @@ import nemo_gym.environment.runtime_composition as runtime_composition
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import ConfigError
 from nemo_gym.environment.authoring import find_environment_definition, load_environment
-from nemo_gym.environment.episode_protocols import create_episode_protocol_runtime
+from nemo_gym.environment.environment_servers import create_environment_server_runtime
 from nemo_gym.environment.runtime_composition import (
     AgentRoleBinding,
-    EpisodeProtocolRuntime,
+    EnvironmentServerRuntime,
     SandboxRuntime,
     compose_environment_run,
 )
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
+from nemo_gym.single_agent_episode_types import SINGLE_AGENT_TASK_INPUT_CONTRACT
 
 
 HELLO_WORLD = WORKING_DIR / "environments/hello_world/environment.yaml"
@@ -61,9 +62,10 @@ def test_compose_environment_run_materializes_internal_input_without_dataset_con
         sandbox_provider_ref="sandbox",
         sandbox_config={},
     )
-    episode_protocol = EpisodeProtocolRuntime(
-        config_paths=(Path("/episode.yaml"),),
+    environment_server = EnvironmentServerRuntime(
+        config_paths=(Path("/environment-server.yaml"),),
         environment_server_name="test_environment_server",
+        task_input_contract=SINGLE_AGENT_TASK_INPUT_CONTRACT,
         environment_server_config={"test_environment_server": {"environment_servers": {}}},
         agent_roles={
             "agent": AgentRoleBinding(resources_server_name="environment_adapter_resources_server"),
@@ -74,7 +76,7 @@ def test_compose_environment_run_materializes_internal_input_without_dataset_con
         loaded,
         tmp_path,
         sandbox=sandbox,
-        episode_protocol=episode_protocol,
+        environment_server=environment_server,
         adapter_config_path=Path("/adapter.yaml"),
     )
 
@@ -107,7 +109,7 @@ def test_compose_environment_run_materializes_internal_input_without_dataset_con
     assert artifacts.config_paths == (
         Path("/supporting.yaml"),
         Path("/adapter.yaml"),
-        Path("/episode.yaml"),
+        Path("/environment-server.yaml"),
         artifacts.config_path,
     )
 
@@ -127,9 +129,10 @@ def test_compose_environment_run_selects_default_taskset(monkeypatch, tmp_path: 
         sandbox_provider_ref="sandbox",
         sandbox_config={},
     )
-    episode_protocol = EpisodeProtocolRuntime(
+    environment_server = EnvironmentServerRuntime(
         config_paths=(),
         environment_server_name="test_environment_server",
+        task_input_contract=SINGLE_AGENT_TASK_INPUT_CONTRACT,
         environment_server_config={},
         agent_roles={},
     )
@@ -139,7 +142,7 @@ def test_compose_environment_run_selects_default_taskset(monkeypatch, tmp_path: 
             loaded,
             tmp_path,
             sandbox=sandbox,
-            episode_protocol=episode_protocol,
+            environment_server=environment_server,
             adapter_config_path=Path("/adapter.yaml"),
         )
 
@@ -154,9 +157,10 @@ def test_compose_environment_run_rejects_unimplemented_mcp_servers(tmp_path: Pat
         sandbox_provider_ref="sandbox",
         sandbox_config={},
     )
-    episode_protocol = EpisodeProtocolRuntime(
+    environment_server = EnvironmentServerRuntime(
         config_paths=(),
         environment_server_name="test_environment_server",
+        task_input_contract=SINGLE_AGENT_TASK_INPUT_CONTRACT,
         environment_server_config={},
         agent_roles={},
     )
@@ -166,7 +170,7 @@ def test_compose_environment_run_rejects_unimplemented_mcp_servers(tmp_path: Pat
             loaded,
             tmp_path,
             sandbox=sandbox,
-            episode_protocol=episode_protocol,
+            environment_server=environment_server,
             adapter_config_path=Path("/adapter.yaml"),
         )
 
@@ -179,12 +183,12 @@ def test_generated_composition_accepts_an_explicit_agent_type(tmp_path: Path) ->
         sandbox_provider_ref="sandbox",
         sandbox_config={},
     )
-    episode_protocol = create_episode_protocol_runtime(loaded)
+    environment_server = create_environment_server_runtime(loaded)
     artifacts = compose_environment_run(
         loaded,
         tmp_path,
         sandbox=sandbox,
-        episode_protocol=episode_protocol,
+        environment_server=environment_server,
         adapter_config_path=WORKING_DIR / "resources_servers/environment_adapter/configs/environment_adapter.yaml",
     )
     config_paths = [

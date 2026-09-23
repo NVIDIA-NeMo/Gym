@@ -682,7 +682,7 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     from nemo_gym.config_types import ConfigError
     from nemo_gym.environment.authoring import find_environment_definition, load_environment
-    from nemo_gym.environment.episode_protocols import create_episode_protocol_runtime
+    from nemo_gym.environment.environment_servers import create_environment_server_runtime
     from nemo_gym.environment.local_docker_image import build_local_docker_image
     from nemo_gym.environment.runtime_composition import SandboxRuntime, compose_environment_run
 
@@ -726,12 +726,12 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
                 "ready_timeout_s": 300,
             },
         )
-        episode_protocol = create_episode_protocol_runtime(loaded)
+        environment_server = create_environment_server_runtime(loaded)
         artifacts = compose_environment_run(
             loaded,
             directory,
             sandbox=sandbox,
-            episode_protocol=episode_protocol,
+            environment_server=environment_server,
             adapter_config_path=Path(_asset_config_path("resources-server", "environment_adapter")),
             taskset=args.taskset,
         )

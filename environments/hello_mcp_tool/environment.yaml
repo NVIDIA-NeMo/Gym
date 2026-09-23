@@ -8,8 +8,6 @@ tags:
   - example
 license: Apache-2.0
 
-episode_protocol: nemo_gym.single_agent.v1
-
 task:
   id: hello-mcp-tool-001
   instruction: instruction.md

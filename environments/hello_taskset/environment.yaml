@@ -9,7 +9,6 @@ tags:
 license: Apache-2.0
 
 instruction: instruction.md
-episode_protocol: nemo_gym.single_agent.v1
 
 task_model: task.py:TaskData
 tasksets:

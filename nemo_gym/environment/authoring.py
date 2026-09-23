@@ -22,15 +22,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 from nemo_gym import component_search_roots
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import MaterializedTask, TaskId
-from nemo_gym.single_agent_episode_types import (
-    SINGLE_AGENT_TASK_INPUT_CONTRACT,
-    SingleAgentTaskInput,
-)
+from nemo_gym.single_agent_episode_types import SingleAgentTaskInput
 
 
 LOGGER = logging.getLogger(__name__)
 ENVIRONMENT_DEFINITION_FILENAME = "environment.yaml"
 TASK_DEFINITION_FILENAME = "task.yaml"
+DEFAULT_ENVIRONMENT_SERVER = "single_agent"
 
 
 class EnvironmentDefinitionError(ConfigError):
@@ -83,9 +81,10 @@ class EnvironmentDefinition(_DefinitionModel):
     description: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
     license: str = Field(min_length=1)
-    episode_protocol: str = Field(
+    environment_server: str = Field(
+        default=DEFAULT_ENVIRONMENT_SERVER,
         min_length=1,
-        description="Protocol used to materialize and run each task episode.",
+        description="Environment Server implementation used to run each task.",
     )
 
     task: TaskDefinition | None = None
@@ -259,12 +258,12 @@ def materialize_tasks(
     *,
     taskset: str | None = None,
 ) -> tuple[MaterializedEnvironmentTask, ...]:
-    """Compile selected tasks using the environment's declared episode protocol."""
+    """Compile selected tasks for the environment's selected Environment Server."""
 
     environment = loaded.definition
-    if environment.episode_protocol == SINGLE_AGENT_TASK_INPUT_CONTRACT:
+    if environment.environment_server == DEFAULT_ENVIRONMENT_SERVER:
         return _materialize_single_agent_tasks(loaded, taskset=taskset)
-    raise EnvironmentDefinitionError(f"Unsupported episode protocol {environment.episode_protocol!r}")
+    raise EnvironmentDefinitionError(f"Unsupported environment server {environment.environment_server!r}")
 
 
 def _materialize_single_agent_tasks(

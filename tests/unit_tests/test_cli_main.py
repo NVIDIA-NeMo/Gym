@@ -1286,7 +1286,7 @@ class TestAssetSelectors:
             lambda loaded: "nemo-gym-test:123",
         )
         monkeypatch.setattr(
-            "nemo_gym.environment.episode_protocols.create_episode_protocol_runtime", lambda loaded: object()
+            "nemo_gym.environment.environment_servers.create_environment_server_runtime", lambda loaded: object()
         )
         monkeypatch.setattr(
             "nemo_gym.environment.runtime_composition.compose_environment_run",

@@ -7,6 +7,7 @@ from shutil import copytree
 import pytest
 
 from nemo_gym.environment.authoring import (
+    DEFAULT_ENVIRONMENT_SERVER,
     EnvironmentDefinitionError,
     load_environment,
     load_environment_callable,
@@ -14,7 +15,6 @@ from nemo_gym.environment.authoring import (
     materialize_tasks,
     materialize_tasks_jsonl,
 )
-from nemo_gym.single_agent_episode_types import SINGLE_AGENT_TASK_INPUT_CONTRACT
 
 
 ROOT = Path(__file__).parents[2]
@@ -27,7 +27,7 @@ def test_load_and_materialize_hello_world() -> None:
     loaded = load_environment(HELLO_WORLD)
 
     assert loaded.definition.name == "hello-world"
-    assert loaded.definition.episode_protocol == SINGLE_AGENT_TASK_INPUT_CONTRACT
+    assert loaded.definition.environment_server == DEFAULT_ENVIRONMENT_SERVER
 
     task = materialize_single_task(loaded)
 
@@ -149,16 +149,16 @@ def test_instruction_rejects_unknown_task_data_reference(tmp_path: Path) -> None
         materialize_tasks(load_environment(environment_root), taskset="example")
 
 
-def test_loading_is_protocol_neutral_but_materialization_dispatches_by_protocol(tmp_path: Path) -> None:
+def test_materialization_rejects_an_unknown_environment_server(tmp_path: Path) -> None:
     environment_root = tmp_path / "hello_world"
     copytree(HELLO_WORLD, environment_root)
     definition_path = environment_root / "environment.yaml"
-    definition_path.write_text(definition_path.read_text().replace("nemo_gym.single_agent.v1", "example.other.v1"))
+    definition_path.write_text(f"{definition_path.read_text()}environment_server: example\n")
 
     loaded = load_environment(environment_root)
 
-    assert loaded.definition.episode_protocol == "example.other.v1"
-    with pytest.raises(EnvironmentDefinitionError, match="Unsupported episode protocol"):
+    assert loaded.definition.environment_server == "example"
+    with pytest.raises(EnvironmentDefinitionError, match="Unsupported environment server"):
         materialize_tasks(loaded)
 
 
@@ -171,7 +171,6 @@ name: unsafe
 version: 1.0.0
 description: Unsafe fixture
 license: Apache-2.0
-episode_protocol: nemo_gym.single_agent.v1
 task:
   id: unsafe-001
   instruction: ../instruction.md
