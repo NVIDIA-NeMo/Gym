@@ -116,7 +116,9 @@ unconfirmed cleanup fail close and retain session state for retry. Resources alw
 destruction. The EnvironmentServer supplies the session ID. Repeating an identical seed returns that session;
 reusing the ID with changed task, episode, or sandbox access fails. Close also accepts the explicit
 ID and episode without a cookie, so a lost seed response can still be cleaned up. Closing an unknown
-ID prevents a delayed seed from creating it during the close retry window. Caller IDs are never used
+ID prevents a delayed seed from creating it for the larger of the session lifetime and close retry
+window. After a close receipt expires, close returns a conflict while that tombstone remains; it
+cannot invent an empty replacement receipt. Caller IDs are never used
 as filesystem paths. Sessions expire after `session_lifetime_seconds` (21,600s by default), measured
 from completed initialization; expiry uses the same cleanup path and blocks further activation if
 cleanup fails. Failed cleanup retains state and logs the need for owner recovery.

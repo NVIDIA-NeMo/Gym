@@ -440,6 +440,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
     _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
         default_factory=OrderedDict
     )
+    _closed_sandbox_session_ids: OrderedDict[str, float] = PrivateAttr(default_factory=OrderedDict)
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
@@ -468,7 +469,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             self._session_lock_users[session_id] -= 1
             if not self._session_lock_users[session_id]:
                 del self._session_lock_users[session_id]
-                if session_id not in self._sandbox_sessions and session_id not in self._closed_sandbox_sessions:
+                if session_id not in self._sandbox_sessions and session_id not in self._closed_sandbox_session_ids:
                     self._session_locks.pop(session_id, None)
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
@@ -479,7 +480,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if marker is not None and marker != session_id:
             raise HTTPException(409, "Codex seed does not match the session cookie")
         async with self._locked_agent_session(session_id):
-            if session_id in self._closed_sandbox_sessions:
+            if session_id in self._closed_sandbox_session_ids:
                 raise HTTPException(409, "Codex session is already closed")
             state = self._sandbox_sessions.get(session_id)
             if state is not None:
@@ -600,6 +601,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 if body.episode_id != closed[0]:
                     raise HTTPException(409, "Codex close does not match the seeded episode")
                 return closed[1]
+            if session_id in self._closed_sandbox_session_ids:
+                raise HTTPException(409, "Codex close receipt has expired")
             state = self._sandbox_sessions.get(session_id)
             if state is None:
                 if marker is not None:
@@ -622,6 +625,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 result,
                 monotonic() + self.config.session_close_retry_window_seconds,
             )
+            self._closed_sandbox_session_ids[session_id] = monotonic() + max(
+                self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds
+            )
             reaper = self._session_reapers.pop(session_id, None)
             if reaper is not None and reaper is not asyncio.current_task():
                 reaper.cancel()
@@ -633,7 +639,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
         while self._closed_sandbox_sessions:
             if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
                 break
-            session_id, _ = self._closed_sandbox_sessions.popitem(last=False)
+            self._closed_sandbox_sessions.popitem(last=False)
+        while self._closed_sandbox_session_ids:
+            if next(iter(self._closed_sandbox_session_ids.values())) > now:
+                break
+            session_id, _ = self._closed_sandbox_session_ids.popitem(last=False)
             if not self._session_lock_users.get(session_id):
                 self._session_locks.pop(session_id, None)
 
