@@ -1,0 +1,83 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/injecagent/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 2.4,
+        "Min": 2.0,
+        "Max": 3.0,
+        "Standard deviation": 0.548
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 309.4,
+        "Min": 183.0,
+        "Max": 495.0,
+        "Standard deviation": 114.57
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "attack_kind": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "attack_type": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "attacker_instruction": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "attacker_tools": {
+        "unique_count": 6,
+        "total_count": 7
+    },
+    "expected_achievements": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "injecagent_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "protocol": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "setting": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "upstream_revision": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "user_tool": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "user_tool_response": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}
