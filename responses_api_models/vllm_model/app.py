@@ -28,6 +28,7 @@ from fastapi import Request, Response
 from openai.types.responses.response import IncompleteDetails
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint.admission import mark_current_generation_started
 from nemo_gym._checkpoint.model_control_contracts import (
     GenerationCutBackend,
     GenerationCutInventory,
@@ -69,7 +70,6 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.token_id_capture import (
     current_capture_context,
-    mark_current_generation_started,
     mark_no_generation,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
