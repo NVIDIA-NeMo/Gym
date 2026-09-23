@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Minimum direct dependency set for the protected runner/comparator and these five
+# original examples. Exact versions come from Gym/uv.lock, not reference execution.
+# These pins do not establish oldest-compatible releases or a verified runtime image.
+# Transitive dependencies, interpreter, snapshot identity and isolation remain unqualified.
+# NumPy and SciPy are not needed by the examples or by the runner. Task reference code and
+# candidate code import them, so the runtime snapshot carries them too.
+
+# task_data.py and comparator.py use Pydantic v2 validators and strict models.
+# uv.lock package pydantic: version 2.13.4, registry https://pypi.org/simple.
+# Inspected pydantic-2.13.4.dist-info/METADATA: License-Expression: MIT;
+# Project-URL: Source, https://github.com/pydantic/pydantic.
+# That metadata also requires pydantic-core==2.46.4 (resolved transitively).
+pydantic==2.13.4
+
+# symbolic.py and runner.py use SymPy expressions and the explicit SymPy adapter.
+# uv.lock package sympy: version 1.14.0, registry https://pypi.org/simple;
+# its recorded dependency is mpmath (lockfile version 1.3.0), not a new direct requirement.
+# Public metadata: https://pypi.org/pypi/sympy/1.14.0/json — license BSD, license_expression null.
+# Source: https://github.com/sympy/sympy.
+# Versioned notices: https://raw.githubusercontent.com/sympy/sympy/1.14.0/LICENSE.
+# Composite license: SymPy, Diofant-derived patches, multipledispatch and PyDy notices
+# have BSD-3-Clause terms; sympy/parsing/latex includes the MIT/latex2sympy notice.
+# Retain upstream copyright and license notices in any distributed runtime.
+# No package code is vendored here; runtime-image and transitive qualification remain open.
+sympy==1.14.0
+
+# Task reference solutions and candidate solutions import NumPy and SciPy. The runner and the
+# comparator do not. These versions are the ones the stored expectations were produced with;
+# uv.lock resolves scipy to the same 1.18.0 and numpy to 2.3.2. Grading reproduces the reference
+# environment, so the reference pin wins for numpy.
+numpy==2.5.1
+scipy==1.18.0
