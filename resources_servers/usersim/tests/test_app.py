@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -40,12 +42,22 @@ def _write_parquet(path: Path) -> None:
     pq.write_table(pa.Table.from_pylist(PERSONAS), path)
 
 
-def _source_path(cache_dir: Path) -> Path:
-    return cache_dir / "0.0.2" / "source" / "en_US.parquet"
+def _panel_path(cache_dir: Path) -> Path:
+    return cache_dir / "0.0.2" / "panels" / "en_US.parquet"
 
 
 def _write_personas(cache_dir: Path) -> None:
-    _write_parquet(_source_path(cache_dir))
+    panel_path = _panel_path(cache_dir)
+    _write_parquet(panel_path)
+    manifest = {
+        "locale": "en_US",
+        "personas_dataset_version": "0.0.2",
+        "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
+        "panel_size_bytes": panel_path.stat().st_size,
+        "panel_rows": len(PERSONAS),
+        "generator": "usersim panel",
+    }
+    panel_path.with_suffix(".manifest.json").write_text(json.dumps(manifest))
 
 
 def _app(
@@ -59,7 +71,6 @@ def _app(
         entrypoint="app.py",
         name="usersim",
         personas_cache_dir=cache_dir,
-        personas_panel_size=2,
         probe_mix=(
             {"general_open_ended": 0.0, "general_educational": 1.0}
             if educational_only
@@ -127,7 +138,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.status_code == 200
     assert first.json()["usersim_context"] == second.json()["usersim_context"]
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
-    assert len(first.json()["usersim_context"]["personas_source_sha256"]) == 64
+    assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
     assert scenario["probe_type"] == "general_open_ended"
@@ -196,22 +207,16 @@ def test_participant_tools_share_task_state_and_keep_sessions_isolated(tmp_path:
     assert verified.json()["verifier_data"]["termination_reason"] == "user_goal_satisfied"
 
 
-def test_startup_prepares_panel_then_reuses_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_personas(tmp_path)
+    _app(tmp_path)
+
     monkeypatch.setattr(
         "resources_servers.usersim.app._sha256_file",
         lambda *_args, **_kwargs: "a" * 64,
     )
-    _app(tmp_path)
-
-    assert _source_path(tmp_path).with_suffix(".manifest.json").is_file()
-    assert (tmp_path / "0.0.2" / "panels" / "en_US-n2-seed42.parquet").is_file()
-
-    monkeypatch.setattr(
-        "resources_servers.usersim.app._sha256_file",
-        lambda *_args, **_kwargs: pytest.fail("matching prepared manifests must be reused"),
-    )
-    _app(tmp_path)
+    with pytest.raises(RuntimeError, match="does not match its manifest"):
+        _app(tmp_path)
 
 
 def test_missing_pinned_dataset_fails_during_initialization(tmp_path: Path) -> None:
