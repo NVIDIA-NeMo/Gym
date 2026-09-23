@@ -579,6 +579,12 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
+    if any(s.node_pool for s in config.services.values()):
+        # With pinned services Slurm may place the driver on any node. It reaches the
+        # policy on localhost, so it goes to the first node of the policy's pool.
+        policy = config.services.get(config.driver.policy_model or "")
+        index = _pool_offsets(compute)[policy.node_pool][0] if policy and policy.node_pool else 0
+        driver_node_flags = f' --nodelist="${{gym_nodes[{index}]}}" --nodes=1 --ntasks=1'
     # The driver writes everything relative to the job directory -- `output_path`
     # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
     # BATCH script on the host, but inside a Pyxis container the cwd is whatever
