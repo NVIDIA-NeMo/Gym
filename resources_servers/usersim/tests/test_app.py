@@ -232,10 +232,14 @@ def test_native_safety_probe_exposes_and_simulates_selected_tools(tmp_path: Path
         )
         tool_name = seed.json()["assistant_tools"][0]["function"]["name"]
         result = client.post(f"/{tool_name}", json={})
+        verified = client.post("/verify", json=_verify_body(seed.json()))
 
     assert seed.status_code == 200
     assert result.status_code == 200
     assert isinstance(result.json(), dict)
+    assert verified.status_code == 200
+    assert verified.json()["native_usersim_result"]["num_tool_calls"] == 1
+    assert verified.json()["verifier_data"]["native_scores"] is not None
 
 
 def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
