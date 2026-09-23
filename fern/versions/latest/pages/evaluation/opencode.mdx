@@ -81,11 +81,14 @@ gym env start \
 
 gym eval run --no-serve \
     --config benchmarks/swebench/pro/opencode_native.yaml \
+    --model-type vllm_model \
     --input /tmp/swebench_pro_native.jsonl \
     --output results/opencode-native.jsonl
 ```
 
-Add a reachable model endpoint and sandbox provider to the deployment configuration.
+Set `policy_base_url`, `policy_model_name`, `policy_api_key`, and the sandbox provider
+in `env.yaml`, or pass the same deployment overlay with `--config` to both commands.
+The collector loads taskset routing and server definitions from its local configuration.
 The materializer's default taskset is `swebench_pro:smoke`; a different taskset needs a
 matching `environment_server_routes` entry. Each materialized row has `task_id` and
 `task_input`, with prompt controls under `task_input.responses_create_params` and
