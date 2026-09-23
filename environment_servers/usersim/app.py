@@ -56,7 +56,7 @@ from nemo_gym.tool_access import (
     MCPToolAccess,
     ToolAccess,
 )
-from nemo_gym.usersim_episode_types import (
+from resources_servers.usersim.types import (
     USERSIM_MODEL_ALIASES,
     UserSimEpisodeFailure,
     UserSimEpisodeRequest,
@@ -75,7 +75,13 @@ from nemo_gym.usersim_episode_types import (
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
-_AGENT_ALIAS_TO_PARTICIPANT = {"user_model": "user", "assistant_model": "assistant"}
+_INVOCATION_ROLE_BY_ALIAS = {
+    "user_model": "user",
+    "assistant_model": "assistant",
+    "judge_model": "judge",
+    "summary_model": "summary",
+}
+_PARTICIPANT_ROLES = {"user", "assistant"}
 
 
 class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
@@ -87,7 +93,6 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
     assistant_agent: AgentServerRef
     judge_model: ModelServerRef
     summary_model: ModelServerRef
-    api_response_model: ModelServerRef
     resources_server: ResourcesServerRef
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
     max_turns: int = Field(5, ge=1)
@@ -100,7 +105,6 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
             "assistant_model": self.assistant_agent,
             "judge_model": self.judge_model,
             "summary_model": self.summary_model,
-            "api_response_model": self.api_response_model,
         }[alias]
 
 
@@ -135,10 +139,22 @@ class _GymModelFacade:
         )
 
 
+class _ResourcesOwnedModelFacade:
+    """Placeholder for UserSim aliases that the Resources Server owns."""
+
+    model_name = "resources-server"
+
+    def completion(self, _messages: Sequence[Any], **_kwargs: Any) -> SimpleNamespace:
+        raise RuntimeError(
+            "UserSim attempted to invoke api_response_model in the Environment Server; "
+            "API-response synthesis must run through the Resources Server tool endpoint"
+        )
+
+
 def _create_usersim_generator(
     generator_type: type[Any],
     config: Any,
-    models: Mapping[str, _GymModelFacade],
+    models: Mapping[str, Any],
 ) -> Any:
     """Instantiate UserSim's generator with Gym-backed model lookup."""
 
@@ -147,7 +163,7 @@ def _create_usersim_generator(
             self.config = config
             self._models = models
 
-        def get_model(self, alias: str) -> _GymModelFacade:
+        def get_model(self, alias: str) -> Any:
             return self._models[alias]
 
     return _GymConversationGenerator()
@@ -243,8 +259,7 @@ class _ConversationBridge:
         self.invocations.append(
             UserSimInvocation(
                 sequence=len(self.invocations),
-                alias=alias,
-                executor="agent" if agent_session is not None else "model",
+                role=_INVOCATION_ROLE_BY_ALIAS[alias],
                 request=request_params,
                 response=gym_response,
                 observations=_agent_observations(target.name, trajectory_data),
@@ -270,7 +285,7 @@ class _ConversationBridge:
             return
         for index in range(len(self.invocations) - 1, -1, -1):
             invocation = self.invocations[index]
-            if invocation.alias == alias:
+            if invocation.role == _INVOCATION_ROLE_BY_ALIAS[alias]:
                 self.invocations[index] = invocation.model_copy(update={"observations": observations})
                 return
 
@@ -394,7 +409,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             raw_result = await asyncio.to_thread(self._run_usersim, bridge, seed.scenario)
             result = UserSimSimulationResult.model_validate(raw_result)
             _finalize_termination(bridge.invocations, result)
-            if not any(invocation.alias == "assistant_model" for invocation in bridge.invocations):
+            if not any(invocation.role == "assistant" for invocation in bridge.invocations):
                 raise ValueError("UserSim completed without an assistant_model invocation")
         except Exception as error:
             raise self._failure("simulation", error) from error
@@ -462,7 +477,10 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             {"name": "conversation_messages", "locale": scenario.locale, "max_turns": self.config.max_turns}
         )
         config = ConversationSimulatorConfig.model_validate(config_values)
-        models = {alias: _GymModelFacade(alias, bridge) for alias in USERSIM_MODEL_ALIASES}
+        models: dict[str, Any] = {alias: _GymModelFacade(alias, bridge) for alias in USERSIM_MODEL_ALIASES}
+        # UserSim currently resolves all model aliases eagerly. This alias is used only by
+        # probe tool runtimes, which execute in the Resources Server.
+        models["api_response_model"] = _ResourcesOwnedModelFacade()
         generator = _create_usersim_generator(ConversationSimulatorGenerator, config, models)
         data = scenario.model_dump(mode="python", exclude={"locale", "probe_data"})
         data.update(scenario.probe_data)
@@ -589,7 +607,7 @@ def _response_text(response: NeMoGymResponse) -> str:
 
 def _finalize_termination(invocations: list[UserSimInvocation], result: UserSimSimulationResult) -> None:
     participant_indexes = [
-        index for index, invocation in enumerate(invocations) if invocation.alias in _AGENT_ALIAS_TO_PARTICIPANT
+        index for index, invocation in enumerate(invocations) if invocation.role in _PARTICIPANT_ROLES
     ]
     if not participant_indexes:
         return
