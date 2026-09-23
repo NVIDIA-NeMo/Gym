@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from nemo_gym._checkpoint import (
+    CHECKPOINT_CONTROL_TOKEN_ENV,
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
     CheckpointConflictError,
@@ -39,6 +40,7 @@ from nemo_gym._checkpoint import (
     Deadline,
     InvalidPhaseError,
     StaleCheckpointError,
+    checkpoint_control_auth_token,
     multi_process_capability_from_num_workers,
 )
 from nemo_gym.base_resources_server import (
@@ -63,6 +65,11 @@ def test_deadline_remaining_clamps_at_zero() -> None:
     assert deadline.remaining(now=2000.0) == 0.0
     assert deadline.expired(now=2000.0)
     assert not deadline.expired(now=900.0)
+
+
+def test_checkpoint_auth_is_independent_of_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+    assert checkpoint_control_auth_token({"token_id_capture": {"enabled": False}}) == "checkpoint-secret"
 
 
 def test_control_request_rejects_invalid_identity_and_deadline() -> None:
@@ -275,7 +282,9 @@ def test_stateless_resources_server_capabilities() -> None:
     assert body["active_checkpoint_id"] is None
 
 
-def test_agent_server_capabilities() -> None:
+def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+
     class _Agent(SimpleResponsesAPIAgent):
         async def responses(self, body):
             raise NotImplementedError
@@ -290,6 +299,19 @@ def test_agent_server_capabilities() -> None:
     body = TestClient(agent.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert body["component"] == "responses_api_agents"
     assert body["name"] == "agent"
+    assert body["checkpoint_mode"] == "stateless"
+
+    class _WhiteboxAgent(_Agent):
+        checkpoint_continuation_supported = True
+
+    whitebox = _WhiteboxAgent(
+        config=BaseResponsesAPIAgentConfig(host="agent.test", port=80, entrypoint="app.py", name="whitebox"),
+        server_client=_server_client(),
+    )
+    whitebox_client = TestClient(whitebox.setup_webserver())
+    whitebox_body = whitebox_client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
+    assert whitebox_body["checkpoint_mode"] == "export_restore"
+    assert whitebox_body["concurrency_contract"] == "serialized_per_session"
 
 
 def test_capabilities_route_reflects_live_fence_phase() -> None:
