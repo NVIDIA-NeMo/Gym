@@ -12,13 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter, time
 from typing import Any
-from uuid import uuid4
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, PrivateAttr, ValidationError
@@ -96,6 +96,8 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
     _agent_sessions: dict[str, SimpleAgentSessionState] = PrivateAttr(default_factory=dict)
+    _agent_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _closed_agent_session_ids: set[str] = PrivateAttr(default_factory=set)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -120,33 +122,47 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             raise ValueError("Simple Agent supports at most one direct HTTP tool access per session")
         direct_access = direct_accesses[0] if direct_accesses else None
 
-        agent_session_id = f"agent-session-{uuid4().hex}"
-        self._agent_sessions[agent_session_id] = SimpleAgentSessionState(
-            request=body,
-            tool_access=direct_access,
-            resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
-        )
+        agent_session_id = body.agent_session_id
         request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
-        return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            if agent_session_id in self._closed_agent_session_ids:
+                raise ValueError(f"Agent session is already closed: {agent_session_id}")
+            state = self._agent_sessions.get(agent_session_id)
+            if state is not None:
+                if state.request.episode_id != body.episode_id or state.request.task_id != body.task_id:
+                    raise ValueError("agent_session_id is already bound to another episode or task")
+                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+            self._agent_sessions[agent_session_id] = SimpleAgentSessionState(
+                request=body,
+                tool_access=direct_access,
+                resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            )
+            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
 
     async def close_agent_session(
         self,
         request: Request,
         body: AgentCloseSessionRequest,
     ) -> AgentCloseSessionResponse:
-        agent_session_id = self._agent_session_id_from_request(request)
-        if body.agent_session_id != agent_session_id:
-            raise ValueError("agent_session_id does not match the session cookie")
-        state = self._require_agent_session(agent_session_id)
-        if body.episode_id != state.request.episode_id:
-            raise ValueError("episode_id does not match the seeded agent session")
+        agent_session_id = body.agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            state = self._agent_sessions.get(agent_session_id)
+            if state is None:
+                self._closed_agent_session_ids.add(agent_session_id)
+                request.session.pop(_AGENT_SESSION_ID_KEY, None)
+                return AgentCloseSessionResponse(agent_session_id=agent_session_id)
+            if body.episode_id != state.request.episode_id:
+                raise ValueError("episode_id does not match the seeded agent session")
 
-        del self._agent_sessions[agent_session_id]
-        request.session.pop(_AGENT_SESSION_ID_KEY, None)
-        return AgentCloseSessionResponse(
-            agent_session_id=agent_session_id,
-            resources_cookies=state.resources_cookies,
-        )
+            del self._agent_sessions[agent_session_id]
+            self._closed_agent_session_ids.add(agent_session_id)
+            request.session.pop(_AGENT_SESSION_ID_KEY, None)
+            return AgentCloseSessionResponse(
+                agent_session_id=agent_session_id,
+                resources_cookies=state.resources_cookies,
+            )
 
     def _require_agent_session(self, agent_session_id: str | None) -> SimpleAgentSessionState:
         if agent_session_id is None:

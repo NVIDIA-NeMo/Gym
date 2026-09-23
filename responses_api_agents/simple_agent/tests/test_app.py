@@ -282,6 +282,7 @@ class TestApp:
         seed = client.post(
             "/v1/agent_sessions",
             json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
                 episode_id=episode_id,
                 task_id=TaskId(taskset="example", task_id="0"),
                 tool_accesses=[
@@ -343,6 +344,7 @@ class TestApp:
         server, _ = _make_agent(False)
         request = MagicMock(session={})
         body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
             episode_id=EpisodeId(rollout_id="rollout", attempt=0),
             task_id=TaskId(taskset="example", task_id="0"),
             tool_accesses=[
@@ -355,6 +357,29 @@ class TestApp:
         )
 
         with pytest.raises(ValueError, match="does not support required MCP"):
+            await server.seed_agent_session(request, body)
+
+    async def test_native_session_seed_and_close_are_idempotent(self) -> None:
+        server, _ = _make_agent(False)
+        request = MagicMock(session={})
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example:test", task_id="0"),
+        )
+
+        first = await server.seed_agent_session(request, body)
+        second = await server.seed_agent_session(request, body)
+        assert first == second
+
+        close_body = AgentCloseSessionRequest(
+            agent_session_id=body.agent_session_id,
+            episode_id=body.episode_id,
+        )
+        await server.close_agent_session(request, close_body)
+        await server.close_agent_session(request, close_body)
+
+        with pytest.raises(ValueError, match="already closed"):
             await server.seed_agent_session(request, body)
 
     @pytest.mark.parametrize("resolved", [False, None])

@@ -22,9 +22,9 @@ from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, Resourc
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.single_agent_episode_types import (
-    ResponsesResourcesVerifyRequest,
-    ResponsesVerificationInput,
+from nemo_gym.single_agent_turn_types import (
+    SingleAgentTurnResourcesVerifyRequest,
+    SingleAgentTurnVerificationInput,
 )
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.example_single_tool_call.app import (
@@ -72,11 +72,21 @@ class TestApp:
         task_id = TaskId(taskset="example", task_id="0")
         seed = await server.seed_session(
             ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
                 episode_id=episode_id,
                 task_id=task_id,
                 task_data={},
             )
         )
+        repeated = await server.seed_session(
+            ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
+                episode_id=episode_id,
+                task_id=task_id,
+                task_data={},
+            )
+        )
+        assert repeated == seed
 
         response = NeMoGymResponse(
             id="response",
@@ -98,10 +108,10 @@ class TestApp:
             tools=[],
         )
         verification = await server.verify(
-            ResponsesResourcesVerifyRequest(
+            SingleAgentTurnResourcesVerifyRequest(
                 episode_id=episode_id,
                 task_id=task_id,
-                verification_input=ResponsesVerificationInput(
+                verification_input=SingleAgentTurnVerificationInput(
                     responses_create_params={"input": "weather?"},
                     response=response,
                 ),
@@ -117,11 +127,20 @@ class TestApp:
         )
         assert close.resources_session_id == seed.resources_session_id
 
-        with pytest.raises(ValueError, match="Unknown resources_session_id"):
-            await server.close_session(
-                ResourcesCloseSessionRequest(
-                    resources_session_id=seed.resources_session_id,
+        repeated_close = await server.close_session(
+            ResourcesCloseSessionRequest(
+                resources_session_id=seed.resources_session_id,
+                episode_id=episode_id,
+            )
+        )
+        assert repeated_close == close
+        with pytest.raises(ValueError, match="already closed"):
+            await server.seed_session(
+                ResourcesSeedSessionRequest(
+                    resources_session_id="resources-session",
                     episode_id=episode_id,
+                    task_id=task_id,
+                    task_data={},
                 )
             )
 
@@ -131,6 +150,7 @@ class TestApp:
         seed = client.post(
             "/seed_session",
             json=ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
                 episode_id=episode_id,
                 task_id=TaskId(taskset="example", task_id="0"),
                 task_data={},

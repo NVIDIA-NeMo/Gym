@@ -1,12 +1,12 @@
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
   - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
-  - environment_servers/single_agent_legacy/configs/single_agent_legacy.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 environment_routing_mode: legacy
-environment_server_name: swebench_pro_hermes_environment_server
+environment_server_name: swebench_pro_hermes
 environment_server_routes:
-  "swebench_pro:smoke": swebench_pro_hermes_environment_server
+  "swebench_pro:smoke": swebench_pro_hermes
 
 swebench_pro_hermes_resources_server:
   _inherit_from: swebench_pro_resources_server
@@ -28,10 +28,10 @@ swebench_pro_hermes_agent:
         name: swebench_pro_hermes_resources_server
       enabled_toolsets: [terminal]
 
-swebench_pro_hermes_environment_server:
-  _inherit_from: single_agent_legacy_environment_server
+swebench_pro_hermes:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    single_agent_legacy:
+    single_agent_turn_legacy:
       resources_server:
         type: resources_servers
         name: swebench_pro_hermes_resources_server
