@@ -561,6 +561,45 @@ async def test_extract_model_patch_drops_untracked_files_the_image_already_shipp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during", ["git", "download", "cleanup"])
+async def test_extract_model_patch_cleans_up_after_cancellation(cancel_during: str) -> None:
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_for_cancellation(stage: str) -> None:
+        if stage == cancel_during:
+            entered.set()
+            await blocked.wait()
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        await wait_for_cancellation("cleanup" if command.startswith("rm -f -- ") else "git")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text("complete patch\n")
+        await wait_for_cancellation("download")
+
+    sandbox = SimpleNamespace(exec=exec_command, download=AsyncMock(side_effect=download), stop=AsyncMock())
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    task = asyncio.create_task(server._extract_model_patch("session", "abc123"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_pristine_untracked
+    if sandbox.download.await_count:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 @pytest.mark.parametrize("new_content", [b"new\n", b"new\r\n", b"new"])
 async def test_extract_model_patch_survives_lossy_exec_logs(tmp_path: Path, new_content: bytes) -> None:

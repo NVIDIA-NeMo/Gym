@@ -431,12 +431,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     print(f"Failed to remove agent patch file: {cleanup.stderr}", file=sys.stderr)
             except Exception:
                 print("Failed to remove agent patch file", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except Exception:
-                print("Failed to stop agent sandbox", format_exc(), file=sys.stderr)
-            self._session_id_to_sandbox.pop(session_id, None)
-            self._session_id_to_pristine_untracked.pop(session_id, None)
+            finally:
+                try:
+                    await original_sandbox.stop()
+                except Exception:
+                    print("Failed to stop agent sandbox", format_exc(), file=sys.stderr)
+                self._session_id_to_sandbox.pop(session_id, None)
+                self._session_id_to_pristine_untracked.pop(session_id, None)
 
     async def verify(
         self,
