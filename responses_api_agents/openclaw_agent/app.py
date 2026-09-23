@@ -755,9 +755,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if getattr(item, "role", None) not in {"user", "system", "developer"}
         ]
         try:
-            fallback, envelope_usage = parse_openclaw_output(stdout)
+            fallback, _ = parse_openclaw_output(stdout)
         except (TypeError, ValueError, AttributeError):
-            fallback, envelope_usage = [], {"input_tokens": 0, "output_tokens": 0}
+            fallback = []
             gaps.append(ObservationGap(code="agent_stdout_unparseable"))
         if not output:
             output = fallback
@@ -813,16 +813,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             input_tokens += count("input") + count("cacheRead") + count("cacheWrite")
             output_tokens += count("output")
         if not assistants:
-            input_tokens = envelope_usage["input_tokens"]
-            output_tokens = envelope_usage["output_tokens"]
             # The legacy envelope parser defaults missing counters to zero.
-            # Keep native optional details unknown unless the artifact supplies them.
+            # Native totals retain valid subtotals without coercing malformed cache values.
             envelope = _decode_last_json_dict_suffix(stdout) or {}
             meta = envelope.get("meta")
             agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
             raw_usage = agent_meta.get("usage") if isinstance(agent_meta, dict) else None
-            cache_read = raw_usage.get("cacheRead") if isinstance(raw_usage, dict) else None
+            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+            cache_read = raw_usage.get("cacheRead")
             cached_tokens = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            input_count, output_count = raw_usage.get("input"), raw_usage.get("output")
+            input_tokens = input_count if type(input_count) is int and input_count >= 0 else 0
+            output_tokens = output_count if type(output_count) is int and output_count >= 0 else 0
+            input_tokens += cached_tokens or 0
             if cached_tokens is None:
                 gaps.append(ObservationGap(code="cached_token_usage_unavailable"))
             gaps.append(

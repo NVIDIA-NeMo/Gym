@@ -985,8 +985,21 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
     assert "agent_stdout_unparseable" in {gap.code for gap in state.observations.gaps}
 
 
-@pytest.mark.parametrize("cache", [{}, {"cacheRead": None}, {"cacheRead": 0}, {"cacheRead": 5}])
-async def test_native_envelope_fallback_preserves_known_and_unknown_cache_details(setup, cache):
+@pytest.mark.parametrize(
+    "cache,expected_cache",
+    [
+        ({}, None),
+        ({"cacheRead": None}, None),
+        ({"cacheRead": -1}, None),
+        ({"cacheRead": True}, None),
+        ({"cacheRead": "5"}, None),
+        ({"cacheRead": "bad"}, None),
+        ({"cacheRead": 3.0}, None),
+        ({"cacheRead": 0}, 0),
+        ({"cacheRead": 5}, 5),
+    ],
+)
+async def test_native_envelope_fallback_preserves_known_and_unknown_cache_details(setup, cache, expected_cache):
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
@@ -999,12 +1012,12 @@ async def test_native_envelope_fallback_preserves_known_and_unknown_cache_detail
         system="",
         stdout=json.dumps({"meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}}}),
     )
-    assert response.usage.input_tokens == 10 + (cache.get("cacheRead") or 0)
+    assert response.usage.input_tokens == 10 + (expected_cache or 0)
     assert response.usage.output_tokens == 3
-    assert response.usage.input_tokens_details.cached_tokens == cache.get("cacheRead")
+    assert response.usage.input_tokens_details.cached_tokens == expected_cache
     assert response.usage.output_tokens_details.reasoning_tokens is None
     gaps = {gap.code for gap in state.observations.gaps}
-    assert ("cached_token_usage_unavailable" in gaps) == (cache.get("cacheRead") is None)
+    assert ("cached_token_usage_unavailable" in gaps) == (expected_cache is None)
     assert "model_call_usage_unavailable" in gaps
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
