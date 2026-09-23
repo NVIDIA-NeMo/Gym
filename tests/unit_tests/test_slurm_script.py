@@ -1765,3 +1765,22 @@ def test_a_worker_naming_something_other_than_a_head_is_refused(tmp_path):
 def test_a_worker_with_both_address_and_head_is_refused():
     with pytest.raises(ValueError, match="exactly one of `address` or `head`"):
         RayServiceConfig(type="ray", container="img", mode="worker", address="h:1", head="ray_head")
+
+
+def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
+    # The driver reaches the policy on localhost. Unpinned, Slurm put it on the aux
+    # node of a real two-node job, where neither the policy nor a local raylet was.
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "scorer": _vllm(8001, "gpu", tensor_parallel_size=4),
+                "policy": _vllm(8000, "aux", tensor_parallel_size=4),
+            },
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    driver = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
