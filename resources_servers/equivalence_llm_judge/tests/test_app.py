@@ -53,6 +53,9 @@ async def test_hle_verified_fixture() -> None:
 
 
 class TestApp:
+    def test_checkpoint_recovery_mode_is_stateless(self) -> None:
+        assert LLMJudgeResourcesServerConfig.CHECKPOINT_RECOVERY_MODE == "stateless"
+
     @fixture
     def config(self) -> LLMJudgeResourcesServerConfig:
         judge_prompt_template_fpath = str(

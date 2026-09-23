@@ -1,0 +1,31 @@
+genrm_checkpoint_test_resources_server:
+  resources_servers:
+    genrm_compare:
+      entrypoint: checkpoint_test_app.py
+      num_workers: 1
+      genrm_model_server:
+        type: responses_api_models
+        name: policy_model
+      genrm_responses_create_params:
+        input: []
+      num_rollouts_per_prompt: 2
+      domain: rlhf
+      verified: false
+      description: Deterministic checkpoint-aware GenRM cohort fixture
+
+genrm_checkpoint_test_agent:
+  responses_api_agents:
+    checkpoint_test_agent:
+      entrypoint: app.py
+      max_steps: 1
+      checkpoint_replayable_verify: true
+      resources_server:
+        type: resources_servers
+        name: genrm_checkpoint_test_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl

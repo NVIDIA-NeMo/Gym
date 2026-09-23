@@ -286,6 +286,10 @@ class CommitCoords(_DigestWireModel):
 class CallRecord(_DigestWireModel):
     """One token-free call manifest row in a rollout's capture ledger."""
 
+    # Capture key that owns the staged row. It is populated when a ledger is
+    # materialized as a manifest. ``None`` accepts manifests produced before
+    # cross-attempt receipts carried per-row ownership.
+    capture_key: Identifier | None = None
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt
@@ -337,8 +341,36 @@ class CaptureLedgerCommit(_WireModel):
     rollout_id: Identifier
     record: CallRecord
     staging_chain: tuple[Identifier, ...] = ()
+    # A recovered call can name a parent owned by an earlier capture key. Keep
+    # that verified, token-free chain beside the new row so a later checkpoint
+    # remains self-contained even after the earlier ledger file is retired.
+    parent_manifest: tuple[CallRecord, ...] = ()
     request_items: list[dict]
     response_items: list[dict]
+
+    @model_validator(mode="after")
+    def _validate_parent_manifest(self) -> Self:
+        if not self.parent_manifest:
+            return self
+        if self.record.parent_call_id != self.parent_manifest[-1].model_call_id:
+            raise ValueError("parent_manifest must end at record.parent_call_id")
+        if self.record.prev_len != self.parent_manifest[-1].cum_len:
+            raise ValueError("parent_manifest terminal length must equal record.prev_len")
+        seen: set[str] = set()
+        previous: CallRecord | None = None
+        for parent in self.parent_manifest:
+            if parent.capture_key is None:
+                raise ValueError("parent_manifest rows require capture_key ownership")
+            if parent.model_call_id in seen or parent.model_call_id == self.record.model_call_id:
+                raise ValueError("parent_manifest contains a duplicate model_call_id")
+            if previous is None:
+                if parent.parent_call_id is not None:
+                    raise ValueError("parent_manifest must start at a root call")
+            elif parent.parent_call_id != previous.model_call_id or parent.prev_len != previous.cum_len:
+                raise ValueError("parent_manifest must be one contiguous call chain")
+            seen.add(parent.model_call_id)
+            previous = parent
+        return self
 
 
 class ManifestFailure(_WireModel):

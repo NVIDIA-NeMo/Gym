@@ -12,16 +12,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import contextvars
 import json
+import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
+import httpx
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from pytest import fixture, raises
 
+from nemo_gym._checkpoint import (
+    AGENT_EXECUTION_GENERATION_HEADER,
+    AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE,
+    CHECKPOINT_CONTROL_TOKEN_ENV,
+    CONTROL_URL_PREFIX,
+    RESOURCE_REQUEST_ID_HEADER,
+    AgentBoundaryKind,
+    AgentBoundaryRecord,
+    AgentExecutionState,
+    PendingModelPayload,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, ToolSimulationAgentConfig
 
@@ -42,6 +59,20 @@ def _drop_nulls(value):
 
 def _calls_without_nulls(calls):
     return [(c.args, _drop_nulls(c.kwargs)) for c in calls]
+
+
+class _SelfResponse:
+    """Adapt an in-process httpx response to the ServerClient response contract."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        self.status = response.status_code
+        self.ok = response.is_success
+        self.cookies = response.cookies
+        self.headers = response.headers
+        self._content = response.content
+
+    async def read(self) -> bytes:
+        return self._content
 
 
 class TestApp:
@@ -89,6 +120,21 @@ class TestApp:
             server_client_post_mock.side_effect = post_responses
         else:
             server_client_post_mock.return_value = post_responses[0]
+
+    async def test_advertises_resource_dependency_index(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock()
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+
+        capabilities = TestClient(agent_server.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities")
+
+        assert capabilities.status_code == 200
+        assert AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE in capabilities.json()["features"]
 
     async def test_responses(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
@@ -218,6 +264,263 @@ class TestApp:
                 ],
             ),
         )
+
+    async def test_responses_parks_and_retries_checkpoint_refusal(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        checkpoint_refusal = AsyncMock()
+        checkpoint_refusal.ok = False
+        checkpoint_refusal.status = 409
+        checkpoint_refusal.read.return_value = json.dumps(
+            {"error": {"code": "checkpoint_parked", "detail": "paused"}}
+        ).encode()
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        completed = AsyncMock()
+        completed.ok = True
+        completed.status = 200
+        completed.headers = {}
+        completed.read.return_value = json.dumps(model_response).encode()
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(side_effect=[checkpoint_refusal, completed])
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        execution = await participant.begin(
+            rollout_id,
+            0,
+            task=asyncio.current_task(),
+        )
+
+        async def wait_until_parked() -> None:
+            while participant.status()["parked"] != 1:
+                await asyncio.sleep(0)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=agent_server.setup_webserver()),
+            base_url="http://agent.test",
+        ) as client:
+            response_task = asyncio.create_task(
+                client.post(
+                    f"/ng-rollout/{rollout_id}/training-token-capture/v1/responses",
+                    headers={
+                        AGENT_EXECUTION_GENERATION_HEADER: str(execution.generation),
+                    },
+                    json={"input": []},
+                )
+            )
+            await asyncio.wait_for(wait_until_parked(), timeout=1)
+            assert not response_task.done()
+
+            await participant.resume()
+            response = await asyncio.wait_for(response_task, timeout=1)
+
+        assert response.status_code == 200
+        assert response.json()["id"] == "response-1"
+        assert server_client_mock.post.await_count == 2
+
+    async def test_run_self_call_parks_and_retries_checkpoint_refusal(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+        tmp_path: Path,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        refused = asyncio.Event()
+        model_calls = 0
+        json_dumps = json.dumps
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        verify_result = {
+            "responses_create_params": {"input": []},
+            "response": model_response,
+            "reward": 1.0,
+        }
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.global_config_dict = {
+            "token_id_capture": {
+                "enabled": True,
+                "all_agents": True,
+                "dir": str(tmp_path),
+            },
+        }
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        app = agent_server.setup_webserver()
+
+        async def post(server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+            del kwargs
+            nonlocal model_calls
+            if server_name == agent_config.name:
+                payload = json.model_dump(exclude_unset=True) if hasattr(json, "model_dump") else json
+
+                async def call_internal_handler() -> _SelfResponse:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://agent.test",
+                    ) as internal_client:
+                        response = await internal_client.post(
+                            url_path,
+                            json=payload,
+                            cookies=cookies,
+                            headers=headers,
+                        )
+                    return _SelfResponse(response)
+
+                return await asyncio.create_task(call_internal_handler(), context=contextvars.Context())
+            if server_name == agent_config.model_server.name:
+                model_calls += 1
+                response = AsyncMock()
+                if model_calls == 1:
+                    response.ok = False
+                    response.status = 409
+                    response.read.return_value = json_dumps(
+                        {"error": {"code": "checkpoint_parked", "detail": "paused"}}
+                    ).encode()
+                    refused.set()
+                    return response
+                response.ok = True
+                response.status = 200
+                response.headers = {
+                    MODEL_CALL_ID_HEADER: "model-call-1",
+                    "x-nemo-gym-model-call-capture-outcome": "captured",
+                }
+                response.read.return_value = json_dumps(model_response).encode()
+                return response
+            assert server_name == agent_config.resources_server.name
+            response = AsyncMock()
+            response.ok = True
+            response.status = 200
+            response.headers = {}
+            response.read.return_value = json_dumps(verify_result).encode()
+            return response
+
+        server_client_mock.post = AsyncMock(side_effect=post)
+
+        async def wait_until_parked() -> None:
+            while participant.status()["parked"] != 1:
+                await asyncio.sleep(0)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://actor.test") as client:
+            run_task = asyncio.create_task(
+                client.post(
+                    "/run",
+                    json={
+                        "_ng_rollout_id": rollout_id,
+                        "_ng_attempt_index": 0,
+                        "responses_create_params": {"input": []},
+                    },
+                )
+            )
+            await asyncio.wait_for(refused.wait(), timeout=1)
+            await asyncio.wait_for(wait_until_parked(), timeout=1)
+            assert not run_task.done()
+
+            await participant.resume()
+            response = await asyncio.wait_for(run_task, timeout=1)
+
+        assert response.status_code == 200
+        assert response.json()["reward"] == 1.0
+        assert model_calls == 2
+
+    async def test_retire_cancels_self_call_parked_on_checkpoint_refusal(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+        tmp_path: Path,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        refused = asyncio.Event()
+        model_calls = 0
+        json_dumps = json.dumps
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.global_config_dict = {
+            "token_id_capture": {
+                "enabled": True,
+                "all_agents": True,
+                "dir": str(tmp_path),
+            },
+        }
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        app = agent_server.setup_webserver()
+
+        async def post(server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+            del kwargs
+            nonlocal model_calls
+            if server_name == agent_config.name:
+                payload = json.model_dump(exclude_unset=True) if hasattr(json, "model_dump") else json
+
+                async def call_internal_handler() -> _SelfResponse:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://agent.test",
+                    ) as internal_client:
+                        response = await internal_client.post(
+                            url_path,
+                            json=payload,
+                            cookies=cookies,
+                            headers=headers,
+                        )
+                    return _SelfResponse(response)
+
+                return await asyncio.create_task(call_internal_handler(), context=contextvars.Context())
+            assert server_name == agent_config.model_server.name
+            model_calls += 1
+            response = AsyncMock()
+            response.ok = False
+            response.status = 409
+            response.read.return_value = json_dumps(
+                {"error": {"code": "checkpoint_parked", "detail": "paused"}}
+            ).encode()
+            refused.set()
+            return response
+
+        server_client_mock.post = AsyncMock(side_effect=post)
+
+        async def wait_until_parked() -> None:
+            while participant.status()["parked"] != 1:
+                await asyncio.sleep(0)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://actor.test") as client:
+            run_task = asyncio.create_task(
+                client.post(
+                    "/run",
+                    json={
+                        "_ng_rollout_id": rollout_id,
+                        "_ng_attempt_index": 0,
+                        "responses_create_params": {"input": []},
+                    },
+                )
+            )
+            await asyncio.wait_for(refused.wait(), timeout=1)
+            await asyncio.wait_for(wait_until_parked(), timeout=1)
+
+            await participant.retire(rollout_id, 0)
+            with raises((asyncio.CancelledError, RuntimeError)) as cancelled:
+                await run_task
+            if isinstance(cancelled.value, RuntimeError):
+                assert str(cancelled.value) == "No response returned."
+
+        await asyncio.sleep(0)
+        assert model_calls == 1
 
     async def test_run(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
@@ -465,7 +768,6 @@ class TestApp:
             "response": full_tool_call_response,
             "reward": 1,
             "mask_sample": False,
-            "failure_kind": None,
             "failure_reason": None,
         }
         assert _drop_nulls(expected_valid_verify_response_json) == _drop_nulls(valid_verify_response.json())
@@ -532,3 +834,309 @@ class TestApp:
                 ],
             ),
         )
+
+    async def test_run_commits_completed_model_before_verify(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        model_call_id = "model-call-1"
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        verify_result = {
+            "responses_create_params": {"input": []},
+            "response": model_response,
+            "reward": 1.0,
+        }
+
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {
+            MODEL_CALL_ID_HEADER: model_call_id,
+            "x-nemo-gym-model-call-capture-outcome": "captured",
+        }
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        verify_http_response = AsyncMock()
+        verify_http_response.ok = True
+        verify_http_response.headers = {}
+        verify_http_response.json.return_value = verify_result
+        verify_http_response.read.return_value = json.dumps(verify_result).encode()
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(side_effect=[model_http_response, verify_http_response])
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        test_client = TestClient(agent_server.setup_webserver())
+
+        response = test_client.post(
+            "/run",
+            json={
+                "_ng_rollout_id": rollout_id,
+                "_ng_attempt_index": 0,
+                "responses_create_params": {"input": []},
+            },
+        )
+
+        assert response.status_code == 200
+        execution = participant.resolve(rollout_id, 0)
+        assert execution is not None
+        assert execution.state == AgentExecutionState.COMPLETED
+        assert execution.boundary is not None
+        assert execution.boundary.boundary_kind == AgentBoundaryKind.PENDING_MODEL
+        assert execution.boundary.last_committed_model_capture_key == rollout_id
+        assert execution.boundary.last_committed_model_call_id == model_call_id
+        assert execution.boundary.resource_state_revisions == {}
+        assert execution.boundary.pending_model is not None
+        assert execution.boundary.pending_model.response == model_response
+        assert participant.completion_receipt(rollout_id, 0).terminal_model_call_id == model_call_id
+
+        model_call = server_client_mock.post.await_args_list[0]
+        assert model_call.kwargs["headers"][AGENT_EXECUTION_GENERATION_HEADER] == "1"
+        verify_call = server_client_mock.post.await_args_list[1]
+        assert verify_call.kwargs["headers"][RESOURCE_REQUEST_ID_HEADER]
+
+    async def test_run_no_generation_skips_verify_and_masks_sample(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        model_response = {
+            "id": "synthetic-response",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+        }
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "no_generation"}
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(return_value=model_http_response)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        test_client = TestClient(agent_server.setup_webserver())
+
+        response = test_client.post(
+            "/run",
+            json={
+                "_ng_rollout_id": "tool-simulation-rollout",
+                "_ng_attempt_index": 0,
+                "responses_create_params": {"input": []},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["mask_sample"] is True
+        assert response.json()["failure_kind"] == "agent_no_generation"
+        assert server_client_mock.post.await_count == 1
+        receipt = participant.completion_receipt("tool-simulation-rollout", 0)
+        assert receipt.terminal_model_call_id is None
+
+    async def test_run_capture_failure_stops_without_verify_or_boundary(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        model_response = {
+            "id": "uncaptured-response",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {"x-nemo-gym-model-call-capture-outcome": "capture_failed"}
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(return_value=model_http_response)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+
+        test_client = TestClient(agent_server.setup_webserver())
+        with raises(RuntimeError, match="without durable token capture"):
+            test_client.post(
+                "/run",
+                json={
+                    "_ng_rollout_id": "tool-simulation-rollout",
+                    "_ng_attempt_index": 0,
+                    "responses_create_params": {"input": []},
+                },
+            )
+
+        assert server_client_mock.post.await_count == 1
+        execution = participant.resolve("tool-simulation-rollout", 0)
+        assert execution is None or execution.boundary is None
+
+    async def test_run_restores_pending_model_without_regenerating(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        model_call_id = "model-call-1"
+        verify_request_id = "verify-request-1"
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        verify_result = {
+            "responses_create_params": {"input": []},
+            "response": model_response,
+            "reward": 1.0,
+        }
+        verify_http_response = AsyncMock()
+        verify_http_response.ok = True
+        verify_http_response.headers = {}
+        verify_http_response.json.return_value = verify_result
+        verify_http_response.read.return_value = json.dumps(verify_result).encode()
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(return_value=verify_http_response)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+        participant.install_restored(
+            [
+                AgentBoundaryRecord(
+                    rollout_id=rollout_id,
+                    attempt_index=0,
+                    boundary_index=1,
+                    turn_index=1,
+                    boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+                    pending_model=PendingModelPayload(
+                        model_call_id=model_call_id,
+                        response=model_response,
+                        pending_action_cursor=0,
+                        resource_request_id=verify_request_id,
+                    ),
+                    output_items=[],
+                    last_committed_model_capture_key=rollout_id,
+                    last_committed_model_call_id=model_call_id,
+                )
+            ]
+        )
+        await participant.resume()
+        test_client = TestClient(agent_server.setup_webserver())
+
+        response = test_client.post(
+            "/run",
+            json={
+                "_ng_rollout_id": rollout_id,
+                "_ng_attempt_index": 1,
+                "responses_create_params": {"input": []},
+            },
+        )
+
+        assert response.status_code == 200
+        server_client_mock.post.assert_awaited_once()
+        verify_call = server_client_mock.post.await_args
+        assert verify_call.kwargs["server_name"] == "tool_resources_server"
+        assert verify_call.kwargs["url_path"] == "/verify"
+        assert verify_call.kwargs["headers"] == {RESOURCE_REQUEST_ID_HEADER: verify_request_id}
+        receipt = participant.completion_receipt(rollout_id, 1)
+        assert receipt.manifest_capture_key == rollout_id
+        assert receipt.terminal_model_call_id == model_call_id
+
+    async def test_checkpoint_prepare_freezes_inflight_verify(
+        self,
+        agent_config: ToolSimulationAgentConfig,
+    ) -> None:
+        rollout_id = "tool-simulation-rollout"
+        verify_started = asyncio.Event()
+        release_verify = asyncio.Event()
+        model_response = {
+            "id": "response-1",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        verify_result = {
+            "responses_create_params": {"input": []},
+            "response": model_response,
+            "reward": 1.0,
+        }
+
+        model_http_response = AsyncMock()
+        model_http_response.ok = True
+        model_http_response.headers = {
+            MODEL_CALL_ID_HEADER: "model-call-1",
+            "x-nemo-gym-model-call-capture-outcome": "captured",
+        }
+        model_http_response.json.return_value = model_response
+        model_http_response.read.return_value = json.dumps(model_response).encode()
+        verify_http_response = AsyncMock()
+        verify_http_response.ok = True
+        verify_http_response.headers = {}
+        verify_http_response.json.return_value = verify_result
+        verify_http_response.read.return_value = json.dumps(verify_result).encode()
+
+        async def post(*, server_name: str, **kwargs):
+            del kwargs
+            if server_name == "tool_agent":
+                return model_http_response
+            assert server_name == "tool_resources_server"
+            verify_started.set()
+            await release_verify.wait()
+            return verify_http_response
+
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = AsyncMock(side_effect=post)
+        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        participant = agent_server.checkpoint_participant()
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=agent_server.setup_webserver()),
+            base_url="http://agent.test",
+        ) as client:
+            run_task = asyncio.create_task(
+                client.post(
+                    "/run",
+                    json={
+                        "_ng_rollout_id": rollout_id,
+                        "_ng_attempt_index": 0,
+                        "responses_create_params": {"input": []},
+                    },
+                )
+            )
+            await asyncio.wait_for(verify_started.wait(), timeout=1)
+
+            report = await participant.prepare(time.time() + 1)
+            assert report["ready_to_commit"] is True
+            assert report["parked_with_boundary"] == 1
+            assert report["selected_boundaries"][0]["boundary_kind"] == AgentBoundaryKind.PENDING_MODEL.value
+
+            release_verify.set()
+            await asyncio.sleep(0)
+            assert not run_task.done()
+
+            await participant.resume()
+            response = await asyncio.wait_for(run_task, timeout=1)
+
+        assert response.status_code == 200

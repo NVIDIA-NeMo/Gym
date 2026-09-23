@@ -40,6 +40,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+import nemo_gym._checkpoint.coordinator as checkpoint_coordinator
 from nemo_gym._checkpoint import (
     MODEL_ADMISSION_URL_PREFIX,
     AdmissionCoordinator,
@@ -148,6 +149,85 @@ async def test_workers_register_and_report(sock_dir) -> None:
         assert status["inflight_total"] == 0
     finally:
         await _stop_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_broadcasts_are_serialized(monkeypatch, tmp_path) -> None:
+    coordinator = AdmissionCoordinator(tmp_path / "unused.sock", expected_workers=2)
+    first_writer = object()
+    delayed_writer = object()
+    coordinator._workers = {
+        "w0": checkpoint_coordinator.WorkerRecord("w0", 1000, first_writer),
+        "w1": checkpoint_coordinator.WorkerRecord("w1", 1001, delayed_writer),
+    }
+    delayed_delivery_started = asyncio.Event()
+    release_delayed_delivery = asyncio.Event()
+    deliveries: list[tuple[object, int, str]] = []
+
+    async def write_message(writer, message) -> None:
+        if message["seq"] == 1 and writer is delayed_writer:
+            delayed_delivery_started.set()
+            await release_delayed_delivery.wait()
+        deliveries.append((writer, message["seq"], message["state"]))
+
+    monkeypatch.setattr(checkpoint_coordinator, "_write_message", write_message)
+
+    close = asyncio.create_task(coordinator.close_admission("checkpoint-1"))
+    await delayed_delivery_started.wait()
+    resume = asyncio.create_task(coordinator.resume_admission())
+    await asyncio.sleep(0)
+
+    assert not resume.done()
+    assert coordinator._state == AdmissionState.DRAINING
+    assert coordinator._seq == 1
+
+    release_delayed_delivery.set()
+    await close
+    await resume
+
+    assert deliveries == [
+        (first_writer, 1, "draining"),
+        (delayed_writer, 1, "draining"),
+        (first_writer, 2, "accepting"),
+        (delayed_writer, 2, "accepting"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_ignores_older_coordinator_state(monkeypatch, tmp_path) -> None:
+    limiter = AdmissionLimiter()
+    worker = WorkerAdmissionAgent(tmp_path / "unused.sock", "w0", limiter)
+    worker._writer = object()
+    acknowledgements: list[dict] = []
+
+    async def write_message(_writer, message) -> None:
+        acknowledgements.append(message)
+
+    monkeypatch.setattr(checkpoint_coordinator, "_write_message", write_message)
+
+    await worker._apply_state_message(
+        {
+            "type": "state",
+            "seq": 2,
+            "state": "accepting",
+            "checkpoint_id": None,
+            "tombstones": [],
+        }
+    )
+    await worker._apply_state_message(
+        {
+            "type": "state",
+            "seq": 1,
+            "state": "draining",
+            "checkpoint_id": "stale-checkpoint",
+            "tombstones": [],
+        }
+    )
+
+    assert limiter.state == AdmissionState.ACCEPTING
+    assert worker._coordinator_sequence == 2
+    assert worker._checkpoint_id is None
+    assert [acknowledgement["seq"] for acknowledgement in acknowledgements] == [2]
 
 
 @pytest.mark.asyncio

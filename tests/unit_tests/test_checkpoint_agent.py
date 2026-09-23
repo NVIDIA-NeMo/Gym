@@ -15,20 +15,31 @@
 """Whitebox agent executions park and restore at typed turn boundaries."""
 
 import asyncio
+import hashlib
+import json
+import tarfile
+import threading
 import time
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 
+import nemo_gym._checkpoint.agent as agent_checkpoint
 from nemo_gym._checkpoint import (
+    AGENT_CONTINUATION_INDEX_NAME,
     AGENT_MANIFEST_NAME,
+    AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
+    AgentAdmissionClosedError,
     AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
+    AgentContinuationRoot,
     AgentStaleAttemptError,
+    CheckpointArtifactReference,
     CheckpointPhase,
     ControlCapabilities,
     ControlFence,
@@ -38,6 +49,7 @@ from nemo_gym._checkpoint import (
     commit_agent_state,
     install_agent_checkpoint,
     install_control_plane,
+    read_jsonl_artifact,
     restore_agent_state,
 )
 
@@ -74,6 +86,8 @@ def test_pending_model_boundary_round_trips_typed_generation_state() -> None:
         ),
         output_items=[],
         usage={"total_tokens": 11},
+        last_committed_model_capture_key="rollout-a",
+        last_committed_model_call_id="call-2",
         resource_state_revisions={"resources": 4},
     )
 
@@ -84,6 +98,83 @@ def test_pending_model_boundary_round_trips_typed_generation_state() -> None:
     assert restored.pending_model is not None
     assert restored.pending_model.pending_action_cursor == 1
     assert restored.pending_model.resource_request_id == "resource-request-2"
+
+
+def _pending_boundary(
+    call_id: str,
+    *,
+    boundary_index: int,
+    attempt_index: int = 0,
+) -> AgentBoundaryRecord:
+    return AgentBoundaryRecord(
+        rollout_id="rollout-a",
+        attempt_index=attempt_index,
+        boundary_index=boundary_index,
+        boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+        pending_model=PendingModelPayload(
+            model_call_id=call_id,
+            response={},
+            pending_action_cursor=0,
+            resource_request_id=f"resource-{boundary_index}",
+        ),
+        output_items=[],
+        last_committed_model_capture_key="rollout-a",
+        last_committed_model_call_id=call_id,
+    )
+
+
+def test_pending_boundary_requires_its_committed_model_call() -> None:
+    with pytest.raises(ValidationError, match="pending model id must equal"):
+        AgentBoundaryRecord(
+            rollout_id="rollout-a",
+            attempt_index=0,
+            boundary_index=1,
+            boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+            pending_model=PendingModelPayload(
+                model_call_id="call-2",
+                response={},
+                pending_action_cursor=0,
+                resource_request_id="resource-1",
+            ),
+            output_items=[],
+            last_committed_model_capture_key="rollout-a",
+            last_committed_model_call_id="call-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_boundary_transition_cannot_clear_or_silently_change_model_coordinate() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _pending_boundary("call-1", boundary_index=1))
+
+    with pytest.raises(AgentCheckpointError, match="cannot clear"):
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=2,
+                output_items=[],
+            ),
+        )
+
+    with pytest.raises(AgentCheckpointError, match="pending-model boundary"):
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=2,
+                output_items=[],
+                last_committed_model_capture_key="rollout-a",
+                last_committed_model_call_id="call-2",
+            ),
+        )
+
+    await participant.commit_boundary(execution, _pending_boundary("call-2", boundary_index=2))
+    assert execution.boundary is not None
+    assert execution.boundary.last_committed_model_call_id == "call-2"
 
 
 @pytest.mark.asyncio
@@ -199,10 +290,99 @@ async def test_completed_attempt_replays_retained_terminal_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restored_completion_receipt_preserves_source_model_lineage() -> None:
+    participant = AgentCheckpointParticipant()
+    participant.install_restored([_boundary(attempt_index=0)])
+    await participant.resume()
+
+    execution = await participant.begin("rollout-a", 1, task=None)
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+
+    receipt = participant.completion_receipt("rollout-a", 1)
+    assert receipt.manifest_capture_key == "rollout-a"
+    assert receipt.terminal_model_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_new_model_boundary_replaces_restored_lineage_coordinate() -> None:
+    participant = AgentCheckpointParticipant()
+    participant.install_restored([_boundary(attempt_index=0)])
+    await participant.resume()
+
+    execution = await participant.begin("rollout-a", 1, task=None)
+    await participant.commit_boundary(
+        execution,
+        _pending_boundary(
+            "call-2",
+            attempt_index=1,
+            boundary_index=2,
+        ).model_copy(update={"last_committed_model_capture_key": "rollout-a-a1"}),
+    )
+    await participant.commit_boundary(
+        execution,
+        _boundary(attempt_index=1, boundary_index=3).model_copy(
+            update={
+                "last_committed_model_capture_key": "rollout-a-a1",
+                "last_committed_model_call_id": "call-2",
+            }
+        ),
+    )
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+
+    receipt = participant.completion_receipt("rollout-a", 1)
+    assert receipt.manifest_capture_key == "rollout-a-a1"
+    assert receipt.terminal_model_call_id == "call-2"
+
+
+@pytest.mark.asyncio
+async def test_restored_continuation_is_a_live_boundary_for_repeated_checkpoint(
+    tmp_path,
+) -> None:
+    participant = AgentCheckpointParticipant()
+    original = _boundary(attempt_index=0, boundary_index=4)
+    participant.install_restored([original])
+    await participant.resume()
+
+    replacement = await participant.begin("rollout-a", 1, task=asyncio.current_task())
+    assert participant.continuation(replacement) == original
+    assert replacement.boundary == original.model_copy(update={"attempt_index": 1})
+    assert replacement.boundary is not original
+
+    await participant.begin_external_wait(replacement)
+    report = await participant.prepare(time.time() + 2)
+
+    assert report["ready_to_commit"] is True
+    assert report["executions"][0]["state"] == "external_wait_frozen"
+    checkpoint_dir = tmp_path / "repeated-checkpoint"
+    checkpoint_dir.mkdir()
+    commit_agent_state(participant, checkpoint_dir, checkpoint_id="checkpoint-2")
+
+    restored = AgentCheckpointParticipant()
+    restore_agent_state(restored, checkpoint_dir)
+    await restored.resume()
+    second_replacement = await restored.begin("rollout-a", 2, task=None)
+    second_continuation = restored.continuation(second_replacement)
+
+    assert second_continuation is not None
+    assert second_continuation.attempt_index == 1
+    assert second_replacement.boundary is not None
+    assert second_replacement.boundary.attempt_index == 2
+    assert second_replacement.boundary.boundary_index == 4
+    assert second_replacement.boundary.last_committed_model_capture_key == "rollout-a"
+    assert second_replacement.boundary.last_committed_model_call_id == "call-1"
+
+    await participant.resume()
+    await participant.end_external_wait(replacement)
+    await participant.finish(replacement, outcome="failed")
+    await restored.finish(second_replacement, outcome="failed")
+
+
+@pytest.mark.asyncio
 async def test_retire_tombstones_attempt_without_execution() -> None:
     participant = AgentCheckpointParticipant()
 
     assert await participant.retire("rollout-a", 7) == {"retired": False, "tombstoned": True}
+    assert ("rollout-a", 7) not in participant._generations
     with pytest.raises(AgentStaleAttemptError):
         await participant.begin("rollout-a", 7, task=None)
 
@@ -225,6 +405,112 @@ async def test_prepare_waits_for_boundary_and_resume_is_explicit() -> None:
     assert (await participant.resume())["released"] == 1
     await boundary
     await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_prepare_freezes_replayable_external_wait_at_existing_boundary() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+    await participant.begin_external_wait(execution)
+
+    report = await participant.prepare(time.time() + 2)
+
+    assert report["ready_to_commit"] is True
+    assert report["running"] == 0
+    assert report["parked_with_boundary"] == 1
+    assert report["executions"][0]["state"] == "external_wait_frozen"
+    assert report["executions"][0]["parked_boundary_state"] == "external_wait_frozen"
+    records = participant.records_for_commit()
+    assert len(records) == 1
+    assert records[0].rollout_id == "rollout-a"
+    assert records[0].boundary_index == 1
+
+    completed = asyncio.create_task(participant.end_external_wait(execution))
+    await asyncio.sleep(0)
+    assert not completed.done()
+
+    assert (await participant.resume())["released"] == 1
+    await completed
+    assert participant.status()["executions"][0]["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_external_wait_without_boundary_uses_normal_park_request() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.begin_external_wait(execution)
+
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    completed = asyncio.create_task(participant.end_external_wait(execution))
+    report = await prepare
+
+    assert report["ready_to_commit"] is False
+    assert report["parked_without_boundary"] == 1
+    assert not completed.done()
+    assert (await participant.resume())["released"] == 1
+    await completed
+
+
+@pytest.mark.asyncio
+async def test_external_wait_arriving_after_prepare_parks_instead_of_failing() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    external_wait = asyncio.create_task(participant.begin_external_wait(execution))
+    report = await prepare
+
+    assert report["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert execution.external_wait_depth == 0
+    assert not external_wait.done()
+
+    await participant.resume()
+    await asyncio.wait_for(external_wait, timeout=1)
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    assert execution.external_wait_depth == 1
+    await participant.end_external_wait(execution)
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
+async def test_stale_resume_signal_cannot_cross_a_new_external_wait_checkpoint() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+
+    first_prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    external_wait = asyncio.create_task(participant.begin_external_wait(execution))
+    assert (await first_prepare)["ready_to_commit"] is True
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+
+    # Checkpoint 1 signals resume, then checkpoint 2 freezes the execution
+    # before the waiting task is scheduled.
+    participant._accepting = True
+    execution.state = agent_checkpoint.AgentExecutionState.RUNNING
+    execution.resume_epoch = participant._checkpoint_epoch
+    execution.resume_event.set()
+    participant._checkpoint_epoch += 1
+    participant._accepting = False
+    execution.state = agent_checkpoint.AgentExecutionState.PARK_REQUESTED
+
+    await asyncio.sleep(0)
+    assert execution.state == agent_checkpoint.AgentExecutionState.PARKED
+    assert not external_wait.done()
+
+    await participant.resume()
+    await asyncio.wait_for(external_wait, timeout=1)
+    assert execution.state == agent_checkpoint.AgentExecutionState.RUNNING
+    assert execution.external_wait_depth == 1
+    await participant.end_external_wait(execution)
+    await participant.finish(execution, outcome="failed")
 
 
 @pytest.mark.asyncio
@@ -352,6 +638,91 @@ async def test_completed_result_acknowledgment_is_receipt_bound_and_idempotent()
 
 
 @pytest.mark.asyncio
+async def test_commit_route_snapshots_agent_records_on_event_loop(monkeypatch, tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+    event_loop_thread = threading.get_ident()
+    record_snapshot_threads: list[int] = []
+    original_records_for_commit = participant.records_for_commit
+
+    def record_snapshot_thread() -> list[AgentBoundaryRecord]:
+        record_snapshot_threads.append(threading.get_ident())
+        return original_records_for_commit()
+
+    monkeypatch.setattr(participant, "records_for_commit", record_snapshot_thread)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        committed = await client.post(
+            "/ng-control/v1/agent-checkpoint/commit",
+            json={
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 2,
+                "checkpoint_dir": str(tmp_path),
+            },
+            headers=headers,
+        )
+
+    assert prepared.status_code == 200
+    assert committed.status_code == 200
+    reference = CheckpointArtifactReference.model_validate(committed.json()["continuation_index"])
+    assert reference.records == 0
+    assert record_snapshot_threads == [event_loop_thread]
+
+
+@pytest.mark.asyncio
+async def test_commit_route_rejects_obsolete_continuation_index_opt_in(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        committed = await client.post(
+            "/ng-control/v1/agent-checkpoint/commit",
+            json={
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 2,
+                "checkpoint_dir": str(tmp_path),
+                "include_continuation_index": True,
+            },
+            headers=headers,
+        )
+
+    assert prepared.status_code == 200
+    assert committed.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_prepare_distinguishes_parked_execution_without_boundary() -> None:
     participant = AgentCheckpointParticipant()
     outer = asyncio.create_task(asyncio.Event().wait())
@@ -402,6 +773,7 @@ async def test_failed_execution_is_tombstoned_and_released() -> None:
     await participant.finish(execution, outcome="failed")
 
     assert participant.resolve("rollout-a", 0) is None
+    assert ("rollout-a", 0) not in participant._generations
     assert execution.boundary is None
     with pytest.raises(AgentStaleAttemptError):
         await participant.commit_boundary(execution, _boundary(boundary_index=2))
@@ -438,6 +810,8 @@ async def test_cancelled_parked_run_keeps_boundary_until_commit(tmp_path) -> Non
 
     assert commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")["records"] == 1
     assert (await participant.resume())["state"] == "accepting"
+    assert participant.resolve("rollout-a", 0) is None
+    assert ("rollout-a", 0) not in participant._generations
 
 
 @pytest.mark.asyncio
@@ -520,11 +894,30 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
 
     summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
     assert summary["records"] == 1
+    continuation_reference = summary["continuation_index"]
+    assert continuation_reference["relative_path"] == f"{AGENT_STATE_SUBDIR}/{AGENT_CONTINUATION_INDEX_NAME}"
+    assert [
+        item.model_dump(mode="json")
+        for item in read_jsonl_artifact(
+            tmp_path,
+            CheckpointArtifactReference.model_validate(continuation_reference),
+            AgentContinuationRoot,
+        )
+    ] == [
+        {
+            "schema_version": 1,
+            "rollout_id": "rollout-a",
+            "attempt_index": 2,
+            "capture_key": "rollout-a-a2",
+            "last_committed_model_call_id": "call-1",
+            "resource_state_revisions": {"resources": 3},
+        }
+    ]
     restored = AgentCheckpointParticipant()
-    assert restore_agent_state(restored, tmp_path) == {
-        "records": 1,
-        "source_checkpoint_id": "checkpoint-1",
-    }
+    restore_summary = restore_agent_state(restored, tmp_path)
+    assert restore_summary["records"] == 1
+    assert restore_summary["source_checkpoint_id"] == "checkpoint-1"
+    assert restore_summary["continuation_index"] == continuation_reference
     await restored.resume()
     replacement = await restored.begin("rollout-a", 3, task=None)
     continuation = restored.continuation(replacement)
@@ -534,6 +927,133 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
     assert continuation.resource_state_revisions == {"resources": 3}
     with pytest.raises(AgentStaleAttemptError):
         await restored.begin("rollout-a", 2, task=None)
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_restore_loads_off_loop_and_installs_on_event_loop(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent_checkpoint._commit_agent_records(
+        [_boundary()],
+        tmp_path,
+        checkpoint_id="source-checkpoint",
+    )
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            checkpoint_mode="export_restore",
+            multi_process=MultiProcessCapability(mode="single_worker"),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(
+        app,
+        participant=participant,
+        fence=fence,
+        auth_token="secret",
+    )
+    event_loop_thread = threading.get_ident()
+    loader_started = threading.Event()
+    release_loader = threading.Event()
+    loader_thread: list[int] = []
+    install_thread: list[int] = []
+    original_loader = agent_checkpoint._load_agent_state
+    original_install = participant.install_restored
+
+    def blocking_loader(*args, **kwargs):
+        loader_thread.append(threading.get_ident())
+        loader_started.set()
+        assert release_loader.wait(timeout=5)
+        return original_loader(*args, **kwargs)
+
+    def record_install(records) -> None:
+        install_thread.append(threading.get_ident())
+        original_install(records)
+
+    monkeypatch.setattr(agent_checkpoint, "_load_agent_state", blocking_loader)
+    monkeypatch.setattr(participant, "install_restored", record_install)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        restore = asyncio.create_task(
+            client.post(
+                f"{agent_checkpoint.AGENT_CHECKPOINT_URL_PREFIX}/restore",
+                json={
+                    "checkpoint_id": "restore-1",
+                    "deadline_ts": time.time() + 5,
+                    "checkpoint_dir": str(tmp_path),
+                },
+                headers={"authorization": "Bearer secret"},
+            )
+        )
+        try:
+            assert await asyncio.wait_for(
+                asyncio.to_thread(loader_started.wait),
+                timeout=1,
+            )
+            assert participant._accepting is False
+            with pytest.raises(AgentAdmissionClosedError):
+                await participant.begin("new-rollout", 0, task=None)
+        finally:
+            release_loader.set()
+
+        response = await restore
+
+    assert response.status_code == 200
+    assert response.json()["records"] == 1
+    assert loader_thread[0] != event_loop_thread
+    assert install_thread == [event_loop_thread]
+    assert fence.phase == CheckpointPhase.RESTORED_PAUSED
+
+
+@pytest.mark.asyncio
+async def test_restored_continuation_can_be_discarded_before_admission(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+
+    restored = AgentCheckpointParticipant()
+    restore_agent_state(restored, tmp_path)
+    fence = ControlFence()
+    fence.phase = CheckpointPhase.RESTORED_PAUSED
+    fence.active_checkpoint_id = "restore-1"
+    app = FastAPI()
+    install_agent_checkpoint(app, participant=restored, fence=fence, auth_token="secret")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/ng-control/v1/agent-checkpoint/discard-restored-continuation",
+            json={
+                "checkpoint_id": "restore-1",
+                "deadline_ts": time.time() + 2,
+                "rollout_id": "rollout-a",
+                "attempt_index": 1,
+            },
+            headers={"authorization": "Bearer secret"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"discarded": True}
+    await restored.resume()
+    replacement = await restored.begin("rollout-a", 1, task=None)
+    assert restored.continuation(replacement) is None
 
     await participant.resume()
     await park
@@ -556,13 +1076,140 @@ async def test_durable_agent_commit_retry_returns_original_result(tmp_path) -> N
     await participant.finish(execution, outcome="completed")
 
 
-def test_restore_rejects_corrupted_boundary_before_activation(tmp_path) -> None:
+def test_commit_uses_bounded_deterministic_agent_archives(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(agent_checkpoint, "_AGENT_ARCHIVE_MAX_MEMBERS", 2)
+    records = [
+        _boundary().model_copy(
+            update={
+                "rollout_id": f"rollout-{index}",
+                "attempt_index": index,
+                "last_committed_model_capture_key": (
+                    f"rollout-{index}" if index == 0 else f"rollout-{index}-a{index}"
+                ),
+            }
+        )
+        for index in range(5)
+    ]
+
+    summary = agent_checkpoint._commit_agent_records(records, tmp_path, checkpoint_id="checkpoint-1")
+
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    manifest = json.loads((directory / AGENT_MANIFEST_NAME).read_text())
+    assert manifest["schema_version"] == 2
+    assert manifest["records"] == 5
+    assert [archive["members"] for archive in manifest["archives"]] == [2, 2, 1]
+    assert list(directory.glob("*.a*.json")) == []
+    assert summary["records"] == 5
+    assert (directory / AGENT_RECORD_INDEX_NAME).exists()
+    assert (directory / AGENT_CONTINUATION_INDEX_NAME).exists()
+
+    expected_members = [
+        ["rollout-0.a0.json", "rollout-1.a1.json"],
+        ["rollout-2.a2.json", "rollout-3.a3.json"],
+        ["rollout-4.a4.json"],
+    ]
+    for archive_reference, expected in zip(manifest["archives"], expected_members, strict=True):
+        archive_path = directory / archive_reference["name"]
+        assert archive_path.stat().st_size == archive_reference["bytes"]
+        assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_reference["sha256"]
+        with tarfile.open(archive_path, mode="r:") as archive:
+            assert archive.getnames() == expected
+
+    restored = AgentCheckpointParticipant()
+    assert restore_agent_state(restored, tmp_path)["records"] == 5
+
+
+def test_restore_rejects_legacy_agent_checkpoint_schema(tmp_path) -> None:
     directory = tmp_path / AGENT_STATE_SUBDIR
     directory.mkdir()
     (directory / AGENT_MANIFEST_NAME).write_text(
-        '{"schema_version": 1, "checkpoint_id": "checkpoint-1", "files": {"missing.json": "bad"}}'
+        '{"schema_version": 1, "checkpoint_id": "checkpoint-1", "instance_name": null, "files": {}}'
     )
     participant = AgentCheckpointParticipant()
-    with pytest.raises(AgentCheckpointError):
+    with pytest.raises(AgentCheckpointError, match="unsupported agent checkpoint manifest schema"):
         restore_agent_state(participant, tmp_path)
     assert participant.resolve("rollout-a", 1) is None
+
+
+def test_restore_rejects_corrupted_agent_archive_before_activation(tmp_path) -> None:
+    agent_checkpoint._commit_agent_records([_boundary()], tmp_path, checkpoint_id="checkpoint-1")
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    manifest = json.loads((directory / AGENT_MANIFEST_NAME).read_text())
+    archive_path = directory / manifest["archives"][0]["name"]
+    archive_path.write_bytes(archive_path.read_bytes() + b"corrupt")
+
+    participant = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="archive.*corrupted"):
+        restore_agent_state(participant, tmp_path)
+    assert participant.resolve("rollout-a", 1) is None
+
+
+def test_restore_rejects_manifest_without_continuation_index(tmp_path) -> None:
+    commit_agent_state(AgentCheckpointParticipant(), tmp_path, checkpoint_id="checkpoint-1")
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    manifest_path = directory / AGENT_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["continuation_index"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    participant = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="missing its continuation index"):
+        restore_agent_state(participant, tmp_path)
+    assert participant.resolve("rollout-a", 1) is None
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_corrupted_continuation_index_before_activation(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+    continuation_path = tmp_path / summary["continuation_index"]["relative_path"]
+    continuation_path.write_text("corrupt\n")
+
+    restored = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="continuation index"):
+        restore_agent_state(restored, tmp_path)
+    assert restored.resolve("rollout-a", 1) is None
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_continuation_dependency_mismatch(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+
+    continuation_path = tmp_path / summary["continuation_index"]["relative_path"]
+    root = AgentContinuationRoot.model_validate_json(continuation_path.read_bytes())
+    payload = (
+        root.model_copy(update={"resource_state_revisions": {"different-resources": 3}}).model_dump_json() + "\n"
+    ).encode()
+    continuation_path.write_bytes(payload)
+    manifest_path = tmp_path / AGENT_STATE_SUBDIR / AGENT_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["continuation_index"].update(
+        {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest))
+
+    restored = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="resource revisions"):
+        restore_agent_state(restored, tmp_path)
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")

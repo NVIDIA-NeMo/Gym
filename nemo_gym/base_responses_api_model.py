@@ -53,6 +53,7 @@ from nemo_gym._checkpoint.admission import (
     bind_current_model_call,
     mark_current_generation_started,
 )
+from nemo_gym._checkpoint.artifacts import EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE
 from nemo_gym._checkpoint.control import (
     AdmissionState,
     ControlCapabilities,
@@ -81,7 +82,7 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import (
-    LOGICAL_REQUEST_HEADER,
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
     MODEL_CALL_ID_HEADER,
     PARENT_MODEL_CALL_ID_HEADER,
     SOURCE_CAPTURE_KEY_HEADER,
@@ -307,7 +308,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             instance_role=self.config.instance_role,
             server_name=self.config.name,
             auth_token=auth_token,
-            expected_workers=self.config.num_workers or 1,
         )
         if self.config.instance_role == "policy":
             app.add_middleware(
@@ -329,6 +329,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 AdmissionState.PAUSED,
             ]
             capabilities.checkpoint_mode = "export_restore"
+            capabilities.features = [EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE]
         return capabilities
 
     @abstractmethod
@@ -1336,7 +1337,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         context is None
         or not context.external_staging
         or context.capture_admission is None
-        or context.committed
+        or context.capture_outcome != "pending"
         or context.lineage_store is None
     ):
         return
@@ -1463,10 +1464,24 @@ class _CaptureMiddleware:
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         bind_current_model_call(model_call_id)
 
+        def _response_capture_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+            if capture_context is None:
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                return headers
+            outcome = capture_context.capture_outcome
+            if outcome == "captured":
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+            elif outcome == "pending":
+                # A handler that reached response egress without resolving its
+                # capture intent is a capture failure, never a model call an
+                # agent may checkpoint.
+                outcome = "capture_failed"
+            headers.append((MODEL_CALL_CAPTURE_OUTCOME_HEADER.encode("ascii"), outcome.encode("ascii")))
+            return headers
+
         async def _send_with_model_call_id(message: dict[str, Any]) -> None:
             if message.get("type") == "http.response.start":
-                headers = list(message.get("headers") or ())
-                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                headers = _response_capture_headers(list(message.get("headers") or ()))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -1485,7 +1500,6 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
-                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
                 source_capture_key=_scope_header(scope, SOURCE_CAPTURE_KEY_HEADER),
                 explicit_parent_call_id=_scope_header(scope, PARENT_MODEL_CALL_ID_HEADER),
                 admitted_at=time.time(),
@@ -1544,8 +1558,7 @@ class _CaptureMiddleware:
             nonlocal defer_response
             message_type = message.get("type")
             if message_type == "http.response.start":
-                headers = list(message.get("headers") or ())
-                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                headers = _response_capture_headers(list(message.get("headers") or ()))
                 message = {**message, "headers": headers}
                 state["status"] = message.get("status")
                 content_type = _headers_content_type(message.get("headers") or [])
@@ -1731,7 +1744,7 @@ def install_model_call_capture(
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
                 "token_id_capture.external_staging requires the lineage store to implement "
-                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows, has_committed_rows)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(

@@ -12,15 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym._checkpoint.agent import AgentBoundaryRecord, AgentCheckpointParticipant
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
+)
+from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
 )
 from nemo_gym.server_utils import ServerClient
 
@@ -102,3 +110,75 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+    def test_capture_result_is_gated_by_token_capture_not_checkpoint_participation(self) -> None:
+        agent = self._agent(
+            {"token_id_capture": {"enabled": True}},
+            token_id_capture=True,
+        )
+        result = agent.model_call_capture_result(
+            {
+                MODEL_CALL_CAPTURE_OUTCOME_HEADER: "captured",
+                MODEL_CALL_ID_HEADER: "call-1",
+            }
+        )
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.CAPTURED
+        assert result.model_call_id == "call-1"
+
+    def test_capture_result_is_absent_when_token_capture_and_header_are_absent(self) -> None:
+        assert self._agent({}).model_call_capture_result(None) is None
+
+    def test_explicit_capture_outcome_is_honored_when_config_is_unavailable(self) -> None:
+        result = self._agent({}).model_call_capture_result({MODEL_CALL_CAPTURE_OUTCOME_HEADER: "no_generation"})
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.NO_GENERATION
+        assert result.model_call_id is None
+
+    def test_checkpoint_participant_preserves_legacy_model_call_id(self) -> None:
+        agent = self._agent({"observability_enabled": True})
+        agent._checkpoint_participant = MagicMock()
+
+        result = agent.model_call_capture_result({MODEL_CALL_ID_HEADER: "call-1"})
+
+        assert result is not None
+        assert result.outcome == ModelCallCaptureOutcome.CAPTURED
+        assert result.model_call_id == "call-1"
+
+    async def test_checkpoint_prepare_before_external_wait_blocks_operation(self) -> None:
+        agent = self._agent({})
+        participant = AgentCheckpointParticipant("test-agent")
+        agent._checkpoint_participant = participant
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        operation_started = asyncio.Event()
+
+        async def operation() -> str:
+            operation_started.set()
+            return "done"
+
+        token = participant.bind(execution)
+        try:
+            prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            request = asyncio.create_task(agent.checkpointable_external_wait(operation))
+
+            assert (await prepare)["ready_to_commit"] is True
+            assert not operation_started.is_set()
+
+            await participant.resume()
+            assert await asyncio.wait_for(request, timeout=1) == "done"
+            assert operation_started.is_set()
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")

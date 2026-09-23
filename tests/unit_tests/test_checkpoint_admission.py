@@ -380,6 +380,7 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
     capabilities = client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert capabilities["instance_role"] == "policy"
     assert capabilities["admission_states"] == ["accepting", "draining", "paused"]
+    assert capabilities["features"] == ["external_storage_reference_index_v1"]
 
     # Generation works while accepting.
     assert client.post("/v1/responses", json={"input": "hi"}).status_code == 200
@@ -438,6 +439,28 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
         json={"checkpoint_id": "ckpt-3", "deadline_ts": 4e9},
         headers=AUTH_HEADERS,
     ).json()["state"] in {"paused", "draining"}
+
+
+def test_policy_model_resume_is_idempotent_when_prepare_never_paused() -> None:
+    """Rollback may race a failed prepare whose fence already returned to idle."""
+    client = TestClient(_model_server("policy").setup_webserver())
+    body = {"checkpoint_id": "ckpt-failed-prepare", "deadline_ts": 4e9}
+
+    resume = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+        json=body,
+        headers=AUTH_HEADERS,
+    )
+    assert resume.status_code == 200
+    assert resume.json()["state"] == "accepting"
+
+    replay = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+        json=body,
+        headers=AUTH_HEADERS,
+    )
+    assert replay.status_code == 200
+    assert replay.json() == resume.json()
 
 
 def test_model_admission_requires_existing_control_bearer() -> None:

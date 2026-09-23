@@ -78,6 +78,14 @@ async def test_workplace_restores_every_dataframe_before_activation() -> None:
     server = _server(WorkbenchResourcesServer, WorkbenchResourcesServerConfig)
     server.execution_to_session[("rollout-a", 0)] = "session-a"
     server.session_id_to_tool_env["session-a"] = get_tools(_TOOLKITS)
+    calendar = server.session_id_to_tool_env["session-a"]["containers"]["calendar"]
+    event_id = calendar.create_event(
+        event_name="NeMo RL checkpoint recovery sentinel",
+        participant_email="checkpoint-recovery@example.com",
+        event_start="2025-01-15 10:00:00",
+        duration="30",
+    )
+    assert event_id.isdigit()
     state = await server.export_checkpoint_state("rollout-a", 0)
     snapshot = ResourceSnapshot(rollout_id="rollout-a", attempt_index=1, state_revision=2, state=state)
     snapshot = ResourceSnapshot.model_validate_json(snapshot.model_dump_json())
@@ -91,6 +99,8 @@ async def test_workplace_restores_every_dataframe_before_activation() -> None:
             original_frame = getattr(original, attribute)
             assert restored_frame.equals(original_frame)
             assert type(restored_frame.index) is type(original_frame.index)
+    restored_events = restored["containers"]["calendar"]._calendar_events
+    assert (restored_events["event_name"] == "NeMo RL checkpoint recovery sentinel").sum() == 1
 
 
 @pytest.mark.asyncio

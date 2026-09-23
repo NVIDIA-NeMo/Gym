@@ -26,10 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym._checkpoint.agent import (
     AGENT_EXECUTION_GENERATION_HEADER,
+    COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+    DISCARD_RESTORED_CONTINUATION_FEATURE,
     AgentBoundaryRecord,
     AgentCheckpointParticipant,
     AgentExecution,
     install_agent_checkpoint,
+)
+from nemo_gym._checkpoint.artifacts import (
+    AGENT_CONTINUATION_INDEX_FEATURE,
+    AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE,
 )
 from nemo_gym._checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
 from nemo_gym.base_resources_server import (
@@ -51,11 +57,16 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import (
+    MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+    MODEL_CALL_ID_HEADER,
+    ModelCallCaptureOutcome,
+    ModelCallCaptureResult,
     RolloutContextMiddleware,
-    capture_key_for,
+    checkpoint_model_call_capture,
     checkpoint_parent_context,
     current_attempt_index,
     current_logical_rollout_id,
+    current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
     rollout_context,
@@ -123,6 +134,8 @@ class AgentCloseSessionResponse(BaseModel):
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Opt in only when an unfinished verifier is safe to replay after recovery.
+    checkpoint_replayable_verify: bool = False
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -148,6 +161,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     config: BaseResponsesAPIAgentConfig
     _CONTROL_COMPONENT = "responses_api_agents"
     checkpoint_continuation_supported: ClassVar[bool] = False
+    checkpoint_resource_dependencies_supported: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentCheckpointParticipant] = PrivateAttr(default=None)
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
@@ -167,6 +181,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
         app.post("/v1/responses")(traced_responses)
+        app.post(f"/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
@@ -205,10 +220,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 continuation = self._checkpoint_participant.continuation(execution)
                 parent_context = (
                     checkpoint_parent_context(
-                        capture_key_for(continuation.rollout_id, continuation.attempt_index),
+                        continuation.last_committed_model_capture_key,
                         continuation.last_committed_model_call_id,
                     )
-                    if continuation is not None and continuation.last_committed_model_call_id is not None
+                    if (
+                        continuation is not None
+                        and continuation.last_committed_model_capture_key is not None
+                        and continuation.last_committed_model_call_id is not None
+                    )
                     else nullcontext()
                 )
                 try:
@@ -259,7 +278,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def setup_agent_checkpoint(self, app: FastAPI) -> None:
         auth_token = self.checkpoint_control_auth_token()
-        if auth_token is None or not self.checkpoint_continuation_supported:
+        if auth_token is None:
             return
         install_agent_checkpoint(
             app,
@@ -270,9 +289,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()
-        if self.checkpoint_control_auth_token() is not None and self.checkpoint_continuation_supported:
+        if self.checkpoint_control_auth_token() is not None:
             capabilities.checkpoint_mode = "export_restore"
             capabilities.concurrency_contract = "serialized_per_session"
+            capabilities.features = [COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE]
+            if self.checkpoint_continuation_supported:
+                capabilities.features.extend(
+                    [
+                        AGENT_CONTINUATION_INDEX_FEATURE,
+                        DISCARD_RESTORED_CONTINUATION_FEATURE,
+                    ]
+                )
+                if self.checkpoint_resource_dependencies_supported:
+                    capabilities.features.append(AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE)
         return capabilities
 
     def checkpoint_execution(self, request: Optional[Request] = None) -> Optional[AgentExecution]:
@@ -330,6 +359,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 return response
             await self._checkpoint_participant.park(execution)
 
+    async def checkpointable_external_wait(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        request: Optional[Request] = None,
+    ) -> Any:
+        """Run a replayable external operation without consuming it across a cut."""
+        execution = self.checkpoint_execution(request)
+        if execution is None or self._checkpoint_participant is None:
+            return await operation()
+        await self._checkpoint_participant.begin_external_wait(execution)
+        try:
+            return await operation()
+        finally:
+            await self._checkpoint_participant.end_external_wait(execution)
+
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
 
@@ -358,6 +403,28 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(block.get("all_agents", False)) or bool(
             getattr(getattr(self, "config", None), "token_id_capture", False)
+        )
+
+    def model_call_capture_result(self, headers: Mapping[str, Any] | None) -> ModelCallCaptureResult | None:
+        """Validate model-call capture evidence when the response carries it.
+
+        Training-token capture and turn-level checkpoint participation are
+        independent capabilities. Typed capture outcomes are authoritative
+        whenever present and mandatory for training-token capture. Turn-level
+        checkpointing without token capture retains the legacy model-call ID
+        header contract used by the model ledger.
+        """
+        capture_header_present = headers is not None and MODEL_CALL_CAPTURE_OUTCOME_HEADER in headers
+        if capture_header_present or self._token_id_capture_enabled():
+            return checkpoint_model_call_capture(headers)
+        if self._checkpoint_participant is None or headers is None:
+            return None
+        model_call_id = headers.get(MODEL_CALL_ID_HEADER)
+        if not isinstance(model_call_id, str) or not model_call_id:
+            return None
+        return ModelCallCaptureResult(
+            outcome=ModelCallCaptureOutcome.CAPTURED,
+            model_call_id=model_call_id,
         )
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
@@ -402,6 +469,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if rollout_id is None:
+            rollout_id = current_rollout_id()
         request_path = getattr(getattr(request, "url", None), "path", "")
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"

@@ -35,6 +35,9 @@ It is an optional extension and deliberately not part of the ``TokenSink`` proto
 An intent with no matching entry at freeze must mask the rollout.
 That closes the window where the final call's entry is lost without a trace.
 ``begin_call`` runs before generation, so the caller may fail the model call at zero compute cost.
+If a sink implements ``begin_call``, it must also implement
+``cancel_call(rollout_id, model_call_id)`` so an intentional no-generation
+response can durably close that intent without creating a token record.
 
 ``nemo_gym.token_id_capture.conformance`` checks an external implementation against these contracts.
 """
@@ -45,7 +48,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
-from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,9 @@ class LineageMatch:
     staging_chain: tuple[str, ...] = ()
     prev_len: int = 0
     chain_hash: str = ""
+    # Token-free, root-to-parent call chain. Explicit cross-attempt resolution
+    # supplies it so the child attempt can persist a self-contained manifest.
+    parent_manifest: tuple[CallRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -184,6 +190,10 @@ class CaptureLedger(LineageResolver, Protocol):
         """Return whether any ledger row (committed or failed) exists."""
         ...
 
+    async def has_committed_rows(self, rollout_id: str) -> bool:
+        """Return whether at least one successfully captured model call exists."""
+        ...
+
 
 @runtime_checkable
 class TokenSink(Protocol):
@@ -282,6 +292,8 @@ def install_token_sink(sink: TokenSink | None) -> None:
         missing = [name for name in ("put", "mark_incomplete", "close") if not callable(getattr(sink, name, None))]
         if missing:
             raise TypeError(f"installed token sink lacks required methods: {', '.join(missing)}")
+        if callable(getattr(sink, "begin_call", None)) != callable(getattr(sink, "cancel_call", None)):
+            raise TypeError("installed token sink must implement begin_call and cancel_call together")
     global _INSTALLED_SINK
     _INSTALLED_SINK = sink
 

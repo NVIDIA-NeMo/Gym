@@ -49,6 +49,10 @@ from resources_servers.competitive_coding_challenges.app import (
 )
 
 
+def test_checkpoint_recovery_mode_is_stateless() -> None:
+    assert CompetitiveCodingChallengesResourcesServerConfig.CHECKPOINT_RECOVERY_MODE == "stateless"
+
+
 def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServer:
     config = CompetitiveCodingChallengesResourcesServerConfig(
         host="0.0.0.0",
