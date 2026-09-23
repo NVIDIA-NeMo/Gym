@@ -65,6 +65,7 @@ gym_run_args=(
     +uv_venv_dir=/opt/uv_venvs
     ++split=benchmark
     ++use_absolute_ip=true
+    ++model_endpoint_readiness_timeout_seconds=1800
     ++reuse_existing_data_preparation=true
     ++policy_api_key=dummy_api_key
     ++policy_model_name=$MODEL_NAME

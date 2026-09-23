@@ -73,6 +73,7 @@ for node in "${nodes[@]}"; do
 done
 exec vllm-router --host 0.0.0.0 --port "$ROUTER_SERVER_PORT" \
     --worker-urls "${urls[@]}" --policy cache_aware \
+    --worker-startup-timeout-secs 1800 --worker-startup-check-interval 5 \
     --balance-abs-threshold "${ROUTER_BALANCE_ABS_THRESHOLD:-40}" \
     --balance-rel-threshold "${ROUTER_BALANCE_REL_THRESHOLD:-2}" \
     --intra-node-data-parallel-size 1 --request-timeout-secs 86400 \
