@@ -145,6 +145,37 @@ def test_failed_or_aborted_never_marked_completed(result, error, status, budget_
     assert response.metadata["budget_exhausted"] == budget_stop
 
 
+@pytest.mark.parametrize(
+    ("completed", "exit_reason", "timed_out", "status", "stop_reason"),
+    [
+        (True, "text_response(finish_reason=stop)", False, "completed", ""),
+        (False, "max_iterations_reached(1/1)", False, "incomplete", "max_turns"),
+        (True, "max_iterations_reached(1/2)", False, "incomplete", "max_turns"),
+        (True, "text_response(finish_reason=stop)", True, "incomplete", "wall_time"),
+    ],
+)
+def test_last_turn_answer_is_distinct_from_forced_summary(completed, exit_reason, timed_out, status, stop_reason):
+    from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop
+
+    # Both a natural answer and a forced summary can consume the last iteration.
+    # Hermes can also mark a forced summary completed when a shared budget runs out.
+    result = classify_stop(
+        {
+            "completed": completed,
+            "turn_exit_reason": exit_reason,
+            "budget_exhausted": True,
+            "n_input": 1,
+            "messages": [{"role": "user", "content": "fix"}, {"role": "assistant", "content": "done"}],
+        },
+        timed_out=timed_out,
+    )
+    response = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="fix"), "model")
+    assert response.status == status
+    assert response.metadata["stop_reason"] == stop_reason
+    assert response.metadata["budget_exhausted"] == str(status == "incomplete").lower()
+    assert response.output[0].content[0].text == "done"
+
+
 @pytest.mark.asyncio
 async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypatch):
     sandbox = SimpleNamespace(

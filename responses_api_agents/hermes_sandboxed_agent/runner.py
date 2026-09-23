@@ -56,6 +56,10 @@ def classify_stop(result, timed_out=False):
     ):
         result["budget_exhausted"] = True
         result["stop_reason"] = "output_tokens"
+    elif result.get("completed") and str(result.get("turn_exit_reason", "")).startswith("text_response("):
+        # A natural final answer can use the last allowed turn. Forced summaries
+        # have a different exit reason, even when Hermes marks them completed.
+        result["budget_exhausted"] = False
     elif result.get("budget_exhausted") and not (
         result.get("failed") or result.get("error") or result.get("interrupted")
     ):

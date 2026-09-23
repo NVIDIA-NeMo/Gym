@@ -63,7 +63,7 @@ gym env start \
   +hermes_sandboxed_agent.responses_api_agents.hermes_sandboxed_agent.model=REAL_MODEL_NAME \
   +hermes_sandboxed_agent.responses_api_agents.hermes_sandboxed_agent.resources_server.name=swebench_pro_resources_server \
   '+sandbox.apptainer.exec.default_binds=[/absolute/path/hermes-runtime:/opt/hermes:ro]' \
-  '+swebench_pro_resources_server.resources_servers.swebench_pro.image_template=/cache/sifs/{image_digest_hex}.sif'
+  '+swebench_pro_resources_server.resources_servers.swebench_pro.image_template="/cache/sifs/{image_digest_hex}.sif"'
 ```
 
 The resources-server reference must be supplied explicitly on this Gym revision.
