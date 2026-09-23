@@ -1216,13 +1216,25 @@ class RolloutCollectionHelper(BaseModel):
         return rows
 
     def _load_from_cache(
-        self, config: RolloutCollectionConfig
+        self,
+        config: RolloutCollectionConfig,
+        *,
+        retain_result_strs: bool = True,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        """Load cached rollouts while preserving the historical four-value return contract.
+
+        ``retain_result_strs=False`` avoids keeping a second serialized copy of
+        every cached rollout when the caller has no consumer for it.
+        """
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
-        results = [orjson.loads(p[0]) for p in result_strs]
+            if retain_result_strs:
+                result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
+                results = [orjson.loads(parts[0]) for parts in result_strs]
+            else:
+                result_strs = []
+                results = [orjson.loads(line) for line in tqdm(f, desc="Reading existing output rows")]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -1303,12 +1315,12 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
-            (
-                input_rows,
-                rows,
-                results,
-                result_strs,
-            ) = self._load_from_cache(config)
+            input_rows, rows, results, result_strs = self._load_from_cache(
+                config,
+                # Nothing downstream reads ``result_strs`` (the W&B rollout upload was removed
+                # upstream), so never retain the second serialized copy of every cached rollout.
+                retain_result_strs=False,
+            )
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
