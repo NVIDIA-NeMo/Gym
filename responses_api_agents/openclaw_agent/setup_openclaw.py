@@ -49,6 +49,7 @@ Examples:
         ('2026.9.4', '24.21.0')
 """
 
+import ctypes
 import logging
 import os
 import platform
@@ -103,6 +104,59 @@ def resolve_node_version() -> str:
     return os.environ.get(NODE_VERSION_ENV) or DEFAULT_NODE_VERSION
 
 
+#: ``IsWow64Process2`` native-machine codes (IMAGE_FILE_MACHINE_*) we can map.
+_IMAGE_FILE_MACHINE_ARM64 = 0xAA64
+_IMAGE_FILE_MACHINE_AMD64 = 0x8664
+_IMAGE_FILE_MACHINE_I386 = 0x014C
+
+
+def _windows_machine() -> str:
+    """Return the host CPU architecture on Windows, robust to emulation.
+
+    The obvious primitive, ``platform.machine()``, is *not* trustworthy on
+    Windows-on-ARM: it reports the architecture of the *running interpreter*,
+    not of the host CPU — an x64 ``python.exe`` running under emulation on
+    ARM64 silicon gets ``AMD64``.
+
+    Worse, CPython 3.13+ makes the value *nondeterministic on one machine*:
+    ``platform.machine()`` consults WMI first (``Win32_Processor.Architecture``,
+    which reports the true host CPU) and silently falls back to the
+    ``PROCESSOR_ARCHITECTURE`` environment variable (which reports the emulated
+    image, ``AMD64`` here) whenever the WMI service is slow or times out. We
+    observed both values alternating between processes on the same ARM64 host,
+    which made the toolchain download flip between the win-arm64 and win-x64
+    zips from run to run.
+
+    ``IsWow64Process2`` (Windows 10+) closes the trap: it reports the *native*
+    process machine directly from the kernel, independent of how this
+    interpreter was built and with no WMI involved. Any failure (old Windows,
+    unexpected API shape) falls back to ``platform.machine()`` — imperfect, but
+    no worse than before.
+
+    Returns:
+        A ``platform.machine()``-style token such as ``"ARM64"`` or ``"AMD64"``
+        ("" when the native machine is not one we recognise).
+    """
+    try:
+        native_machine = ctypes.c_ushort()
+        # BOOL IsWow64Process2(HANDLE hProcess, USHORT *pProcessMachine,
+        #                      USHORT *pNativeMachine);
+        # A NULL handle means "the current process"; we only need the native side.
+        ok = ctypes.windll.kernel32.IsWow64Process2(
+            None, ctypes.byref(ctypes.c_ushort()), ctypes.byref(native_machine)
+        )
+        if ok:
+            return {
+                _IMAGE_FILE_MACHINE_ARM64: "ARM64",
+                _IMAGE_FILE_MACHINE_AMD64: "AMD64",
+                _IMAGE_FILE_MACHINE_I386: "x86",
+            }.get(native_machine.value, "")
+    except AttributeError:
+        # Pre-Windows-10 kernel: the API does not exist; use the legacy source.
+        pass
+    return platform.machine()
+
+
 def _node_platform() -> tuple[str, str]:
     """Return the ``(os, arch)`` tokens nodejs.org uses for the running interpreter.
 
@@ -115,11 +169,11 @@ def _node_platform() -> tuple[str, str]:
             f"no Node.js build is published for platform {sys.platform!r}; install Node.js manually "
             f"and put 'npm' on PATH"
         )
-    machine = platform.machine().lower()
+    machine = (_windows_machine() if node_os == "win" else platform.machine()).lower()
     node_arch = _NODE_ARCH.get(machine)
     if node_arch is None:
         raise RuntimeError(
-            f"no Node.js build is published for architecture {platform.machine()!r}; install Node.js "
+            f"no Node.js build is published for architecture {machine!r}; install Node.js "
             f"manually and put 'npm' on PATH"
         )
     return node_os, node_arch

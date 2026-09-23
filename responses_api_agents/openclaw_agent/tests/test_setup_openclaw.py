@@ -42,8 +42,42 @@ def fake_platform(monkeypatch):
     def _set(sys_platform: str, machine: str) -> None:
         monkeypatch.setattr(setup_openclaw.sys, "platform", sys_platform)
         monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: machine)
+        # On Windows the module asks _windows_machine(), not platform.machine(),
+        # because platform.machine() is unreliable under ARM64 x64 emulation.
+        monkeypatch.setattr(setup_openclaw, "_windows_machine", lambda: machine)
 
     return _set
+
+
+class _FakeKernel32:
+    """kernel32 double whose IsWow64Process2 reports a fixed native machine."""
+
+    def __init__(self, native_machine: int):
+        self._native_machine = native_machine
+
+    def IsWow64Process2(self, handle, process_machine_ref, native_machine_ref):
+        # byref() wraps the c_ushort in a CArgObject holding the real object.
+        native_machine_ref._obj.value = self._native_machine
+        return 1
+
+
+class _FakeWindll:
+    """Stands in for ``ctypes.windll`` exposing a fake kernel32."""
+
+    def __init__(self, kernel32):
+        self.kernel32 = kernel32
+
+
+class _Kernel32WithoutIsWow64Process2:
+    """kernel32 double for pre-Windows-10 kernels: no IsWow64Process2 export."""
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+def _patch_kernel32(monkeypatch, kernel32) -> None:
+    """Point ``setup_openclaw.ctypes.windll.kernel32`` at a test double."""
+    monkeypatch.setattr(setup_openclaw.ctypes, "windll", _FakeWindll(kernel32))
 
 
 class TestNodeDistUrl:
@@ -77,6 +111,49 @@ class TestNodeDistUrl:
         fake_platform("linux", "riscv64")
         with pytest.raises(RuntimeError, match="riscv64"):
             setup_openclaw._node_dist_url("24.21.0")
+
+
+class TestWindowsMachine:
+    """platform.machine() on Windows reports the *interpreter's* architecture.
+
+    An x64 python.exe running under emulation on ARM64 silicon gets "AMD64",
+    and CPython 3.13+ flips between WMI truth (ARM64) and the emulated env var
+    (AMD64) depending on whether the WMI service answers in time. The module
+    therefore must not trust platform.machine() for the download choice.
+    """
+
+    def test_prefers_iswow64process2_over_platform_machine(self, monkeypatch):
+        """The kernel-reported native machine wins even when the interpreter
+        disagrees with the host (x64 python.exe under emulation on ARM64)."""
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
+        _patch_kernel32(monkeypatch, _FakeKernel32(native_machine=setup_openclaw._IMAGE_FILE_MACHINE_ARM64))
+        assert setup_openclaw._windows_machine() == "ARM64"
+
+    def test_recognised_amd64_native_machine(self, monkeypatch):
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "ARM64")
+        _patch_kernel32(monkeypatch, _FakeKernel32(native_machine=setup_openclaw._IMAGE_FILE_MACHINE_AMD64))
+        assert setup_openclaw._windows_machine() == "AMD64"
+
+    def test_unrecognised_machine_code_raises_actionable_error(self, monkeypatch):
+        """A valid-but-unmapped kernel answer is authoritative truth we cannot
+        translate; falling back to platform.machine() (the lying primitive) would
+        be worse than surfacing the gap, so the caller sees the actionable error."""
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
+        _patch_kernel32(monkeypatch, _FakeKernel32(native_machine=0xFFFF))
+        with pytest.raises(RuntimeError, match="architecture"):
+            setup_openclaw._node_platform()
+
+    def test_api_absent_falls_back_to_platform_machine(self, monkeypatch):
+        """Pre-Windows-10 kernels have no IsWow64Process2; behave as before."""
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
+        _patch_kernel32(monkeypatch, _Kernel32WithoutIsWow64Process2())
+        assert setup_openclaw._windows_machine() == "AMD64"
+
+    def test_emulated_interpreter_gets_native_download(self, fake_platform):
+        """End-to-end trap: x64-emulated interpreter on an ARM64 host must pick
+        the arm64 zip, not the x64 zip its own image would suggest."""
+        fake_platform("win32", "ARM64")
+        assert setup_openclaw._node_dist_url("24.21.0").endswith("node-v24.21.0-win-arm64.zip")
 
 
 class TestNodeBinDir:
