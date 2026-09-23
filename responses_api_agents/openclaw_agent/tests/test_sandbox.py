@@ -702,11 +702,13 @@ def test_usage_sums_cache_writes_and_failed_calls(setup):
         (2, {"cacheRead": "3"}, None, 17),
         (2, {"cacheRead": 3.0}, None, 17),
         (None, {"cacheRead": 2}, None, 17),
-        (0, {"cacheRead": 0}, 0, 15),
+        (0, {"cacheRead": 0}, None, 15),
+        (2, {"cacheRead": 0}, None, 17),
+        (0, {"cacheRead": 2}, None, 17),
         (2, {"cacheRead": 3}, 5, 20),
     ],
 )
-def test_native_usage_details_preserve_unknown_and_known_counts(
+def test_native_usage_details_preserve_positive_counts_and_treat_defaulted_zero_as_unknown(
     setup, first_cache, second_cache, expected_cache, expected_input
 ):
     agent, sandbox = setup
@@ -995,7 +997,7 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
         ({"cacheRead": "5"}, None),
         ({"cacheRead": "bad"}, None),
         ({"cacheRead": 3.0}, None),
-        ({"cacheRead": 0}, 0),
+        ({"cacheRead": 0}, None),
         ({"cacheRead": 5}, 5),
     ],
 )
