@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Pins for each Mathlib version a Gym benchmark needs. One image per version: compiled",
+    "oleans do not carry across versions, so a benchmark run against the wrong one fails in",
+    "ways that look like model errors rather than environment errors.",
+    "",
+    "lean_sha256 is the sha256 of the release tarball named by lean_version; mathlib_commit is",
+    "the commit the Mathlib tag of the same name resolves to. Both were computed from the",
+    "published artifacts, and v4.34.0 reproduces the pins in the offline_science_image.",
+    "",
+    "To add a version: resolve the tag with",
+    "  git ls-remote https://github.com/leanprover-community/mathlib4 refs/tags/<tag>",
+    "and hash the tarball with",
+    "  curl -fsSL https://github.com/leanprover/lean4/releases/download/<tag>/lean-<v>-linux.tar.zst | sha256sum",
+    "The build asserts the Mathlib commit's own lean-toolchain matches lean_version, so a",
+    "mismatched pair fails the build instead of producing a subtly wrong image."
+  ],
+  "versions": {
+    "v4.12.0": {
+      "lean_version": "v4.12.0",
+      "mathlib_commit": "809c3fb3b5c8f5d7dace56e200b426187516535a",
+      "lean_sha256": "2659fc3bfb3955c118e727346c4d894799c69cfbbc2238f6d625fd4f5ad2d929",
+      "benchmarks": ["minif2f", "proofnet", "putnam_bench", "mobench"]
+    },
+    "v4.19.0": {
+      "lean_version": "v4.19.0",
+      "mathlib_commit": "c44e0c8ee63ca166450922a373c7409c5d26b00b",
+      "lean_sha256": "6fe3ce97a58f44e2b3567d455b994eacec5bfe9ae7774f2a573444480ba813fe",
+      "benchmarks": ["leancat"]
+    },
+    "v4.33.0": {
+      "lean_version": "v4.33.0",
+      "mathlib_commit": "db584cd6d46c92f209a44c0f1c829460d327499d",
+      "lean_sha256": "4b3fb03c29a1e0a253fb1d11f9bae3725f19a0dc6fc09b3ea16d2c9df3349e2c",
+      "benchmarks": []
+    },
+    "v4.34.0": {
+      "lean_version": "v4.34.0",
+      "mathlib_commit": "5ed2965256430c3649e86755f9576b54eca72435",
+      "lean_sha256": "caaa98356098c85dc0fcbbd28e1ec66f39eb6551829972b752ff20e1286b646b",
+      "benchmarks": []
+    }
+  }
+}

@@ -24,20 +24,17 @@ where the model writes only a proof body and the server reassembles the file. Be
 model owns the whole file it could also weaken the theorem, so
 ``proof_utils.check_statement_preserved`` compares the submission against the reference.
 
-Verification runs through ``nemo_gym.sandbox``: one sandbox per server process, created
-from a snapshot (or image) carrying Lean 4.19.0 and Mathlib v4.19.0, reused across
-rollouts. Each attempt is written into it and compiled with ``lake env lean``, which is
-what upstream's ``verify_lean`` does. A sandbox per rollout is not viable here -- pod
-allocation costs minutes and a run is thousands of rollouts.
+Verification runs through ``math_formal_lean.lean_sandbox``: one sandbox per server process,
+created from an image carrying Lean and Mathlib at the version the rows are written against
+(``math_formal_lean/lean_image`` builds one per version), reused across rollouts. Each attempt
+is compiled with ``lake env lean``, which is what upstream's ``verify_lean`` does.
 
 ``CompilerOutput`` and the Lean comment stripper are imported from ``math_formal_lean``.
 Only the whole-file logic lives here.
 """
 
-import asyncio
 import logging
 import re
-import uuid
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
@@ -50,23 +47,19 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import cpu_cap_env
 from resources_servers.leancat.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
     find_banned_tokens,
 )
 from resources_servers.math_formal_lean.app import CompilerOutput
-from resources_servers.math_formal_lean.toolchain import normalize_version, parse_lean_version
+from resources_servers.math_formal_lean.lean_sandbox import DEFAULT_LEAN_PROJECT_DIR, LeanSandbox
 
 
 # Terminal values of `proof_status`. Only COMPLETED scores 1.0. "completed",
@@ -132,8 +125,8 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
     # is the practical route here: there is no published image at Mathlib v4.19.0, and one
     # built inside a sandbox can be snapshotted once and reused (provider_options.snapshot_id).
     sandbox_config: Dict[str, Any] = {}
-    # Directory of the lake project the compile runs in, so `lake env lean` resolves Mathlib.
-    lean_project_dir: str = "/lean4/my_project"
+    # Lake project the compile runs in; lean_image/ builds Mathlib here.
+    lean_project_dir: str = DEFAULT_LEAN_PROJECT_DIR
 
     # Upstream's per-attempt verification budget (EVALUATION.md); LeanCat proofs import all
     # of Mathlib and rely on heavy typeclass search.
@@ -194,106 +187,25 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        # One sandbox per server process, created on the first verify. Creating one per
-        # rollout is not viable: pod allocation costs minutes and a run is thousands of
-        # rollouts. `_sandbox_lock` keeps concurrent verifies from creating several.
-        # There is no server shutdown hook, so cleanup is `sandbox_config.ttl_s`: the
-        # sandbox expires on its own if the process dies without releasing it.
-        self._sandbox: Optional[AsyncSandbox] = None
-        self._sandbox_lock = asyncio.Lock()
+        self._lean = LeanSandbox(
+            sandbox_provider=self.config.sandbox_provider,
+            sandbox_config=self.config.sandbox_config,
+            project_dir=self.config.lean_project_dir,
+            server_name=self.config.name,
+        )
         self._toolchain_checked = False
 
-    async def _ensure_sandbox(self) -> AsyncSandbox:
-        """Create the shared sandbox on first use, or return the running one."""
-        if self._sandbox is not None:
-            return self._sandbox
-
-        async with self._sandbox_lock:
-            if self._sandbox is not None:
-                return self._sandbox
-
-            provider = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
-            default_metadata = resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict())
-            sandbox_config = dict(self.config.sandbox_config)
-
-            resources = SandboxResources.from_mapping(sandbox_config.get("resources", {}))
-            env = dict(sandbox_config.get("env", {}))
-            if sandbox_config.get("derive_cpu_env", True):
-                # `lake` sizes its worker pool from the host core count, which leaks through on
-                # clusters without LXCFS. Explicit env keys win over the derived caps.
-                env = cpu_cap_env(resources.cpu) | env
-
-            spec = SandboxSpec(
-                image=sandbox_config.get("image"),
-                ttl_s=sandbox_config.get("ttl_s"),
-                ready_timeout_s=sandbox_config.get("ready_timeout_s"),
-                workdir=self.config.lean_project_dir,
-                env=env,
-                metadata=default_metadata | sandbox_config.get("metadata", {}) | {"nemo_gym_agent": self.config.name},
-                resources=resources,
-                entrypoint=sandbox_config.get("entrypoint"),
-                provider_options=sandbox_config.get("provider_options", {}),
-            )
-            sandbox = AsyncSandbox(provider)
-            await sandbox.start(spec)
-            self._sandbox = sandbox
-            return sandbox
-
     async def _check_toolchain_once(self, expected: Optional[str]) -> None:
-        """Log an error if the sandbox's Mathlib is not the one the rows were written against.
-
-        A wrong Mathlib fails statements with ordinary compile errors, so the score would be
-        meaningless but look plausible: on Mathlib v4.12.0, 36 of the 100 reference statements
-        fail to compile with their `sorry` still intact. Runs once per process.
-        """
+        """Probe the sandbox's Lean version once per process; see LeanSandbox.check_toolchain."""
         if not self.config.check_lean_version or self._toolchain_checked:
             return
         self._toolchain_checked = True
-
-        want = normalize_version(expected or self.config.expected_lean_version)
-        result = await self._run_lean("import Mathlib\n#eval Lean.versionString\n", timeout_s=600)
-        found = parse_lean_version({"stdout": result.stdout or "", "stderr": result.stderr or ""})
-
-        if found is None:
-            logger.error(
-                "LEAN VERSION UNKNOWN: could not determine the sandbox's Lean version. "
-                "If `import Mathlib` does not compile, every task will fail for reasons that "
-                "have nothing to do with the model."
-            )
-        elif want and found != want:
-            logger.error(
-                "MATHLIB MISMATCH: sandbox is Lean %s but the rows are written against %s. "
-                "Statements will fail with ordinary compile errors and the score will be "
-                "meaningless but plausible.",
-                found,
-                want,
-            )
+        await self._lean.check_toolchain(expected or self.config.expected_lean_version)
 
     async def _run_lean(self, code: str, timeout_s: Optional[float] = None) -> SandboxExecResult:
-        """Write ``code`` to a fresh file in the sandbox and compile it with `lake env lean`.
-
-        This is upstream's `verify_lean` (``scripts/eval_common.py``): a temp file inside the
-        lake project, compiled with the project's toolchain. The file is passed through a
-        heredoc rather than interpolated into the command, so quotes, backslashes and unicode
-        in a proof need no escaping. Each call uses a unique name because one sandbox serves
-        many concurrent verifies.
-        """
-        sandbox = await self._ensure_sandbox()
-        timeout = self.config.compilation_timeout if timeout_s is None else timeout_s
-        path = f"attempt_{uuid.uuid4().hex}.lean"
-        delimiter = f"LEANCAT_EOF_{uuid.uuid4().hex}"
-
-        # `cat` writes the file, then lake compiles it; the file is removed either way so a
-        # long-lived sandbox does not accumulate one file per rollout.
-        command = (
-            f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
-            f"lake env lean {path}; status=$?; rm -f {path}; exit $status"
-        )
-        return await sandbox.exec(
-            command,
-            cwd=self.config.lean_project_dir,
-            # The sandbox, not the client, should report the timeout.
-            timeout_s=timeout + 30,
+        """Compile one submission. Kept as a method so tests can stub the sandbox away."""
+        return await self._lean.compile(
+            code, timeout_s=self.config.compilation_timeout if timeout_s is None else timeout_s
         )
 
     async def verify(self, body: LeanCatVerifyRequest) -> LeanCatVerifyResponse:
