@@ -1,0 +1,51 @@
+deepsearchqa:
+  resources_servers:
+    deepsearchqa:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Grade DeepSearchQA single-answer and set-answer responses
+      value: Evaluate multi-step web research answers
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: null
+        top_p: null
+deepsearchqa_agent:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run DeepSearchQA with any Gym harness in a sandbox
+      value: Evaluate agentic search performance
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: deepsearchqa
+      agent: claude_code
+      agent_kwargs:
+        model: ${policy_model_name}
+        max_turns: 12
+        timeout: 600
+        bare: false
+        system_prompt: >-
+          Research the question using Exa MCP web search tools, then give the final answer. Work directly: do not delegate to subagents or use planning/team tools. Limit yourself to at most four web searches.
+        claude_code_version: null
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/4b30acc3eb3a316e5d6e0475e6959606c8512cbf.zip && npm install -g @anthropic-ai/claude-code
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 1800
+      sandbox_model_base_url: null
+      exa_api_key: ${oc.env:EXA_API_KEY,null}
+      token_id_capture: false
+      datasets:
+        - name: deepsearchqa
+          type: benchmark
+          jsonl_fpath: benchmarks/deepsearchqa/data/deepsearchqa_benchmark.jsonl
+          prepare_script: benchmarks/deepsearchqa/prepare.py

@@ -24,8 +24,9 @@ from pytest import MonkeyPatch
 import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.cli.main import _eval_submit, main
 from nemo_gym.config_types import ConfigError
-from nemo_gym.orchestration.api import SlurmComputeConfig
-from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -34,8 +35,10 @@ DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}}}
 JOB = {"output_path": "/tmp/gym-jobs"}
 
 
-def _args(config_path, *, dry_run: bool = False, json_output: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(config=str(config_path), dry_run=dry_run, json=json_output)
+def _args(
+    config_path, *, dry_run: bool = False, resolve_only: bool = False, json_output: bool = False
+) -> argparse.Namespace:
+    return argparse.Namespace(config=str(config_path), dry_run=dry_run, resolve_only=resolve_only, json=json_output)
 
 
 def _capture_submit(monkeypatch: MonkeyPatch) -> dict:
@@ -403,6 +406,70 @@ class TestEvalSubmitOutput:
         assert capsys.readouterr().out == ""
 
 
+class TestEvalSubmitResolveOnly:
+    """`--resolve-only` is the compose + resolve + validate half of `eval submit` on its own: the
+    `SubmitConfig` that `submit()` would have received is printed instead, and nothing past that
+    point runs. It exists so a caller can obtain the resolved config -- and diff it against the
+    RESOLVED_CONFIG_NAME a real submission persisted -- without queueing a job or opening a
+    connection to the cluster."""
+
+    def test_prints_the_resolved_config_and_never_calls_submit(self, tmp_path, monkeypatch, capsys):
+        captured = _capture_submit(monkeypatch)
+
+        _eval_submit(_args(_config_file(tmp_path), resolve_only=True), overrides=[])
+
+        resolved = yaml.safe_load(capsys.readouterr().out)
+        assert resolved["job"]["output_path"] == "/tmp/gym-jobs"
+        assert resolved["compute"]["cluster"]["account"] == "my-account"
+        assert captured == {}
+
+    def test_output_is_what_persist_writes_for_a_real_submission(self, tmp_path, monkeypatch, capsys):
+        """Asserted against BaseExecutor.persist() itself rather than a re-derivation of its
+        serialization: the value of the YAML form is that it diffs cleanly against a run
+        directory's RESOLVED_CONFIG_NAME, and only the real writer can vouch for that."""
+        _capture_submit(monkeypatch)
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))  # keeps write_local_index() inside tmp_path
+        written = {}
+
+        class _NoRunExecutor(BaseExecutor):
+            def run(self, config, *, dry_run: bool = False):
+                raise AssertionError("persist() does not go through run()")
+
+        config = SubmitConfig.model_validate(
+            {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}
+        )
+        _NoRunExecutor().persist(_record(), config, lambda path, text: written.__setitem__(path.name, text))
+        capsys.readouterr()
+
+        _eval_submit(_args(_config_file(tmp_path), resolve_only=True), overrides=[])
+
+        assert capsys.readouterr().out == written[RESOLVED_CONFIG_NAME] + "\n"
+
+    def test_overrides_are_applied_before_printing(self, tmp_path, monkeypatch, capsys):
+        _capture_submit(monkeypatch)
+
+        _eval_submit(_args(_config_file(tmp_path), resolve_only=True), overrides=["job.output_path=/tmp/other"])
+
+        assert yaml.safe_load(capsys.readouterr().out)["job"]["output_path"] == "/tmp/other"
+
+    def test_json_flag_emits_the_resolved_config_as_json(self, tmp_path, monkeypatch, capsys):
+        _capture_submit(monkeypatch)
+
+        _eval_submit(_args(_config_file(tmp_path), resolve_only=True, json_output=True), overrides=[])
+
+        assert json.loads(capsys.readouterr().out)["job"]["output_path"] == "/tmp/gym-jobs"
+
+    def test_an_invalid_config_is_rejected_exactly_as_on_submit(self, tmp_path, monkeypatch):
+        captured = _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(yaml.dump({"services": {"svc": SERVICE}}))
+
+        with pytest.raises(ConfigError, match="missing required configuration: compute, driver, job"):
+            _eval_submit.__wrapped__(_args(config_path, resolve_only=True), overrides=[])
+
+        assert captured == {}
+
+
 class TestEvalSubmitThroughTheRealCli:
     """Drive `gym eval submit` the way a caller does: `main()` with argv, and
     nothing between it and the code under test but a fake executor.
@@ -498,3 +565,30 @@ class TestEvalSubmitThroughTheRealCli:
             main()
 
         assert "[dev]" in capsys.readouterr().out
+
+    def test_resolve_only_stdout_parses_whole_and_no_executor_runs(self, tmp_path, monkeypatch, capsys):
+        class _NeverExecutor:
+            def run(self, config, *, dry_run: bool = False):
+                raise AssertionError("--resolve-only reached an executor")
+
+        monkeypatch.setattr(submit_module, "_EXECUTORS", {SlurmComputeConfig: _NeverExecutor})
+        self._argv(monkeypatch, _config_file(tmp_path), "--resolve-only")
+
+        main()
+
+        assert yaml.safe_load(capsys.readouterr().out)["job"]["output_path"] == "/tmp/gym-jobs"
+
+    def test_dry_run_is_redundant_under_resolve_only(self, tmp_path, monkeypatch, capsys):
+        """Both flags mean "do not submit"; --resolve-only stops earlier, so adding --dry-run changes
+        nothing -- the same way --json is accepted and inert under --dry-run."""
+
+        class _NeverExecutor:
+            def run(self, config, *, dry_run: bool = False):
+                raise AssertionError("--resolve-only reached an executor")
+
+        monkeypatch.setattr(submit_module, "_EXECUTORS", {SlurmComputeConfig: _NeverExecutor})
+        self._argv(monkeypatch, _config_file(tmp_path), "--resolve-only", "--dry-run")
+
+        main()
+
+        assert yaml.safe_load(capsys.readouterr().out)["job"]["output_path"] == "/tmp/gym-jobs"

@@ -18,6 +18,7 @@ import json
 import struct
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -968,6 +969,76 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     assert client.closed, "aclose must close PTY-owned aiohttp clients"
     assert ws.closed
     await session.close()
+
+
+async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    target_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    other_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    clients = iter([target_client, other_client])
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: next(clients))
+    endpoint = SimpleNamespace(endpoint="server/base", headers={})
+    detached_before_pause: list[bool] = []
+
+    async def pause() -> None:
+        detached_before_pause.append(target_session.closed)
+
+    target_raw = SimpleNamespace(
+        get_endpoint=AsyncMock(return_value=endpoint),
+        pause=pause,
+        get_info=AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="PAUSED"))),
+    )
+    other_raw = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+    target_handle = SandboxHandle("sb-target", "opensandbox", target_raw)
+    other_handle = SandboxHandle("sb-other", "opensandbox", other_raw)
+    target_session = await provider.create_pty(target_handle, SandboxPtySpec())
+    other_session = await provider.create_pty(other_handle, SandboxPtySpec())
+
+    await provider.pause(target_handle)
+
+    assert detached_before_pause == [True]
+    assert target_session.closed
+    assert target_client.closed
+    # The server session is never deleted; on Docker it stays re-attachable.
+    assert target_client.delete_calls == [], "pause must drop the local client without a delete request"
+    assert not other_session.closed
+    assert not other_client.closed
+    assert provider._pty_sessions == {other_session}
+    await provider.aclose()
+
+
+async def test_provider_pause_bounds_a_hung_pty_detach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A WebSocket close that never completes must not turn a completed pause into a timeout."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(
+        connection={"domain": "server", "protocol": "http"},
+        operations={"close_timeout_s": 0.05, "pause_resume_timeout_s": 0.2},
+    )
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: client)
+    raw = SimpleNamespace(
+        get_endpoint=AsyncMock(return_value=SimpleNamespace(endpoint="server/base", headers={})),
+        pause=AsyncMock(),
+        get_info=AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="PAUSED"))),
+    )
+    handle = SandboxHandle("sb-target", "opensandbox", raw)
+    session = await provider.create_pty(handle, SandboxPtySpec())
+    monkeypatch.setattr(session, "close", AsyncMock(side_effect=asyncio.Event().wait))
+
+    await asyncio.wait_for(provider.pause(handle), timeout=1)
+
+    raw.pause.assert_awaited_once_with()
+    assert provider._pty_sessions == set()
+    await client.close()
 
 
 async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: pytest.MonkeyPatch) -> None:

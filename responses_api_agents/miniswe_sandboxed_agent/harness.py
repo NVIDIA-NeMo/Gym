@@ -8,23 +8,41 @@ import json
 from pathlib import Path
 from shlex import quote
 from threading import Lock
-from time import time
+from time import monotonic, time
 from typing import Any
 from uuid import uuid4
 
 import yaml
+from aiohttp import ClientResponseError
 from minisweagent import __version__ as mini_swe_version
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir
 from minisweagent.environments.local import LocalEnvironment
+from minisweagent.exceptions import LimitsExceeded
 from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
     format_toolcall_observation_messages,
     parse_toolcall_actions,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionMessageToolCall, NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionMessageToolCall,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseInputItem,
+    NeMoGymResponseUsage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.sandbox import AsyncSandbox
 
 
@@ -60,6 +78,8 @@ class HarnessOutcome(BaseModel):
 
 class HarnessContext(BaseModel):
     session_id: str
+    task_id: str | None = None
+    rollout_id: str | None = None
     instruction: str
     user: str | int | None = None
     workdir: str | None = None
@@ -110,9 +130,9 @@ class GymModel:
     def format_observation_messages(self, message, outputs, template_vars=None):
         messages = format_toolcall_observation_messages(
             actions=message.get("extra", {}).get("actions", []),
-            outputs=outputs,
-            # Intentionally retain full observations instead of mini.yaml's head/tail truncation.
-            observation_template="<returncode>{{output.returncode}}</returncode>\n{{output.output}}",
+            outputs=[{"exception_info": None, **output} for output in outputs],
+            observation_template=MINI_CONFIG["model"]["observation_template"],
+            template_vars=template_vars,
         )
         for observation, output in zip(messages, outputs):
             if output.get("images"):
@@ -134,7 +154,7 @@ class SandboxEnvironment:
         self.system_info = system_info
 
     def execute(self, action):
-        output = self.bridge.call(lambda: self._execute(action["command"]))
+        output = self.bridge.call(lambda: self._execute(action))
         LocalEnvironment._check_finished(self, output)
         return output
 
@@ -158,6 +178,7 @@ class MiniSWEHarness:
         query,
         model_name: str,
         directory: Path,
+        observability_enabled: bool = False,
     ):
         self.sandbox = sandbox
         self.context = context
@@ -166,6 +187,7 @@ class MiniSWEHarness:
         self.query = query
         self.model_name = model_name
         self.directory = directory
+        self.observability_enabled = observability_enabled
         self.extra_instruction = ""
         self.system_info = {}
         self.result = None
@@ -226,6 +248,18 @@ class MiniSWEHarness:
     async def execute(self, budget):
         bridge = WorkerBridge()
         responses = []
+        output_items = []
+        invocation = observations = trajectory = conversation_adapter = None
+        if self.observability_enabled:
+            invocation = AgentInvocation(invocation_id=self.context.session_id)
+            observations = AgentObservationBundle(source="miniswe", records=[invocation])
+            trajectory = TrajectoryRecord(
+                task_id=self.context.task_id or self.context.session_id,
+                rollout_id=self.context.rollout_id or self.context.session_id,
+            )
+            conversation_adapter = TypeAdapter(list[NeMoGymResponseInputItem])
+            execution_started = monotonic()
+        step_count = 0
 
         async def query(messages):
             params = self.params.model_dump(exclude_none=True)
@@ -233,8 +267,68 @@ class MiniSWEHarness:
             # mini-SWE executes bash calls; task MCP tools are discovered in setup
             # and made available through the task-local CLI described in the prompt.
             params["tools"] = [{"type": "function", **BASH_TOOL["function"], "strict": False}]
-            response = await self.query(params)
+            if self.observability_enabled:
+                invocation.conversation = conversation_adapter.validate_python(params["input"])
+            try:
+                response = await self.query(params)
+            except ClientResponseError as exc:
+                detail = getattr(exc, "response_content", b"").decode(errors="replace")
+                context_overflow = exc.status == 400 and (
+                    "context_length_exceeded" in detail
+                    or "context length" in detail.lower()
+                    or "maximum model length" in detail.lower()
+                    or ("max_tokens" in detail and "too large" in detail.lower())
+                )
+                if not context_overflow:
+                    raise
+                # An overfull transcript cannot be repaired by format-error retries.
+                # End the agent normally so the caller can still verify its work.
+                raise LimitsExceeded(
+                    {
+                        "role": "exit",
+                        "content": detail,
+                        "extra": {"exit_status": "ContextWindowExceeded", "submission": ""},
+                    }
+                ) from exc
             responses.append(response)
+            output_items.extend(response.output)
+            if self.observability_enabled:
+                invocation.conversation.extend(response.output)
+                turn_model_calls = []
+                if response.id:
+                    reference = ModelCallRef(
+                        model_ref=ModelServerRef(type="responses_api_models", name=self.model_name),
+                        response_id=response.id,
+                    )
+                    invocation.model_calls.append(reference)
+                    turn_model_calls.append(reference)
+                else:
+                    trajectory.gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_unavailable",
+                            invocation_id=invocation.invocation_id,
+                            detail=f"turn:{len(trajectory.turns) + 1}",
+                        )
+                    )
+                # Record the decision before parsing: rejected model output is still
+                # an observed decision, and must not disappear during recovery.
+                trajectory.turns.append(
+                    TrajectoryTurn(
+                        invocation_id=invocation.invocation_id,
+                        task_id=trajectory.task_id,
+                        rollout_id=trajectory.rollout_id,
+                        turn_no=len(trajectory.turns) + 1,
+                        timestamp=time(),
+                        question=params["input"],
+                        answer=[item.model_dump(mode="json") for item in response.output],
+                        reasoning_content=[
+                            item.model_dump(mode="json") for item in response.output if item.type == "reasoning"
+                        ]
+                        or None,
+                        step_count=step_count,
+                        model_calls=turn_model_calls,
+                    )
+                )
             content = "\n".join(
                 part.text
                 for item in response.output
@@ -252,6 +346,11 @@ class MiniSWEHarness:
             actions = parse_toolcall_actions(
                 calls,
                 format_error_template=MINI_CONFIG["model"]["format_error_template"],
+                template_kwargs={
+                    "finish_reason": "length"
+                    if response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
+                    else "stop",
+                },
             )
             return {
                 "role": "assistant",
@@ -263,14 +362,61 @@ class MiniSWEHarness:
                 },
             }
 
-        async def command(text):
-            result = await self.sandbox.exec(
-                "setsid --wait bash -c " + quote(f"echo $$ >> /tmp/{self.context.session_id}.pids; " + text),
-                user=self.context.user,
-                cwd=self.context.workdir,
-                env=MINI_CONFIG["environment"]["env"],
-                timeout_s=min(budget, self.config.step_timeout_sec),
-            )
+        async def command(action: dict[str, str]) -> dict[str, Any]:
+            nonlocal step_count
+            observation = None
+            if self.observability_enabled:
+                observation = ToolCallObservation(
+                    invocation_id=invocation.invocation_id,
+                    tool_call_id=action["tool_call_id"],
+                    tool_name="bash",
+                    started_at=time(),
+                    timing_source="executor",
+                    status="incomplete",
+                )
+                observations.records.append(observation)
+                started = monotonic()
+            try:
+                result = await self.sandbox.exec(
+                    "setsid --wait bash -c "
+                    + quote(f"echo $$ >> /tmp/{self.context.session_id}.pids; " + action["command"]),
+                    user=self.context.user,
+                    cwd=self.context.workdir,
+                    env=MINI_CONFIG["environment"]["env"],
+                    timeout_s=min(budget, self.config.step_timeout_sec),
+                )
+                if observation is not None:
+                    observation.status = (
+                        "timeout"
+                        if result.error_type == "timeout"
+                        else "failed"
+                        if result.error_type or result.return_code != 0
+                        else "completed"
+                    )
+                    observation.error_type = result.error_type
+            except asyncio.CancelledError:
+                if observation is not None:
+                    observation.status = "cancelled"
+                    observation.error_type = "CancelledError"
+                raise
+            except Exception as exc:
+                if observation is not None:
+                    observation.status = "failed"
+                    observation.error_type = type(exc).__name__
+                raise
+            finally:
+                if observation is not None:
+                    completed_at = time()
+                    if completed_at >= observation.started_at:
+                        observation.completed_at = completed_at
+                    else:
+                        observations.gaps.append(
+                            ObservationGap(code="tool_clock_moved_backwards", invocation_id=invocation.invocation_id)
+                        )
+                    observation.duration_ms = (monotonic() - started) * 1000
+                    step_count += 1
+                    if trajectory.turns:
+                        trajectory.turns[-1].step_count = step_count
             if result.error_type and result.error_type != "timeout":
                 raise RuntimeError(f"Sandbox execution failed: {result.error_type}")
             output = (result.stdout or "") + (result.stderr or "")
@@ -284,10 +430,28 @@ class MiniSWEHarness:
                     output = json.dumps(tool_result)
             except (ValueError, AttributeError, KeyError, TypeError):
                 pass
-            return {"output": output, "returncode": result.return_code, "images": images}
+            outcome = {
+                "output": output,
+                "returncode": result.return_code,
+                "images": images,
+                "exception_info": (
+                    f"Command timed out after {min(budget, self.config.step_timeout_sec)} seconds."
+                    if result.error_type == "timeout"
+                    else None
+                ),
+            }
+            # Observe before LocalEnvironment._check_finished raises Submitted.
+            # mini-SWE deliberately omits that final ordinary tool message.
+            messages = model.format_observation_messages({"extra": {"actions": [action]}}, [outcome])
+            item = NeMoGymFunctionCallOutput.model_validate(responses_input(messages)[0])
+            output_items.append(item)
+            if self.observability_enabled:
+                invocation.conversation.append(item)
+            return outcome
 
+        model = GymModel(bridge, query)
         agent = DefaultAgent(
-            GymModel(bridge, query),
+            model,
             SandboxEnvironment(bridge, command, self.system_info),
             system_template=MINI_CONFIG["agent"]["system_template"],
             instance_template=MINI_CONFIG["agent"]["instance_template"],
@@ -299,6 +463,13 @@ class MiniSWEHarness:
         termination = HarnessOutcome(reason="completed")
         try:
             info = await asyncio.wait_for(asyncio.shield(worker), budget)
+            if info.get("exit_status") == "RepeatedFormatError" and all(
+                response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
+                for response in responses[-agent.n_consecutive_format_errors :]
+            ):
+                info["exit_status"] = "OutputTokenLimitExceeded"
+                agent.messages[-1]["content"] = "OutputTokenLimitExceeded"
+                agent.save(agent.config.output_path)
             if info.get("exit_status") != "Submitted":
                 termination = HarnessOutcome(reason="nonzero_exit", detail=info.get("exit_status"))
         except asyncio.CancelledError:
@@ -316,17 +487,28 @@ class MiniSWEHarness:
             created_at=int(time()),
             model=self.model_name,
             object="response",
-            output=[item for part in responses for item in part.output],
+            output=output_items,
             tool_choice=self.params.tool_choice,
             tools=self.params.tools,
             parallel_tool_calls=self.params.parallel_tool_calls,
-            usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in responses if r.usage]),
+            # An empty or partial sum is not a measured rollout total.
+            usage=NeMoGymResponseUsage.sum_from_list([r.usage for r in responses])
+            if responses and all(r.usage is not None for r in responses)
+            else None,
         )
+        extra = {"mini_swe_trajectory": agent.serialize(), "harness_version": mini_swe_version}
+        if self.observability_enabled:
+            invocation.status = (
+                "completed"
+                if termination.reason == "completed"
+                else "failed"
+                if termination.reason == "infrastructure_error"
+                else "incomplete"
+            )
+            invocation.duration_ms = (monotonic() - execution_started) * 1000
+            extra["ng_agent_observations"] = observations.model_dump(mode="json")
+            extra["ng_trajectory"] = trajectory.model_dump(mode="json")
         termination.artifacts = [str(self.directory / "trajectory.json")]
-        self.result = (
-            response,
-            termination,
-            {"mini_swe_trajectory": agent.serialize(), "harness_version": mini_swe_version},
-        )
+        self.result = (response, termination, extra)
 
         return self.result

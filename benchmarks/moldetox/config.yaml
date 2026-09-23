@@ -1,0 +1,27 @@
+config_paths:
+  - resources_servers/moldetox/configs/moldetox.yaml
+
+# Gym-native MolDeTox benchmark. Inherits the resources server and policy wiring
+# from moldetox_simple_agent (resources_servers/moldetox/configs/moldetox.yaml)
+# and points it at the whole-split JSONL built by prepare.py.
+#
+# Rows already carry a fully-built responses_create_params.input -- upstream's
+# system prompt followed by its question, both verbatim -- so prompt_config is
+# null and no template is applied.
+#
+# This registers task3_smiles_gen_single only. MolDeTox publishes a figure for
+# each of its eight QA configs, so naming one canonical is a choice: this is the
+# config upstream headlines, and the one whose measured accuracy agrees with the
+# published figure. The other seven are prepared through the resources server's
+# script.
+moldetox_benchmark_simple_agent:
+  _inherit_from: moldetox_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: moldetox
+        type: benchmark
+        jsonl_fpath: benchmarks/moldetox/data/moldetox_benchmark.jsonl
+        prepare_script: benchmarks/moldetox/prepare.py
+        prompt_config: null
+        license: Creative Commons Attribution 4.0 International
