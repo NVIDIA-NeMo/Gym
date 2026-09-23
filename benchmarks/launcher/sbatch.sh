@@ -193,8 +193,12 @@ BATCH
 # Allocate four GPUs per node, independently of replica count.
 # Hold briefly so the output directory exists before Slurm opens its log.
 NUM_NODES=${NUM_NODES:-1}
+# Evaluation can leave GPUs idle while task sandboxes run tools and verifiers.
+# Match the exemption to this allocation's four-hour wall time.
+default_slurm_comment='{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"240","reason":"benchmarking","description":"Benchmark evaluation with idle periods during sandbox tools and verification"}}'
 job=$(sbatch --hold --parsable --nodes="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node=4 \
     --exclusive --segment="$NUM_NODES" --time=04:00:00 \
+    --comment="${SLURM_COMMENT:-$default_slurm_comment}" \
     --job-name="gym-$EXPERIMENT_NAME-$USER" --output="$RUNS_DIR/%j-$BENCHMARK/slurm.log" \
     --wrap 'exec bash -c "$batch_command"')
 job=${job%%;*}

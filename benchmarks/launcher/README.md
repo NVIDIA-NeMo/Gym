@@ -74,3 +74,16 @@ still go to the shared run directory.
 Set `GYM_INFERENCE_METRICS_ENABLED=true` to scrape vLLM replicas and the router
 and publish their counters and gauges through the configured exporters (including W&B).
 Router metrics appear under `router/main/`; vLLM metrics remain under `vllm/`.
+
+
+# GPU Idle-Time Exemption
+
+GPU evaluation jobs request a 240-minute idle-time exemption through the Slurm
+job comment, using the `benchmarking` reason. This matches the launcher's
+four-hour wall time and allows task tools and verifiers to finish while inference
+GPUs are idle. CPU cleanup jobs do not receive this comment.
+
+To supply a different job comment, set `SLURM_COMMENT` in the launcher’s
+`.env`. An override replaces the entire default JSON comment, including the
+exemption. The exemption is interpreted by the cluster's job reaper; the Slurm
+wall-time limit still applies. This setting affects newly submitted jobs.
