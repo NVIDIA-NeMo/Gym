@@ -351,6 +351,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
+    def _defer_generation_started_to_backend_dispatch(self) -> bool:
+        """Whether the implementation marks generation at its real backend call.
+
+        Most model servers enter generation as soon as their implementation is
+        invoked. Wrappers that perform asynchronous prefix claiming or can return
+        locally without generation must defer the transition until immediately
+        before they dispatch the backend request.
+        """
+        return False
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
@@ -446,11 +456,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await register_call_intent()
         else:
             request_messages = None
-        if "request" in inspect.signature(self.chat_completions).parameters:
+        if not self._defer_generation_started_to_backend_dispatch():
             mark_current_generation_started()
+        if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
-            mark_current_generation_started()
             completion = await self.chat_completions(body=params)
         await capture_tokens(
             completion,
@@ -494,11 +504,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await register_call_intent()
         else:
             request_messages = None
-        if "request" in inspect.signature(self.responses).parameters:
+        if not self._defer_generation_started_to_backend_dispatch():
             mark_current_generation_started()
+        if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
-            mark_current_generation_started()
             response = await self.responses(body=params)
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
