@@ -86,17 +86,12 @@ enable a larger context; they need a separately validated model metadata/runtime
 Omitted values preserve CLI defaults. These are harness context-management settings, not per-call
 generation limits; configure those on the Gym model server. Compaction remains owned by Codex.
 
-Native responses preserve completed text, reasoning, tool calls/results, and CLI aggregate usage.
-Positive cache/reasoning counters are retained. The pinned CLI substitutes zero when the backend
-omits these details, so native responses use `null` for absent, invalid, or ambiguous zero counters
-and record an observation gap. A CLI zero alone cannot establish a measured backend zero.
-Missing `turn.completed`, CLI errors, nonzero exit, and timeouts do
+Native responses preserve completed text, reasoning, tool calls/results, and CLI aggregate usage,
+including cached-input tokens. Missing `turn.completed`, CLI errors, nonzero exit, and timeouts do
 not produce a successful completion. Partial transcripts, including the latest unfinished item updates, are retained in close observations on
 cancellation or execution failure. CLI events omit per-model response IDs and often omit reasoning
 usage; observations record these gaps explicitly. Usage from a failed turn can be unavailable, so
-zero is not evidence of zero model consumption. Recovered stream retries can also omit usage from
-earlier attempts; they retain a partial-usage gap while preserving successful status and available
-CLI totals. Compare aggregate usage with captured Gym model calls.
+zero is not evidence of zero model consumption. Compare aggregate usage with captured Gym model calls.
 Gym preserves incomplete/failed model status in the Responses SSE terminal event. Codex 0.144.4
 treats a model output-limit event as a failed turn after at most five stream reconnects; partial
 reasoning survives, while failed-call usage remains available in Gym capture rather than CLI JSONL.
