@@ -19,6 +19,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
+    HermesAgentRunRequest,
     HermesAgentSessionState,
     RunnerCleanup,
     SessionPhase,
@@ -49,6 +50,7 @@ def state():
     sandbox.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="")
     return HermesAgentSessionState(
         request=AgentSeedSessionRequest(
+            agent_session_id="session",
             episode_id=EpisodeId(rollout_id="native", attempt=1),
             task_id=TaskId(taskset="test", task_id="task"),
             sandbox_access={
@@ -95,7 +97,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         assert seed.status_code == 200
         assert state.phase is SessionPhase.READY
         assert state.runner_cleanup is RunnerCleanup.IDLE
-        assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 409
+        assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         assert client.post(path, json={"input": "task"}).status_code == 200
         assert state.task is not None
@@ -112,6 +114,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         assert state.phase is SessionPhase.CLOSING
         assert first.json() == retry.json()
         assert client.post(path, json={"input": "task"}).status_code == 409
+        assert client.post("/run", json={"responses_create_params": {"input": "task"}}).status_code == 409
         wrong = dict(close, episode_id={"rollout_id": "other"})
         assert client.post("/v1/agent_sessions/close", json=wrong).status_code == 409
     assert agent._run_sandbox_episode.await_count == 1
@@ -146,6 +149,7 @@ def test_http_close_retry_survives_other_session_closes(agent, state, monkeypatc
         def seed_and_close(index):
             client.cookies.clear()
             body = state.request.model_dump(mode="json")
+            body["agent_session_id"] = f"session-{index}"
             body["episode_id"] = {"rollout_id": f"episode-{index}"}
             seed = client.post("/v1/agent_sessions", json=body)
             assert seed.status_code == 200
@@ -441,3 +445,137 @@ async def test_required_resources_tools_are_rejected_before_connect(agent, state
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
     with pytest.raises(HTTPException, match="required HTTP/MCP"):
         await agent._initialize_agent_session_state("session", state.request)
+
+
+async def test_seed_binds_full_payload_and_is_serialized(agent, state):
+    agent._initialize_agent_session_state = AsyncMock(return_value=state)
+    requests = [SimpleNamespace(session={}), SimpleNamespace(session={})]
+    result = await asyncio.gather(*(agent.seed_agent_session(req, state.request) for req in requests))
+    assert [item.agent_session_id for item in result] == [state.request.agent_session_id] * 2
+    agent._initialize_agent_session_state.assert_awaited_once()
+    changed = state.request.model_copy(deep=True)
+    changed.sandbox_access.workdir = "/other"
+    with pytest.raises(HTTPException, match="another seed"):
+        await agent.seed_agent_session(requests[1], changed)
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+    result = await agent.close_agent_session(SimpleNamespace(session={}), close)
+    assert await agent.close_agent_session(SimpleNamespace(session={}), close) == result
+    assert not agent._agent_sessions
+    state.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_unknown_close_tombstone_and_locks_expire(agent, state, monkeypatch):
+    agent.config.session_lifetime_seconds = 20
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+    stale_request = SimpleNamespace(session={})
+    await agent.close_agent_session(stale_request, close)
+    with pytest.raises(HTTPException, match="already closed"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    clock[0] = 110.0
+    agent._expire_closed_agent_sessions()
+    assert not agent._closed_agent_sessions
+    with pytest.raises(HTTPException, match="already closed"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(SimpleNamespace(session={}), close)
+    clock[0] = 120.0
+    agent._expire_closed_agent_sessions()
+    assert not agent._closed_agent_session_ids
+    assert not agent._agent_session_locks
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.seed_agent_session(stale_request, state.request)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(stale_request, close)
+
+
+@pytest.mark.parametrize("marker", [None, "", 0, [], {}])
+async def test_malformed_cookie_cannot_fall_back_or_seed(agent, state, marker):
+    malformed = SimpleNamespace(session={"agent_session_id": marker})
+    agent._create_response = AsyncMock(side_effect=AssertionError("host fallback"))
+    with pytest.raises(HTTPException, match="Invalid Hermes"):
+        await agent.responses(malformed, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    with pytest.raises(HTTPException, match="Invalid Hermes"):
+        await agent.seed_agent_session(malformed, state.request)
+    with pytest.raises(HTTPException, match="Invalid Hermes"):
+        await agent.close_agent_session(
+            malformed, AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+        )
+    with pytest.raises(HTTPException, match="Invalid Hermes"):
+        await agent.run(malformed, HermesAgentRunRequest(responses_create_params={"input": "task"}))
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_abandoned_session_is_closed_or_retained_fail_closed(agent, state, cleanup_fails, caplog):
+    agent.config.session_lifetime_seconds = 0.001
+    agent._initialize_agent_session_state = AsyncMock(return_value=state)
+    await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    if cleanup_fails:
+        state.sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
+    reaper = agent._session_reapers["session"]
+    await asyncio.wait_for(asyncio.shield(reaper), timeout=1)
+    if cleanup_fails:
+        assert agent._agent_sessions["session"].phase is SessionPhase.CLOSING
+        assert "owner recovery required" in caplog.text
+        with pytest.raises(HTTPException):
+            await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        state.sandbox.disconnect.side_effect = None
+        await agent.close_agent_session(
+            SimpleNamespace(session={}),
+            AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id),
+        )
+    assert not agent._agent_sessions
+    assert not agent._session_reapers
+    assert "session" in agent._closed_agent_sessions
+    state.sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owns_sandbox", [False, True])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_failed_setup_retains_handle_until_cleanup_confirmed(
+    agent, state, monkeypatch, owns_sandbox, cleanup_fails
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    body = state.request.model_copy(deep=True)
+    if owns_sandbox:
+        body.sandbox_access = None
+        agent.config.sandbox_provider = "runtime"
+        agent.config.sandbox_config = {"workdir": "/fallback"}
+    sandbox = state.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="")
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
+    sandbox.exec.side_effect = [ok, failed, ok]
+    cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
+    if cleanup_fails:
+        cleanup.side_effect = RuntimeError("cleanup unavailable")
+    with pytest.raises(RuntimeError, match="installer failed"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), body)
+    if cleanup_fails:
+        assert agent._agent_sessions["session"].phase is SessionPhase.CLOSING
+        with pytest.raises(HTTPException, match="closing"):
+            await agent.seed_agent_session(SimpleNamespace(session={}), body)
+    else:
+        assert not agent._agent_sessions
+    sandbox.exec.side_effect = None
+    cleanup.side_effect = None
+    receipt = await agent.close_agent_session(
+        SimpleNamespace(session={}),
+        AgentCloseSessionRequest(agent_session_id="session", episode_id=body.episode_id),
+    )
+    assert receipt.agent_session_id == "session"
+    assert not agent._agent_sessions
+    assert not agent._session_reapers
+    if owns_sandbox:
+        sandbox.disconnect.assert_not_awaited()
+    else:
+        sandbox.stop.assert_not_awaited()

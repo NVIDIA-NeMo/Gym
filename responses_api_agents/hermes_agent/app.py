@@ -22,7 +22,8 @@ import sys
 import tempfile
 from asyncio import Semaphore
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -255,6 +256,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
         allow_inf_nan=False,
         description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
     )
+    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -288,70 +290,126 @@ class HermesAgent(SimpleResponsesAPIAgent):
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    @asynccontextmanager
+    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[None]:
+        lock = self._agent_session_locks.setdefault(session_id, asyncio.Lock())
+        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            self._session_lock_users[session_id] -= 1
+            if not self._session_lock_users[session_id]:
+                del self._session_lock_users[session_id]
+                if session_id not in self._agent_sessions and session_id not in self._closed_agent_session_ids:
+                    self._agent_session_locks.pop(session_id, None)
+
     async def seed_agent_session(
         self,
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
+        """Idempotently initialize the caller's session with an immutable seed binding."""
         self._expire_closed_agent_sessions()
         agent_session_id = body.agent_session_id
-        request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        async with lock:
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        async with self._locked_agent_session(agent_session_id):
             if agent_session_id in self._closed_agent_session_ids:
-                raise ValueError(f"Agent session is already closed: {agent_session_id}")
+                raise HTTPException(409, "Agent session is already closed")
             state = self._agent_sessions.get(agent_session_id)
             if state is not None:
-                if state.request.episode_id != body.episode_id or state.request.task_id != body.task_id:
-                    raise ValueError("agent_session_id is already bound to another episode or task")
-                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
-            state = await self._initialize_agent_session_state(agent_session_id, body)
-            self._agent_sessions[agent_session_id] = state
+                if state.request != body:
+                    raise HTTPException(409, "agent_session_id is already bound to another seed request")
+                if state.phase is SessionPhase.CLOSING:
+                    raise HTTPException(409, "Agent session is closing")
+            else:
+                if current is not None:
+                    raise HTTPException(409, "Agent session cookie has expired")
+                state = await self._initialize_agent_session_state(agent_session_id, body)
+                self._agent_sessions[agent_session_id] = state
+                self._session_reapers[agent_session_id] = asyncio.create_task(
+                    self._expire_agent_session(agent_session_id, body)
+                )
+            request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
             return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+
+    async def _expire_agent_session(self, session_id: str, seed: AgentSeedSessionRequest) -> None:
+        try:
+            await asyncio.sleep(self.config.session_lifetime_seconds)
+            await self.close_agent_session(
+                Request({"type": "http", "session": {}}),
+                AgentCloseSessionRequest(agent_session_id=session_id, episode_id=seed.episode_id),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.exception("Could not close expired Hermes session %s; owner recovery required", session_id)
+        finally:
+            if self._session_reapers.get(session_id) is asyncio.current_task():
+                self._session_reapers.pop(session_id, None)
 
     async def close_agent_session(
         self,
         request: Request,
         body: AgentCloseSessionRequest,
     ) -> AgentCloseSessionResponse:
+        """Close by caller identity even if the seed response and its cookie were lost."""
         self._expire_closed_agent_sessions()
-        agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
-        if body.agent_session_id != agent_session_id:
+        agent_session_id = body.agent_session_id
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
-        closed = self._closed_agent_sessions.get(agent_session_id)
-        if closed is not None:
-            if body.episode_id != closed[0]:
-                raise HTTPException(409, "episode_id does not match the seeded agent session")
-            return closed[1]
-        state = self._require_agent_session(agent_session_id)
-        if body.episode_id != state.request.episode_id:
-            raise HTTPException(409, "episode_id does not match the seeded agent session")
-        async with state.close_lock:
-            self._expire_closed_agent_sessions()
+        async with self._locked_agent_session(agent_session_id):
             closed = self._closed_agent_sessions.get(agent_session_id)
             if closed is not None:
+                if body.episode_id != closed[0]:
+                    raise HTTPException(409, "episode_id does not match the seeded agent session")
                 return closed[1]
-            state = self._require_agent_session(agent_session_id)
-            state.phase = SessionPhase.CLOSING
-            observations = await self._close_agent_session_state(state)
-            result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
-            del self._agent_sessions[agent_session_id]
-            # Keep the cookie as a tombstone so later activations cannot fall back
-            # to host execution. Other sessions must not shorten the retry window.
+            if agent_session_id in self._closed_agent_session_ids:
+                raise HTTPException(409, "Agent close receipt has expired")
+            state = self._agent_sessions.get(agent_session_id)
+            if state is None:
+                if current is not None:
+                    raise HTTPException(409, "Agent close receipt has expired")
+                result = AgentCloseSessionResponse(agent_session_id=agent_session_id)
+            else:
+                if body.episode_id != state.request.episode_id:
+                    raise HTTPException(409, "episode_id does not match the seeded agent session")
+                async with state.close_lock:
+                    state.phase = SessionPhase.CLOSING
+                    observations = await self._close_agent_session_state(state)
+                result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
+                del self._agent_sessions[agent_session_id]
+            # This receipt also prevents a delayed seed after an unknown close.
+            request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
             self._closed_agent_sessions[agent_session_id] = (
                 body.episode_id,
                 result,
                 monotonic() + self.config.session_close_retry_window_seconds,
             )
+            self._closed_agent_session_ids[agent_session_id] = monotonic() + max(
+                self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds
+            )
+            reaper = self._session_reapers.pop(agent_session_id, None)
+            if reaper is not None and reaper is not asyncio.current_task():
+                reaper.cancel()
             return result
 
     def _expire_closed_agent_sessions(self) -> None:
-        """Prune receipts by close time, never by traffic or retry access order."""
+        """Prune receipts and idle locks by close time, never retry access order."""
         now = monotonic()
         while self._closed_agent_sessions:
             if next(iter(self._closed_agent_sessions.values()))[2] > now:
                 break
             self._closed_agent_sessions.popitem(last=False)
+        while self._closed_agent_session_ids:
+            if next(iter(self._closed_agent_session_ids.values())) > now:
+                break
+            session_id, _ = self._closed_agent_session_ids.popitem(last=False)
+            if not self._session_lock_users.get(session_id):
+                self._agent_session_locks.pop(session_id, None)
 
     def _require_agent_session(self, agent_session_id: str) -> HermesAgentSessionState:
         try:
@@ -364,10 +422,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if request is None:
             return None
         try:
-            agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
+            session = request.session
         except (AssertionError, AttributeError):
             return None
-        return agent_session_id if isinstance(agent_session_id, str) else None
+        if not isinstance(session, Mapping) or _AGENT_SESSION_ID_KEY not in session:
+            return None
+        agent_session_id = session[_AGENT_SESSION_ID_KEY]
+        if not isinstance(agent_session_id, str) or not agent_session_id:
+            raise HTTPException(409, "Invalid Hermes agent session marker")
+        return agent_session_id
 
     def _ensure_sigterm_handler(self) -> None:
         """Install exactly one SIGTERM handler on the event loop that interrupts *every* in-flight
@@ -429,7 +492,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self.interrupted_agents = set()
         self._agent_sessions: dict[str, HermesAgentSessionState] = {}
         self._agent_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_agent_session_ids: set[str] = set()
+        self._closed_agent_session_ids: OrderedDict[str, float] = OrderedDict()
+        self._session_lock_users: dict[str, int] = {}
+        self._session_reapers: dict[str, asyncio.Task[None]] = {}
         self._closed_agent_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = (
             OrderedDict()
         )
@@ -450,6 +515,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         body: AgentSeedSessionRequest,
     ) -> HermesAgentSessionState:
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise HTTPException(422, "Native Hermes does not support required HTTP/MCP Resources tools")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
@@ -477,7 +544,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await provider.aclose()
             raise
 
-        session_dir = f"/tmp/nemo-gym-hermes-sessions/{agent_session_id}"
+        session_dir = f"/tmp/nemo-gym-hermes-sessions/{uuid4().hex}"
+        state = HermesAgentSessionState(
+            request=body,
+            sandbox=sandbox,
+            workdir=workdir,
+            session_dir=session_dir,
+            owns_sandbox=owns_sandbox,
+        )
+        self._agent_sessions[agent_session_id] = state
         try:
             uv_path = shutil.which("uv")
             if uv_path is None:
@@ -507,19 +582,18 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         except BaseException:
-            if owns_sandbox:
-                await sandbox.stop()
+            state.phase = SessionPhase.CLOSING
+            try:
+                await self._close_agent_session_state(state)
+            except BaseException:
+                LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
+                self._session_reapers[agent_session_id] = asyncio.create_task(
+                    self._expire_agent_session(agent_session_id, body)
+                )
             else:
-                await sandbox.disconnect()
+                self._agent_sessions.pop(agent_session_id, None)
             raise
-
-        return HermesAgentSessionState(
-            request=body,
-            sandbox=sandbox,
-            workdir=workdir,
-            session_dir=session_dir,
-            owns_sandbox=owns_sandbox,
-        )
+        return state
 
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
         runner_session = state.runner_session
@@ -1195,6 +1269,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Use the native session responses and close routes")
         async with self.sem:
             cookies = request.cookies
 

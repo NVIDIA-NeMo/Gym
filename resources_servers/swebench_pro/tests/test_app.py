@@ -461,7 +461,13 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
 
     with TestClient(server.setup_webserver()) as client:
         seed = client.post(
-            "/seed_session", json={"episode_id": episode_id, "task_id": task_id, "task_data": task_data}
+            "/seed_session",
+            json={
+                "resources_session_id": "resources-session",
+                "episode_id": episode_id,
+                "task_id": task_id,
+                "task_data": task_data,
+            },
         )
         assert seed.status_code == 200
         session_id = seed.json()["resources_session_id"]
@@ -505,10 +511,10 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
         close_body = {"resources_session_id": session_id, "episode_id": episode_id}
         close = client.post("/close_session", json=close_body)
         assert close.status_code == 200
-        # Upstream rejects unknown sessions after successful close removes identity.
-        # A repeated request must not stop an already released sandbox again.
-        with pytest.raises(ValueError, match="Unknown resources session"):
-            client.post("/close_session", json=close_body)
+        # A repeated close confirms cleanup without stopping the sandbox again.
+        repeated_close = client.post("/close_session", json=close_body)
+        assert repeated_close.status_code == 200
+        assert repeated_close.json() == close.json()
         assert session_id not in server._session_id_to_task
         assert session_id not in server._session_id_to_identity
         assert session_id not in server._session_id_to_sandbox
@@ -837,3 +843,43 @@ def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: Monke
     assert _budget_spent(None) is False
     assert _budget_spent(90.0) is True
     assert _budget_spent(150.0) is False
+
+
+@pytest.mark.parametrize("cancel_stop", [False, True])
+async def test_patch_extraction_retains_failed_stop_for_native_close(cancel_stop: bool, capsys) -> None:
+    server = make_server(golden=False)
+    stop_error = asyncio.CancelledError() if cancel_stop else RuntimeError("stop unavailable")
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("complete patch\n")),
+        stop=AsyncMock(side_effect=stop_error),
+    )
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_task["session"] = SWEBenchProInstanceRequest.model_validate(request_body())
+    server._session_id_to_identity["session"] = identity
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    if cancel_stop:
+        with pytest.raises(asyncio.CancelledError):
+            await server._extract_model_patch("session", "abc123")
+    else:
+        assert await server._extract_model_patch("session", "abc123") == "complete patch\n"
+        assert "stop unavailable" in capsys.readouterr().err
+    assert server._session_id_to_sandbox["session"] is sandbox
+    assert server._session_id_to_identity["session"] == identity
+    assert server._session_id_to_pristine_untracked["session"] == frozenset({"pristine.txt"})
+
+    sandbox.stop.side_effect = None
+    request = SimpleNamespace(session={})
+    close_body = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=identity[0])
+    receipt = await server.close_session(request, close_body)
+    assert receipt.resources_session_id == "session"
+    assert await server.close_session(request, close_body) == receipt
+    assert sandbox.stop.await_count == 2
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_task
+    assert "session" not in server._session_id_to_identity
+    assert "session" not in server._session_id_to_pristine_untracked
