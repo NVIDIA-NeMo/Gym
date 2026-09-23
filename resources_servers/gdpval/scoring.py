@@ -588,7 +588,7 @@ async def score_with_rubric_structured(
         for key in ("score", "weight"):
             v = item.get(key)
             if isinstance(v, (int, float)):
-                return v
+                return max(v, 0)
         return 0
 
     if isinstance(rubric_json, str):
