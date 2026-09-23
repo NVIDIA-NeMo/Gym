@@ -366,7 +366,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 net = await self._provider.exec(
                     handle,
                     f"bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}'",
-                    timeout_s=5,
+                    # 5s misses under load when hundreds of harness processes share one host.
+                    timeout_s=60,
                 )
                 if net.return_code != 0:
                     raise RuntimeError(f"model endpoint {pm.group(1)}:{pm.group(2)} unreachable from sandbox")
