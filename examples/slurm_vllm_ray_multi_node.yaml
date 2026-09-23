@@ -32,6 +32,7 @@ driver:
     ref: main
   benchmarks:
     gpqa:
+      resumable: true
       run:
         split: benchmark
         config_paths:
