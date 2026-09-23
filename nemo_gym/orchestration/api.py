@@ -142,6 +142,9 @@ class VllmServiceConfig(BaseModelServiceConfig):
     # Port the data-parallel ranks of this service coordinate on. Two tiers sharing an
     # allocation need different ones, the way they need different side-channel ports.
     data_parallel_rpc_port: int = 13345
+    # Run an independent server on every node of the pool instead of one data-parallel
+    # engine across them. A router in front then lists each node as its own endpoint.
+    server_per_node: bool = False
 
     @field_validator("number_of_instances")
     @classmethod
@@ -379,6 +382,18 @@ class SubmitConfig(_StrictModel):
                 else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
             )
             service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
+            if isinstance(service, VllmServiceConfig) and service.server_per_node:
+                if service.node_pool is None:
+                    raise ValueError(
+                        f"Service '{service_name}' sets server_per_node but no node_pool; it needs a pool to spread over."
+                    )
+                if service.number_of_instances != 1:
+                    raise ValueError(
+                        f"Service '{service_name}' sets server_per_node, so each node is one instance; "
+                        f"number_of_instances must be 1, got {service.number_of_instances}."
+                    )
+                # Each node serves on its own, so size it as a single-node deployment.
+                service_nodes = 1
             service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
 
             is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
