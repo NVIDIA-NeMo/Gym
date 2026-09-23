@@ -17,7 +17,7 @@ async def test_default_agent_submits_in_sandbox_environment(tmp_path):
         return {"role": "assistant", "content": "Submit", "extra": {"actions": [{"command": "submit"}]}}
 
     async def execute(command):
-        commands.append(command)
+        commands.append(command["command"])
         return {"output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinished", "returncode": 0}
 
     agent = DefaultAgent(
@@ -126,7 +126,7 @@ async def test_harness_stops_real_worker_and_retains_partial_trajectory(tmp_path
             "step_limit": "nonzero_exit",
         }[stop]
     )
-    assert len(response.output) == 1
+    assert len(response.output) == 2
     if stop != "step_limit":
         assert exited.is_set()
     assert extra["mini_swe_trajectory"]["messages"]

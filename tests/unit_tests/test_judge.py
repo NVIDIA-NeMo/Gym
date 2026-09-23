@@ -98,9 +98,37 @@ class TestJudgeFailsafe:
         out = await (judge_failsafe(verify)(body=req) if by_keyword else judge_failsafe(verify)(req))
         data = orjson.loads(out.body)
         assert data["reward"] == 0.0
+        assert data["mask_sample"] is True
+        assert data["failure_kind"] == "judge_failed"
+        assert data["failure_reason"] == "RuntimeError: judge 401"
+        assert data["instance_config"]["mask_sample"] is True
         assert data["_ng_failure_class"] == "judge_failed"
         assert data["_ng_failure_judge_error"] == "RuntimeError: judge 401"
         # The model's final output is carried for a later judge-only replay.
         assert data["response"] == {"final": "answer"}
         # Transient: never terminal, so resume re-dispatches it.
         assert "_ng_failure_terminal" not in data
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("instance_config", [None, "invalid", {"task": "keep", "mask_sample": False}])
+    async def test_mask_contract_overrides_request_defaults_without_mutation(self, instance_config) -> None:
+        async def verify(body):
+            raise JudgeError("judge offline " + "x" * 3000)
+
+        request = _Req(
+            response={"final": "answer"},
+            mask_sample=False,
+            failure_kind=None,
+            instance_config=instance_config,
+        )
+        original = request.model_dump()
+        data = orjson.loads((await judge_failsafe(verify)(request)).body)
+        assert data["mask_sample"] is True and data["failure_kind"] == "judge_failed"
+        assert data["instance_config"] == {
+            **(instance_config if isinstance(instance_config, dict) else {}),
+            "mask_sample": True,
+        }
+        assert data["failure_reason"].startswith("judge offline")
+        assert len(data["failure_reason"]) == 2000
+        assert data["_ng_failure_judge_error"] == data["failure_reason"]
+        assert request.model_dump() == original

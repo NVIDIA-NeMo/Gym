@@ -14,6 +14,9 @@ class TaskData(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    task_id: str | None = Field(
+        default=None, description="Namespaced task identity, such as terminal-bench/ks-solver-cpp."
+    )
     task_name: str = Field(description="Namespaced task name, such as terminal-bench/ks-solver-cpp.")
     task_ref: str = Field(description="Pinned task package digest from the benchmark manifest.")
     dataset_ref: str = Field(description="Pinned dataset digest from the benchmark manifest.")

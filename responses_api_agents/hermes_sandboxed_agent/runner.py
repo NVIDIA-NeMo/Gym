@@ -237,6 +237,9 @@ def run(params):
         agent.iteration_budget.remaining <= 0 or result.get("api_calls", 0) >= params["max_turns"]
     )
     result["n_input"] = len(history) + 1
+    # TODO: Include session-title and post-budget summary calls in usage; Hermes's
+    # session counters omit them. Disable unused title generation or forward the
+    # request's token/temperature controls to these calls as well.
     result["usage"] = {
         "input_tokens": agent.session_input_tokens,
         "output_tokens": agent.session_output_tokens,
