@@ -95,6 +95,9 @@ zero is not evidence of zero model consumption. Compare aggregate usage with cap
 Gym preserves incomplete/failed model status in the Responses SSE terminal event. Codex 0.144.4
 treats a model output-limit event as a failed turn after at most five stream reconnects; partial
 reasoning survives, while failed-call usage remains available in Gym capture rather than CLI JSONL.
+The pinned CLI emits known model-metadata and compaction-accuracy advisories as error items.
+On a clean exit ending with `turn.completed` and no other errors, native observations retain their
+exact text as warning gaps. Unknown errors and failed or incomplete executions remain unsuccessful.
 
 A Linux child-subreaper supervisor runs once per activation and kills/reaps detached tool descendants.
 A successful runner exit alone cannot authorize verification: close requires its cleanup receipt,
