@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare pinned Indic GPQA Diamond data with Gym's English GPQA pipeline."""
+"""Prepare Indic GPQA Diamond data with Gym's English GPQA pipeline."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import hf_hub_download
+from datasets import load_dataset
 
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_ID = "ai4bharat/indic-gpqa"
-SOURCE_REVISION = "c3c32b0a0ec7aeebe884c4c55c46730b4274a612"
+SOURCE_SPLIT = "train"
 LANGUAGES = {
     "en": "English",
     "as": "Assamese",
@@ -99,7 +99,7 @@ def build_rows(
                 "uuid": str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
-                        f"indic-gpqa-diamond/{SOURCE_REVISION}/{language}/{record_ids[index]}",
+                        f"indic-gpqa-diamond/{language}/{record_ids[index]}",
                     )
                 ),
                 "metadata": {
@@ -111,18 +111,11 @@ def build_rows(
                     "source_row_index": index,
                     "duplicate_choice_text": len({example[field] for field in TEXT_FIELDS[1:]}) != 4,
                     "source_id": SOURCE_ID,
-                    "source_revision": SOURCE_REVISION,
+                    "source_split": SOURCE_SPLIT,
                 },
             }
         )
     return result
-
-
-def _read_parquet(*, repo_id: str, revision: str, filename: str) -> list[dict[str, Any]]:
-    import pyarrow.parquet as pq
-
-    path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", revision=revision)
-    return pq.read_table(path).to_pylist()
 
 
 def prepare(
@@ -131,18 +124,14 @@ def prepare(
     languages: Sequence[str] | None = None,
     question_ids: Sequence[str] | None = None,
 ) -> Path:
-    """Prepare selected languages from the pinned dataset."""
+    """Download the train split and prepare selected languages."""
     if isinstance(languages, str):
         raise ValueError("languages must be a list of language codes")
     selected = list(DEFAULT_LANGUAGES if languages is None else languages)
     if not selected or len(set(selected)) != len(selected) or set(selected) - set(LANGUAGES):
         raise ValueError(f"Select unique language codes from {list(LANGUAGES)}")
 
-    records = _read_parquet(
-        repo_id=SOURCE_ID,
-        revision=SOURCE_REVISION,
-        filename="train.parquet",
-    )
+    records = list(load_dataset(SOURCE_ID, split=SOURCE_SPLIT))
     rows = []
     for language in selected:
         rows.extend(

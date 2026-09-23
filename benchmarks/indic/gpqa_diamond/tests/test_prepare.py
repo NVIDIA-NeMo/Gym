@@ -130,16 +130,16 @@ def test_invalid_source_rows(extra):
         build(records)
 
 
-def test_prepare_uses_one_pinned_source_for_all_languages(tmp_path, monkeypatch):
+def test_prepare_loads_train_split_once_for_all_languages(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "EXPECTED_ROWS", 2)
     records = [record(index, "hi") for index in range(2)]
     calls = []
 
-    def read_parquet(*, repo_id, revision, filename):
-        calls.append((repo_id, revision, filename))
+    def load(repo_id, *, split):
+        calls.append((repo_id, split))
         return records
 
-    monkeypatch.setattr(module, "_read_parquet", read_parquet)
+    monkeypatch.setattr(module, "load_dataset", load)
     output = module.prepare(tmp_path / "prepared.jsonl", languages=["en", "hi"], question_ids=["1"])
     with output.open() as handle:
         rows = [json.loads(line) for line in handle]
@@ -148,7 +148,9 @@ def test_prepare_uses_one_pinned_source_for_all_languages(tmp_path, monkeypatch)
     assert "DO NOT INCLUDE" not in output.read_text()
     assert rows[1]["metadata"]["source_id"] == "ai4bharat/indic-gpqa"
     assert rows[0]["metadata"]["record_id"] == "record-1"
-    assert calls == [(module.SOURCE_ID, module.SOURCE_REVISION, "train.parquet")]
+    assert calls == [(module.SOURCE_ID, "train")]
+    assert rows[0]["metadata"]["source_split"] == "train"
+    assert "source_revision" not in rows[0]["metadata"]
 
 
 def test_config_matches_english_pipeline():
@@ -174,7 +176,7 @@ def test_prepare_rejects_invalid_source_ids(value, tmp_path, monkeypatch):
     monkeypatch.setattr(module, "EXPECTED_ROWS", 2)
     source = [record(index, "hi") for index in range(2)]
     source[0]["Record ID"] = value
-    monkeypatch.setattr(module, "_read_parquet", lambda **kwargs: source)
+    monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: source)
     with pytest.raises(ValueError, match="GPQA Record IDs"):
         module.prepare(tmp_path / "invalid.jsonl", languages=["hi"])
     assert not (tmp_path / "invalid.jsonl").exists()
