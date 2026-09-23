@@ -382,7 +382,6 @@ class ApptainerProvider:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr,
                     start_new_session=True,
-                    env=self._subprocess_env,
                 ),
                 timeout=self._create_config.start_timeout_s,
             )

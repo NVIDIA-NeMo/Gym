@@ -9,12 +9,17 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import shlex
+import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field
@@ -36,15 +41,21 @@ from nemo_gym.openai_utils import (
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolve_provider_config
 from nemo_gym.sandbox.config import resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.apex_agent.runtime_bootstrap import STIRRUP_PREFLIGHT, stirrup_runtime_bootstrap_script
 from responses_api_agents.apex_agent.runtime_setup import (
     ApexImageBuildConfig,
     resolve_image,
     stirrup_cache_path,
 )
+from responses_api_agents.apex_agent.stirrup_runtime import RelayServer, serve_unix_to_tcp
 
 
 LOG = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
+_PREBUILT_RUNNER_PATH = Path(__file__).with_name("prebuilt_world_entrypoint.py")
+_SANDBOX_LOCAL_DNS_PATH = Path(__file__).with_name("sandbox_local_dns.py")
+_EGRESS_MOUNT = "/egress"
+_EGRESS_SOCKET_NAME = "policy.sock"
 _STIRRUP_RUNTIME_PATH = Path(__file__).with_name("stirrup_runtime.py")
 _STIRRUP_SETUP_PATH = Path(__file__).with_name("setup_stirrup.sh")
 _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt")
@@ -53,6 +64,7 @@ _STIRRUP_ROOT = "/app/stirrup-runtime"
 _GUEST_PARTIAL_RESULT_PATH = "/sandbox/partial_result.json"
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
+_WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
 
 
 class ApexAgentConfig(BaseResponsesAPIAgentConfig):
@@ -76,6 +88,15 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
     artifact_output_dir: Optional[str] = None
+    prebuilt_world_manifest: Optional[str] = None
+    # Relay policy traffic through a unix socket bound into the sandbox. "auto"
+    # enables it when the apptainer sandbox runs in its own network namespace
+    # (extra_start_args contain --net or a --network option).
+    policy_egress_relay: Literal["auto", "always", "never"] = "auto"
+    # Run a sandbox-local catch-all DNS resolver for prebuilt worlds in private
+    # network namespaces. It maps in-world app hostnames to loopback without
+    # needing to enumerate names like erpnext.io, wikijs.local, etc.
+    local_dns: Literal["auto", "always", "never"] = "auto"
 
 
 class ApexAgentRunRequest(BaseRunRequest):
@@ -86,6 +107,8 @@ class ApexAgentRunRequest(BaseRunRequest):
     task_input_files: Optional[str] = None
     domain: Optional[str] = None
     foundry_services: List[str] = Field(default_factory=list)
+    runtime_mode: Literal["world_zip", "prebuilt_world"] = "world_zip"
+    task_slug: Optional[str] = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]*$")
 
 
 class ApexAgentVerifyResponse(BaseVerifyResponse):
@@ -94,6 +117,14 @@ class ApexAgentVerifyResponse(BaseVerifyResponse):
 
 def load_runner_source() -> str:
     return _RUNNER_PATH.read_text(encoding="utf-8")
+
+
+def load_prebuilt_runner_source() -> str:
+    return _PREBUILT_RUNNER_PATH.read_text(encoding="utf-8")
+
+
+def load_sandbox_local_dns_source() -> str:
+    return _SANDBOX_LOCAL_DNS_PATH.read_text(encoding="utf-8")
 
 
 def instruction_from_input(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
@@ -120,6 +151,65 @@ def _safe_id(value: str) -> str:
     return cleaned[:128] or "unknown"
 
 
+def prebuilt_local_dns_command() -> str:
+    python = shlex.quote(f"{_STIRRUP_ROOT}/bin/python")
+    dns_path = shlex.quote(f"{_GUEST_ROOT}/sandbox_local_dns.py")
+    log_path = shlex.quote(f"{_GUEST_ROOT}/output/local_dns.log")
+    pid_path = shlex.quote(f"{_GUEST_ROOT}/output/local_dns.pid")
+    resolv_conf = "nameserver 127.0.0.1\noptions ndots:0 timeout:1 attempts:1\n"
+    test_resolver = (
+        "import socket,sys; "
+        "infos=socket.getaddrinfo('nemo-gym-local-dns.invalid',80,type=socket.SOCK_STREAM); "
+        "sys.exit(0 if any(info[4][0] in {'127.0.0.1','::1'} for info in infos) else 1)"
+    )
+    return (
+        "set -e; "
+        f"printf %s {shlex.quote(resolv_conf)} > /etc/resolv.conf; "
+        f"nohup {python} {dns_path} --host 127.0.0.1 --port 53 > {log_path} 2>&1 & "
+        "dns_pid=$!; "
+        f"printf '%s\\n' \"$dns_pid\" > {pid_path}; "
+        "for _ in $(seq 1 50); do "
+        f'kill -0 "$dns_pid" 2>/dev/null || {{ cat {log_path} 2>/dev/null || true; exit 1; }}; '
+        f"{python} -c {shlex.quote(test_resolver)} >/dev/null 2>&1 && exit 0; "
+        "sleep 0.1; "
+        "done; "
+        f"cat {log_path} 2>/dev/null || true; "
+        "exit 1"
+    )
+
+
+class PolicyEgressRelay:
+    """Unix socket on the host that forwards sandbox connections to the model server."""
+
+    def __init__(self, socket_dir: Path, server: RelayServer) -> None:
+        self.socket_dir = socket_dir
+        self._server = server
+
+    @property
+    def socket_name(self) -> str:
+        return _EGRESS_SOCKET_NAME
+
+    @classmethod
+    async def start(cls, model_base_url: str) -> "PolicyEgressRelay":
+        parts = urlsplit(model_base_url)
+        if parts.scheme != "http" or not parts.hostname:
+            raise ValueError(f"the policy egress relay needs an http model_base_url, got {model_base_url!r}")
+        socket_dir = Path(tempfile.mkdtemp(prefix="apex-egress-"))
+        if len(str(socket_dir / _EGRESS_SOCKET_NAME)) > 100:  # AF_UNIX paths are capped at 107 bytes
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            socket_dir = Path(tempfile.mkdtemp(prefix="apex-egress-", dir="/tmp"))
+        try:
+            server = await serve_unix_to_tcp(str(socket_dir / _EGRESS_SOCKET_NAME), parts.hostname, parts.port or 80)
+        except Exception:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            raise
+        return cls(socket_dir, server)
+
+    async def close(self) -> None:
+        await self._server.close()
+        shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
 class ApexAgent(SimpleResponsesAPIAgent):
     """Run one upstream Apex rollout, then hand changed artifacts to Gym verification."""
 
@@ -131,6 +221,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
     _setup_lock: Any = None
     _image: Any = None
     _stirrup_archive: Any = None
+    _prebuilt_worlds: Any = None
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -141,6 +232,47 @@ class ApexAgent(SimpleResponsesAPIAgent):
         self._setup_lock = asyncio.Lock()
         self._image = None
         self._stirrup_archive = None
+        self._prebuilt_worlds = self._load_prebuilt_worlds()
+
+    def _load_prebuilt_worlds(self) -> dict[str, str]:
+        if not self.config.prebuilt_world_manifest:
+            return {}
+        path = Path(self.config.prebuilt_world_manifest).expanduser()
+        if not path.is_absolute():
+            path = PARENT_DIR / path
+        payload = json.loads(path.resolve().read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid prebuilt-world manifest: {path}")
+        raw_cache_root = payload.get("image_cache_root")
+        worlds = payload.get("worlds") or {}
+        if not isinstance(raw_cache_root, str) or not raw_cache_root.strip() or not isinstance(worlds, dict):
+            raise ValueError(f"invalid prebuilt-world manifest: {path}")
+        cache_root = Path(raw_cache_root).expanduser()
+        if not cache_root.is_absolute():
+            raise ValueError(f"prebuilt-world image cache must be absolute: {cache_root}")
+        cache_root = cache_root.resolve()
+        resolved: dict[str, str] = {}
+        for world_id, entry in worlds.items():
+            if not isinstance(world_id, str) or not _WORLD_ID_RE.fullmatch(world_id) or not isinstance(entry, dict):
+                raise ValueError(f"invalid prebuilt-world entry for {world_id}")
+            raw_image = entry.get("runtime_image")
+            if not isinstance(raw_image, str) or not raw_image.strip():
+                raise ValueError(f"invalid prebuilt-world image for {world_id}")
+            image = Path(raw_image).expanduser().resolve()
+            if image.parent != cache_root or image.name != f"{world_id}.sif":
+                raise ValueError(f"untrusted prebuilt-world image path for {world_id}: {image}")
+            resolved[str(world_id)] = str(image)
+        return resolved
+
+    def _prebuilt_image(self, body: ApexAgentRunRequest) -> str:
+        if not body.task_slug:
+            raise ValueError(f"prebuilt-world task {body.task_id} is missing task_slug")
+        image = self._prebuilt_worlds.get(body.world_id)
+        if not image:
+            raise ValueError(f"world {body.world_id} is absent from the trusted prebuilt-world manifest")
+        if not Path(image).is_file():
+            raise FileNotFoundError(f"prebuilt-world image is missing: {image}")
+        return image
 
     async def responses(
         self,
@@ -158,6 +290,33 @@ class ApexAgent(SimpleResponsesAPIAgent):
         if not isinstance(value, str) or not value.strip():
             raise RuntimeError("policy_model_name must be set in Gym's env.yaml or with gym eval run --model")
         return value.strip()
+
+    def _sandbox_has_private_network(self) -> bool:
+        provider = self._sandbox_provider if isinstance(self._sandbox_provider, dict) else {}
+        create = (provider.get("apptainer") or {}).get("create") or {}
+        args = create.get("extra_start_args") or []
+        return any(str(arg) == "--net" or str(arg).startswith("--network") for arg in args)
+
+    def _policy_egress_relay_enabled(self) -> bool:
+        if self.config.policy_egress_relay == "auto":
+            return self._sandbox_has_private_network()
+        return self.config.policy_egress_relay == "always"
+
+    def _local_dns_enabled(self) -> bool:
+        if self.config.local_dns == "auto":
+            return self._sandbox_has_private_network()
+        return self.config.local_dns == "always"
+
+    @asynccontextmanager
+    async def _policy_egress(self, body: ApexAgentRunRequest) -> AsyncIterator[PolicyEgressRelay | None]:
+        if not self._policy_egress_relay_enabled():
+            yield None
+            return
+        relay = await PolicyEgressRelay.start(self._model_base_url(body))
+        try:
+            yield relay
+        finally:
+            await relay.close()
 
     def _sandbox_parts(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
         extra = dict(self.config.sandbox_spec)
@@ -218,8 +377,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
         temporary.replace(archive)
         return archive
 
-    async def _ensure_runtime_setup(self) -> None:
-        """Resolve the Archipelago image and cached Stirrup runtime."""
+    async def _ensure_runtime_setup(self) -> Path:
+        """Resolve the bootstrap image and cached portable Stirrup runtime."""
         async with self._setup_lock:
             if self._image is None:
                 self._image = await asyncio.to_thread(
@@ -232,6 +391,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 )
             if self._stirrup_archive is None:
                 self._stirrup_archive = await self._build_stirrup_archive(self._image)
+            return self._stirrup_archive
 
     async def _download_world(self, cookies: Any, target: Path) -> None:
         response = await self.server_client.get(
@@ -257,8 +417,21 @@ class ApexAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(f"task attachment archive is {len(data)} bytes; limit is {self.config.max_world_bytes}")
         target.write_bytes(data)
 
-    def _sandbox_spec(self, body: ApexAgentRunRequest, instruction: str) -> SandboxSpec:
+    def _sandbox_spec(
+        self,
+        body: ApexAgentRunRequest,
+        instruction: str,
+        *,
+        image: str | None = None,
+        prebuilt_world: bool = False,
+        relay: PolicyEgressRelay | None = None,
+    ) -> SandboxSpec:
         extra, provider_options, metadata, resources = self._sandbox_parts()
+        if relay is not None:
+            binds = provider_options.get("binds")
+            binds = [binds] if isinstance(binds, str) else list(binds or [])
+            binds.append(f"{relay.socket_dir}:{_EGRESS_MOUNT}")
+            provider_options["binds"] = binds
         metadata.update({"nemo_gym_agent": self.config.name, "task_id": _safe_id(body.task_id)})
         policy_model = self._policy_model()
         if "edgar" in body.foundry_services and not self.config.edgar_user_agent:
@@ -290,20 +463,28 @@ class ApexAgent(SimpleResponsesAPIAgent):
             ),
             "foundry_services": body.foundry_services,
             "edgar_user_agent": self.config.edgar_user_agent,
+            "task_slug": body.task_slug,
         }
+        if relay is not None:
+            runner_config["model_egress_socket"] = f"{_EGRESS_MOUNT}/{relay.socket_name}"
+        files = {
+            f"{_GUEST_ROOT}/sandbox_entrypoint.py": (
+                load_prebuilt_runner_source() if prebuilt_world else load_runner_source()
+            ),
+            f"{_GUEST_ROOT}/stirrup_runtime.py": _STIRRUP_RUNTIME_PATH.read_text(encoding="utf-8"),
+            f"{_GUEST_ROOT}/runner_config.json": json.dumps(runner_config),
+        }
+        if prebuilt_world:
+            files[f"{_GUEST_ROOT}/sandbox_local_dns.py"] = load_sandbox_local_dns_source()
         return SandboxSpec(
-            image=self._image or self.config.image,
+            image=image or self._image or self.config.image,
             workdir=_GUEST_ROOT,
             env={
                 "HF_HUB_OFFLINE": "1",
                 "LOGURU_LEVEL": "WARNING",
                 "NO_PROXY": "127.0.0.1,localhost",
             },
-            files={
-                f"{_GUEST_ROOT}/sandbox_entrypoint.py": load_runner_source(),
-                f"{_GUEST_ROOT}/stirrup_runtime.py": _STIRRUP_RUNTIME_PATH.read_text(encoding="utf-8"),
-                f"{_GUEST_ROOT}/runner_config.json": json.dumps(runner_config),
-            },
+            files=files,
             metadata=metadata,
             provider_options=provider_options,
             resources=resources,
@@ -430,7 +611,10 @@ class ApexAgent(SimpleResponsesAPIAgent):
             result: dict[str, Any] | None = None
             try:
                 policy_model = self._policy_model()
-                await self._ensure_runtime_setup()
+                prebuilt_world = body.runtime_mode == "prebuilt_world"
+                selected_image = self._prebuilt_image(body) if prebuilt_world else None
+                stirrup_archive = await self._ensure_runtime_setup()
+                cookies = request.cookies
                 with tempfile.TemporaryDirectory(prefix=f"apex-{_safe_id(body.task_id)}-") as scratch:
                     scratch_path = Path(scratch)
                     world_zip = scratch_path / "world.zip"
@@ -439,63 +623,86 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     partial_result_path = scratch_path / "partial_result.json"
                     initial_snapshot_path = scratch_path / "initial.zip"
                     snapshot_path = scratch_path / "final.zip"
-                    seed = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path="/seed_session",
-                        json=body.model_dump(),
-                        cookies=request.cookies,
-                    )
-                    await raise_for_status(seed)
-                    cookies = seed.cookies
-                    await self._download_world(cookies, world_zip)
-                    if body.task_input_files:
-                        await self._download_task_files(cookies, task_files_zip)
-                    spec = self._sandbox_spec(body, instruction)
-                    async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
-                        await sandbox.start()
-                        await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
+                    if not prebuilt_world:
+                        seed = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/seed_session",
+                            json=body.model_dump(),
+                            cookies=request.cookies,
+                        )
+                        await raise_for_status(seed)
+                        cookies = seed.cookies
+                        await self._download_world(cookies, world_zip)
                         if body.task_input_files:
-                            await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
-                        await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
-                        unpack = await sandbox.exec(
-                            f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
-                            f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
-                            f"-C {shlex.quote(_STIRRUP_ROOT)}",
-                            user="root",
-                            timeout_s=600,
+                            await self._download_task_files(cookies, task_files_zip)
+                    async with self._policy_egress(body) as relay:
+                        spec = self._sandbox_spec(
+                            body,
+                            instruction,
+                            image=selected_image,
+                            prebuilt_world=prebuilt_world,
+                            relay=relay,
                         )
-                        if unpack.return_code != 0:
-                            detail = (unpack.stderr or unpack.stdout or "")[-4000:]
-                            return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
-                        protect = await sandbox.exec(
-                            f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
-                            f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
-                            f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
-                            user="root",
-                        )
-                        if protect.return_code != 0:
-                            detail = (protect.stderr or protect.stdout or "")[-4000:]
-                            return self._failure(body, f"could not protect sandbox inputs: {detail}")
-                        process = await sandbox.exec(
-                            f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
-                            f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
-                            timeout_s=self.config.timeout,
-                        )
-                        if process.return_code != 0:
-                            detail = (process.stderr or process.stdout or "")[-4000:]
-                            result = await self._recover_partial_result(sandbox, partial_result_path)
-                            return self._failure(
-                                body,
-                                f"sandbox Stirrup rollout exited: {detail}",
-                                process.return_code,
-                                failure_class="timeout_exceeded"
-                                if process.error_type == "timeout"
-                                else "sandbox_error",
-                                partial_result=result,
+                        async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
+                            await sandbox.start()
+                            if not prebuilt_world:
+                                await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
+                                if body.task_input_files:
+                                    await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
+                            await sandbox.upload(stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
+                            interpreter_setup = (
+                                f" && ( {stirrup_runtime_bootstrap_script(_STIRRUP_ROOT)} )" if prebuilt_world else ""
                             )
-                        await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
-                        await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
-                        await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)
+                            unpack = await sandbox.exec(
+                                f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
+                                f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
+                                f"-C {shlex.quote(_STIRRUP_ROOT)}{interpreter_setup} && "
+                                f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} -c "
+                                f"{shlex.quote(STIRRUP_PREFLIGHT)}",
+                                user="root",
+                                timeout_s=600,
+                            )
+                            if unpack.return_code != 0:
+                                detail = (unpack.stderr or unpack.stdout or "")[-4000:]
+                                return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
+                            protect = await sandbox.exec(
+                                f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
+                                f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
+                                f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
+                                user="root",
+                            )
+                            if protect.return_code != 0:
+                                detail = (protect.stderr or protect.stdout or "")[-4000:]
+                                return self._failure(body, f"could not protect sandbox inputs: {detail}")
+                            if prebuilt_world and self._local_dns_enabled():
+                                dns = await sandbox.exec(
+                                    prebuilt_local_dns_command(),
+                                    user="root",
+                                    timeout_s=30,
+                                )
+                                if dns.return_code != 0:
+                                    detail = (dns.stderr or dns.stdout or "")[-4000:]
+                                    return self._failure(body, f"could not start sandbox local DNS: {detail}")
+                            process = await sandbox.exec(
+                                f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
+                                f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
+                                timeout_s=self.config.timeout,
+                            )
+                            if process.return_code != 0:
+                                detail = (process.stderr or process.stdout or "")[-4000:]
+                                result = await self._recover_partial_result(sandbox, partial_result_path)
+                                return self._failure(
+                                    body,
+                                    f"sandbox Stirrup rollout exited: {detail}",
+                                    process.return_code,
+                                    failure_class="timeout_exceeded"
+                                    if process.error_type == "timeout"
+                                    else "sandbox_error",
+                                    partial_result=result,
+                                )
+                            await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
+                            await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
+                            await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)
 
                     result = json.loads(result_path.read_text(encoding="utf-8"))
                     initial_snapshot = initial_snapshot_path.read_bytes()

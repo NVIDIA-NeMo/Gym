@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import os
 import shutil
 import zipfile
-from contextlib import suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, get_args, get_origin
+from urllib.parse import urlsplit, urlunsplit
 
 
 FILESYSTEM_ROOT = Path("/filesystem")
@@ -300,6 +303,36 @@ def annotate_schema_ref_types(schema: Any) -> Any:
         return annotate(schema)
     except Exception:
         return schema
+
+
+def install_json_schema_to_pydantic_array_items_patch() -> None:
+    """Allow MCP schemas to use JSON Schema's implicit unconstrained array items."""
+    import json_schema_to_pydantic
+
+    current_create_model = json_schema_to_pydantic.create_model
+    if getattr(current_create_model, "_apex_array_items_patch", False):
+        patched_create_model = current_create_model
+    else:
+        original_create_model = current_create_model
+        signature = inspect.signature(original_create_model)
+
+        def create_model_with_undefined_array_items(*args: Any, **kwargs: Any) -> Any:
+            bound = signature.bind_partial(*args, **kwargs)
+            if not bound.arguments.get("allow_undefined_array_items"):
+                bound.arguments["allow_undefined_array_items"] = True
+            return original_create_model(*bound.args, **bound.kwargs)
+
+        create_model_with_undefined_array_items._apex_array_items_patch = True
+        patched_create_model = create_model_with_undefined_array_items
+        json_schema_to_pydantic.create_model = patched_create_model
+
+    with suppress(Exception):
+        import stirrup.tools.mcp as stirrup_mcp
+
+        if hasattr(stirrup_mcp, "create_model") and not getattr(
+            stirrup_mcp.create_model, "_apex_array_items_patch", False
+        ):
+            stirrup_mcp.create_model = patched_create_model
 
 
 # GLM-family vLLM tool-call parsers reconstruct each argument's type from the
@@ -648,6 +681,144 @@ async def _checkpoint_partial_result(session: Any, destination: Path) -> None:
         await asyncio.sleep(PARTIAL_RESULT_CHECKPOINT_INTERVAL_SECONDS)
 
 
+# ---------------------------------------------------------------------------
+# Policy egress relay. A sandbox that runs in its own network namespace
+# (apptainer --net --network none, used so worlds with fixed service ports can
+# share a node) has no route to the model server. The host binds a unix socket
+# into the sandbox; unix sockets ignore network namespaces. Inside, a loopback
+# listener forwards to that socket and the Chat Completions client points at
+# the listener. Both halves live here so every entrypoint that calls
+# run_stirrup_rollout gets the relay.
+# ---------------------------------------------------------------------------
+_RELAY_CHUNK_BYTES = 65536
+_RELAY_CONNECT_TIMEOUT_SECONDS = 5.0
+_RELAY_CLOSE_TIMEOUT_SECONDS = 1.0
+
+
+async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        while True:
+            data = await reader.read(_RELAY_CHUNK_BYTES)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (OSError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        with suppress(Exception):
+            if writer.can_write_eof():
+                writer.write_eof()
+
+
+async def _bridge(
+    downstream: tuple[asyncio.StreamReader, asyncio.StreamWriter],
+    upstream: tuple[asyncio.StreamReader, asyncio.StreamWriter],
+) -> None:
+    try:
+        await asyncio.gather(_pump(downstream[0], upstream[1]), _pump(upstream[0], downstream[1]))
+    finally:
+        for writer in (downstream[1], upstream[1]):
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+
+
+class RelayServer:
+    """An asyncio server whose in-flight bridges are cancelled on close.
+
+    ``Server.wait_closed`` waits for every accepted connection to finish, and the
+    Chat Completions client keeps idle keep-alive connections open, so closing
+    must cancel the bridges instead of waiting for them.
+    """
+
+    def __init__(self) -> None:
+        self._server: asyncio.AbstractServer | None = None
+        self._bridges: set[asyncio.Task[None]] = set()
+
+    def track(self, task: asyncio.Task[None]) -> None:
+        self._bridges.add(task)
+        task.add_done_callback(self._bridges.discard)
+
+    def attach(self, server: asyncio.AbstractServer) -> None:
+        self._server = server
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None and self._server.sockets
+        return self._server.sockets[0].getsockname()[1]
+
+    async def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+        for task in list(self._bridges):
+            task.cancel()
+        if self._bridges:
+            await asyncio.gather(*self._bridges, return_exceptions=True)
+        if self._server is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(self._server.wait_closed(), _RELAY_CLOSE_TIMEOUT_SECONDS)
+
+
+def _relay_handler(relay: RelayServer, connect: Any) -> Any:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            relay.track(task)
+        try:
+            upstream = await asyncio.wait_for(connect(), _RELAY_CONNECT_TIMEOUT_SECONDS)
+        except (OSError, asyncio.TimeoutError):
+            writer.close()
+            return
+        await _bridge((reader, writer), upstream)
+
+    return handler
+
+
+async def serve_unix_to_tcp(socket_path: str, host: str, port: int) -> RelayServer:
+    """Host side: accept on a unix socket and forward each connection to ``host:port``."""
+    relay = RelayServer()
+    relay.attach(
+        await asyncio.start_unix_server(
+            _relay_handler(relay, lambda: asyncio.open_connection(host, port)), path=socket_path
+        )
+    )
+    return relay
+
+
+async def serve_tcp_to_unix(socket_path: str) -> RelayServer:
+    """Sandbox side: listen on a free loopback port and forward each connection to the unix socket."""
+    relay = RelayServer()
+    relay.attach(
+        await asyncio.start_server(
+            _relay_handler(relay, lambda: asyncio.open_unix_connection(socket_path)), "127.0.0.1", 0
+        )
+    )
+    return relay
+
+
+def rewrite_model_base_url(url: str, port: int) -> str:
+    """Point an http model URL at the loopback relay port, keeping its path."""
+    parts = urlsplit(url)
+    if parts.scheme != "http":
+        raise ValueError(f"the policy egress relay forwards plain HTTP only, got {url!r}")
+    return urlunsplit(("http", f"127.0.0.1:{port}", parts.path, parts.query, parts.fragment))
+
+
+@asynccontextmanager
+async def policy_endpoint(config: dict[str, Any]) -> AsyncIterator[str]:
+    """Yield the model base URL for the client, relayed through ``model_egress_socket`` when configured."""
+    socket_path = config.get("model_egress_socket")
+    if not socket_path:
+        yield config["model_base_url"]
+        return
+    relay = await serve_tcp_to_unix(str(socket_path))
+    try:
+        yield rewrite_model_base_url(config["model_base_url"], relay.port)
+    finally:
+        await relay.close()
+
+
 async def run_stirrup_rollout(
     config: dict[str, Any],
     gateway_url: str,
@@ -664,6 +835,7 @@ async def run_stirrup_rollout(
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
 
     install_tool_argument_coercion(Agent)
+    install_json_schema_to_pydantic_array_items_patch()
     install_tool_schema_type_annotation()
 
     class ToolNameParams(BaseModel):
@@ -878,50 +1050,51 @@ async def run_stirrup_rollout(
         "temperature": float(config["temperature"]),
         "top_p": float(config["top_p"]),
     }
-    client = ChatCompletionsClient(
-        model=config["policy_model"],
-        base_url=config["model_base_url"],
-        api_key="unused",
-        max_tokens=int(config["max_output_tokens"]),
-        kwargs=model_kwargs,
-    )
-    managed_tools = ManagedMCPTools()
-    agent = Agent(
-        client=client,
-        name="apex_stirrup_agent",
-        max_turns=int(config["max_turns"]),
-        system_prompt=SYSTEM_PROMPT,
-        tools=[managed_tools],
-        finish_tool=finish_tool,
-        # Chat Completions tool messages accept text only. Stirrup preserves
-        # image results by moving each image into a following user message.
-        text_only_tool_responses=True,
-    )
-    managed_tools.attach(agent)
-
-    async with agent.session() as session:
-        checkpoint_task = (
-            asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path))
-            if checkpoint_path is not None
-            else None
+    async with policy_endpoint(config) as model_base_url:
+        client = ChatCompletionsClient(
+            model=config["policy_model"],
+            base_url=model_base_url,
+            api_key="unused",
+            max_tokens=int(config["max_output_tokens"]),
+            kwargs=model_kwargs,
         )
-        try:
-            finish_params, history, metadata = await session.run(config["instruction"])
-        except BaseException as exc:
-            if checkpoint_path is not None:
-                with suppress(Exception):
-                    write_partial_result_checkpoint(
-                        session,
-                        checkpoint_path,
-                        completion_status="error",
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-            raise
-        finally:
-            if checkpoint_task is not None:
-                checkpoint_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await checkpoint_task
+        managed_tools = ManagedMCPTools()
+        agent = Agent(
+            client=client,
+            name="apex_stirrup_agent",
+            max_turns=int(config["max_turns"]),
+            system_prompt=SYSTEM_PROMPT,
+            tools=[managed_tools],
+            finish_tool=finish_tool,
+            # Chat Completions tool messages accept text only. Stirrup preserves
+            # image results by moving each image into a following user message.
+            text_only_tool_responses=True,
+        )
+        managed_tools.attach(agent)
+
+        async with agent.session() as session:
+            checkpoint_task = (
+                asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path))
+                if checkpoint_path is not None
+                else None
+            )
+            try:
+                finish_params, history, metadata = await session.run(config["instruction"])
+            except BaseException as exc:
+                if checkpoint_path is not None:
+                    with suppress(Exception):
+                        write_partial_result_checkpoint(
+                            session,
+                            checkpoint_path,
+                            completion_status="error",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                raise
+            finally:
+                if checkpoint_task is not None:
+                    checkpoint_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await checkpoint_task
 
     input_tokens, output_tokens, reasoning_tokens = _token_usage(history)
     completion_status = getattr(finish_params, "status", None)

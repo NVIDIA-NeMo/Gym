@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
+import shutil
+import tempfile
 import zipfile
 from inspect import getsource
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from pydantic import BaseModel
 
 from responses_api_agents.apex_agent import stirrup_runtime
@@ -182,3 +186,91 @@ def test_gateway_config_runs_packaged_servers_and_offline_edgar(monkeypatch, tmp
     assert edgar_env["EDGAR_OFFLINE_MODE"] == "true"
     assert edgar_env["INTERNET_ENABLED"] == "false"
     assert edgar_env["EDGAR_USER_AGENT"] == "Apex test@example.com"
+
+
+async def _idle_peer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Accept a connection, hold it open until the peer goes away, then close it."""
+    await reader.read()
+    writer.close()
+
+
+def test_rewrite_model_base_url_keeps_path_and_rejects_https() -> None:
+    assert stirrup_runtime.rewrite_model_base_url("http://10.1.2.3:8000/v1", 4242) == "http://127.0.0.1:4242/v1"
+    with pytest.raises(ValueError):
+        stirrup_runtime.rewrite_model_base_url("https://10.1.2.3/v1", 4242)
+
+
+async def test_policy_endpoint_without_socket_uses_model_url_directly() -> None:
+    async with stirrup_runtime.policy_endpoint({"model_base_url": "http://model/v1"}) as base_url:
+        assert base_url == "http://model/v1"
+
+
+async def test_policy_endpoint_relays_http_through_unix_socket() -> None:
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(4096)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong")
+        await writer.drain()
+        writer.close()
+
+    model = await asyncio.start_server(respond, "127.0.0.1", 0)
+    model_port = model.sockets[0].getsockname()[1]
+    # AF_UNIX paths are capped at 107 bytes; pytest's tmp_path can exceed that.
+    socket_dir = tempfile.mkdtemp(prefix="egr-", dir="/tmp")
+    socket_path = f"{socket_dir}/policy.sock"
+    host_side = await stirrup_runtime.serve_unix_to_tcp(socket_path, "127.0.0.1", model_port)
+    config = {"model_base_url": f"http://10.0.0.1:{model_port}/v1", "model_egress_socket": socket_path}
+    try:
+        async with stirrup_runtime.policy_endpoint(config) as base_url:
+            assert base_url.startswith("http://127.0.0.1:")
+            assert base_url.endswith("/v1")
+            port = int(base_url.removeprefix("http://127.0.0.1:").split("/", 1)[0])
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+            await writer.drain()
+
+            assert b"pong" in await reader.read(4096)
+
+            writer.close()
+    finally:
+        await host_side.close()
+        model.close()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+async def test_policy_endpoint_exits_promptly_with_idle_keepalive_connection() -> None:
+    socket_dir = tempfile.mkdtemp(prefix="egr-", dir="/tmp")
+    socket_path = f"{socket_dir}/policy.sock"
+    host_side = await asyncio.start_unix_server(_idle_peer, path=socket_path)
+    config = {"model_base_url": "http://10.0.0.1:8000/v1", "model_egress_socket": socket_path}
+    writer = None
+    try:
+        async with asyncio.timeout(5):
+            async with stirrup_runtime.policy_endpoint(config) as base_url:
+                port = int(base_url.removeprefix("http://127.0.0.1:").split("/", 1)[0])
+                _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"GET /v1/models HTTP/1.1\r\n\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)  # idle keep-alive connection stays bridged
+    finally:
+        if writer is not None:
+            writer.close()
+        host_side.close()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+async def test_policy_endpoint_closes_listener_when_body_raises() -> None:
+    socket_dir = tempfile.mkdtemp(prefix="egr-", dir="/tmp")
+    socket_path = f"{socket_dir}/policy.sock"
+    host_side = await asyncio.start_unix_server(_idle_peer, path=socket_path)
+    config = {"model_base_url": "http://10.0.0.1:8000/v1", "model_egress_socket": socket_path}
+    port = None
+    try:
+        with pytest.raises(RuntimeError):
+            async with stirrup_runtime.policy_endpoint(config) as base_url:
+                port = int(base_url.removeprefix("http://127.0.0.1:").split("/", 1)[0])
+                raise RuntimeError("rollout failed")
+        with pytest.raises(OSError):
+            await asyncio.open_connection("127.0.0.1", port)
+    finally:
+        host_side.close()
+        shutil.rmtree(socket_dir, ignore_errors=True)
