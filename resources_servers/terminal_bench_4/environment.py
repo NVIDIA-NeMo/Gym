@@ -41,6 +41,7 @@ class EnvironmentConfig(Settings):
     sandbox_request_gpu_type: bool
     sandbox_split_endpoints: bool
     compose_image_configs: Path | None
+    single_container_image_configs: Path | None = None
     sandbox_ttl_s: float = Field(gt=0)
     sandbox_ready_timeout_s: float = Field(gt=0)
     default_exec_timeout_s: float = Field(gt=0)
@@ -109,7 +110,36 @@ class Environment:
         if self.uses_compose and config.compose_image_configs is None:
             raise ValueError("Compose requires verified image startup metadata")
 
-    def build_spec(self):
+    def _single_container_entrypoint(self, image: str) -> list[str] | None:
+        path = self.config.single_container_image_configs
+        if self.uses_compose or path is None:
+            return None
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[2] / path
+        records = json.loads(path.read_text())
+        record = records.get(image) if isinstance(records, dict) else None
+        if not isinstance(record, dict):
+            raise ValueError(f"No recorded OCI startup metadata for {image!r}")
+        if record.get("image") != image:
+            raise ValueError(f"OCI startup metadata image does not match {image!r}")
+        if (record.get("os"), record.get("architecture")) != ("linux", "amd64"):
+            raise ValueError(f"OCI startup metadata for {image!r} requires a supported Linux/amd64 image")
+        config = record.get("config")
+        if not isinstance(config, dict):
+            raise ValueError(f"OCI startup metadata for {image!r} requires an image config")
+        startup = []
+        for field in ("Entrypoint", "Cmd"):
+            value = config.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, list) or any(not isinstance(arg, str) for arg in value):
+                raise ValueError(f"OCI {field} for {image!r} must be a list of strings or null")
+            startup.extend(value)
+        # The provider's entrypoint is the complete argv, not Docker's separate
+        # ENTRYPOINT field. Empty image startup retains the provider keepalive.
+        return startup or None
+
+    def build_spec(self) -> SandboxSpec:
         settings, config = self.settings, self.config
         metadata = {
             "tb4-session": self.session_id,
@@ -135,8 +165,10 @@ class Environment:
             options["volumes"] = volumes
         if settings.network_mode == "no-network":
             options["network_policy"] = {"defaultAction": "deny", "egress": []}
+        image = rewrite_image(settings.docker_image, config.image_rewrites)
         return SandboxSpec(
-            image=rewrite_image(settings.docker_image, config.image_rewrites),
+            image=image,
+            entrypoint=self._single_container_entrypoint(image),
             resources=SandboxResources(
                 cpu=settings.cpus,
                 memory_mib=settings.memory_mb,

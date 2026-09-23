@@ -64,6 +64,28 @@ lifecycle. `oracle/identity.json`, stdout/stderr and `oracle_exit_code` distingu
 solution failures from verifier errors; reward 1 is still required for a golden
 pass. `execution_mode: miniswe` is the default for ordinary rollouts.
 
+## Optional single-container image startup
+
+Set `environment.single_container_image_configs` to a trusted JSON file to
+preserve a single-container image's startup command. Paths are absolute or
+relative to the Gym root. Like `compose_image_configs`, this file maps image
+references to records with `image`, `os`, `architecture`, and the OCI `config`.
+Acquire and digest-check the metadata upstream; the runner does not query a
+registry. Every non-Compose agent and verifier image must have a record matching
+its effective image reference after `image_rewrites`.
+
+For each role, the runner passes the recorded `Entrypoint` followed by `Cmd` as
+the sandbox's complete startup argv. Values must be string lists or null;
+shell-form commands must already have their image-recorded shell argv. This
+starts services supplied by the image instead of OpenSandbox's default
+`tail -f /dev/null`. An empty image startup keeps the provider default. Metadata
+must describe a Linux/amd64 image; missing or mismatched records fail explicitly.
+
+The option defaults to null, retaining existing single-container behavior.
+Enable it for images whose recorded command is suitable for a long-lived task
+sandbox. Compose continues to use its existing startup resolution. This option
+does not change users, workdirs, health checks, environment, or network policy.
+
 ## Non-root Compose services
 
 When loading agent Compose YAML, two task-specific adaptations use the

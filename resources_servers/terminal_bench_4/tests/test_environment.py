@@ -148,6 +148,7 @@ async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkey
     await env.start()
     box.start.assert_awaited_once()
     assert create.call_args.args[1].image == "public/agent"
+    assert create.call_args.args[1].entrypoint is None
     assert await env.agent_workdir() == "/app"
     box.serialize.assert_not_awaited()
     assert box.exec.await_args.kwargs["user"] == "task-user"
@@ -163,12 +164,88 @@ async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkey
     assert env.closed and env.resources[0]["sandbox_id"] == "owned-box"
 
 
+@pytest.mark.parametrize("verifier", [False, True])
+@pytest.mark.parametrize(
+    "startup,expected",
+    [
+        (
+            {"Entrypoint": ["/start", "--mode"], "Cmd": ["sh", "-c", "sleep infinity"]},
+            ["/start", "--mode", "sh", "-c", "sleep infinity"],
+        ),
+        ({"Entrypoint": ["/start"], "Cmd": None}, ["/start"]),
+        ({"Entrypoint": None, "Cmd": ["sh", "-c", "echo '$HOME'"]}, ["sh", "-c", "echo '$HOME'"]),
+        ({"Entrypoint": [], "Cmd": []}, None),
+        ({}, None),
+    ],
+)
+async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, verifier, startup, expected):
+    images = tmp_path / "single-images.json"
+    images.write_text(
+        json.dumps(
+            {
+                "mirror/agent": {
+                    "image": "mirror/agent",
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": startup if not verifier else {"Cmd": ["wrong-role"]},
+                },
+                "mirror/verifier": {
+                    "image": "mirror/verifier",
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": startup if verifier else {"Cmd": ["wrong-role"]},
+                },
+            }
+        )
+    )
+    env, _, create, _ = make_environment(
+        tmp_path,
+        monkeypatch,
+        verifier=verifier,
+        config={"single_container_image_configs": images, "image_rewrites": [{"from": "public/", "to": "mirror/"}]},
+    )
+    await env.start()
+    spec = create.call_args.args[1]
+    assert spec.image == "mirror/" + ("verifier" if verifier else "agent")
+    assert spec.entrypoint == expected
+
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        ({"image": "different"}, "does not match"),
+        ({"os": "windows"}, "Linux/amd64"),
+        ({"architecture": "arm64"}, "Linux/amd64"),
+        ({"config": None}, "requires an image config"),
+        ({"config": {"Entrypoint": "/start --arg"}}, "Entrypoint.*list of strings"),
+        ({"config": {"Cmd": ["sleep", 1]}}, "Cmd.*list of strings"),
+    ],
+)
+def test_single_container_rejects_incompatible_startup_metadata(tmp_path, monkeypatch, change, error):
+    images = tmp_path / "single-images.json"
+    record = {"image": "public/agent", "os": "linux", "architecture": "amd64", "config": {}}
+    images.write_text(json.dumps({"public/agent": record | change}))
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"single_container_image_configs": images})
+    with pytest.raises(ValueError, match=error):
+        env.build_spec()
+
+
+def test_single_container_configured_metadata_must_include_image(tmp_path, monkeypatch):
+    images = tmp_path / "single-images.json"
+    images.write_text("{}")
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"single_container_image_configs": images})
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
 async def test_compose_specs_startup_metadata_sidecar_operations(tmp_path, monkeypatch):
     env, box, _, create = make_environment(tmp_path, monkeypatch, compose=True)
+    env.config.single_container_image_configs = tmp_path / "unused-missing.json"
     await env.start()
     kwargs = create.call_args.kwargs
     assert kwargs["service_specs"]["main"].resources.cpu == 2
     assert kwargs["service_specs"]["db"].resources.cpu is None
+    assert kwargs["service_specs"]["main"].entrypoint is None
     document = yaml.safe_load(create.call_args.args[1].read_text())
     assert document["services"]["main"]["labels"] == {"nemo.nvidia.com/shm": "64"}
     await env.exec("echo sidecar", service="db")
