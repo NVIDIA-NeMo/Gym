@@ -1,4 +1,4 @@
-# NeMo UserSim benchmark overlay. Preparation owns NGC access; runtime is offline.
+# NeMo UserSim benchmark overlay. Preparation materializes the persona panel; runtime only reads it.
 config_paths:
   - resources_servers/usersim/configs/usersim.yaml
 
