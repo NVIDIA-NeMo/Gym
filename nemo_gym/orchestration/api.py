@@ -126,6 +126,22 @@ class VllmServiceConfig(BaseModelServiceConfig):
     use_ray_serve: bool = False
     # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
     extra_args: str = ""
+    # Marks this service as one tier of a prefill/decode disaggregated deployment.
+    # "producer" computes prefill and hands its KV cache off; "consumer" receives that
+    # cache and decodes. A router service (type: router) fronts the pair. Unset means
+    # an ordinary self-contained vLLM deployment, which is what most configs are.
+    kv_role: Literal["producer", "consumer"] | None = None
+    # The vLLM KV connector moving cache between the tiers.
+    kv_connector: str = "NixlConnector"
+    # What vLLM does when a KV transfer fails. "fail" surfaces the error rather than
+    # silently recomputing, which would read as a slow run instead of a broken one.
+    kv_load_failure_policy: str = "fail"
+    # NIXL's side-channel port. Each tier needs its own, since both run on nodes of
+    # the same allocation and the port is bound per host.
+    nixl_side_channel_port: int = 5600
+    # Port the data-parallel ranks of this service coordinate on. Two tiers sharing an
+    # allocation need different ones, the way they need different side-channel ports.
+    data_parallel_rpc_port: int = 13345
 
     @field_validator("number_of_instances")
     @classmethod
@@ -156,6 +172,35 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
     return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
+class RouterServiceConfig(BaseModelServiceConfig):
+    """vllm-router fronting a prefill/decode pair.
+
+    This is the address clients use: `driver.policy_model` names the router, not
+    either tier, and the router forwards each phase to the tier that owns it.
+    """
+
+    type: Literal["router"]
+    # Names of the two vLLM services this router fronts. They must carry kv_role
+    # "producer" and "consumer" respectively.
+    prefill: str
+    decode: str
+    prefill_policy: str = "cache_aware"
+    decode_policy: str = "cache_aware"
+    intra_node_data_parallel_size: int = 1
+    # An agentic benchmark holds a request open for a long time; the router must not
+    # be the thing that gives up on it.
+    request_timeout_secs: int = 86400
+    log_level: str = "error"
+
+    @model_validator(mode="after")
+    def _default_health_check(self) -> "RouterServiceConfig":
+        if self.health_check is None:
+            self.health_check = HealthCheckConfig(port=self.port)
+        elif self.health_check.port is None:
+            self.health_check.port = self.port
+        return self
+
+
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
     # "head" starts a cluster; "worker" joins the one at `address`. A worker is how a
@@ -184,7 +229,9 @@ class RayServiceConfig(BaseServiceConfig):
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
-    Annotated[VllmServiceConfig, Tag("vllm")] | Annotated[RayServiceConfig, Tag("ray")],
+    Annotated[VllmServiceConfig, Tag("vllm")]
+    | Annotated[RayServiceConfig, Tag("ray")]
+    | Annotated[RouterServiceConfig, Tag("router")],
     Discriminator("type"),
 ]
 
@@ -302,6 +349,13 @@ class SubmitConfig(_StrictModel):
                     f"compute '{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
                 )
 
+            if isinstance(service, VllmServiceConfig) and service.kv_role is not None and service.node_pool is None:
+                raise ValueError(
+                    f"Service '{service_name}' sets kv_role='{service.kv_role}' but no node_pool. A prefill/decode "
+                    "tier needs nodes of its own: the two tiers run side by side and the router addresses each "
+                    "tier's head by its pool."
+                )
+
             if not isinstance(service, VllmServiceConfig):
                 continue
 
@@ -334,6 +388,8 @@ class SubmitConfig(_StrictModel):
                 service_name, service, service_nodes, service_pools, service_gpus, is_ray_serve
             )
 
+        self._validate_routers(compute)
+
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
                 raise ValueError(
@@ -357,6 +413,60 @@ class SubmitConfig(_StrictModel):
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
         return self
+
+    def _validate_routers(self, compute: "ComputeConfig") -> None:
+        """Check that every router fronts a real prefill/decode pair.
+
+        A router that names a missing or mis-roled service produces a script that
+        starts, serves nothing, and fails as a timeout much later.
+        """
+        pools = list(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else []
+
+        for name, router in self.services.items():
+            if not isinstance(router, RouterServiceConfig):
+                continue
+
+            for field, expected in (("prefill", "producer"), ("decode", "consumer")):
+                tier_name = getattr(router, field)
+                tier = self.services.get(tier_name)
+                if tier is None:
+                    raise ValueError(
+                        f"Router '{name}' names {field} service '{tier_name}', which is not in services "
+                        f"({', '.join(sorted(self.services))})."
+                    )
+                if not isinstance(tier, VllmServiceConfig):
+                    raise ValueError(
+                        f"Router '{name}' names {field} service '{tier_name}', which is a "
+                        f"'{tier.type}' service; a router fronts vllm services."
+                    )
+                if tier.kv_role != expected:
+                    raise ValueError(
+                        f"Router '{name}' names {field} service '{tier_name}', whose kv_role is "
+                        f"{tier.kv_role!r}; it has to be '{expected}' to serve as the {field} tier."
+                    )
+
+            prefill = self.services[router.prefill]
+            decode = self.services[router.decode]
+            assert isinstance(prefill, VllmServiceConfig) and isinstance(decode, VllmServiceConfig)
+            for field, value in (
+                ("nixl_side_channel_port", prefill.nixl_side_channel_port == decode.nixl_side_channel_port),
+                ("data_parallel_rpc_port", prefill.data_parallel_rpc_port == decode.data_parallel_rpc_port),
+            ):
+                if value:
+                    raise ValueError(
+                        f"Router '{name}': prefill '{router.prefill}' and decode '{router.decode}' share "
+                        f"{field} {getattr(prefill, field)}. Each tier binds the port on its own hosts, so the "
+                        "two tiers need different ones."
+                    )
+
+            # driver.policy_model points clients at http://localhost:<port>, and the
+            # driver runs on the allocation's first node. A router anywhere else is
+            # reachable by nothing.
+            if router.node_pool is not None and pools and router.node_pool != pools[0]:
+                raise ValueError(
+                    f"Router '{name}' is pinned to node_pool '{router.node_pool}', but the driver reaches it over "
+                    f"localhost and runs on the first node. Pin it to '{pools[0]}' or leave node_pool unset."
+                )
 
     def _validate_vllm_gpu_footprint(
         self,

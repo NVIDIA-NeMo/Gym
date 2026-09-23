@@ -1705,3 +1705,175 @@ def test_a_ray_worker_without_an_address_is_refused():
 def test_a_ray_head_with_an_address_is_refused():
     with pytest.raises(ValueError, match="starts its own cluster"):
         RayServiceConfig(type="ray", container="img", address="10.0.0.1:6379")
+
+
+# ---------------------------------------------------------------------------
+# prefill/decode disaggregation
+# ---------------------------------------------------------------------------
+
+
+_PD_POOLS = {
+    "prefill": {"partition": "batch", "nodes": 4, "ntasks_per_node": 1, "gpus_per_node": 4},
+    "decode": {"partition": "batch", "nodes": 6, "ntasks_per_node": 1, "gpus_per_node": 4},
+}
+
+
+def _tier(port, pool, role, nixl, rpc, instances):
+    return {
+        "type": "vllm",
+        "container": "img",
+        "model": "/ckpt",
+        "served_model_name": "super35",
+        "port": port,
+        "node_pool": pool,
+        "kv_role": role,
+        "nixl_side_channel_port": nixl,
+        "data_parallel_rpc_port": rpc,
+        "tensor_parallel_size": 4,
+        "number_of_instances": instances,
+    }
+
+
+def _pd_services(**router_overrides):
+    return {
+        "prefill": _tier(8001, "prefill", "producer", 5600, 13345, 4),
+        "decode": _tier(8002, "decode", "consumer", 5700, 13346, 6),
+        "router": {
+            "type": "router",
+            "container": "img",
+            "model": "super35",
+            "port": 8000,
+            "prefill": "prefill",
+            "decode": "decode",
+            **router_overrides,
+        },
+    }
+
+
+def _pd_config(tmp_path, services=None, pools=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services if services is not None else _pd_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _PD_POOLS}},
+            "driver": {"container": "img", "policy_model": "router", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _pd_script(tmp_path, **kwargs):
+    config = _pd_config(tmp_path, **kwargs)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_each_tier_carries_its_own_kv_role(tmp_path):
+    script = _pd_script(tmp_path)
+    assert '"kv_role":"kv_producer"' in script.split("# service: decode")[0]
+    assert '"kv_role":"kv_consumer"' in script.split("# service: decode")[1]
+
+
+def test_each_tier_coordinates_on_its_own_head(tmp_path):
+    # Pointing both tiers at the allocation's head node would make prefill rank 0 and
+    # decode rank 0 try to coordinate through the same address and port.
+    script = _pd_script(tmp_path)
+    prefill, decode = script.split("# service: decode")[0], script.split("# service: decode")[1]
+    assert "--data-parallel-address ${gym_nodes[0]} --data-parallel-rpc-port 13345" in prefill
+    assert "--data-parallel-address ${gym_nodes[4]} --data-parallel-rpc-port 13346" in decode
+
+
+def test_the_tiers_take_separate_node_ranges(tmp_path):
+    script = _pd_script(tmp_path)
+    assert "--relative=0 --nodes=4 --ntasks=4" in script
+    assert "--relative=4 --nodes=6 --ntasks=6" in script
+    assert "#SBATCH --nodes=10" in script
+
+
+def test_the_router_addresses_both_tier_heads(tmp_path):
+    script = _pd_script(tmp_path)
+    router = script.split("# service: router")[1]
+    assert "--vllm-pd-disaggregation" in router
+    assert '--prefill "http://${gym_nodes[0]}:8001"' in router
+    assert '--decode "http://${gym_nodes[4]}:8002"' in router
+
+
+def test_a_tier_off_the_first_node_is_probed_where_it_runs(tmp_path):
+    # The probe runs on the allocation's first node; decode answers on node 4.
+    script = _pd_script(tmp_path)
+    assert "Waiting for decode at http://${gym_nodes[4]}:8002" in script
+    assert "Waiting for prefill at http://localhost:8001" in script
+
+
+def test_each_tier_exports_its_own_nixl_side_channel(tmp_path):
+    script = _pd_script(tmp_path)
+    assert "export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)" in script
+    assert "export VLLM_NIXL_SIDE_CHANNEL_PORT=5600" in script
+    assert "export VLLM_NIXL_SIDE_CHANNEL_PORT=5700" in script
+
+
+def test_the_node_list_is_resolved_for_the_router(tmp_path):
+    assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in _pd_script(tmp_path)
+
+
+def test_a_router_naming_a_missing_service_is_refused(tmp_path):
+    services = _pd_services(prefill="nope")
+    with pytest.raises(ValueError, match="names prefill service 'nope', which is not in services"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_router_naming_a_mis_roled_tier_is_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["kv_role"] = "producer"
+    with pytest.raises(ValueError, match="kv_role is 'producer'; it has to be 'consumer'"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_tiers_sharing_a_side_channel_port_are_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["nixl_side_channel_port"] = 5600
+    with pytest.raises(ValueError, match="share nixl_side_channel_port 5600"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_tiers_sharing_a_data_parallel_rpc_port_are_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["data_parallel_rpc_port"] = 13345
+    with pytest.raises(ValueError, match="share data_parallel_rpc_port 13345"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_tier_without_a_node_pool_is_refused(tmp_path):
+    services = _pd_services()
+    del services["prefill"]["node_pool"]
+    with pytest.raises(ValueError, match="sets kv_role='producer' but no node_pool"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_router_away_from_the_driver_is_refused(tmp_path):
+    # driver.policy_model reaches the router over localhost, and the driver runs on
+    # the allocation's first node.
+    services = _pd_services(node_pool="decode")
+    with pytest.raises(ValueError, match="reaches it over localhost"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_plain_vllm_service_gets_no_kv_transfer_config(tmp_path):
+    services = {
+        "policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 4}
+    }
+    pools = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+    assert "--kv-transfer-config" not in script
+    assert "VLLM_NIXL_SIDE_CHANNEL" not in script
+    assert "gym_nodes=" not in script
