@@ -49,16 +49,32 @@ def fake_platform(monkeypatch):
     return _set
 
 
+class _FakeWin32Function:
+    """Callable Win32 export that accepts ctypes signature attributes."""
+
+    def __init__(self, implementation):
+        self._implementation = implementation
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self._implementation(*args)
+
+
 class _FakeKernel32:
     """kernel32 double whose IsWow64Process2 reports a fixed native machine."""
 
-    def __init__(self, native_machine: int):
-        self._native_machine = native_machine
+    def __init__(self, native_machine: int, result: int = 1):
+        self.current_process_handle = object()
+        self.received_handle = None
+        self.GetCurrentProcess = _FakeWin32Function(lambda: self.current_process_handle)
 
-    def IsWow64Process2(self, handle, process_machine_ref, native_machine_ref):
-        # byref() wraps the c_ushort in a CArgObject holding the real object.
-        native_machine_ref._obj.value = self._native_machine
-        return 1
+        def _is_wow64_process2(handle, process_machine_ref, native_machine_ref):
+            self.received_handle = handle
+            native_machine_ref._obj.value = native_machine
+            return result
+
+        self.IsWow64Process2 = _FakeWin32Function(_is_wow64_process2)
 
 
 class _FakeWindll:
@@ -71,8 +87,8 @@ class _FakeWindll:
 class _Kernel32WithoutIsWow64Process2:
     """kernel32 double for pre-Windows-10 kernels: no IsWow64Process2 export."""
 
-    def __getattr__(self, name):
-        raise AttributeError(name)
+    def __init__(self):
+        self.GetCurrentProcess = _FakeWin32Function(lambda: object())
 
 
 def _patch_kernel32(monkeypatch, kernel32) -> None:
@@ -123,11 +139,20 @@ class TestWindowsMachine:
     """
 
     def test_prefers_iswow64process2_over_platform_machine(self, monkeypatch):
-        """The kernel-reported native machine wins even when the interpreter
-        disagrees with the host (x64 python.exe under emulation on ARM64)."""
+        """The native machine and documented current-process handle drive detection."""
         monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
-        _patch_kernel32(monkeypatch, _FakeKernel32(native_machine=setup_openclaw._IMAGE_FILE_MACHINE_ARM64))
+        kernel32 = _FakeKernel32(native_machine=setup_openclaw._IMAGE_FILE_MACHINE_ARM64)
+        _patch_kernel32(monkeypatch, kernel32)
         assert setup_openclaw._windows_machine() == "ARM64"
+        assert kernel32.received_handle is kernel32.current_process_handle
+        assert kernel32.GetCurrentProcess.argtypes == []
+        assert kernel32.GetCurrentProcess.restype is setup_openclaw.wintypes.HANDLE
+        assert kernel32.IsWow64Process2.argtypes == [
+            setup_openclaw.wintypes.HANDLE,
+            setup_openclaw.ctypes.POINTER(setup_openclaw.wintypes.USHORT),
+            setup_openclaw.ctypes.POINTER(setup_openclaw.wintypes.USHORT),
+        ]
+        assert kernel32.IsWow64Process2.restype is setup_openclaw.wintypes.BOOL
 
     def test_recognised_amd64_native_machine(self, monkeypatch):
         monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "ARM64")
@@ -147,6 +172,14 @@ class TestWindowsMachine:
         """Pre-Windows-10 kernels have no IsWow64Process2; behave as before."""
         monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
         _patch_kernel32(monkeypatch, _Kernel32WithoutIsWow64Process2())
+        assert setup_openclaw._windows_machine() == "AMD64"
+
+    def test_api_failure_falls_back_to_platform_machine(self, monkeypatch):
+        monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
+        _patch_kernel32(
+            monkeypatch,
+            _FakeKernel32(native_machine=setup_openclaw._IMAGE_FILE_MACHINE_ARM64, result=0),
+        )
         assert setup_openclaw._windows_machine() == "AMD64"
 
     def test_emulated_interpreter_gets_native_download(self, fake_platform):

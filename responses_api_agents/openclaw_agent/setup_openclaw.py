@@ -60,6 +60,7 @@ import tarfile
 import time
 import urllib.request
 import zipfile
+from ctypes import wintypes
 from pathlib import Path
 
 
@@ -138,12 +139,23 @@ def _windows_machine() -> str:
         ("" when the native machine is not one we recognise).
     """
     try:
-        native_machine = ctypes.c_ushort()
-        # BOOL IsWow64Process2(HANDLE hProcess, USHORT *pProcessMachine,
-        #                      USHORT *pNativeMachine);
-        # A NULL handle means "the current process"; we only need the native side.
-        ok = ctypes.windll.kernel32.IsWow64Process2(
-            None, ctypes.byref(ctypes.c_ushort()), ctypes.byref(native_machine)
+        kernel32 = ctypes.windll.kernel32
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = wintypes.HANDLE
+
+        is_wow64_process2 = kernel32.IsWow64Process2
+        is_wow64_process2.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.USHORT),
+            ctypes.POINTER(wintypes.USHORT),
+        ]
+        is_wow64_process2.restype = wintypes.BOOL
+
+        process_machine = wintypes.USHORT()
+        native_machine = wintypes.USHORT()
+        ok = is_wow64_process2(
+            get_current_process(), ctypes.byref(process_machine), ctypes.byref(native_machine)
         )
         if ok:
             return {
