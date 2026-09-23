@@ -47,6 +47,8 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     AGENT_RUN_ERROR_FAILURE_CLASS,
+    ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
@@ -88,6 +90,35 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+
+
+def _environment_server_config() -> DictConfig:
+    return OmegaConf.create(
+        {
+            "swe": {
+                "resources_servers": {
+                    "swebench_pro": {
+                        "allowed_agents": ["hermes_agent"],
+                    }
+                }
+            },
+            "hermes": {
+                "responses_api_agents": {
+                    "hermes_agent": {
+                        "resources_server": {"type": "resources_servers", "name": "swe"},
+                    }
+                }
+            },
+            "environment": {
+                "environment_servers": {
+                    "single_agent": {
+                        "agent_server": {"type": "responses_api_agents", "name": "hermes"},
+                        "resources_server": {"type": "resources_servers", "name": "swe"},
+                    }
+                }
+            },
+        }
+    )
 
 
 class _StubLineageStore:
@@ -2897,7 +2928,7 @@ class TestRolloutCollection:
         helper = RolloutCollectionHelper()
 
         rows = [
-            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0},
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1},
@@ -2906,6 +2937,7 @@ class TestRolloutCollection:
             {
                 TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
                 "reward": 1.0,
                 "response": {
                     "usage": {"tokens": 10},
@@ -4390,3 +4422,345 @@ class TestAnAgentThatOnlyEverFails:
 
         assert set(agent_name_to_scored) == {"healthy_agent"}
         assert set(agent_name_to_dropped) == {"broken_agent"}
+
+
+class TestEnvironmentServerRouting:
+    def _row(self) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+            "task_source": "swe",
+            "instance_id": "instance",
+            "base_commit": "abc",
+            "responses_create_params": {"input": "fix it"},
+        }
+
+    def test_default_environment_preprocesses_rows_without_legacy_routing_fields(self) -> None:
+        row = {"responses_create_params": {"input": "fix it"}}
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="legacy",
+            environment_server_name="environment",
+            num_repeats=1,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(row).decode(), row)],
+            config,
+        )
+
+        assert len(rows) == 1
+        assert AGENT_REF_KEY_NAME not in rows[0]
+        assert rows[0][TASK_INDEX_KEY_NAME] == 0
+        assert rows[0][ROLLOUT_INDEX_KEY_NAME] == 0
+        assert rows[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
+
+    async def test_taskset_route_builds_native_episode_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = {"reward": 1.0, "agent_ref": {"name": "hermes"}}
+        post = AsyncMock(return_value=FakeResponse(200, payload))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        materialized = {
+            "task_id": {
+                "taskset": "swe_pro",
+                "task_id": "instance",
+            },
+            "task_input": {
+                "responses_create_params": {"input": "fix it"},
+                "task_data": {"instance_id": "instance"},
+            },
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized)],
+            config,
+        )
+
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                rows,
+            )
+        )
+
+        assert result == payload
+        assert post.await_args.kwargs["server_name"] == "environment"
+        assert AGENT_REF_KEY_NAME not in rows[0]
+        assert post.await_args.kwargs["json"] == {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task": {
+                "task_id": {
+                    "taskset": "swe_pro",
+                    "task_id": "instance",
+                },
+                "task_input": {
+                    "responses_create_params": {"input": "fix it"},
+                    "task_data": {"instance_id": "instance"},
+                },
+            },
+        }
+
+    def test_taskset_route_requires_a_configured_environment_server(self) -> None:
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}, "task_data": {}},
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"other": "environment"},
+            num_repeats=1,
+        )
+
+        with pytest.raises(ValueError, match="No environment server route.*swe_pro"):
+            RolloutCollectionHelper._preprocess_raw_rows(
+                [(0, orjson.dumps(row).decode(), row)],
+                config,
+            )
+
+    async def test_routes_legacy_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = {
+            "reward": 1.0,
+            "model_patch": "patch",
+            "ng_agent_observations": {"source": "hermes", "records": [], "gaps": []},
+        }
+        post = AsyncMock(return_value=FakeResponse(200, payload))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        row = self._row()
+
+        returned_row, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [row],
+                environment_server_name="environment",
+            )
+        )
+
+        assert returned_row is row
+        assert result["reward"] == 1.0
+        assert result["model_patch"] == "patch"
+        assert result["ng_agent_observations"]["source"] == "hermes"
+        assert post.await_args.kwargs["server_name"] == "environment"
+        assert post.await_args.kwargs["url_path"] == "/run"
+        assert post.await_args.kwargs["json"] is row
+        assert row[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+
+    async def test_environment_route_rejects_mismatched_resources_server(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        post = AsyncMock()
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        row = self._row() | {"task_source": "other"}
+
+        with pytest.raises(ValueError, match="does not match.*resources server"):
+            next(
+                RolloutCollectionHelper().run_examples(
+                    [row],
+                    environment_server_name="environment",
+                )
+            )
+        post.assert_not_awaited()
+
+    async def test_environment_route_rejects_mismatched_agent_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = AsyncMock()
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        row = self._row() | {AGENT_REF_KEY_NAME: {"name": "other"}}
+
+        with pytest.raises(ValueError, match="does not match.*agent server"):
+            next(
+                RolloutCollectionHelper().run_examples(
+                    [row],
+                    environment_server_name="environment",
+                )
+            )
+        post.assert_not_awaited()
+
+    async def test_accepts_projected_http_200_failure_for_the_sidecar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = {
+            NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+            NG_TERMINAL_KEY: False,
+            "_ng_failure_message": "agent unavailable",
+            "_ng_failure_stage": "agent",
+            "_ng_failure_partial_response": {"id": "partial"},
+        }
+        post = AsyncMock(return_value=FakeResponse(200, payload))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [self._row()],
+                environment_server_name="environment",
+            )
+        )
+
+        assert result[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert result[NG_TERMINAL_KEY] is False
+        assert result["_ng_failure_terminal"] is False
+        assert result["_ng_failure_stage"] == "agent"
+        assert result["_ng_failure_partial_response"]["id"] == "partial"
+
+    @staticmethod
+    def _mixed_batch_config() -> DictConfig:
+        """The native SWE Pro pairing plus a second, compatibility-routed pairing on the same server."""
+        config = _environment_server_config()
+        config["hermes_legacy"] = {
+            "responses_api_agents": {
+                "hermes_agent": {
+                    "resources_server": {"type": "resources_servers", "name": "swe"},
+                }
+            }
+        }
+        config["legacy_environment"] = {
+            "environment_servers": {
+                "legacy_agent": {
+                    "agent_server": {"type": "responses_api_agents", "name": "hermes_legacy"},
+                }
+            }
+        }
+        return config
+
+    @staticmethod
+    def _materialized_row() -> dict:
+        return {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance", "revision": "demo-v1"},
+            "task_input": {
+                "responses_create_params": {"input": "fix it"},
+                "task_data": {"instance_id": "instance"},
+            },
+        }
+
+    async def test_one_batch_mixes_native_and_compatibility_routed_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A materialized taskset and a legacy flat row travel in one batch, each to its own environment server."""
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = self._mixed_batch_config()
+        materialized = self._materialized_row()
+        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}}
+        del flat[ATTEMPT_INDEX_KEY_NAME]
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+        assert config.environment_routing_mode == "agent"
+
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized), (1, orjson.dumps(flat).decode(), flat)],
+            config,
+        )
+
+        # Identity is decided once, at preprocessing, and stamped only on the native row.
+        native_row = next(row for row in rows if "task_input" in row)
+        flat_row = next(row for row in rows if "task_input" not in row)
+        assert native_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert NG_ENVIRONMENT_SERVER_KEY not in flat_row
+
+        futures = list(RolloutCollectionHelper().run_examples(rows))
+        dispatched = [await future for future in futures]
+
+        assert len(dispatched) == 2
+        calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
+        assert set(calls) == {"environment", "legacy_environment"}
+        # The native row goes to its taskset's route as an episode request.
+        assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
+        assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        # The flat row goes to the environment server fronting its agent, as today's flat body.
+        assert calls["legacy_environment"] is flat_row
+        assert calls["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+
+    def test_materialized_row_requires_a_route_in_agent_mode(self) -> None:
+        materialized = self._materialized_row()
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            num_repeats=1,
+        )
+
+        with pytest.raises(ValueError, match="No environment server route is configured for taskset 'swe_pro'"):
+            RolloutCollectionHelper._preprocess_raw_rows(
+                [(0, orjson.dumps(materialized).decode(), materialized)],
+                config,
+            )
+
+    async def test_legacy_mode_routes_flat_rows_to_one_server_and_materialized_rows_by_taskset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy mode: every flat row to the named server, materialized rows still by taskset, through dispatch."""
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = self._mixed_batch_config()
+        materialized = self._materialized_row()
+        flat = self._row()
+        del flat[ATTEMPT_INDEX_KEY_NAME]
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="legacy",
+            environment_server_name="legacy_environment",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized), (1, orjson.dumps(flat).decode(), flat)],
+            config,
+        )
+
+        native_row = next(row for row in rows if "task_input" in row)
+        flat_row = next(row for row in rows if "task_input" not in row)
+        assert native_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert flat_row[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+
+        # Dispatch validates the flat row against a legacy_agent server that binds no resources server,
+        # stamps the agent that server fronts, and sends today's flat body; the native row is unaffected.
+        for future in list(RolloutCollectionHelper().run_examples(rows)):
+            await future
+
+        calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
+        assert set(calls) == {"environment", "legacy_environment"}
+        assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
+        assert calls["legacy_environment"] is flat_row
+        assert flat_row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+
+    def test_materialized_row_rejects_num_repeats_add_seed(self) -> None:
+        """The seed lives in the top-level prompt, which a materialized row keeps under task_input."""
+        materialized = self._materialized_row()
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=2,
+            num_repeats_add_seed=True,
+        )
+
+        with pytest.raises(ValueError, match="num_repeats_add_seed is not supported for materialized task rows"):
+            RolloutCollectionHelper._preprocess_raw_rows(
+                [(0, orjson.dumps(materialized).decode(), materialized)],
+                config,
+            )
+
+    def test_taskset_mode_stays_native_only(self) -> None:
+        flat = self._row()
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+
+        with pytest.raises(ValueError, match="environment_routing_mode=agent to mix"):
+            RolloutCollectionHelper._preprocess_raw_rows([(0, orjson.dumps(flat).decode(), flat)], config)
