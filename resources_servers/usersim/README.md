@@ -187,12 +187,11 @@ either participant policy without relabeling the other participant's outputs:
 selected = [
     {"responses_create_params": call["request"], "response": call["response"]}
     for call in rollout["result"]["invocations"]
-    if call["alias"] in requested_aliases
+    if call["role"] in requested_roles
 ]
 ```
 
-Use `{"assistant_model"}`, `{"user_model"}`, or both for
-`requested_aliases`. Support-model calls use distinct aliases, so judge,
-summary, and API-response outputs cannot be mistaken for participant training
-tokens. Participant filtering provides the explicit per-invocation contract
-for downstream SFT, RL projection, or custom collation.
+Use `{"assistant"}`, `{"user"}`, or both for `requested_roles`. Judge and
+Summary Agent calls use distinct roles, while API-response synthesis remains
+Resources-owned. Participant filtering provides the explicit per-invocation
+contract for downstream SFT, RL projection, or custom collation.
