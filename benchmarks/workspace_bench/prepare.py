@@ -4,24 +4,16 @@
 import json
 from pathlib import Path
 
+from resources_servers.workspace_bench.dataset import snapshot_root
+
 
 DATA_DIR = Path(__file__).parent / "data"
 OUTPUT_PATH = DATA_DIR / "workspace_bench_lite.jsonl"
 
 
 def prepare() -> Path:
-    from huggingface_hub import snapshot_download
-
-    root = (
-        Path(
-            snapshot_download(
-                "Workspace-Bench/Workspace-Bench-Lite",
-                repo_type="dataset",
-                allow_patterns="task_lite_clean_en/**",
-            )
-        )
-        / "task_lite_clean_en"
-    )
+    snapshot = snapshot_root("task_lite_clean_en")
+    root = snapshot / "task_lite_clean_en"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_PATH.open("w", encoding="utf-8") as output:
         for metadata_path in sorted(root.glob("*/metadata.json"), key=lambda path: int(path.parent.name)):
@@ -42,7 +34,7 @@ def prepare() -> Path:
                             ]
                         },
                         "task_id": task_id,
-                        "task_dir": str(metadata_path.parent),
+                        "task_dir": metadata_path.parent.relative_to(snapshot).as_posix(),
                     },
                     ensure_ascii=False,
                 )

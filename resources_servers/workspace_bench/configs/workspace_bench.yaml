@@ -4,7 +4,7 @@ workspace_bench_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [harness_agent]
       judge_base_url: ${oc.env:WORKSPACE_BENCH_JUDGE_BASE_URL,''}
       judge_api_key: ${oc.env:WORKSPACE_BENCH_JUDGE_API_KEY,''}
       judge_model: ${oc.env:WORKSPACE_BENCH_JUDGE_MODEL,''}
@@ -22,4 +22,3 @@ workspace_bench_resources_server:
         provider_options: {}
         metadata:
           benchmark: workspace-bench
-          harness: opencode
