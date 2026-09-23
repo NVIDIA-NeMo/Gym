@@ -64,14 +64,14 @@ _PYTHON_FENCE = re.compile(r"```python[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _BARE_FENCE = re.compile(r"```[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 
 
-# The `_ng_failure_class` values this server writes on a verify response.
-#   verifier_unavailable: no verdict for a good saved response. Reverify-recoverable.
-#   reference_failed: a terminal task or reference fault. Never recovered.
-#   needs_regeneration: no usable source. NOT reverify-recoverable. A new candidate is needed.
-_NG_FAILURE_CLASS_VERIFIER_UNAVAILABLE = "verifier_unavailable"
-_NG_FAILURE_CLASS_REFERENCE_FAILED = "reference_failed"
-_NG_FAILURE_CLASS_NEEDS_REGENERATION = "needs_regeneration"
-# Categories the grader emits with `needs_regeneration`, not `verifier_unavailable`.
+# The `_ng_failure_class` / `failure_kind` values this server writes on a verify response.
+#   provider_unavailable: no verdict for a good saved response. Reverify-recoverable.
+#   verifier_error: a terminal task or reference fault. Never recovered.
+#   critpt_custom_grader:response_incomplete: no usable source. NOT reverify-recoverable. A new candidate is
+#     needed.
+# The first two match nemo_gym.failure_kinds registered names and pass through from there, unchanged.
+_NG_FAILURE_CLASS_RESPONSE_INCOMPLETE = "critpt_custom_grader:response_incomplete"
+# Categories the grader emits with `critpt_custom_grader:response_incomplete`, not `provider_unavailable`.
 _NEEDS_REGENERATION_CATEGORIES = frozenset({"response_incomplete"})
 
 
@@ -392,12 +392,12 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if scored:
             failure_class = None
         elif terminal:
-            failure_class = _NG_FAILURE_CLASS_REFERENCE_FAILED
+            failure_class = failure_kinds.VERIFIER_ERROR
         elif category in _NEEDS_REGENERATION_CATEGORIES:
             # No usable source. Reverify rejects it the same way every pass, so mark for regeneration.
-            failure_class = _NG_FAILURE_CLASS_NEEDS_REGENERATION
+            failure_class = _NG_FAILURE_CLASS_RESPONSE_INCOMPLETE
         else:
-            failure_class = _NG_FAILURE_CLASS_VERIFIER_UNAVAILABLE
+            failure_class = failure_kinds.PROVIDER_UNAVAILABLE
         return CritPtVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -407,6 +407,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             category=category,
             cleanup_status=cleanup,
             failure_class=failure_class,
+            failure_kind=failure_class,
             failure_subcategory=None if scored else category,
             failure_terminal=True if terminal else None,
         )

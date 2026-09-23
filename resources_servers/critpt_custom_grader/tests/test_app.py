@@ -256,7 +256,7 @@ async def until(predicate):
 def assert_unscorable(result, *, terminal=False):
     assert result["reward"] == 0.0
     assert result["scored"] is False
-    assert result["_ng_failure_class"] == ("reference_failed" if terminal else "verifier_unavailable")
+    assert result["_ng_failure_class"] == ("verifier_error" if terminal else "provider_unavailable")
     if terminal:
         assert result["_ng_failure_terminal"] is True
     else:
@@ -1081,7 +1081,7 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["category"] == "response_incomplete"
-    assert result["_ng_failure_class"] == "needs_regeneration"
+    assert result["_ng_failure_class"] == "critpt_custom_grader:response_incomplete"
     assert "_ng_failure_terminal" not in result
     fake.grade.assert_not_awaited()
 
@@ -1096,7 +1096,7 @@ async def test_incomplete_final_message_in_a_completed_envelope_needs_regenerati
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["category"] == "response_incomplete"
-    assert result["_ng_failure_class"] == "needs_regeneration"
+    assert result["_ng_failure_class"] == "critpt_custom_grader:response_incomplete"
     assert "_ng_failure_terminal" not in result
     fake.grade.assert_not_awaited()
 
