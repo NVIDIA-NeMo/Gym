@@ -59,6 +59,7 @@ class GymnasiumRunResponse(BaseVerifyResponse):
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: GymnasiumAgentConfig
 
     async def responses(

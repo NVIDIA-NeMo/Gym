@@ -28,11 +28,10 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
-import ray
 import requests
 import uvicorn
 from aiohttp import (
@@ -839,6 +838,13 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def _get_ray():
+    """Import Ray only for processes configured to use it."""
+    import ray
+
+    return ray
+
+
 def initialize_ray() -> None:
     """
     Initialize ray cluster in a process.
@@ -847,6 +853,7 @@ def initialize_ray() -> None:
     Note: This function will modify the global config dict - update `ray_head_node_address`
     """
 
+    ray = _get_ray()
     if ray.is_initialized():
         print("Ray already initialized")
         return
@@ -860,12 +867,12 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("NeMo Gym is starting a new Ray cluster...")
-        global _NEMO_GYM_STARTED_RAY_CLUSTER
-        _NEMO_GYM_STARTED_RAY_CLUSTER = True
 
     ray.init(**ray_init_kwargs)
 
     if not ray_head_node_address:
+        global _NEMO_GYM_STARTED_RAY_CLUSTER
+        _NEMO_GYM_STARTED_RAY_CLUSTER = True
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
@@ -878,7 +885,9 @@ def maybe_ray_cluster_exit():  # pragma: no cover
         return
 
     print("Shutting down Ray cluster spun up by NeMo Gym...")
-    ray.shutdown()
+    ray = sys.modules.get("ray")
+    if ray is not None:
+        ray.shutdown()
 
     _NEMO_GYM_STARTED_RAY_CLUSTER = False
 
@@ -1003,8 +1012,60 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
+_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
+
+
+def _server_uses_ray(server_class: type) -> bool:
+    ray_enabled = server_class.ray_enabled
+    if ray_enabled is not None:
+        return ray_enabled
+    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
+        logger.warning(
+            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
+            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
+            "a future release will default it to false."
+        )
+        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
+    return True
+
+
+def _uvicorn_kwargs(server_config: BaseRunServerInstanceConfig, global_config_dict: DictConfig) -> dict[str, Any]:
+    """Build Uvicorn settings shared by single- and multi-worker launch paths."""
+    uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+    uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+    return {
+        "host": server_config.host,
+        "port": server_config.port,
+        "timeout_graceful_shutdown": 0.5,
+        "timeout_worker_healthcheck": global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
+        "timeout_keep_alive": 30,
+        "http": "httptools",
+        "access_log": uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
+        "proxy_headers": uvicorn_proxy_cfg.uvicorn_proxy_headers,
+        "forwarded_allow_ips": uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
+    }
+
+
+def _multi_worker_app_import(
+    server_config: BaseRunServerInstanceConfig,
+    global_config_dict: DictConfig,
+) -> str:
+    """Configure worker imports and return the Uvicorn app reference."""
+    server_instance_config_dict = global_config_dict[server_config.name]
+    first_level_key = list(server_instance_config_dict.keys())[0]
+    second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
+    relative_fpath = f"{first_level_key}/{second_level_key}/{server_config.entrypoint}"
+    module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
+
+    set_is_nemo_gym_fastapi_worker()
+    set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
+    set_nemo_gym_fastapi_num_workers(server_config.num_workers or 1)
+    return f"{module_import_str}:app"
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
+    ray_enabled: ClassVar[bool | None] = None
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1188,19 +1249,35 @@ repr(e): {repr(e)}"""
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
-        initialize_ray()
-
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
+        if global_config_dict[DRY_RUN_KEY_NAME]:
+            return None
 
         server_config = cls.load_config_from_global_config()
+        is_multi_worker_manager = (
+            is_main_fastapi_proc and server_config.num_workers is not None and server_config.num_workers > 1
+        )
+
+        if is_multi_worker_manager:
+            uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+            if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
+                print(
+                    "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+                )
+            uvicorn_kwargs = _uvicorn_kwargs(server_config, global_config_dict)
+            uvicorn_kwargs["app"] = _multi_worker_app_import(server_config, global_config_dict)
+            uvicorn_kwargs["workers"] = server_config.num_workers
+            uvicorn.run(**uvicorn_kwargs)
+            return None
+
+        if _server_uses_ray(cls):
+            initialize_ray()
+
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
-
-        if global_config_dict[DRY_RUN_KEY_NAME]:
-            return
 
         # Before setup_webserver so the OTel providers exist by the time the app is
         # instrumented below: FastAPIInstrumentor captures the tracer provider at
@@ -1235,48 +1312,13 @@ repr(e): {repr(e)}"""
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
-        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
             )
 
-        uvicorn_kwargs = dict(
-            host=server.config.host,
-            port=server.config.port,
-            # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
-            timeout_graceful_shutdown=0.5,
-            # Some workers may take a while for imports and setup_webserver.
-            timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
-            # Ensure server keepalive > client keepalive
-            timeout_keep_alive=30,
-            # Parse HTTP with httptools instead of pure-Python h11.
-            # Explicit selection prevents Uvicorn from silently falling back to h11.
-            # A missing or incompatible httptools wheel now fails during startup.
-            http="httptools",
-            access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
-            # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
-            # so forwarded headers are never honored from an arbitrary peer.
-            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
-            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
-        )
-
-        if server.config.num_workers and server.config.num_workers > 1:
-            # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
-            server_instance_config_dict = global_config_dict[server.config.name]
-            first_level_key = list(server_instance_config_dict.keys())[0]
-            second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
-            relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
-            module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
-
-            set_is_nemo_gym_fastapi_worker()
-            set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
-            set_nemo_gym_fastapi_num_workers(server.config.num_workers)
-
-            uvicorn_kwargs["app"] = f"{module_import_str}:app"
-            uvicorn_kwargs["workers"] = server.config.num_workers
-        else:
-            uvicorn_kwargs["app"] = app
+        uvicorn_kwargs = _uvicorn_kwargs(server.config, global_config_dict)
+        uvicorn_kwargs["app"] = app
 
         if is_main_fastapi_proc:
             try:

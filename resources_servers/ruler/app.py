@@ -50,6 +50,7 @@ class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):
 
 
 class RulerResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: RulerResourcesServerConfig
 
     async def verify(self, body: RulerVerifyRequest) -> BaseVerifyResponse:

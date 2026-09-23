@@ -203,6 +203,7 @@ class CritPtVerifyResponse(BaseVerifyResponse):
 
 
 class CritPtResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: CritPtResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

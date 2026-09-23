@@ -101,6 +101,7 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: StructuredOutputsResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

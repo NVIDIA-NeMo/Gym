@@ -154,6 +154,8 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
     text whose docstring is not indented and therefore is not valid Python.
     """
 
+    ray_enabled = False
+
     config: SciCodePileResourcesServerConfig
 
     def model_post_init(self, context):

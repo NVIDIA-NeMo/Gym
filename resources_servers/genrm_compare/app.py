@@ -278,6 +278,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     - Batch /compare: Direct comparison of N response_objs (e.g. for rollout_collection or tests).
     """
 
+    ray_enabled = False
+
     config: GenRMCompareConfig
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)

@@ -93,6 +93,8 @@ class GenRMModel(GenRMModelMixin, LocalVLLMModel):
     for response_1/response_2/principle roles.
     """
 
+    ray_enabled = False
+
     config: GenRMModelConfig
 
 

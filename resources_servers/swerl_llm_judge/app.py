@@ -167,6 +167,7 @@ def _extract_llm_choice_from_solution_block_strict(llm_output: str, allowed_lett
 
 
 class SWEJudgeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SWEJudgeResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

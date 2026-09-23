@@ -74,6 +74,7 @@ class GetInnerVLLMConfigResponse(BaseModel):
 
 
 class LocalVLLMModel(VLLMModel):
+    ray_enabled = True
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor

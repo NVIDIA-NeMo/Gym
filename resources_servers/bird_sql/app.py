@@ -111,6 +111,7 @@ class BirdSqlVerifyResponse(BaseVerifyResponse):
 
 
 class BirdSqlResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: BirdSqlResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

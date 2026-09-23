@@ -21,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -34,7 +35,6 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
@@ -68,6 +68,8 @@ from nemo_gym.telemetry.setup import (
 
 
 logger = logging.getLogger(__name__)
+
+ray_version = distribution_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"

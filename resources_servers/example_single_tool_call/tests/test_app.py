@@ -13,8 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import runpy
+from pathlib import Path
 from unittest.mock import MagicMock
 
+from fastapi import FastAPI
+
+import nemo_gym.server_utils
+import resources_servers.example_single_tool_call.app as app_module
+from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.example_single_tool_call.app import (
@@ -33,6 +40,19 @@ class TestApp:
             name="",
         )
         SimpleWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_uvicorn_worker_exports_app(self, monkeypatch) -> None:
+        expected_app = FastAPI()
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _file: True)
+        monkeypatch.setattr(
+            SimpleResourcesServer,
+            "run_webserver",
+            classmethod(lambda _cls: expected_app),
+        )
+
+        worker_module = runpy.run_path(str(Path(app_module.__file__)), run_name="uvicorn_worker")
+
+        assert worker_module["app"] is expected_app
 
     def test_verifier_fixture(self) -> None:
         asyncio.run(

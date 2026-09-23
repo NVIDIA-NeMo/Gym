@@ -262,6 +262,7 @@ class SpartqaVerifyResponse(BaseVerifyResponse):
 
 
 class SpartqaResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SpartqaResourcesServerConfig
 
     async def verify(self, body: SpartqaVerifyRequest) -> SpartqaVerifyResponse:

@@ -68,6 +68,8 @@ class FukuyamaBenchVerifyResponse(BaseVerifyResponse):
 
 
 class FukuyamaBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
+
     config: BaseResourcesServerConfig
 
     def compute_metrics(self, tasks: list[list[dict]]) -> dict:

@@ -76,6 +76,7 @@ def empty_response(params: NeMoGymResponseCreateParamsNonStreaming, model: str) 
 
 
 class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: MiniSWESandboxedConfig
 
     def model_post_init(self, context: object) -> None:

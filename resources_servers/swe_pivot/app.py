@@ -564,6 +564,7 @@ def _extract_expected_function_call(body: SwePivotRunRequest) -> Optional[dict]:
 
 
 class SwePivotResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SwePivotResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

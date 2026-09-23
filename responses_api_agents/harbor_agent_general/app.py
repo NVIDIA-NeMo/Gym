@@ -119,6 +119,7 @@ class HarborVerifyResponse(BaseVerifyResponse):
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: HarborAgentConfig
 
     _sem: asyncio.Semaphore = PrivateAttr()

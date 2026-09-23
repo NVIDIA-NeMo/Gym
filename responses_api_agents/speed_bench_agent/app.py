@@ -112,6 +112,8 @@ def _content_text(content) -> str:
 class SpeedBenchAgent(SimpleResponsesAPIAgent):
     """Multi-turn fixed-replay agent for SPEED-Bench."""
 
+    ray_enabled = False
+
     config: SpeedBenchAgentConfig
 
     async def responses(

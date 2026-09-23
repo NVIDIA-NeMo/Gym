@@ -331,6 +331,7 @@ class NeMoFabricAgentVerifyResponse(BaseVerifyResponse):
 
 
 class NeMoFabricAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: NeMoFabricAgentConfig
     sem: Semaphore | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

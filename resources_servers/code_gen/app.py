@@ -83,6 +83,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # Server
 # ----------------------------
 class CompCodingResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):

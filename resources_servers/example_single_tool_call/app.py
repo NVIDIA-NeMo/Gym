@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -48,6 +49,7 @@ class SimpleWeatherVerifier:
 
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
+    ray_enabled = False
     config: SimpleWeatherResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -70,3 +72,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     SimpleWeatherResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SimpleWeatherResourcesServer.run_webserver()  # noqa: F401

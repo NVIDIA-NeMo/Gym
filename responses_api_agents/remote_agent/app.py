@@ -150,6 +150,7 @@ class RemoteAgentVerifyResponse(BaseVerifyResponse):
 
 
 class RemoteAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: RemoteAgentConfig
     sem: Optional[asyncio.Semaphore] = None
     _num_failures: int = PrivateAttr(default=0)
