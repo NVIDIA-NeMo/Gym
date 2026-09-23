@@ -22,3 +22,11 @@ gymnasium_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/gymnasium/data/example.jsonl
+
+gymnasium_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gymnasium_agent

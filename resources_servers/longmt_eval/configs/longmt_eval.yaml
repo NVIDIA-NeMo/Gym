@@ -29,3 +29,11 @@ longmt_eval_simple_agent:
         jsonl_fpath: resources_servers/longmt_eval/data/example.jsonl
         num_repeats: 1
         license: Apache 2.0
+
+longmt_eval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: longmt_eval_simple_agent

@@ -23,3 +23,10 @@ ragtruth_benchmark_simple_agent:
         prompt_config: null
         num_repeats: 1
         license: MIT
+
+ragtruth_benchmark_environment_server:
+  _inherit_from: ragtruth_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: ragtruth_benchmark_simple_agent

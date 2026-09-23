@@ -30,3 +30,10 @@ tau2_benchmark_agent:
         prompt_config: null
         prepare_script: benchmarks/tau2/prepare.py
         num_repeats: 8
+
+tau2_benchmark_environment_server:
+  _inherit_from: tau2_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: tau2_benchmark_agent
