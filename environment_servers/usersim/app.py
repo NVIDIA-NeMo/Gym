@@ -39,7 +39,6 @@ from nemo_gym.config_types import (
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
-    ModelServerRef,
     ResourcesServerRef,
 )
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
@@ -57,7 +56,6 @@ from nemo_gym.tool_access import (
     ToolAccess,
 )
 from resources_servers.usersim.episode_contracts import (
-    USERSIM_MODEL_ALIASES,
     UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
@@ -81,30 +79,31 @@ _INVOCATION_ROLE_BY_ALIAS = {
     "judge_model": "judge",
     "summary_model": "summary",
 }
+_USERSIM_AGENT_ALIASES = tuple(_INVOCATION_ROLE_BY_ALIAS)
 _PARTICIPANT_ROLES = {"user", "assistant"}
 
 
 class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
-    """Bind UserSim's model aliases to Gym Agent and Model Servers."""
+    """Bind UserSim's conversation roles to Gym Agent Servers."""
 
     model_config = ConfigDict(extra="forbid")
 
     user_agent: AgentServerRef
     assistant_agent: AgentServerRef
-    judge_model: ModelServerRef
-    summary_model: ModelServerRef
+    judge_agent: AgentServerRef
+    summary_agent: AgentServerRef
     resources_server: ResourcesServerRef
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
     max_turns: int = Field(5, ge=1)
     actor_call_timeout_seconds: float = Field(300.0, gt=0)
     protocol_config: UserSimProtocolConfig = Field(default_factory=UserSimProtocolConfig)
 
-    def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
+    def target_for_alias(self, alias: str) -> AgentServerRef:
         return {
             "user_model": self.user_agent,
             "assistant_model": self.assistant_agent,
-            "judge_model": self.judge_model,
-            "summary_model": self.summary_model,
+            "judge_model": self.judge_agent,
+            "summary_model": self.summary_agent,
         }[alias]
 
 
@@ -160,7 +159,7 @@ def _create_usersim_generator(
 
     class _GymConversationGenerator(generator_type):
         def __init__(self) -> None:
-            self.config = config
+            self._config = config
             self._models = models
 
         def get_model(self, alias: str) -> Any:
@@ -226,7 +225,8 @@ class _ConversationBridge:
         max_tokens: int | None,
         tools: Sequence[Any] | None,
     ) -> SimpleNamespace:
-        base_params = self.task.model_responses_create_params.get(alias)
+        role = _INVOCATION_ROLE_BY_ALIAS[alias]
+        base_params = self.task.agent_responses_create_params.get(role)
         if base_params is None:
             base_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
         values = base_params.model_dump(mode="json", exclude_none=True)
@@ -240,21 +240,20 @@ class _ConversationBridge:
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(values)
 
         target = self.environment_server.config.target_for_alias(alias)
-        agent_session = self.agent_sessions.get(alias)
+        agent_session = self.agent_sessions[alias]
         response = await self.environment_server.server_client.post(
             server_name=target.name,
             url_path=self.environment_server.responses_path(target.name, self.request),
             json=request_params,
-            cookies=agent_session.cookies if agent_session is not None else None,
+            cookies=agent_session.cookies,
         )
         await raise_for_status(response)
         response_data = await get_response_json(response)
         trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
         gym_response = NeMoGymResponse.model_validate(response_data)
-        if agent_session is not None:
-            response_cookies = _cookies(response)
-            if response_cookies:
-                agent_session.cookies = response_cookies
+        response_cookies = _cookies(response)
+        if response_cookies:
+            agent_session.cookies = response_cookies
 
         self.invocations.append(
             UserSimInvocation(
@@ -279,15 +278,6 @@ class _ConversationBridge:
                 else None
             ),
         )
-
-    def attach_session_observations(self, alias: str, observations: AgentObservationBundle | None) -> None:
-        if observations is None:
-            return
-        for index in range(len(self.invocations) - 1, -1, -1):
-            invocation = self.invocations[index]
-            if invocation.role == _INVOCATION_ROLE_BY_ALIAS[alias]:
-                self.invocations[index] = invocation.model_copy(update={"observations": observations})
-                return
 
 
 class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, UserSimEpisodeResponse]):
@@ -348,20 +338,22 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         tool_accesses = self._resources_tool_accesses(seed, resources_cookies)
 
         agent_sessions: dict[str, _AgentSession] = {}
-        for alias, target in (
-            ("user_model", self.config.user_agent),
-            ("assistant_model", self.config.assistant_agent),
-        ):
+        agent_targets = {
+            alias: self.config.target_for_alias(alias)
+            for alias in ("user_model", "assistant_model", "judge_model", "summary_model")
+        }
+        for alias, target in agent_targets.items():
             try:
+                session_request = AgentSeedSessionRequest(
+                    episode_id=request.episode_id,
+                    task_id=request.task.task_id,
+                    tool_accesses=tool_accesses if alias == "assistant_model" else [],
+                    sandbox_access=seed.sandbox_access if alias in {"user_model", "assistant_model"} else None,
+                )
                 session_http_response = await self.server_client.post(
                     server_name=target.name,
                     url_path="/v1/agent_sessions",
-                    json=AgentSeedSessionRequest(
-                        episode_id=request.episode_id,
-                        task_id=request.task.task_id,
-                        tool_accesses=tool_accesses if alias == "assistant_model" else [],
-                        sandbox_access=seed.sandbox_access,
-                    ),
+                    json=session_request.model_dump(mode="json"),
                 )
                 await raise_for_status(session_http_response)
                 session_response = AgentSeedSessionResponse.model_validate(
@@ -414,7 +406,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         except Exception as error:
             raise self._failure("simulation", error) from error
 
-        for alias in ("assistant_model", "user_model"):
+        for alias in reversed(tuple(agent_targets)):
             session = agent_sessions[alias]
             try:
                 if session.cleanup is None:
@@ -423,8 +415,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             except Exception as error:
                 raise self._failure("cleanup", error, terminal=True) from error
             if session.close_response is not None:
-                bridge.attach_session_observations(alias, session.close_response.agent_observations)
-                if session.close_response.resources_cookies is not None:
+                if session.close_response.resources_cookies:
                     bridge.resources_cookies.clear()
                     bridge.resources_cookies.update(session.close_response.resources_cookies)
 
@@ -477,7 +468,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             {"name": "conversation_messages", "locale": scenario.locale, "max_turns": self.config.max_turns}
         )
         config = ConversationSimulatorConfig.model_validate(config_values)
-        models: dict[str, Any] = {alias: _GymModelFacade(alias, bridge) for alias in USERSIM_MODEL_ALIASES}
+        models: dict[str, Any] = {alias: _GymModelFacade(alias, bridge) for alias in _USERSIM_AGENT_ALIASES}
         # UserSim currently resolves all model aliases eagerly. This alias is used only by
         # probe tool runtimes, which execute in the Resources Server.
         models["api_response_model"] = _ResourcesOwnedModelFacade()
