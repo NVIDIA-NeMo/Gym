@@ -46,15 +46,15 @@ The Resources Server owns the episode-scoped tool implementation, mutable
 state, and native verification evidence. All other probes execute their native
 UserSim conversation shape without Assistant tools.
 
-The resulting ordered `result.invocations` retain participant and support-model
-calls, tool calls and results, post-activation state, and observations.
+The resulting ordered `result.invocations` retain User, Assistant, Judge, and
+Summary Agent activations, tool calls and results, post-activation state, and
+observations.
 
-The Assistant, simulated User, and NeMo UserSim support calls use three explicit
-model-server references: `assistant_policy_model`, `user_policy_model`, and
-`simulation_support_model`. By default, all three inherit the standard
-`policy_base_url`, `policy_api_key`, and `policy_model_name` settings. Override
-their corresponding `assistant_policy_*`, `user_policy_*`, or
-`simulation_support_*` settings to run them on different models or endpoints.
+The four Agents have explicit policy Model Servers. Resources-owned tool-result
+synthesis uses `tool_simulation_model`, while `probe_scorer_model` reuses
+`judge_model` by default. All Model Servers inherit the standard
+`policy_base_url`, `policy_api_key`, and `policy_model_name` settings unless
+their role-specific settings override them.
 
 After preparation:
 
