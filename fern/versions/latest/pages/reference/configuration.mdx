@@ -93,6 +93,38 @@ server_id:                    # Your unique name for this server
       # ... additional fields vary by server type
 ```
 
+### HTTP Connection Pool
+
+Gym uses one shared aiohttp connection pool per process. The top-level limits are aggregate
+budgets across the FastAPI workers and are divided by the worker count:
+
+```yaml
+global_aiohttp_connector_limit: 102400
+global_aiohttp_connector_limit_per_host: 1024
+
+# Optional sizing checks. Set these when the expected outbound concurrency is known.
+global_aiohttp_intended_concurrency: 4096
+global_aiohttp_intended_concurrency_per_host: 2048
+```
+
+At startup, Gym logs the aggregate and effective per-worker limits. It rejects non-positive
+limits and limits that become zero after worker division because aiohttp interprets a zero
+connector limit as unlimited. When either optional intended-concurrency value is larger than
+its effective limit, Gym warns that requests can queue and reports the file-descriptor and
+ephemeral-port budgets used for capacity planning.
+
+The `http_client` telemetry group adds the following bounded attributes to each outbound CLIENT
+span:
+
+| Attribute | Meaning |
+| --- | --- |
+| `nemo.gym.http.connection_pool.queued` | Whether this logical request waited for a connection |
+| `nemo.gym.http.connection_pool.queue_events` | Number of queue waits across retries made inside `server_utils.request()` |
+| `nemo.gym.http.connection_pool.queue_duration_ms` | Total connection-pool wait across retries made inside `server_utils.request()` |
+| `nemo.gym.http.connection_pool.queue_constraint` | Connector limit associated with the wait: `total`, `per_host`, `mixed`, `unknown`, or `none` |
+
+No queue callbacks are installed when the `http_client` group is disabled.
+
 ### Reverse Proxy Headers
 
 Gym disables Uvicorn proxy-header processing by default. Direct Gym traffic does not pass through a reverse proxy, so

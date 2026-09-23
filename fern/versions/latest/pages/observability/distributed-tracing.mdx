@@ -38,6 +38,13 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
              version
 ```
 
+Each CLIENT span also separates connection-pool wait from total request time. The
+`nemo.gym.http.connection_pool.queue_duration_ms` attribute is `0` when a connection was
+available immediately and accumulates every wait across retries made inside
+`server_utils.request()` otherwise. See
+[Configuration](/main/reference/configuration#http-connection-pool) for the complete attribute
+and pool-sizing reference.
+
 **Inbound.** Every NeMo Gym server applies OpenTelemetry FastAPI auto-instrumentation,
 which reads `traceparent` off the incoming request and makes the caller's span the parent
 of its own SERVER span.

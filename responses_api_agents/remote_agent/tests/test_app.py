@@ -184,7 +184,12 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-    monkeypatch.setattr(remote_agent_app, "get_global_aiohttp_client", lambda: client)
+
+    async def http_request(method, url, _max_connection_retries=None, **kwargs):
+        assert _max_connection_retries == 1
+        return await client.request(method, url, **kwargs)
+
+    monkeypatch.setattr(remote_agent_app, "http_request", http_request)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
