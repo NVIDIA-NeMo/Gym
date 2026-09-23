@@ -21,7 +21,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym._checkpoint.control import CONTROL_URL_PREFIX, CheckpointControlRequest
-from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
+from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 
 
 MODEL_ADMISSION_URL_PREFIX = f"{CONTROL_URL_PREFIX}/model-admission"
@@ -76,21 +76,89 @@ class GenerationCutPrefixAck(_GenerationCutModel):
     model_call_id: str = Field(min_length=1)
     admitted_at: float
     disposition: Literal["durable_prefix", "durable_failure"]
+    cut_kind: Literal["active_prefix", "terminal_completion"] | None = None
     frozen_buffer_id: str | None = Field(default=None, min_length=1)
-    staging_key: str | None = Field(default=None, min_length=1)
+    staging_keys: tuple[str, ...] = ()
     prefix_token_count: int | None = Field(default=None, ge=0)
     prefix_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    effective_output_limit: int | None = Field(default=None, ge=1)
+    terminal_finish_reason: Literal["stop", "length"] | None = None
+    terminal_stop_reason: str | int | None = None
 
     @model_validator(mode="after")
     def _validate_prefix_evidence(self) -> "GenerationCutPrefixAck":
-        evidence = (self.frozen_buffer_id, self.staging_key, self.prefix_token_count, self.prefix_digest)
-        if self.disposition == "durable_prefix" and any(value is None for value in evidence):
+        evidence = (self.frozen_buffer_id, self.prefix_token_count, self.prefix_digest)
+        if self.disposition == "durable_prefix" and (
+            self.cut_kind is None or any(value is None for value in evidence) or not self.staging_keys
+        ):
             raise ValueError(
-                "durable_prefix requires frozen_buffer_id, staging_key, prefix_token_count, and prefix_digest"
+                "durable_prefix requires cut_kind, frozen_buffer_id, staging_keys, "
+                "prefix_token_count, and prefix_digest"
             )
-        if self.disposition == "durable_failure" and any(value is not None for value in evidence):
-            raise ValueError("durable_failure cannot carry prefix evidence")
+        if self.disposition == "durable_prefix" and self.effective_output_limit is None:
+            raise ValueError("durable_prefix requires effective_output_limit")
+        if self.terminal_stop_reason is not None and self.terminal_finish_reason is None:
+            raise ValueError("terminal_stop_reason requires terminal_finish_reason")
+        if len(self.staging_keys) != len(set(self.staging_keys)) or any(not key for key in self.staging_keys):
+            raise ValueError("generation-cut staging_keys must be unique and non-empty")
+        if self.disposition == "durable_failure" and (
+            self.cut_kind is not None
+            or self.staging_keys
+            or any(value is not None for value in evidence)
+            or self.effective_output_limit is not None
+            or self.terminal_finish_reason is not None
+            or self.terminal_stop_reason is not None
+        ):
+            raise ValueError("durable_failure cannot carry cut or prefix evidence")
         return self
+
+
+class GenerationCutLineageRecord(GenerationCutPrefixAck):
+    """Token-free durable cut coordinate stored in one rollout lineage.
+
+    The ordered TQ rows own the token and logprob chunks.  This record
+    binds that chain to the checkpoint and rollout attempt whose model call was
+    cut.  Repeating an identical record is idempotent; a conflicting record
+    for the same checkpoint ticket is a ledger corruption.
+    """
+
+    event: Literal["generation_cut"] = "generation_cut"
+    checkpoint_id: str = Field(min_length=1)
+    server_name: str = Field(min_length=1)
+    capture_key: str = Field(min_length=1, pattern=ROLLOUT_ID_PATTERN.pattern)
+
+    @classmethod
+    def from_prefix(
+        cls,
+        *,
+        checkpoint_id: str,
+        server_name: str,
+        prefix: GenerationCutPrefixAck,
+    ) -> "GenerationCutLineageRecord":
+        return cls(
+            **prefix.model_dump(mode="json"),
+            checkpoint_id=checkpoint_id,
+            server_name=server_name,
+            capture_key=capture_key_for(prefix.rollout_id, prefix.attempt_index),
+        )
+
+    @model_validator(mode="after")
+    def _validate_capture_key(self) -> "GenerationCutLineageRecord":
+        expected = capture_key_for(self.rollout_id, self.attempt_index)
+        if self.capture_key != expected:
+            raise ValueError(
+                "generation-cut lineage capture key does not match its rollout "
+                f"attempt: expected={expected!r}, actual={self.capture_key!r}"
+            )
+        return self
+
+    def prefix_ack(self) -> GenerationCutPrefixAck:
+        return GenerationCutPrefixAck.model_validate(
+            self.model_dump(
+                mode="json",
+                exclude={"event", "checkpoint_id", "server_name", "capture_key"},
+            )
+        )
 
 
 class GenerationCutReceipt(_GenerationCutModel):
@@ -143,6 +211,13 @@ class GenerationCutReceipt(_GenerationCutModel):
 
 
 GenerationCutAck = GenerationCutReceipt
+
+
+class GenerationCutReplacement(_GenerationCutModel):
+    """One replacement attempt that must restart without a token prefix."""
+
+    rollout_id: str = Field(min_length=1, pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
 
 
 class GenerationCutFrozenTicket(_GenerationCutModel):
@@ -319,7 +394,12 @@ class GenerationCutBackend(Protocol):
         """Create durable recovery state and return its final receipt."""
         ...
 
-    async def restore_generation_cut(self, receipt: GenerationCutReceipt) -> GenerationCutReceipt:
+    async def restore_generation_cut(
+        self,
+        receipt: GenerationCutReceipt,
+        *,
+        excluded_replacements: frozenset[tuple[str, int]] = frozenset(),
+    ) -> GenerationCutReceipt:
         """Restore the durable backend snapshot named by ``receipt``."""
         ...
 

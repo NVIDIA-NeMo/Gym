@@ -82,6 +82,8 @@ class CaptureContext:
     # ``None`` means another process owns record staging.
     # The context still carries the capture identity.
     token_sink: TokenSink | None
+    logical_rollout_id: str | None = None
+    attempt_index: int | None = None
     # External staging binds a ``CaptureLedger``; the built-in path needs only a resolver.
     lineage_store: LineageResolver | CaptureLedger | None = None
     model: str = ""
@@ -120,6 +122,7 @@ class CaptureContext:
     request_items: list[dict] | None = None
     # Retain the worker acknowledgement privately until API conversion finishes.
     external_commit_coords: dict[str, Any] | None = None
+    generation_cut_key: tuple[str, int] | None = None
 
     @property
     def parent_call_id(self) -> str | None:

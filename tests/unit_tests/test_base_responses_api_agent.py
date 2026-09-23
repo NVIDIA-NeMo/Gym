@@ -79,7 +79,7 @@ class TestBaseResponsesAPIAgent:
 
     def _agent(self, global_config: dict, *, token_id_capture: bool = False) -> SimpleResponsesAPIAgent:
         config = BaseResponsesAPIAgentConfig(
-            host="", port=0, entrypoint="", name="", token_id_capture=token_id_capture
+            host="", port=0, entrypoint="", name="agent", token_id_capture=token_id_capture
         )
 
         class _Agent(SimpleResponsesAPIAgent):
@@ -178,6 +178,115 @@ class TestBaseResponsesAPIAgent:
 
             await participant.resume()
             assert await asyncio.wait_for(request, timeout=1) == "done"
+            assert operation_started.is_set()
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")
+
+    async def test_checkpoint_refusal_after_resume_retries_without_parking(self) -> None:
+        agent = self._agent({})
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        response_ready = asyncio.Event()
+        return_refusal = asyncio.Event()
+        calls = 0
+
+        class _Response:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            async def read(self) -> bytes:
+                return self._body
+
+        async def operation() -> _Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                response_ready.set()
+                await return_refusal.wait()
+                return _Response(409, b'{"error":{"code":"checkpoint_parked"}}')
+            return _Response(200, b"{}")
+
+        token = participant.bind(execution)
+        try:
+            retried = asyncio.create_task(
+                agent.retry_checkpoint_refusal(
+                    operation,
+                    checkpointable_model_wait=True,
+                )
+            )
+            await response_ready.wait()
+            report = await participant.prepare(
+                time.time() + 2,
+                allow_model_wait_boundary=True,
+            )
+            assert report["ready_to_commit"] is True
+
+            return_refusal.set()
+            await asyncio.sleep(0)
+            assert not retried.done()
+
+            await participant.resume()
+            response = await asyncio.wait_for(retried, timeout=1)
+            assert response.status == 200
+            assert calls == 2
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")
+
+    async def test_checkpoint_prepare_before_model_wait_blocks_http_dispatch(self) -> None:
+        agent = self._agent({})
+        participant = AgentCheckpointParticipant("test-agent")
+        agent._checkpoint_participant = participant
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                boundary_index=1,
+                output_items=[],
+            ),
+        )
+        operation_started = asyncio.Event()
+
+        class _Response:
+            status = 200
+
+            async def read(self) -> bytes:
+                return b"{}"
+
+        async def operation() -> _Response:
+            operation_started.set()
+            return _Response()
+
+        token = participant.bind(execution)
+        try:
+            prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            request = asyncio.create_task(
+                agent.retry_checkpoint_refusal(
+                    operation,
+                    checkpointable_model_wait=True,
+                )
+            )
+
+            assert (await prepare)["ready_to_commit"] is True
+            assert not operation_started.is_set()
+
+            await participant.resume()
+            response = await asyncio.wait_for(request, timeout=1)
+            assert response.status == 200
             assert operation_started.is_set()
         finally:
             participant.unbind(token)
