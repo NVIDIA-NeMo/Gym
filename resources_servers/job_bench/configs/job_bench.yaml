@@ -4,7 +4,7 @@ job_bench_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
-      allowed_agents: [opencode_sandboxed_agent, harness_agent]
+      allowed_agents: [harness_agent]
       judge_base_url: ${oc.env:JOB_BENCH_JUDGE_BASE_URL,https://api.x.ai/v1}
       judge_api_key: ${oc.env:JOB_BENCH_JUDGE_API_KEY,${oc.env:XAI_API_KEY,''}}
       judge_model: ${oc.env:JOB_BENCH_JUDGE_MODEL,grok-4.3}
@@ -21,5 +21,4 @@ job_bench_resources_server:
         provider_options: {}
         metadata:
           benchmark: job-bench
-          harness: opencode
 

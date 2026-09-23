@@ -1,33 +1,27 @@
 # Job-Bench
 
-Runs the Job-Bench `main` split with OpenCode 1.14.18 and an upstream-derived weighted-rubric evaluator.
-The `job-bounded-utf8-v1` input-preparation variant is documented in
-[the resources server](../../resources_servers/job_bench/README.md); it is not exact published-leaderboard reproduction.
-The example explicitly selects a judge on NVIDIA's OpenAI-compatible API; no XAI key is required.
+The 65-task Job-Bench `main` split, run with `harness_agent` using Claude Code, Codex, Pi, or Hermes. Deliverables are
+graded by the upstream Job-Bench rubric judge. See [the resources server](../../resources_servers/job_bench/README.md)
+for how grading differs from upstream.
 
 ```bash
-uv run gym eval prepare --benchmark job_bench
+gym eval prepare --benchmark job_bench/claude_code
 
-export NVIDIA_API_KEY=...
-export POLICY_MODEL=... # Exact model ID available on your endpoint.
-export POLICY_BASE_URL=https://inference-api.nvidia.com/v1
-export JOB_BENCH_JUDGE_BASE_URL="$POLICY_BASE_URL"
-export JOB_BENCH_JUDGE_API_KEY="$NVIDIA_API_KEY"
-export JOB_BENCH_JUDGE_MODEL="$POLICY_MODEL"
-export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
-uv run gym eval run \
-  --benchmark job_bench \
-  --model-type vllm_model \
-  --model-url "$POLICY_BASE_URL" \
-  --model "$POLICY_MODEL" \
-  --model-api-key "$NVIDIA_API_KEY" \
+gym eval run \
+  --benchmark job_bench/claude_code \
   --split benchmark \
-  --output results/job_bench.jsonl \
-  +default_host="$ROUTABLE_HOST_IP"
+  --model-type vllm_model \
+  --model "$POLICY_MODEL" \
+  --model-url "$POLICY_BASE_URL" \
+  --model-api-key "$POLICY_API_KEY" \
+  --output results/job_bench.jsonl
 ```
 
-Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, and a routable `ROUTABLE_HOST_IP`. Use `JOB_BENCH_JUDGE_*` to
-override the judge. Set `JOB_BENCH_SPLIT=easy` for the smaller non-leaderboard split.
-Without explicit judge overrides, the upstream-derived YAML still defaults to Grok 4.3 on XAI.
-Keep one judge fixed across model comparisons, including its revision, sampling, and input protocol.
-The default dataset configuration runs one repeat; set `num_repeats: 4` for avg@4 and include every planned trial.
+Replace `claude_code` with `codex`, `pi`, or `hermes` to change the harness.
+
+- Sandboxes run on OpenSandbox: set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
+- The judge defaults to Grok 4.3 on xAI (`XAI_API_KEY`), as upstream does. Override it with `JOB_BENCH_JUDGE_BASE_URL`,
+  `JOB_BENCH_JUDGE_API_KEY`, and `JOB_BENCH_JUDGE_MODEL`, and keep it fixed across compared runs.
+- `harness_agent` runs the agent inside the task sandbox, so `JOB_BENCH_SANDBOX_IMAGE` must include `python3` and Gym's
+  dependencies.
+- Set `JOB_BENCH_SPLIT=easy` before `prepare` for the smaller split.
