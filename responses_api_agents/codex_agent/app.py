@@ -383,7 +383,7 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
 
     @model_validator(mode="after")
     def validate_context_budget(self) -> "CodexAgentConfig":
-        """Reject explicit compaction limits that the pinned CLI would silently clamp."""
+        """Check the explicit config pair against the pinned CLI's 90% compaction threshold."""
         if (
             self.model_context_window is not None
             and self.model_auto_compact_token_limit is not None
