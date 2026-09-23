@@ -10,11 +10,15 @@ import base64
 import json
 import logging
 import shlex
+import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field
@@ -41,10 +45,13 @@ from responses_api_agents.apex_agent.runtime_setup import (
     resolve_image,
     stirrup_cache_path,
 )
+from responses_api_agents.apex_agent.stirrup_runtime import RelayServer, serve_unix_to_tcp
 
 
 LOG = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
+_EGRESS_MOUNT = "/egress"
+_EGRESS_SOCKET_NAME = "policy.sock"
 _STIRRUP_RUNTIME_PATH = Path(__file__).with_name("stirrup_runtime.py")
 _STIRRUP_SETUP_PATH = Path(__file__).with_name("setup_stirrup.sh")
 _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt")
@@ -76,6 +83,10 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
     artifact_output_dir: Optional[str] = None
+    # Relay policy traffic through a unix socket bound into the sandbox. "auto"
+    # enables it when the apptainer sandbox runs in its own network namespace
+    # (extra_start_args contain --net or a --network option).
+    policy_egress_relay: Literal["auto", "always", "never"] = "auto"
 
 
 class ApexAgentRunRequest(BaseRunRequest):
@@ -120,6 +131,38 @@ def _safe_id(value: str) -> str:
     return cleaned[:128] or "unknown"
 
 
+class PolicyEgressRelay:
+    """Unix socket on the host that forwards sandbox connections to the model server."""
+
+    def __init__(self, socket_dir: Path, server: RelayServer) -> None:
+        self.socket_dir = socket_dir
+        self._server = server
+
+    @property
+    def socket_name(self) -> str:
+        return _EGRESS_SOCKET_NAME
+
+    @classmethod
+    async def start(cls, model_base_url: str) -> "PolicyEgressRelay":
+        parts = urlsplit(model_base_url)
+        if parts.scheme != "http" or not parts.hostname:
+            raise ValueError(f"the policy egress relay needs an http model_base_url, got {model_base_url!r}")
+        socket_dir = Path(tempfile.mkdtemp(prefix="apex-egress-"))
+        if len(str(socket_dir / _EGRESS_SOCKET_NAME)) > 100:  # AF_UNIX paths are capped at 107 bytes
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            socket_dir = Path(tempfile.mkdtemp(prefix="apex-egress-", dir="/tmp"))
+        try:
+            server = await serve_unix_to_tcp(str(socket_dir / _EGRESS_SOCKET_NAME), parts.hostname, parts.port or 80)
+        except Exception:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            raise
+        return cls(socket_dir, server)
+
+    async def close(self) -> None:
+        await self._server.close()
+        shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
 class ApexAgent(SimpleResponsesAPIAgent):
     """Run one upstream Apex rollout, then hand changed artifacts to Gym verification."""
 
@@ -158,6 +201,28 @@ class ApexAgent(SimpleResponsesAPIAgent):
         if not isinstance(value, str) or not value.strip():
             raise RuntimeError("policy_model_name must be set in Gym's env.yaml or with gym eval run --model")
         return value.strip()
+
+    def _sandbox_has_private_network(self) -> bool:
+        provider = self._sandbox_provider if isinstance(self._sandbox_provider, dict) else {}
+        create = (provider.get("apptainer") or {}).get("create") or {}
+        args = create.get("extra_start_args") or []
+        return any(str(arg) == "--net" or str(arg).startswith("--network") for arg in args)
+
+    def _policy_egress_relay_enabled(self) -> bool:
+        if self.config.policy_egress_relay == "auto":
+            return self._sandbox_has_private_network()
+        return self.config.policy_egress_relay == "always"
+
+    @asynccontextmanager
+    async def _policy_egress(self, body: ApexAgentRunRequest) -> AsyncIterator[PolicyEgressRelay | None]:
+        if not self._policy_egress_relay_enabled():
+            yield None
+            return
+        relay = await PolicyEgressRelay.start(self._model_base_url(body))
+        try:
+            yield relay
+        finally:
+            await relay.close()
 
     def _sandbox_parts(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
         extra = dict(self.config.sandbox_spec)
@@ -257,8 +322,18 @@ class ApexAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(f"task attachment archive is {len(data)} bytes; limit is {self.config.max_world_bytes}")
         target.write_bytes(data)
 
-    def _sandbox_spec(self, body: ApexAgentRunRequest, instruction: str) -> SandboxSpec:
+    def _sandbox_spec(
+        self,
+        body: ApexAgentRunRequest,
+        instruction: str,
+        relay: PolicyEgressRelay | None = None,
+    ) -> SandboxSpec:
         extra, provider_options, metadata, resources = self._sandbox_parts()
+        if relay is not None:
+            binds = provider_options.get("binds")
+            binds = [binds] if isinstance(binds, str) else list(binds or [])
+            binds.append(f"{relay.socket_dir}:{_EGRESS_MOUNT}")
+            provider_options["binds"] = binds
         metadata.update({"nemo_gym_agent": self.config.name, "task_id": _safe_id(body.task_id)})
         policy_model = self._policy_model()
         if "edgar" in body.foundry_services and not self.config.edgar_user_agent:
@@ -291,6 +366,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
             "foundry_services": body.foundry_services,
             "edgar_user_agent": self.config.edgar_user_agent,
         }
+        if relay is not None:
+            runner_config["model_egress_socket"] = f"{_EGRESS_MOUNT}/{relay.socket_name}"
         return SandboxSpec(
             image=self._image or self.config.image,
             workdir=_GUEST_ROOT,
@@ -450,52 +527,53 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     await self._download_world(cookies, world_zip)
                     if body.task_input_files:
                         await self._download_task_files(cookies, task_files_zip)
-                    spec = self._sandbox_spec(body, instruction)
-                    async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
-                        await sandbox.start()
-                        await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
-                        if body.task_input_files:
-                            await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
-                        await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
-                        unpack = await sandbox.exec(
-                            f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
-                            f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
-                            f"-C {shlex.quote(_STIRRUP_ROOT)}",
-                            user="root",
-                            timeout_s=600,
-                        )
-                        if unpack.return_code != 0:
-                            detail = (unpack.stderr or unpack.stdout or "")[-4000:]
-                            return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
-                        protect = await sandbox.exec(
-                            f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
-                            f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
-                            f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
-                            user="root",
-                        )
-                        if protect.return_code != 0:
-                            detail = (protect.stderr or protect.stdout or "")[-4000:]
-                            return self._failure(body, f"could not protect sandbox inputs: {detail}")
-                        process = await sandbox.exec(
-                            f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
-                            f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
-                            timeout_s=self.config.timeout,
-                        )
-                        if process.return_code != 0:
-                            detail = (process.stderr or process.stdout or "")[-4000:]
-                            result = await self._recover_partial_result(sandbox, partial_result_path)
-                            return self._failure(
-                                body,
-                                f"sandbox Stirrup rollout exited: {detail}",
-                                process.return_code,
-                                failure_class="timeout_exceeded"
-                                if process.error_type == "timeout"
-                                else "sandbox_error",
-                                partial_result=result,
+                    async with self._policy_egress(body) as relay:
+                        spec = self._sandbox_spec(body, instruction, relay=relay)
+                        async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
+                            await sandbox.start()
+                            await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
+                            if body.task_input_files:
+                                await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
+                            await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
+                            unpack = await sandbox.exec(
+                                f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
+                                f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
+                                f"-C {shlex.quote(_STIRRUP_ROOT)}",
+                                user="root",
+                                timeout_s=600,
                             )
-                        await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
-                        await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
-                        await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)
+                            if unpack.return_code != 0:
+                                detail = (unpack.stderr or unpack.stdout or "")[-4000:]
+                                return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
+                            protect = await sandbox.exec(
+                                f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
+                                f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
+                                f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
+                                user="root",
+                            )
+                            if protect.return_code != 0:
+                                detail = (protect.stderr or protect.stdout or "")[-4000:]
+                                return self._failure(body, f"could not protect sandbox inputs: {detail}")
+                            process = await sandbox.exec(
+                                f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
+                                f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
+                                timeout_s=self.config.timeout,
+                            )
+                            if process.return_code != 0:
+                                detail = (process.stderr or process.stdout or "")[-4000:]
+                                result = await self._recover_partial_result(sandbox, partial_result_path)
+                                return self._failure(
+                                    body,
+                                    f"sandbox Stirrup rollout exited: {detail}",
+                                    process.return_code,
+                                    failure_class="timeout_exceeded"
+                                    if process.error_type == "timeout"
+                                    else "sandbox_error",
+                                    partial_result=result,
+                                )
+                            await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
+                            await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
+                            await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)
 
                     result = json.loads(result_path.read_text(encoding="utf-8"))
                     initial_snapshot = initial_snapshot_path.read_bytes()

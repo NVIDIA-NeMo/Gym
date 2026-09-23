@@ -4,6 +4,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from pytest import MonkeyPatch
@@ -16,6 +17,7 @@ from responses_api_agents.apex_agent.app import (
     ApexAgent,
     ApexAgentConfig,
     ApexAgentRunRequest,
+    PolicyEgressRelay,
     instruction_from_input,
     load_runner_source,
 )
@@ -41,6 +43,8 @@ def _agent(
     image: str = "registry.example/archipelago@sha256:1234",
     auto_build: bool = False,
     supports_vision: bool = True,
+    sandbox_provider: dict | None = None,
+    policy_egress_relay: str = "auto",
 ) -> ApexAgent:
     config = ApexAgentConfig(
         host="0.0.0.0",
@@ -62,7 +66,7 @@ def _agent(
             "docker_tag": "nemo-gym-archipelago:test",
             "timeout": 60,
         },
-        sandbox_provider={"apptainer": {}},
+        sandbox_provider=sandbox_provider or {"apptainer": {}},
         sandbox_spec={},
         edgar_user_agent=None,
         max_turns=200,
@@ -73,6 +77,7 @@ def _agent(
         max_snapshot_bytes=None,
         max_world_bytes=None,
         artifact_output_dir=None,
+        policy_egress_relay=policy_egress_relay,
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"policy_model_name": "moonshotai/Kimi-K3"}
@@ -332,3 +337,147 @@ def test_incomplete_rollout_snapshots_are_saved_without_grading(tmp_path: Path) 
     assert (output_dir / "initial_snapshot.zip").read_bytes() == b"initial"
     assert (output_dir / "final_snapshot.zip").read_bytes() == b"final"
     assert json.loads((output_dir / "rollout.json").read_text())["completion_status"] == "max_turns"
+
+
+async def _idle_peer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Accept a connection, hold it open until the peer goes away, then close it."""
+    await reader.read()
+    writer.close()
+
+
+def test_policy_egress_relay_follows_private_network_namespace() -> None:
+    private = {"apptainer": {"create": {"extra_start_args": ["--net", "--network=none", "--fakeroot"]}}}
+
+    assert _agent(sandbox_provider=private)._policy_egress_relay_enabled() is True
+    assert _agent()._policy_egress_relay_enabled() is False
+    assert _agent(policy_egress_relay="always")._policy_egress_relay_enabled() is True
+    assert _agent(sandbox_provider=private, policy_egress_relay="never")._policy_egress_relay_enabled() is False
+
+
+def test_sandbox_config_binds_egress_socket_only_when_relaying(tmp_path: Path) -> None:
+    relay = SimpleNamespace(socket_dir=tmp_path, socket_name="policy.sock")
+    spec = _agent()._sandbox_spec(_body(), "Do the work", relay=relay)
+    runner = json.loads(spec.files["/app/apex-gym/runner_config.json"])
+
+    assert spec.provider_options["binds"] == [f"{tmp_path}:/egress"]
+    assert runner["model_egress_socket"] == "/egress/policy.sock"
+    assert runner["model_base_url"] == "http://model/v1"
+
+    plain = _agent()._sandbox_spec(_body(), "Do the work")
+
+    assert "binds" not in plain.provider_options
+    assert "model_egress_socket" not in json.loads(plain.files["/app/apex-gym/runner_config.json"])
+
+    agent = _agent()
+    agent.config.sandbox_spec = {"provider_options": {"binds": "/data:/data:ro"}}
+    spec = agent._sandbox_spec(_body(), "Do the work", relay=relay)
+
+    assert spec.provider_options["binds"] == ["/data:/data:ro", f"{tmp_path}:/egress"]
+
+
+async def test_policy_egress_relay_forwards_to_model_server() -> None:
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"echo:" + await reader.read(1024))
+        await writer.drain()
+        writer.close()
+
+    upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+    port = upstream.sockets[0].getsockname()[1]
+    relay = await PolicyEgressRelay.start(f"http://127.0.0.1:{port}/v1")
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(relay.socket_dir / relay.socket_name))
+        writer.write(b"ping")
+        await writer.drain()
+
+        assert await reader.read(1024) == b"echo:ping"
+
+        writer.close()
+    finally:
+        await relay.close()
+        upstream.close()
+
+    assert not relay.socket_dir.exists()
+
+
+async def test_policy_egress_relay_rejects_non_http_model_urls() -> None:
+    try:
+        await PolicyEgressRelay.start("https://model/v1")
+    except ValueError as exc:
+        assert "http" in str(exc)
+    else:
+        raise AssertionError("https model URLs must be rejected")
+
+
+async def test_policy_egress_relay_closes_with_idle_keepalive_connection() -> None:
+    upstream = await asyncio.start_server(_idle_peer, "127.0.0.1", 0)
+    port = upstream.sockets[0].getsockname()[1]
+    relay = await PolicyEgressRelay.start(f"http://127.0.0.1:{port}/v1")
+    reader, writer = await asyncio.open_unix_connection(str(relay.socket_dir / relay.socket_name))
+    writer.write(b"GET /v1/models HTTP/1.1\r\n\r\n")
+    await writer.drain()
+    await asyncio.sleep(0.05)  # the bridge is now parked on both idle sockets
+    try:
+        await asyncio.wait_for(relay.close(), timeout=3)
+    finally:
+        writer.close()
+        upstream.close()
+
+    assert not relay.socket_dir.exists()
+
+
+async def test_run_wires_and_tears_down_the_relay(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    agent = _agent(policy_egress_relay="always")
+    agent._ensure_runtime_setup = AsyncMock()
+    agent._download_world = AsyncMock()
+    agent._stirrup_archive = tmp_path / "stirrup-runtime.tar.gz"
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.raise_for_status", AsyncMock())
+    model = await asyncio.start_server(_idle_peer, "127.0.0.1", 0)
+    agent._model_base_url = lambda _body: f"http://127.0.0.1:{model.sockets[0].getsockname()[1]}/v1"
+    seen: dict[str, object] = {}
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def upload(self, *_args) -> None:
+            return None
+
+        async def download(self, _source: str, destination: Path) -> None:
+            destination.write_text("{}", encoding="utf-8")
+
+        def __init__(self) -> None:
+            self._exec_results = [
+                MagicMock(return_code=0),
+                MagicMock(return_code=0),
+                MagicMock(return_code=1, stderr="boom", stdout=None, error_type=None),
+            ]
+
+        async def exec(self, *_args, **_kwargs):
+            return self._exec_results.pop(0)
+
+    def fake_sandbox(_provider, spec):
+        seen["spec"] = spec
+        return FakeSandbox()
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.AsyncSandbox", fake_sandbox)
+    try:
+        result = await agent.run(MagicMock(cookies={}), _body())
+    finally:
+        model.close()
+
+    spec = seen["spec"]
+    bind = spec.provider_options["binds"][0]
+    socket_dir = Path(bind.split(":")[0])
+    runner = json.loads(spec.files["/app/apex-gym/runner_config.json"])
+
+    assert bind.endswith(":/egress")
+    assert runner["model_egress_socket"] == "/egress/policy.sock"
+    assert result.model_dump()[NG_FAILURE_CLASS_KEY] == "sandbox_error"
+    assert not socket_dir.exists()
