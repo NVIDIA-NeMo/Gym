@@ -1,0 +1,13 @@
+openclaw_agent_native:
+  responses_api_agents:
+    openclaw_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server: {type: responses_api_models, name: policy_model}
+      model: ${policy_model_name}
+      openclaw_version: 2026.6.11
+      timeout: 900
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      session_close_retry_window_seconds: 300
+      session_lifetime_seconds: 21600
