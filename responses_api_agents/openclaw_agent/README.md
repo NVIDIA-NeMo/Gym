@@ -9,7 +9,7 @@ Minimal, meant to be extended, and currently eval-only.
 ## Quick start
 
 OpenClaw is auto-installed on the first local CLI invocation. Starting an agent server for native
-sessions does not install or execute OpenClaw on the agent-server host. 
+sessions does not install or execute OpenClaw on the agent-server host.
 Make sure `env.yaml` is also set.
 
 ```bash
