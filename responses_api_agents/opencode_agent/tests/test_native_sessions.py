@@ -565,6 +565,86 @@ def test_native_usage_restores_cached_and_reasoning_tokens_across_subagents():
     assert OpenCodeAgent._native_usage({"messages": []}) is None
 
 
+@pytest.mark.parametrize("field", ["cache", "reasoning"])
+@pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "3", "bad"])
+def test_native_usage_does_not_treat_defaulted_or_invalid_details_as_measurements(field, value):
+    tokens = {"input": 10, "output": 3, "reasoning": 2, "cache": {"read": 4, "write": 1}}
+    if field == "cache":
+        tokens["cache"]["read"] = value
+    else:
+        tokens["reasoning"] = value
+    usage = OpenCodeAgent._native_usage({"usage_messages": [{"role": "assistant", "tokens": tokens}]})
+    # Invalid optional fields neither erase measured base counts nor get coerced into totals.
+    assert usage.input_tokens == (11 if field == "cache" else 15)
+    assert usage.output_tokens == (3 if field == "reasoning" else 5)
+    assert usage.total_tokens == usage.input_tokens + usage.output_tokens
+    assert usage.input_tokens_details.cached_tokens == (None if field == "cache" else 4)
+    assert usage.output_tokens_details.reasoning_tokens == (None if field == "reasoning" else 2)
+
+
+@pytest.mark.parametrize("unknown_turn", [0, 1])
+@pytest.mark.parametrize("unknown_kind", ["zero", "absent", "missing_usage"])
+def test_native_optional_usage_stays_unknown_across_root_and_subagent_calls(unknown_turn, unknown_kind):
+    infos = [
+        {"role": "assistant", "tokens": {"input": 10, "output": 3, "reasoning": 2, "cache": {"read": 4, "write": 1}}},
+        {"role": "assistant", "tokens": {"input": 7, "output": 5, "reasoning": 1, "cache": {"read": 2}}},
+    ]
+    if unknown_kind == "missing_usage":
+        infos[unknown_turn].pop("tokens")
+    elif unknown_kind == "absent":
+        infos[unknown_turn]["tokens"].pop("reasoning")
+        infos[unknown_turn]["tokens"]["cache"].pop("read")
+    else:
+        infos[unknown_turn]["tokens"]["reasoning"] = 0
+        infos[unknown_turn]["tokens"]["cache"]["read"] = 0
+    usage = OpenCodeAgent._native_usage({"usage_messages": infos})
+    assert usage.input_tokens_details.cached_tokens is None
+    assert usage.output_tokens_details.reasoning_tokens is None
+    if unknown_kind == "missing_usage":
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (
+            (9, 6, 15) if unknown_turn == 0 else (15, 5, 20)
+        )
+    else:
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (
+            (20, 9, 29) if unknown_turn == 0 else (22, 10, 32)
+        )
+
+
+@pytest.mark.parametrize("cache,reasoning", [(0, 0), (4, 0), (0, 2), (4, 2)])
+def test_native_http_usage_gaps_follow_persisted_optional_counter_availability(setup, tmp_path, cache, reasoning):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    tokens = export["messages"][1]["info"]["tokens"]
+    tokens["cache"] = {"read": cache, "write": 1}
+    tokens["reasoning"] = reasoning
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        activated = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        activated.raise_for_status()
+        response = activated.json()
+        assert response["status"] == "completed"
+        assert response["usage"] == {
+            "input_tokens": 11 + cache,
+            "output_tokens": 2 + reasoning,
+            "total_tokens": 13 + cache + reasoning,
+            "input_tokens_details": {"cached_tokens": cache or None},
+            "output_tokens_details": {"reasoning_tokens": reasoning or None},
+        }
+        assert [item["type"] for item in response["output"]] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert ("token_usage_detail_unavailable" in gaps) == (cache == 0 or reasoning == 0)
+
+
 @pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
 def test_invalid_seed_never_connects(setup, option):
     agent, sandbox = setup
