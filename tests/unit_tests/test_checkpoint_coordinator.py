@@ -69,7 +69,11 @@ from nemo_gym._checkpoint.coordinator import (
     RestoredCutConsumedError,
     RestoredCutRegistry,
 )
-from nemo_gym._checkpoint.ledger import LedgerMismatchError, PolicyModelCheckpointCoordinatorService
+from nemo_gym._checkpoint.ledger import (
+    MODEL_LEDGER_SUBDIR,
+    LedgerMismatchError,
+    PolicyModelCheckpointCoordinatorService,
+)
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 
 
@@ -1039,6 +1043,8 @@ async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_inde
             },
         )
         assert commit_result["generation_cut_records"] == 1
+        assert commit_result["generation_cut_proof"] == evidence.generation_cut_proof.model_dump(mode="json")
+        assert (sock_dir / "checkpoint" / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").is_file()
 
         (lineage.checkpoint_root / "rollout-large.lineage.jsonl").unlink()
         with pytest.raises(LedgerMismatchError, match="lineage does not match"):
