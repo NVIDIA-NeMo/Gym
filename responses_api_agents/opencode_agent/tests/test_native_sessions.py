@@ -519,7 +519,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=1, stderr="curl failed", stdout="", error_type=None),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="curl failed"):
@@ -535,7 +535,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_opencode(se
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
         asyncio.CancelledError(),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(asyncio.CancelledError):
@@ -974,3 +974,76 @@ async def test_caller_session_id_is_never_used_as_a_filesystem_path(setup):
     assert Path(state.directory).parent == Path("/tmp/nemo-gym-opencode-sessions")
     assert body.agent_session_id not in state.directory
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
+
+
+async def test_receipt_expiry_does_not_create_empty_cookieless_success(setup, monkeypatch):
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_close_retry_window_seconds = 10
+    body = seed()
+    request = Request({"type": "http", "session": {}})
+    await agent.seed_agent_session(request, body)
+    close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    await agent.close_agent_session(request, close)
+    clock[0] = 111.0
+    with pytest.raises(HTTPException, match="receipt expired"):
+        await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
+    with pytest.raises(HTTPException, match="already closed"):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    # Even after tombstone pruning, a stale cookie cannot create a new session or receipt.
+    clock[0] += agent.config.session_lifetime_seconds
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(request, close)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.seed_agent_session(request, body)
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["remove", "disconnect"])
+async def test_failed_setup_cleanup_retains_state_for_cookieless_close(setup, failure):
+    agent, sandbox = setup
+    body = seed()
+    success = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed", error_type=None)
+    sandbox.exec.side_effect = [success, failed, failed if failure == "remove" else success]
+    if failure == "disconnect":
+        sandbox.disconnect.side_effect = RuntimeError("disconnect failed")
+    with pytest.raises(RuntimeError, match="installer failed"):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    assert agent._native_sessions[body.agent_session_id].closing
+    with pytest.raises(HTTPException, match="closing"):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    sandbox.exec.side_effect = None
+    sandbox.exec.return_value = success
+    sandbox.disconnect.side_effect = None
+    closed = await agent.close_agent_session(
+        Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    )
+    assert closed.agent_observations is not None
+    assert body.agent_session_id not in agent._native_sessions
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_expiring_tombstone_preserves_lock_with_a_queued_waiter(setup, monkeypatch):
+    agent, _ = setup
+    body = seed()
+    session_id = body.agent_session_id
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: 10.0)
+    agent._native_session_tombstones[session_id] = (body.episode_id, 1.0)
+    lock = agent._native_session_locks.setdefault(session_id, asyncio.Lock())
+    await lock.acquire()
+
+    async def wait_for_lock():
+        async with agent._native_session_lock(session_id):
+            assert agent._native_session_locks[session_id] is lock
+
+    waiter = asyncio.create_task(wait_for_lock())
+    await asyncio.sleep(0)
+    # release wakes the queued waiter without letting it reacquire until this coroutine yields.
+    lock.release()
+    assert not lock.locked()
+    agent._expire_native_receipts()
+    assert agent._native_session_locks[session_id] is lock
+    await waiter
+    assert session_id not in agent._native_session_locks

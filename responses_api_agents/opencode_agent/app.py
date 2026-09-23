@@ -24,7 +24,8 @@ import shutil
 import tempfile
 from asyncio import Semaphore
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
@@ -189,6 +190,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         default_factory=OrderedDict
     )
     _native_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _native_session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
     _native_session_expiry_tasks: dict[str, asyncio.Task[None]] = PrivateAttr(default_factory=dict)
     _native_session_tombstones: OrderedDict[str, tuple[EpisodeId, float]] = PrivateAttr(default_factory=OrderedDict)
     _local_runtime_ready: bool = PrivateAttr(default=False)
@@ -583,6 +585,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Invalid native OpenCode session marker")
         return marker
 
+    @asynccontextmanager
+    async def _native_session_lock(self, session_id: str) -> AsyncIterator[None]:
+        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
+        self._native_session_lock_users[session_id] = self._native_session_lock_users.get(session_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            self._native_session_lock_users[session_id] -= 1
+            if not self._native_session_lock_users[session_id]:
+                del self._native_session_lock_users[session_id]
+                if session_id not in self._native_sessions and session_id not in self._native_session_tombstones:
+                    self._native_session_locks.pop(session_id, None)
+
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Install OpenCode once under the EnvironmentServer's caller-assigned identity."""
         if self.config.execution_mode != "sandbox":
@@ -592,8 +608,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         marker = self._native_session_marker(request)
         if marker is not None and marker != session_id and marker in self._native_sessions:
             raise HTTPException(409, "OpenCode request is already bound to another session")
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self._native_session_lock(session_id):
             if session_id in self._native_session_tombstones:
                 raise HTTPException(409, "OpenCode session is already closed")
             state = self._native_sessions.get(session_id)
@@ -603,6 +618,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if state.closing:
                     raise HTTPException(409, "OpenCode session is closing")
             else:
+                if marker == session_id:
+                    raise HTTPException(409, "OpenCode session cookie has expired")
                 state = await self._initialize_agent_session_state(session_id, body)
                 self._native_sessions[session_id] = state
                 self._native_session_expiry_tasks[session_id] = asyncio.create_task(
@@ -614,8 +631,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def _expire_native_session(self, session_id: str, episode_id: EpisodeId) -> None:
         try:
             await asyncio.sleep(self.config.session_lifetime_seconds)
-            lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
-            async with lock:
+            async with self._native_session_lock(session_id):
                 await self._close_native_session(session_id, episode_id)
         except asyncio.CancelledError:
             raise
@@ -674,7 +690,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        prepared_directory = False
+        state = OpenCodeSandboxSession(body, sandbox, directory, runtime)
         try:
             # Resolve inside the sandbox: host-side lexical checks cannot detect task symlinks.
             validate_paths = (
@@ -690,7 +706,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             result = await sandbox.exec(command, timeout_s=30)
             self._check_native_setup(command, result)
-            prepared_directory = True
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
             command = "bash " + " ".join(
@@ -709,12 +724,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException:
             try:
-                if prepared_directory:
-                    await sandbox.exec(f"rm -rf -- {quote(directory)}", timeout_s=30)
-            finally:
-                await sandbox.disconnect()
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                # A lost cleanup response must not turn the next close into empty success.
+                self._native_sessions[session_id] = state
+                self._native_session_expiry_tasks[session_id] = asyncio.create_task(
+                    self._expire_native_session(session_id, body.episode_id)
+                )
+                LOG.exception("Could not clean failed OpenCode setup %s; retaining session for close", session_id)
             raise
-        return OpenCodeSandboxSession(body, sandbox, directory, runtime)
+        return state
 
     @staticmethod
     def _check_native_setup(command: str, result: SandboxExecResult) -> None:
@@ -730,7 +749,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._closed_native_sessions.popitem(last=False)
         while self._native_session_tombstones and next(iter(self._native_session_tombstones.values()))[1] <= now:
             session_id, _ = self._native_session_tombstones.popitem(last=False)
-            if session_id not in self._native_sessions:
+            if session_id not in self._native_sessions and not self._native_session_lock_users.get(session_id):
                 self._native_session_locks.pop(session_id, None)
 
     async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
@@ -740,8 +759,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         marker = self._native_session_marker(request)
         if marker is not None and marker != session_id:
             raise HTTPException(409, "OpenCode close cookie does not match the requested session")
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self._native_session_lock(session_id):
+            if (
+                marker is not None
+                and session_id not in self._native_sessions
+                and session_id not in self._closed_native_sessions
+            ):
+                raise HTTPException(409, "OpenCode close receipt expired")
             result = await self._close_native_session(session_id, body.episode_id)
             # Keep a tombstone cookie so this client cannot enter local or legacy execution.
             request.session[_NATIVE_SESSION_KEY] = session_id
@@ -777,10 +801,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             now + self.config.session_close_retry_window_seconds,
         )
         # A close that arrives before seed must block the delayed seed through its lifetime.
-        self._native_session_tombstones[session_id] = (
-            episode_id,
-            now + self.config.session_lifetime_seconds + self.config.session_close_retry_window_seconds,
-        )
+        retention = max(self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds)
+        self._native_session_tombstones[session_id] = (episode_id, now + retention)
+        loop = asyncio.get_running_loop()
+        loop.call_later(self.config.session_close_retry_window_seconds, self._expire_native_receipts)
+        loop.call_later(retention, self._expire_native_receipts)
         return result
 
     def _native_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
