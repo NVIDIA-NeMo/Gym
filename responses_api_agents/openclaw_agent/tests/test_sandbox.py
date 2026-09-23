@@ -1010,8 +1010,14 @@ async def test_native_envelope_fallback_preserves_known_and_unknown_cache_detail
         NeMoGymResponseCreateParamsNonStreaming(input="task"),
         prompt="task",
         system="",
-        stdout=json.dumps({"meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}}}),
+        stdout=json.dumps(
+            {
+                "payloads": [{"text": "Retained final output."}],
+                "meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}},
+            }
+        ),
     )
+    assert response.output[0].content[0].text == "Retained final output."
     assert response.usage.input_tokens == 10 + (expected_cache or 0)
     assert response.usage.output_tokens == 3
     assert response.usage.input_tokens_details.cached_tokens == expected_cache
