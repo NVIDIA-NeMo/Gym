@@ -115,7 +115,7 @@ benchmark's Resources server, a sandbox provider, and a Gym model server:
 
 - On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
   `model_server` pointing to the Gym model server, and `model` to its served model ID.
-- On [single-agent EnvironmentServer](../../environment_servers/single_agent/configs/single_agent.yaml),
+- On [single-agent EnvironmentServer](../../environment_servers/single_agent_turn/configs/single_agent_turn.yaml),
   set `agent_server` to Pi, `resources_server` to the benchmark, and `resources_tool_transports: []`.
 - Resources must support native sessions and return direct `SandboxAccess` with an
   absolute task working directory. Pi does not create a fallback sandbox.
@@ -139,6 +139,27 @@ files may still be read by Pi.
 Keep `resources_tool_transports: []`: Pi provides its own sandbox tools.
 Required Resources HTTP/MCP tools are rejected. Native sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
+
+For SWE-bench Pro, the benchmark-owned composition is
+[`benchmarks/swebench/pro/pi_native.yaml`](../../benchmarks/swebench/pro/pi_native.yaml).
+It selects `environment_routing_mode: taskset` and routes `swebench_pro:smoke`
+to the native `single_agent_turn` EnvironmentServer. Supply a `policy_model` model
+server and `sandbox` provider, and set
+`swebench_pro_pi_agent.responses_api_agents.pi_agent.model` to the served model ID.
+Prepare typed input from the existing benchmark rows before collection:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py prepared.jsonl native.jsonl
+# model-provider.yaml supplies policy_model, sandbox, and the served model setting.
+gym env start --config benchmarks/swebench/pro/pi_native.yaml --config model-provider.yaml
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/pi_native.yaml --config model-provider.yaml \
+  -i native.jsonl -o rollouts.jsonl
+```
+
+The collector calls the EnvironmentServer's `/run`; the environment seeds Resources
+and Pi, invokes Pi's `/v1/responses`, closes Pi, then verifies and closes Resources.
+Native collection does not call Pi's compatibility `/run` endpoint.
 
 After starting the composed servers, submit a native episode request to EnvironmentServer's
 `/run` endpoint, not the agent's `/run`. Use the benchmark's prepared task: `task.task_input`
@@ -179,3 +200,11 @@ starting after cleanup. Set it to cover the caller's retry horizon. Other sessio
 do not shorten or extend that window. Expired receipts are pruned on seed/close activity;
 stale activations still cannot fall back to the host. Sessions and receipts are process-local,
 not durable recovery. Resources and the sandbox provider own sandbox cleanup and expiry.
+
+Native session IDs come from EnvironmentServer. Repeating an identical seed returns the
+same session, while reusing its ID for a different seed fails. Close accepts an explicit
+session ID and episode without a cookie, so a lost seed response can still be cleaned up.
+Close-before-seed records a tombstone to reject delayed creation. The agent uses a separate
+random filesystem directory, so caller IDs never become paths. `session_lifetime_seconds`
+(default 21600) bounds abandoned sessions through the same confirmed-cleanup path. Failed
+cleanup retains the closing state for retry and blocks another activation.

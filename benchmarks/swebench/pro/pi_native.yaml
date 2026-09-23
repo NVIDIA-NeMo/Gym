@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench_pro:smoke": swebench_pro_pi
+
+swebench_pro_pi_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [pi_agent]
+
+swebench_pro_pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ???
+      pi_version: 0.80.2
+      timeout: 900
+      session_lifetime_seconds: 21600
+
+swebench_pro_pi:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_pi_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_pi_agent
