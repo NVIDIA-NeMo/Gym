@@ -8,7 +8,6 @@ job_bench_opencode_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       opencode_version: 1.14.18
-      opencode_max_output_tokens: 131072
       resources_server:
         type: resources_servers
         name: job_bench_resources_server
