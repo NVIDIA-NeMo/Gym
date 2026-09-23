@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import hashlib
 import json
+import logging
+import os
+import shutil
 import tarfile
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,7 +33,11 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.job_bench.vendor import judge
 
 
+LOG = logging.getLogger(__name__)
+
+
 class JobBenchConfig(BaseResourcesServerConfig):
+    artifact_root: Path | None = None
     judge_base_url: str
     judge_api_key: str
     judge_model: str
@@ -46,6 +55,7 @@ class JobBenchRequest(BaseSeedSessionRequest):
 
 class JobBenchSeedResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    sandbox_descriptor: dict[str, Any]
 
 
 class JobBenchVerifyRequest(BaseVerifyRequest):
@@ -53,6 +63,7 @@ class JobBenchVerifyRequest(BaseVerifyRequest):
     task_id: str
     task_dir: str
     rubrics_file: str
+    artifact_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class JobBenchVerifyResponse(BaseVerifyResponse):
@@ -110,14 +121,17 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             )
             if result.return_code != 0:
                 raise RuntimeError(f"Failed to seed Job-Bench task: {result.stderr}")
-        except Exception:
-            await sandbox.stop()
+            descriptor = await sandbox.serialize()
+        except BaseException:
+            try:
+                await sandbox.stop()
+            except Exception:
+                LOG.warning("Job-Bench seed sandbox cleanup failed for task %s", body.task_id, exc_info=True)
             raise
 
         session_id = request.session[SESSION_ID_KEY]
         self._sandboxes[session_id] = sandbox
-        descriptor = await sandbox.serialize()
-        return JobBenchSeedResponse(sandbox_handle=descriptor["sandbox_id"])
+        return JobBenchSeedResponse(sandbox_handle=descriptor["sandbox_id"], sandbox_descriptor=descriptor)
 
     def _judge(self, output_dir: Path, rubrics_file: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         rubrics_data = json.loads(rubrics_file.read_text(encoding="utf-8"))
@@ -156,6 +170,28 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                 for index, rubric in enumerate(rubrics)
             ]
             judged = [future.result() for future in futures]
+        receipt = [
+            {
+                "result": result,
+                "debug": {
+                    key: debug[key]
+                    for key in (
+                        "parse_status",
+                        "api_exit_code",
+                        "raw_response",
+                        "error",
+                        "vision_used",
+                        "attached_images",
+                    )
+                    if key in debug
+                },
+            }
+            for result, debug in judged
+        ]
+        try:
+            (output_dir.parent / "judge-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+        except (OSError, ValueError, TypeError) as exc:
+            LOG.warning("Job-Bench judge receipt retention failed (%s)", type(exc).__name__)
         errors = [debug["error"] for _, debug in judged if debug["api_exit_code"] == 2]
         if errors:
             raise JudgeError("; ".join(errors))
@@ -163,26 +199,76 @@ class JobBenchResourcesServer(SimpleResourcesServer):
         return judge.build_scorecard(results), results
 
     async def verify(self, request: Request, body: JobBenchVerifyRequest) -> JobBenchVerifyResponse:
-        sandbox = self._sandboxes.pop(request.session[SESSION_ID_KEY], None)
-        if sandbox is None:
+        session_id = str(request.session[SESSION_ID_KEY])
+        replay = body.artifact_id is not None
+        saved = None
+        if self.config.artifact_root is not None:
+            body.artifact_id = body.artifact_id or hashlib.sha256(session_id.encode()).hexdigest()
+            saved = self.config.artifact_root / body.artifact_id
+            if replay:
+                body = JobBenchVerifyRequest.model_validate_json((saved / "request.json").read_text())
+                if (saved / "result.json").exists():
+                    return JobBenchVerifyResponse.model_validate_json((saved / "result.json").read_text())
+            else:
+                saved.mkdir(parents=True, exist_ok=False)
+        elif replay:
+            raise HTTPException(status_code=400, detail="Artifact replay requires artifact_root")
+        sandbox = None if replay else self._sandboxes.pop(session_id, None)
+        if not replay and sandbox is None:
             raise HTTPException(status_code=400, detail="Job-Bench session is not active")
         try:
             with tempfile.TemporaryDirectory() as temporary_dir:
                 local_dir = Path(temporary_dir)
-                archive = local_dir / "output.tar.gz"
-                result = await sandbox.exec("tar -czf /tmp/output.tar.gz -C /workspace/output .")
-                if result.return_code != 0:
-                    raise RuntimeError(f"Failed to collect Job-Bench output: {result.stderr}")
-                await sandbox.download("/tmp/output.tar.gz", archive)
+                archive = (saved or local_dir) / "output.tar.gz"
+                if sandbox is not None:
+                    if saved is not None:
+                        shutil.copyfile(body.rubrics_file, saved / "rubrics.json")
+                        pending = saved / "request.partial"
+                        pending.write_text(body.model_dump_json())
+                        pending.replace(saved / "request.json")
+                    result = await sandbox.exec("tar -czf /tmp/output.tar.gz -C /workspace/output .")
+                    if result.return_code != 0:
+                        raise RuntimeError(
+                            f"Failed to collect Job-Bench output: {result.stderr}; output={(result.stdout or '')[-4000:]}"
+                        )
+                    partial = archive.with_suffix(".partial")
+                    await sandbox.download("/tmp/output.tar.gz", partial)
+                    with partial.open("rb") as stream:
+                        os.fsync(stream.fileno())
+                    partial.replace(archive)
                 output_dir = local_dir / "output"
                 output_dir.mkdir()
                 with tarfile.open(archive, "r:gz") as tar:
-                    tar.extractall(output_dir, filter="data")
-                scorecard, rubrics = await asyncio.to_thread(self._judge, output_dir, Path(body.rubrics_file))
+                    # Agent-created environments may contain links outside the output tree.
+                    runtime_dirs = {"venv", ".venv", "node_modules", ".git", ".cache", "__pycache__"}
+                    members = (
+                        member
+                        for member in tar
+                        if (member.isfile() or member.isdir())
+                        and not runtime_dirs.intersection(
+                            Path(member.name).parts if member.isdir() else Path(member.name).parts[:-1]
+                        )
+                    )
+                    tar.extractall(output_dir, members=members, filter="data")
+                rubrics_file = saved / "rubrics.json" if saved is not None else Path(body.rubrics_file)
+                try:
+                    scorecard, rubrics = await asyncio.to_thread(self._judge, output_dir, rubrics_file)
+                finally:
+                    receipt = local_dir / "judge-receipt.json"
+                    if saved is not None and receipt.is_file():
+                        try:
+                            with (saved / f"judge-receipt-{uuid4().hex}.json").open("xb") as stream:
+                                stream.write(receipt.read_bytes())
+                        except OSError as exc:
+                            LOG.warning("Job-Bench judge receipt retention failed (%s)", type(exc).__name__)
         finally:
-            await sandbox.stop()
+            if sandbox is not None:
+                try:
+                    await sandbox.stop()
+                except Exception:
+                    LOG.warning("Job-Bench task sandbox cleanup failed for task %s", body.task_id, exc_info=True)
 
-        return JobBenchVerifyResponse(
+        response = JobBenchVerifyResponse(
             **body.model_dump(),
             reward=float(scorecard["normalized_score"]),
             score=float(scorecard["total_score"]),
@@ -190,8 +276,14 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             passed_count=int(scorecard["passed_count"]),
             total_count=int(scorecard["total_count"]),
             judge_model=self.config.judge_model,
+            grading_protocol=judge.INPUT_PROTOCOL,
             rubrics=rubrics,
         )
+        if saved is not None:
+            pending = saved / "result.partial"
+            pending.write_text(response.model_dump_json())
+            pending.replace(saved / "result.json")
+        return response
 
 
 if __name__ == "__main__":

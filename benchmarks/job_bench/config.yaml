@@ -29,3 +29,4 @@ job_bench_opencode_agent:
           jsonl_fpath: benchmarks/job_bench/data/job_bench.jsonl
           prepare_script: benchmarks/job_bench/prepare.py
           num_repeats: 1
+

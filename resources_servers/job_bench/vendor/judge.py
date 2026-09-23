@@ -35,6 +35,8 @@ from zipfile import BadZipFile, ZipFile
 
 
 MAX_CHARS_PER_FILE = 200_000
+MAX_EXTRACTED_BYTES = 120_000
+INPUT_PROTOCOL = "job-bounded-utf8-v1"
 SQLITE_EXTS = {"db", "sqlite", "sqlite3"}
 SQLITE_ROWS_PER_TABLE = 500
 DEFAULT_JUDGE_API_BASE = "https://api.x.ai/v1"
@@ -199,7 +201,8 @@ def convert_file_to_text(path: Path) -> str:
 
 
 def extract_all_file_contents(output_dir: Path) -> str:
-    parts = []
+    headers = []
+    contents = []
     for file_path in sorted(output_dir.rglob("*")):
         if not file_path.is_file():
             continue
@@ -207,8 +210,23 @@ def extract_all_file_contents(output_dir: Path) -> str:
         ext = file_path.suffix.lower().lstrip(".")
         if ext not in SQLITE_EXTS and len(content) > MAX_CHARS_PER_FILE:
             content = content[:MAX_CHARS_PER_FILE] + f"\n... [Content truncated at {MAX_CHARS_PER_FILE} characters]"
-        parts.append(f"=== FILE: {file_path.name} ===\n{content}\n")
-    return "\n".join(parts)
+        headers.append(f"=== FILE: {file_path.relative_to(output_dir).as_posix()} ===\n")
+        contents.append(content.encode("utf-8"))
+    marker = b"\n... [Middle omitted by job-bounded-utf8-v1] ...\n"
+    remaining = MAX_EXTRACTED_BYTES - sum(len(header.encode("utf-8")) + 2 for header in headers)
+    if remaining < len(contents) * len(marker):
+        raise ValueError("Too many output filenames to fit the Job-Bench grading input budget")
+    # Short files remain whole; unused allowance is shared equally among longer files.
+    for rank, index in enumerate(sorted(range(len(contents)), key=lambda i: (len(contents[i]), i))):
+        allowance = remaining // (len(contents) - rank)
+        content = contents[index]
+        if len(content) > allowance:
+            keep = (allowance - len(marker)) // 2
+            head = content[:keep].decode("utf-8", errors="ignore") if keep else ""
+            tail = content[-keep:].decode("utf-8", errors="ignore") if keep else ""
+            contents[index] = head.encode("utf-8") + marker + tail.encode("utf-8")
+        remaining -= len(contents[index])
+    return "\n".join(header + content.decode("utf-8") + "\n" for header, content in zip(headers, contents))
 
 
 def rubric_needs_vision(rubric: dict) -> bool:
@@ -645,7 +663,9 @@ IMPORTANT:
     last_error = None
     raw_response = ""
     parse_status = "failed"
+    received_response = False
     for attempt in range(max_retries):
+        received_response = False
         try:
             client = get_openai_client(api_base, api_key)
             response = client.chat.completions.create(
@@ -662,6 +682,7 @@ IMPORTANT:
                 timeout=timeout_sec,
             )
             raw_response = response.choices[0].message.content.strip()
+            received_response = bool(raw_response)
             parsed, parse_status = parse_judge_json(raw_response)
 
             model_criteria = parsed.get("criteria_results", [])
@@ -740,7 +761,7 @@ IMPORTANT:
     debug = {
         "api_base": api_base,
         "parse_status": parse_status,
-        "api_exit_code": 1 if raw_response else 2,
+        "api_exit_code": 1 if received_response else 2,
         "criterion_count": criterion_count,
         "criteria_list_text": criteria_list_text,
         "rubric_text": rubric_text,
