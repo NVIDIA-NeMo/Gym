@@ -12,14 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from time import perf_counter, time
-from typing import Any, List
+from typing import Any
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, PrivateAttr, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -29,6 +31,10 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
@@ -52,15 +58,25 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import request as http_request
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 
 
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_AGENT_SESSION_ID_KEY = "agent_session_id"
+
+
+@dataclass
+class SimpleAgentSessionState:
+    request: AgentSeedSessionRequest
+    tool_access: DirectHTTPToolAccess | None
+    resources_cookies: dict[str, str]
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
 
@@ -79,6 +95,92 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
+    _agent_sessions: dict[str, SimpleAgentSessionState] = PrivateAttr(default_factory=dict)
+    _agent_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _closed_agent_session_ids: set[str] = PrivateAttr(default_factory=set)
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Process-local Simple Agent sessions require num_workers=1")
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        if body.sandbox_access is not None:
+            raise ValueError("Simple Agent does not support sandbox access")
+
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
+        if unsupported:
+            raise ValueError(f"Simple Agent does not support required MCP tool access: {', '.join(unsupported)}")
+
+        direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct_accesses) > 1:
+            raise ValueError("Simple Agent supports at most one direct HTTP tool access per session")
+        direct_access = direct_accesses[0] if direct_accesses else None
+
+        agent_session_id = body.agent_session_id
+        request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            if agent_session_id in self._closed_agent_session_ids:
+                raise ValueError(f"Agent session is already closed: {agent_session_id}")
+            state = self._agent_sessions.get(agent_session_id)
+            if state is not None:
+                if state.request.episode_id != body.episode_id or state.request.task_id != body.task_id:
+                    raise ValueError("agent_session_id is already bound to another episode or task")
+                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+            self._agent_sessions[agent_session_id] = SimpleAgentSessionState(
+                request=body,
+                tool_access=direct_access,
+                resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            )
+            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        agent_session_id = body.agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            state = self._agent_sessions.get(agent_session_id)
+            if state is None:
+                self._closed_agent_session_ids.add(agent_session_id)
+                request.session.pop(_AGENT_SESSION_ID_KEY, None)
+                return AgentCloseSessionResponse(agent_session_id=agent_session_id)
+            if body.episode_id != state.request.episode_id:
+                raise ValueError("episode_id does not match the seeded agent session")
+
+            del self._agent_sessions[agent_session_id]
+            self._closed_agent_session_ids.add(agent_session_id)
+            request.session.pop(_AGENT_SESSION_ID_KEY, None)
+            return AgentCloseSessionResponse(
+                agent_session_id=agent_session_id,
+                resources_cookies=state.resources_cookies,
+            )
+
+    def _require_agent_session(self, agent_session_id: str | None) -> SimpleAgentSessionState:
+        if agent_session_id is None:
+            raise ValueError("Agent session cookie is missing")
+        try:
+            return self._agent_sessions[agent_session_id]
+        except KeyError as error:
+            raise ValueError(f"Unknown agent_session_id: {agent_session_id}") from error
+
+    @staticmethod
+    def _agent_session_id_from_request(request: Request | None) -> str | None:
+        if request is None:
+            return None
+        try:
+            agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
+        except (AssertionError, AttributeError):
+            return None
+        return agent_session_id if isinstance(agent_session_id, str) else None
 
     async def _create_episode(
         self,
@@ -86,6 +188,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         *,
         model_url_path: str,
         resources_server_cookies: Any = None,
+        tool_access: DirectHTTPToolAccess | None = None,
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
@@ -167,8 +270,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 invocation_status = "incomplete"
                 break
 
-            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+            all_fn_calls: list[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
+            all_output_messages: list[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls:
@@ -212,14 +315,30 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         tool_status = "failed"
                 else:
                     # Resource-server errors are valid model-visible tool outputs.
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=parsed_arguments,
-                        cookies=resources_server_cookies,
-                    )
+                    if tool_access is not None:
+                        api_response = await http_request(
+                            method="POST",
+                            url=f"{str(tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                            json=parsed_arguments,
+                            cookies=resources_server_cookies,
+                            headers=dict(tool_access.headers),
+                            _internal=True,
+                        )
+                    else:
+                        if self.config.resources_server is None:
+                            raise RuntimeError(
+                                "Simple Agent received a tool call without direct HTTP tool access "
+                                "or a legacy resources_server configuration"
+                            )
+                        api_response = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path=f"/{output_function_call.name}",
+                            json=parsed_arguments,
+                            cookies=resources_server_cookies,
+                        )
                     tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = api_response.cookies
+                    resources_server_cookies = dict(resources_server_cookies or {})
+                    resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
@@ -286,15 +405,25 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        agent_session_id = self._agent_session_id_from_request(request)
+        state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
-            resources_server_cookies=request.cookies,
+            resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
+            tool_access=state.tool_access if state is not None else None,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
         )
-        # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+        if state is not None:
+            state.resources_cookies = dict(resources_server_cookies or {})
+
+        # Legacy self-dispatch propagates resources cookies for its later verification call.
+        if state is None:
+            downstream_cookies = (*resources_server_cookies.items(), *model_server_cookies.items())
+        else:
+            downstream_cookies = (model_server_cookies or {}).items()
+        for k, v in downstream_cookies:
             response.set_cookie(k, v)
         if trajectory is not None:
             model_response = model_response.model_copy(
@@ -303,6 +432,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        if self.config.resources_server is None:
+            raise ValueError("resources_server is required when invoking the legacy Simple Agent /run route")
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -383,6 +514,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         """Proxy aggregate_metrics to the resources server."""
         if self.config.skip_verification:
             return await super().aggregate_metrics(body)
+        if self.config.resources_server is None:
+            raise ValueError("resources_server is required to proxy aggregate metrics")
 
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -391,6 +524,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
+
+
+def _cookies(response: Any) -> dict[str, str]:
+    return {str(name): str(getattr(morsel, "value", morsel)) for name, morsel in response.cookies.items()}
 
 
 if __name__ == "__main__":

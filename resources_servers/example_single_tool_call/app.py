@@ -12,17 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.single_agent_turn_types import SingleAgentTurnResourcesVerifyRequest
 from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -49,13 +58,57 @@ class SimpleWeatherVerifier:
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
     config: SimpleWeatherResourcesServerConfig
+    _native_sessions: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _native_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _closed_native_session_ids: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
         app.post("/get_weather")(self.get_weather)
+        app.post("/close_session")(self.close_session)
 
         return app
+
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            return BaseSeedSessionResponse()
+
+        resources_session_id = body.resources_session_id
+        lock = self._native_session_locks.setdefault(resources_session_id, asyncio.Lock())
+        async with lock:
+            if resources_session_id in self._closed_native_session_ids:
+                raise ValueError(f"Resources session is already closed: {resources_session_id}")
+            identity = self._native_sessions.get(resources_session_id)
+            if identity is not None and identity != (body.episode_id, body.task_id):
+                raise ValueError("resources_session_id is already bound to another episode or task")
+            self._native_sessions[resources_session_id] = (body.episode_id, body.task_id)
+            return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def verify(
+        self,
+        body: SingleAgentTurnResourcesVerifyRequest | BaseVerifyRequest,
+    ) -> BaseVerifyResponse:
+        if isinstance(body, SingleAgentTurnResourcesVerifyRequest):
+            body = BaseVerifyRequest(
+                responses_create_params=body.verification_input.responses_create_params,
+                response=body.verification_input.response,
+            )
+        return await SimpleWeatherVerifier.verify(self, body)
+
+    async def close_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        resources_session_id = body.resources_session_id
+        lock = self._native_session_locks.setdefault(resources_session_id, asyncio.Lock())
+        async with lock:
+            identity = self._native_sessions.get(resources_session_id)
+            if identity is not None and body.episode_id != identity[0]:
+                raise ValueError("episode_id does not match the seeded resources session")
+            self._native_sessions.pop(resources_session_id, None)
+            self._closed_native_session_ids.add(resources_session_id)
+            return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
         return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")

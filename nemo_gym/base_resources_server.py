@@ -182,7 +182,12 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Idempotently initialize resources state under a caller-assigned identifier."""
+    """Idempotently initialize resources state under a caller-assigned identifier.
+
+    Repeating the same identifier and episode must return the existing session.
+    Closing an unknown identifier must prevent a racing seed from creating it later.
+    Implementations must reap abandoned state after a bounded lifetime.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
