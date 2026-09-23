@@ -286,6 +286,36 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
+def test_incomplete_model_response_retains_reasoning_and_reports_usage_gap(setup) -> None:
+    agent, sandbox = setup
+    message = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+    sandbox.result["return_code"] = 1
+    sandbox.events = "\n".join(
+        json.dumps([float(index), event])
+        for index, event in enumerate(
+            [
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {"id": "partial", "type": "reasoning", "text": "Inspect first"}},
+                {"type": "turn.failed", "error": {"message": message}},
+            ]
+        )
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "failed"
+        assert body["error"]["message"] == message
+        assert body["output"][0]["summary"][0]["text"] == "Inspect first"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        observations = closed.json()["agent_observations"]
+        assert observations["records"][0]["status"] == "failed"
+        assert observations["records"][0]["conversation"][-1]["summary"][0]["text"] == "Inspect first"
+        assert "partial_model_usage_unavailable" in [gap["code"] for gap in observations["gaps"]]
+
+
 @pytest.mark.parametrize(
     "condition", ["completed", "failed-turn", "failed-exit", "in-turn", "other-error", "later-error"]
 )

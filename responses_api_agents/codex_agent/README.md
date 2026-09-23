@@ -92,6 +92,9 @@ not produce a successful completion. Partial transcripts, including the latest u
 cancellation or execution failure. CLI events omit per-model response IDs and often omit reasoning
 usage; observations record these gaps explicitly. Usage from a failed turn can be unavailable, so
 zero is not evidence of zero model consumption. Compare aggregate usage with captured Gym model calls.
+Gym preserves incomplete/failed model status in the Responses SSE terminal event. Codex 0.144.4
+treats a model output-limit event as a failed turn after at most five stream reconnects; partial
+reasoning survives, while failed-call usage remains available in Gym capture rather than CLI JSONL.
 
 A Linux child-subreaper supervisor runs once per activation and kills/reaps detached tool descendants.
 A successful runner exit alone cannot authorize verification: close requires its cleanup receipt,

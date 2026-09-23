@@ -27,8 +27,8 @@ this module provides:
   way, and drops the fields the params model does not know;
 - the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
   Responses SSE event sequence streaming clients require (``response.created`` ->
-  ``response.output_item.done`` per output item -> ``response.completed``), splitting flattened
-  function-call names back into ``namespace`` + ``name`` on the way out.
+  ``response.output_item.done`` per output item -> the matching completed/incomplete/failed
+  terminal event), splitting flattened function-call names back into ``namespace`` + ``name``.
 """
 
 import json
@@ -262,10 +262,9 @@ def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> lis
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
-    Streaming clients build their view of the turn from ``response.output_item.done`` events and
-    treat ``response.completed`` (which carries the response id and usage) as the terminal event,
-    so those two are the required minimum; ``response.created`` is included for clients that wait
-    for an acknowledgement before reading items.
+    Streaming clients build their view of the turn from ``response.output_item.done`` events.
+    The terminal event reflects the response status, retaining partial output, usage and failure
+    details; ``response.created`` is included for clients waiting for an acknowledgement.
     """
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
     usage = response_json.get("usage")
@@ -290,7 +289,11 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     )
     for index, item in enumerate(output_items):
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
-    yield _sse_event({"type": "response.completed", "response": {**response_json, "output": output_items}})
+    terminal_event = {
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }.get(response_json.get("status"), "response.completed")
+    yield _sse_event({"type": terminal_event, "response": {**response_json, "output": output_items}})
 
 
 def synthesize_responses_failure_sse(message: str, *, code: str = "server_error") -> Iterator[str]:
