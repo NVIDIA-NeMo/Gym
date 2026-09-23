@@ -218,7 +218,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         base = self.config.sandbox_model_base_url
         if not base:
             cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
-            base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
+            # The Gym model server, not its upstream base_url: capture routes live on the Gym server.
+            base = self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
             base = base[0]
         base = re.sub(r"/v1/?$", "", str(base))
