@@ -119,7 +119,7 @@ async def test_no_queue_is_recorded_explicitly(traces, monkeypatch):
     assert span.attributes["nemo.gym.http.connection_pool.queued"] is False
     assert span.attributes["nemo.gym.http.connection_pool.queue_events"] == 0
     assert span.attributes["nemo.gym.http.connection_pool.queue_duration_ms"] == 0.0
-    assert span.attributes["nemo.gym.http.connection_pool.pressure"] == "none"
+    assert span.attributes["nemo.gym.http.connection_pool.queue_constraint"] == "none"
 
 
 async def test_per_host_limit_records_queue_wait(traces, monkeypatch):
@@ -135,7 +135,7 @@ async def test_per_host_limit_records_queue_wait(traces, monkeypatch):
     assert len(queued) == 2
     assert all(span.attributes["nemo.gym.http.connection_pool.queue_events"] >= 1 for span in queued)
     assert all(span.attributes["nemo.gym.http.connection_pool.queue_duration_ms"] > 0 for span in queued)
-    assert all(span.attributes["nemo.gym.http.connection_pool.pressure"] == "per_host" for span in queued)
+    assert all(span.attributes["nemo.gym.http.connection_pool.queue_constraint"] == "per_host" for span in queued)
 
 
 async def test_total_limit_records_queue_across_destinations(traces, monkeypatch):
@@ -160,8 +160,8 @@ async def test_cancelled_queue_wait_is_recorded(traces, monkeypatch):
     queue_started = asyncio.Event()
     original_queued = server_utils._ConnectionQueueTraceContext.queued
 
-    def queued_callback(context, pressure="unknown"):
-        original_queued(context, pressure)
+    def queued_callback(context, queue_constraint="unknown"):
+        original_queued(context, queue_constraint)
         queue_started.set()
 
     monkeypatch.setattr(server_utils._ConnectionQueueTraceContext, "queued", queued_callback)
@@ -219,7 +219,7 @@ async def test_queue_telemetry_failure_is_swallowed_without_retrying(traces, mon
     assert span.attributes["http.response.status_code"] == 200
 
 
-async def test_total_limit_pressure_is_attributed(traces, monkeypatch):
+async def test_total_limit_queue_constraint_is_attributed(traces, monkeypatch):
     """A wait caused by the aggregate limit is reported as `total`, not `per_host`."""
     release = asyncio.Event()
 
@@ -238,7 +238,7 @@ async def test_total_limit_pressure_is_attributed(traces, monkeypatch):
 
     queued = [s for s in _client_spans(traces) if s.attributes["nemo.gym.http.connection_pool.queued"]]
     assert queued
-    assert all(s.attributes["nemo.gym.http.connection_pool.pressure"] == "total" for s in queued)
+    assert all(s.attributes["nemo.gym.http.connection_pool.queue_constraint"] == "total" for s in queued)
 
 
 async def test_attributes_are_omitted_when_callbacks_are_not_installed(traces, monkeypatch):
@@ -260,7 +260,7 @@ async def test_attributes_are_omitted_when_callbacks_are_not_installed(traces, m
 
     span = _client_spans(traces)[0]
     assert "nemo.gym.http.connection_pool.queued" not in span.attributes
-    assert "nemo.gym.http.connection_pool.pressure" not in span.attributes
+    assert "nemo.gym.http.connection_pool.queue_constraint" not in span.attributes
 
 
 async def test_retries_share_one_span_and_accumulate_queue_waits(traces, monkeypatch):

@@ -121,7 +121,7 @@ span:
 | `nemo.gym.http.connection_pool.queued` | Whether this logical request waited for a connection |
 | `nemo.gym.http.connection_pool.queue_events` | Number of queue waits across retries made inside `server_utils.request()` |
 | `nemo.gym.http.connection_pool.queue_duration_ms` | Total connection-pool wait across retries made inside `server_utils.request()` |
-| `nemo.gym.http.connection_pool.pressure` | `none` or `unknown`; aiohttp's public callbacks do not expose which limit caused a wait |
+| `nemo.gym.http.connection_pool.queue_constraint` | Connector limit associated with the wait: `total`, `per_host`, `mixed`, `unknown`, or `none` |
 
 No queue callbacks are installed when the `http_client` group is disabled.
 

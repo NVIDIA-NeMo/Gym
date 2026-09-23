@@ -443,13 +443,13 @@ class _ConnectionQueueTraceContext:
         self.started_at: Optional[float] = None
         self.duration_ms = 0.0
         self.count = 0
-        self.pressures: set[str] = set()
+        self.queue_constraints: set[str] = set()
 
-    def queued(self, pressure: str = "unknown") -> None:
+    def queued(self, queue_constraint: str = "unknown") -> None:
         if self.started_at is not None:
             return
         self.started_at = time.perf_counter()
-        self.pressures.add(pressure)
+        self.queue_constraints.add(queue_constraint)
 
     def released(self) -> None:
         if self.started_at is None:
@@ -459,11 +459,11 @@ class _ConnectionQueueTraceContext:
         self.started_at = None
         self.update_span()
 
-    def pressure(self) -> str:
+    def queue_constraint(self) -> str:
         """Which connector limit caused the waits, as a bounded enum."""
         if not self.count:
             return "none"
-        known = self.pressures - {"unknown"}
+        known = self.queue_constraints - {"unknown"}
         if len(known) > 1:
             return "mixed"
         return next(iter(known)) if known else "unknown"
@@ -477,7 +477,7 @@ class _ConnectionQueueTraceContext:
                 "nemo.gym.http.connection_pool.queued": self.count > 0,
                 "nemo.gym.http.connection_pool.queue_events": self.count,
                 "nemo.gym.http.connection_pool.queue_duration_ms": self.duration_ms,
-                "nemo.gym.http.connection_pool.pressure": self.pressure(),
+                "nemo.gym.http.connection_pool.queue_constraint": self.queue_constraint(),
             },
         )
 
@@ -487,7 +487,7 @@ _CONNECTION_QUEUE_TRACE_CONTEXT: ContextVar[Optional[_ConnectionQueueTraceContex
 )
 
 
-def _connector_pressure(session: Any) -> str:
+def _connector_queue_constraint(session: Any) -> str:
     """Classify which connector limit caused a queue wait.
 
     aiohttp's queue callbacks carry no params, but the connector decides in
@@ -508,7 +508,7 @@ async def _on_connection_queued_start(session, _trace_config_ctx, _params) -> No
     if context is None:
         return
     try:
-        context.queued(_connector_pressure(session))
+        context.queued(_connector_queue_constraint(session))
     except Exception:
         logger.debug("Failed to start aiohttp connection-queue telemetry", exc_info=True)
 
