@@ -62,7 +62,6 @@ from nemo_gym.usersim_episode_types import (
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
-    UserSimEpisodeStatus,
     UserSimInvocation,
     UserSimProtocolConfig,
     UserSimScenario,
@@ -124,13 +123,16 @@ class _GymModelFacade:
         self._bridge = bridge
 
     def completion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
-        if kwargs.get("tools"):
-            raise NotImplementedError("UserSimEnvironmentServer currently supports non-tool probes only")
         unsupported = set(kwargs) - {"max_tokens", "max_completion_tokens", "tools"}
         if unsupported:
             raise NotImplementedError(f"Unsupported UserSim completion options: {sorted(unsupported)}")
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
-        return self._bridge.complete_from_worker(self.alias, messages, max_tokens=max_tokens)
+        return self._bridge.complete_from_worker(
+            self.alias,
+            messages,
+            max_tokens=max_tokens,
+            tools=kwargs.get("tools"),
+        )
 
 
 def _create_usersim_generator(
@@ -162,6 +164,7 @@ class _ConversationBridge:
         event_loop: asyncio.AbstractEventLoop,
         resources_cookies: dict[str, str],
         agent_sessions: dict[str, _AgentSession],
+        assistant_tools: list[dict[str, Any]],
     ) -> None:
         self.environment_server = environment_server
         self.request = request
@@ -169,6 +172,7 @@ class _ConversationBridge:
         self.event_loop = event_loop
         self.resources_cookies = resources_cookies
         self.agent_sessions = agent_sessions
+        self.assistant_tools = assistant_tools
         self.invocations: list[UserSimInvocation] = []
 
     def complete_from_worker(
@@ -177,6 +181,7 @@ class _ConversationBridge:
         messages: Sequence[Any],
         *,
         max_tokens: int | None,
+        tools: Sequence[Any] | None = None,
     ) -> SimpleNamespace:
         try:
             running_loop = asyncio.get_running_loop()
@@ -186,7 +191,7 @@ class _ConversationBridge:
             raise RuntimeError("UserSim's synchronous ConversationLoop must run outside the Environment Server loop")
 
         future = asyncio.run_coroutine_threadsafe(
-            self._invoke(alias, messages, max_tokens=max_tokens),
+            self._invoke(alias, messages, max_tokens=max_tokens, tools=tools),
             self.event_loop,
         )
         try:
@@ -203,6 +208,7 @@ class _ConversationBridge:
         messages: Sequence[Any],
         *,
         max_tokens: int | None,
+        tools: Sequence[Any] | None,
     ) -> SimpleNamespace:
         base_params = self.task.model_responses_create_params.get(alias)
         if base_params is None:
@@ -211,6 +217,10 @@ class _ConversationBridge:
         values["input"] = [_to_responses_input(message) for message in messages]
         if max_tokens is not None:
             values["max_output_tokens"] = max_tokens
+        if tools:
+            if alias != "assistant_model":
+                raise ValueError(f"UserSim requested tools for non-Assistant alias {alias!r}")
+            values["tools"] = [_to_responses_tool(tool) for tool in self.assistant_tools]
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(values)
 
         target = self.environment_server.config.target_for_alias(alias)
@@ -230,7 +240,6 @@ class _ConversationBridge:
             if response_cookies:
                 agent_session.cookies = response_cookies
 
-        status = await self._episode_status() if alias in _AGENT_ALIAS_TO_PARTICIPANT else None
         self.invocations.append(
             UserSimInvocation(
                 sequence=len(self.invocations),
@@ -239,8 +248,6 @@ class _ConversationBridge:
                 request=request_params,
                 response=gym_response,
                 observations=_agent_observations(target.name, trajectory_data),
-                state_after=status.state if status is not None else None,
-                termination_reason=status.termination_reason if status is not None and status.terminated else None,
             )
         )
 
@@ -257,20 +264,6 @@ class _ConversationBridge:
                 else None
             ),
         )
-
-    async def _episode_status(self) -> UserSimEpisodeStatus:
-        response = await self.environment_server.server_client.post(
-            server_name=self.environment_server.config.resources_server.name,
-            url_path="/episode_status",
-            json={},
-            cookies=self.resources_cookies,
-        )
-        await raise_for_status(response)
-        response_cookies = _cookies(response)
-        if response_cookies:
-            self.resources_cookies.clear()
-            self.resources_cookies.update(response_cookies)
-        return UserSimEpisodeStatus.model_validate(await get_response_json(response))
 
     def attach_session_observations(self, alias: str, observations: AgentObservationBundle | None) -> None:
         if observations is None:
@@ -351,7 +344,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     json=AgentSeedSessionRequest(
                         episode_id=request.episode_id,
                         task_id=request.task.task_id,
-                        tool_accesses=tool_accesses,
+                        tool_accesses=tool_accesses if alias == "assistant_model" else [],
                         sandbox_access=seed.sandbox_access,
                     ),
                 )
@@ -395,6 +388,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             asyncio.get_running_loop(),
             resources_cookies,
             agent_sessions,
+            seed.assistant_tools,
         )
         try:
             raw_result = await asyncio.to_thread(self._run_usersim, bridge, seed.scenario)
@@ -437,6 +431,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             )
             await raise_for_status(verify_http_response)
             verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
+            if verification.native_usersim_result is not None:
+                result = verification.native_usersim_result
         except Exception as error:
             raise self._failure("verification", error) from error
 
@@ -468,7 +464,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         config = ConversationSimulatorConfig.model_validate(config_values)
         models = {alias: _GymModelFacade(alias, bridge) for alias in USERSIM_MODEL_ALIASES}
         generator = _create_usersim_generator(ConversationSimulatorGenerator, config, models)
-        return generator.generate(scenario.model_dump(mode="python", exclude={"locale"}))
+        data = scenario.model_dump(mode="python", exclude={"locale", "probe_data"})
+        data.update(scenario.probe_data)
+        return generator.generate(data)
 
     def responses_path(self, target_name: str, request: UserSimEpisodeRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
@@ -561,6 +559,20 @@ def _to_responses_input(message: Any) -> dict[str, Any]:
     if role not in {"system", "developer", "user", "assistant"}:
         raise NotImplementedError(f"UserSim message role {role!r} is not supported")
     return {"type": "message", "role": role, "content": value.get("content", "")}
+
+
+def _to_responses_tool(tool: Any) -> dict[str, Any]:
+    value = tool.model_dump(mode="json", exclude_none=True) if hasattr(tool, "model_dump") else dict(tool)
+    function = value.get("function")
+    if not isinstance(function, Mapping):
+        raise ValueError(f"Invalid UserSim function tool schema: {value!r}")
+    return {
+        "type": "function",
+        "name": function["name"],
+        "description": function.get("description"),
+        "parameters": function.get("parameters", {}),
+        "strict": function.get("strict"),
+    }
 
 
 def _response_text(response: NeMoGymResponse) -> str:
