@@ -231,6 +231,50 @@ def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup):
     agent.server_client.post.assert_not_called()
 
 
+@pytest.mark.parametrize("part_type", ["text", "reasoning"])
+@pytest.mark.parametrize("text", ["literal <think> opening", "literal </think> closing", " <think>x</think> \n"])
+def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path, part_type, text):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["parts"] = [{"type": part_type, "text": text}, tool, {"type": part_type, "text": text}]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "completed"
+        output = body["output"]
+        expected_type = "message" if part_type == "text" else "reasoning"
+        text_key = "content" if part_type == "text" else "summary"
+        assert [item["type"] for item in output] == [
+            expected_type,
+            "function_call",
+            "function_call_output",
+            expected_type,
+        ]
+        assert output[0][text_key][0]["text"] == output[3][text_key][0]["text"] == text
+        assert output[0]["id"] != output[3]["id"]
+        assert output[1]["call_id"] == output[2]["call_id"] == "tool-1"
+        assert output[1]["name"] == "bash"
+        assert json.loads(output[1]["arguments"]) == {"command": "pwd"}
+        assert output[2]["output"] == "/app"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    persisted_parts = [item for item in invocation["conversation"] if item.get("role") != "user"]
+    assert [item["type"] for item in persisted_parts] == [item["type"] for item in output]
+    assert persisted_parts[0][text_key][0]["text"] == persisted_parts[3][text_key][0]["text"] == text
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "override",
     [

@@ -34,7 +34,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -452,24 +451,26 @@ def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymRespon
 
             messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
         elif message["info"]["role"] == "assistant":
-            converter = ResponsesConverter(return_token_id_information=True)
             for part in message["parts"]:
+                # OpenCode already supplies typed parts; literal think tags are content.
                 if part["type"] == "text":
-                    output_items = converter.postprocess_assistant_message_dict(
-                        message_dict={
-                            "content": part["text"],
-                            "role": "assistant",
-                        }
+                    messages.append(
+                        NeMoGymResponseOutputMessage(
+                            id=f"msg_{uuid4().hex}",
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                            content=[NeMoGymResponseOutputText(type="output_text", text=part["text"], annotations=[])],
+                        )
                     )
-                    messages.extend(output_items)
                 elif part["type"] == "reasoning":
-                    output_items = converter.postprocess_assistant_message_dict(
-                        message_dict={
-                            "content": converter._wrap_reasoning_in_think_tags([part["text"]]),
-                            "role": "assistant",
-                        }
+                    messages.append(
+                        NeMoGymResponseReasoningItem(
+                            id=f"rs_{uuid4().hex}",
+                            type="reasoning",
+                            summary=[NeMoGymSummary(type="summary_text", text=part["text"])],
+                        )
                     )
-                    messages.extend(output_items)
                 elif part["type"] == "tool":
                     messages.append(
                         NeMoGymResponseFunctionToolCall(
