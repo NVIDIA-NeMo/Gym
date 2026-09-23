@@ -1,37 +1,28 @@
 # NeMo UserSim benchmark preparation
 
-The benchmark preparation step downloads the pinned Nemotron Personas source.
-The Resources Server never accesses NGC and fails fast when the prepared source
-is missing.
-
-Configure NGC credentials in the repository-root `env.yaml`:
-
-```yaml
-ngc_cli_api_key: <NGC API key>
-ngc_cli_org: <NGC organization>
-```
-
-An existing `~/.ngc/config` or exported `NGC_CLI_API_KEY` and `NGC_CLI_ORG`
-remain valid alternatives. Then prepare the benchmark:
+The benchmark preparation step delegates persona sampling to NeMo UserSim and
+treats the resulting panel Parquet as the immutable prepared artifact. Install
+the pinned NeMo UserSim package so the `usersim` executable is on `PATH`, then
+prepare the benchmark:
 
 ```bash
 gym eval prepare --benchmark usersim
 ```
 
-Preparation downloads the immutable NGC resource version configured by
-`prepare.py`, validates the Parquet, and writes its checksum manifest under:
+Preparation invokes `usersim panel`, validates the resulting Parquet, and
+writes its checksum manifest under:
 
 ```text
 benchmarks/usersim/data/personas/
 └── 0.0.2/
-    └── source/
+    └── panels/
         ├── en_US.parquet
         └── en_US.manifest.json
 ```
 
 It also materializes `benchmarks/usersim/data/usersim.jsonl`, the lightweight
-Gym task dataset. At Resources Server startup, the source is validated and a
-bounded deterministic panel is created or reused beside it under `panels/`.
+Gym task dataset. The Resources Server validates and loads this prepared panel;
+it does not duplicate Data Designer's person-sampling logic.
 
 While UserSim is private, the Environment Server installs the pinned source
 revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
