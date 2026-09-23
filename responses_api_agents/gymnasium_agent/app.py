@@ -17,10 +17,13 @@
 
 import logging
 import uuid
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from fastapi import Body, Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, TypeAdapter
 
+from nemo_gym._checkpoint import AgentBoundaryRecord
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -32,13 +35,35 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
+    NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER, current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
 _LOGGER = logging.getLogger(__name__)
+_INPUT_ITEMS_ADAPTER = TypeAdapter(list[NeMoGymResponseInputItem])
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(cookie, "value", cookie))
+        for name, cookie in (cookies.items() if cookies is not None else ())
+    }
+
+
+def _merge_cookies(current: Any, updates: Any) -> Any:
+    if current is None or current is updates:
+        return updates
+    merged = _cookie_values(current)
+    merged.update(_cookie_values(updates))
+    return merged
+
+
+RESOURCE_STATE_REVISION_HEADER = "x-nemo-gym-resource-state-revision"
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -60,6 +85,7 @@ class GymnasiumRunResponse(BaseVerifyResponse):
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
     config: GymnasiumAgentConfig
+    checkpoint_continuation_supported = True
 
     async def responses(
         self,
@@ -84,27 +110,41 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         # issued by the resource server during the rollout.
         env_cookies = dict(request.cookies)
         model_url_path = self.url_path_for_run("/v1/responses", body)
-
-        reset_resp = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/reset",
-            json=body.model_dump(),
-            cookies=env_cookies,
-        )
-        await raise_for_status(reset_resp)
-        if reset_resp.cookies:
-            env_cookies.update(reset_resp.cookies)
+        continuation = self.checkpoint_continuation(body)
 
         supports_explicit_close = False
         try:
-            # A successful reset owns a stateful server slot even if response
-            # decoding or schema validation fails, so validation belongs
-            # inside the same cleanup boundary as the rollout itself.
-            reset_payload = await get_response_json(reset_resp)
-            if isinstance(reset_payload, dict) and isinstance(reset_payload.get("info"), dict):
-                supports_explicit_close = reset_payload["info"].get("supports_explicit_close") is True
-            reset_data = EnvResetResponse.model_validate(reset_payload)
-            result = await self._run_open_episode(body, model_url_path, reset_data, env_cookies)
+            if continuation is None:
+                reset_resp = await self.retry_checkpoint_refusal(
+                    lambda: self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/reset",
+                        json=body.model_dump(),
+                        cookies=env_cookies,
+                    )
+                )
+                await raise_for_status(reset_resp)
+                if reset_resp.cookies:
+                    env_cookies.update(reset_resp.cookies)
+                # A successful reset owns a stateful server slot even if response
+                # decoding or schema validation fails.
+                reset_payload = await get_response_json(reset_resp)
+                if isinstance(reset_payload, dict) and isinstance(reset_payload.get("info"), dict):
+                    supports_explicit_close = reset_payload["info"].get("supports_explicit_close") is True
+                reset_data = EnvResetResponse.model_validate(reset_payload)
+            else:
+                reset_data = EnvResetResponse.model_validate(continuation.agent_state["reset_data"])
+                env_cookies = dict(continuation.agent_state.get("env_cookies") or env_cookies)
+            supports_explicit_close = supports_explicit_close or (
+                (reset_data.info or {}).get("supports_explicit_close") is True
+            )
+            result = await self._run_open_episode(
+                body,
+                model_url_path,
+                reset_data,
+                env_cookies,
+                continuation=continuation,
+            )
         except BaseException:
             if supports_explicit_close:
                 # Preserve the original model/transport/cancellation failure.
@@ -151,6 +191,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         model_url_path: str,
         reset_data: EnvResetResponse,
         env_cookies,
+        *,
+        continuation: Optional[AgentBoundaryRecord] = None,
     ) -> GymnasiumRunResponse:
         """Drive an already-reset episode; :meth:`run` owns its cleanup."""
 
@@ -169,19 +211,49 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
         finished = False
+        start_step = 0
+        resource_revision = 0
+        if continuation is not None:
+            new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
+            total_reward = float(continuation.agent_state.get("total_reward", 0.0))
+            usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
+            model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
+            step_data = EnvStepResponse.model_validate(continuation.agent_state["step_data"])
+            start_step = continuation.boundary_index
+            resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
+            restored_response = continuation.agent_state.get("last_model_response")
+            if restored_response is not None:
+                last_model_response = NeMoGymResponse.model_validate(restored_response)
+            else:
+                last_model_response = NeMoGymResponse(
+                    id=continuation.last_committed_model_call_id or "restored-checkpoint-boundary",
+                    created_at=continuation.created_at,
+                    model=base_body.model or self.config.model_server.name,
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    tools=[],
+                )
 
-        for _ in range(self.config.max_steps):
+        for step in range(start_step + 1, self.config.max_steps + 1):
             new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
 
-            model_resp = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=model_url_path,
-                json=new_body,
-                cookies=model_server_cookies,
+            model_resp = await self.retry_checkpoint_refusal(
+                lambda: self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=model_url_path,
+                    json=new_body,
+                    cookies=model_server_cookies,
+                )
             )
+            model_call_id = None
+            headers = getattr(model_resp, "headers", None)
+            if self._checkpoint_participant is not None and isinstance(headers, Mapping):
+                model_call_id = headers.get(MODEL_CALL_ID_HEADER)
             await raise_for_status(model_resp)
             model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
-            model_server_cookies = model_resp.cookies
+            model_server_cookies = _merge_cookies(model_server_cookies, model_resp.cookies)
             last_model_response = model_response
 
             new_outputs.extend(model_response.output)
@@ -191,21 +263,22 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             step_body = body.model_dump() | {"response": model_response.model_dump()}
             if (reset_data.info or {}).get("supports_step_idempotency") is True:
                 step_body["_ng_step_request_id"] = uuid.uuid4().hex
-            step_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/step",
-                json=step_body,
-                cookies=env_cookies,
+            step_resp = await self.retry_checkpoint_refusal(
+                lambda: self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/step",
+                    json=step_body,
+                    cookies=env_cookies,
+                )
             )
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
+            step_headers = getattr(step_resp, "headers", None)
+            if isinstance(step_headers, Mapping) and step_headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
+                resource_revision = int(step_headers[RESOURCE_STATE_REVISION_HEADER])
             total_reward += step_data.reward
             if step_resp.cookies:
                 env_cookies.update(step_resp.cookies)
-
-            if step_data.terminated or step_data.truncated:
-                finished = True
-                break
 
             for tool_output in (step_data.info or {}).get("tool_outputs", []):
                 new_outputs.append(
@@ -219,9 +292,47 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if step_data.observation:
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
 
+            if (
+                self._checkpoint_participant is not None
+                and not (step_data.terminated or step_data.truncated)
+                and step < self.config.max_steps
+            ):
+                logical_rollout_id = current_logical_rollout_id()
+                attempt_index = current_attempt_index()
+                execution = self.checkpoint_execution()
+                if logical_rollout_id is not None and attempt_index is not None and execution is not None:
+                    await self.checkpoint_participant().commit_boundary(
+                        execution,
+                        AgentBoundaryRecord(
+                            rollout_id=logical_rollout_id,
+                            attempt_index=attempt_index,
+                            boundary_index=step,
+                            output_items=[item.model_dump(mode="json") for item in new_outputs],
+                            usage=usage.model_dump(mode="json") if usage is not None else None,
+                            last_committed_model_call_id=model_call_id,
+                            resource_state_revisions={self.config.resources_server.name: resource_revision},
+                            agent_state={
+                                "reset_data": reset_data.model_dump(mode="json"),
+                                "step_data": step_data.model_dump(mode="json"),
+                                "total_reward": total_reward,
+                                "model_server_cookies": _cookie_values(model_server_cookies),
+                                "env_cookies": _cookie_values(env_cookies),
+                                "last_model_response": model_response.model_copy(
+                                    update={"output": new_outputs, "usage": usage}
+                                ).model_dump(mode="json"),
+                            },
+                        ),
+                    )
+
+            if step_data.terminated or step_data.truncated:
+                finished = True
+                break
+
         if not finished:
             step_data = step_data.model_copy(update={"truncated": True})
 
+        if last_model_response is None:
+            raise RuntimeError("Gymnasium episode ended before producing or restoring a model response")
         last_model_response.output = new_outputs
         last_model_response.usage = usage
 
