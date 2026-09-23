@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.opencode_sandboxed_agent import sandbox_runner
+from responses_api_agents.opencode_agent import sandbox_runner
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")

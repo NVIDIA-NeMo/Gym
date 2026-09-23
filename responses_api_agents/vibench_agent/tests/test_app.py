@@ -370,9 +370,9 @@ class TestSandboxModelUrl:
         means the URL rewrite silently never runs and the harness talks to itself."""
         import inspect
 
-        from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
+        from responses_api_agents.opencode_agent.legacy import LegacyOpenCodeAgent
 
         mine = inspect.signature(VibenchAgent._create_opencode_config)
-        base = inspect.signature(OpenCodeSandboxedAgent._create_opencode_config)
+        base = inspect.signature(LegacyOpenCodeAgent._create_opencode_config)
         assert list(mine.parameters) == list(base.parameters)
         assert inspect.iscoroutinefunction(VibenchAgent._create_opencode_config)

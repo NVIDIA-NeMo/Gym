@@ -51,27 +51,27 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from responses_api_agents.opencode_sandboxed_agent import app as app_module
-from responses_api_agents.opencode_sandboxed_agent.app import (
-    OpenCodeSandboxedAgent,
-    OpenCodeSandboxedAgentConfig,
-    OpenCodeSandboxedAgentRunRequest,
+from responses_api_agents.opencode_agent import legacy as app_module
+from responses_api_agents.opencode_agent.legacy import (
+    LegacyOpenCodeAgent,
+    LegacyOpenCodeAgentConfig,
+    LegacyOpenCodeAgentRunRequest,
 )
 
 
-class TestOpenCodeSandboxedAgent:
-    def test_import_only_loads_shared_opencode_observability(self) -> None:
+class TestLegacyOpenCodeAgent:
+    def test_legacy_import_does_not_load_local_or_native_execution(self) -> None:
         code = (
             f"import sys; import responses_api_agents; responses_api_agents.__path__ = [{str(Path(__file__).resolve().parents[2])!r}]; "
-            "import responses_api_agents.opencode_sandboxed_agent.app; "
-            "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
-            "or name.startswith('responses_api_agents.opencode_agent.')} == "
-            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
+            "import responses_api_agents.opencode_agent.legacy; "
+            "assert 'responses_api_agents.opencode_agent.app' not in sys.modules; "
+            "assert 'responses_api_agents.opencode_agent.setup_opencode' not in sys.modules; "
+            "assert 'responses_api_agents.opencode_agent.sandbox' not in sys.modules"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
-    def _create_config(self) -> OpenCodeSandboxedAgentConfig:
-        return OpenCodeSandboxedAgentConfig(
+    def _create_config(self) -> LegacyOpenCodeAgentConfig:
+        return LegacyOpenCodeAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -99,7 +99,7 @@ class TestOpenCodeSandboxedAgent:
         async def created_spec(sandbox_config: Dict[str, Any]) -> Any:
             config = self._create_config()
             config.sandbox_config = sandbox_config
-            server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+            server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
             await server._start_sandbox()
             return sandbox.start.await_args.args[0]
 
@@ -147,7 +147,7 @@ class TestOpenCodeSandboxedAgent:
     ) -> None:
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
 
-        actual_output_items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, opencode_export_test_data)
+        actual_output_items = LegacyOpenCodeAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
             NeMoGymEasyInputMessage(content=[{"text": "hello", "type": "input_text"}], role="user", type="message"),
             NeMoGymResponseOutputMessage(
@@ -192,7 +192,7 @@ class TestOpenCodeSandboxedAgent:
         assert expected_output_items == actual_output_items
 
     def test_opencode_export_to_usages(self, opencode_export_test_data: Dict[str, Any]) -> None:
-        actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
+        actual_usages = LegacyOpenCodeAgent._opencode_export_to_usages(None, opencode_export_test_data)
         expected_usages = [
             NeMoGymResponseUsage(
                 input_tokens=55,
@@ -218,7 +218,7 @@ class TestOpenCodeSandboxedAgent:
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
-        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
@@ -236,18 +236,18 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
 
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
+            "responses_api_agents.opencode_agent.legacy.Path.exists",
             lambda self: True,
         )
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            "responses_api_agents.opencode_agent.legacy.Path.read_text",
             lambda self: json.dumps(opencode_export_test_data),
         )
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
+            "responses_api_agents.opencode_agent.legacy.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
-        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
+        monkeypatch.setattr("responses_api_agents.opencode_agent.legacy.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
             request=MagicMock(
@@ -349,7 +349,7 @@ class TestOpenCodeSandboxedAgent:
 
     @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
     def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:
-        server = OpenCodeSandboxedAgent(
+        server = LegacyOpenCodeAgent(
             config=self._create_config(),
             server_client=MagicMock(spec=ServerClient),
         )
@@ -399,9 +399,9 @@ class TestOpenCodeSandboxedAgent:
             "observability_enabled": observability_enabled,
             "token_id_capture": {"enabled": token_capture_enabled, "all_agents": False},
         }
-        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            "responses_api_agents.opencode_agent.legacy.sandbox_server_url",
             lambda _name, **kwargs: "http://model-server",
         )
         request = MagicMock()
@@ -499,7 +499,7 @@ class TestOpenCodeSandboxedAgent:
             "observability_enabled": True,
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
-        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
@@ -523,7 +523,7 @@ class TestOpenCodeSandboxedAgent:
                 value = str(snapshot_path)
             return shlex.quote(value)
 
-        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
+        monkeypatch.setattr("responses_api_agents.opencode_agent.legacy.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
             if remote_path == "/tmp/opencode_export.json":
@@ -537,7 +537,7 @@ class TestOpenCodeSandboxedAgent:
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
         server._start_sandbox = AsyncMock(return_value=sandbox)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.__file__",
+            "responses_api_agents.opencode_agent.legacy.__file__",
             str(tmp_path / "app.py"),
         )
 
@@ -564,7 +564,7 @@ class TestOpenCodeSandboxedAgent:
 
         server_client.post = AsyncMock(side_effect=post)
         request = RunRequest()
-        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        body = LegacyOpenCodeAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": [{"role": "user", "content": "solve"}]},
                 "_ng_task_index": 7,

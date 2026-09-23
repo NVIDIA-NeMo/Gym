@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# API-only native SWE-bench Pro composition. Start with gym env start --config <this file>
+# plus a reachable Gym model and sandbox provider. POST SingleAgentEpisodeRequest to
+# swebench_pro_opencode_environment /run. Flat-row gym eval recipes use the separate
+# benchmarks/swebench/pro/opencode.yaml legacy profile until collection supports episodes.
+# Put responses_create_params under task.task_input.responses_create_params and the
+# remaining prepared SWE-bench Pro row under task.task_input.task_data; keep grader
+# patches/scripts out of the agent input. Supply episode_id and task.task_id explicitly.
+config_paths:
+  - environment_servers/single_agent/configs/single_agent.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+
+swebench_pro_opencode_environment:
+  _inherit_from: single_agent_environment_server
+  environment_servers:
+    single_agent:
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_opencode_agent
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_opencode_resources_server
+
+swebench_pro_opencode_agent:
+  _inherit_from: opencode_agent
+
+swebench_pro_opencode_resources_server:
+  _inherit_from: swebench_pro_resources_server

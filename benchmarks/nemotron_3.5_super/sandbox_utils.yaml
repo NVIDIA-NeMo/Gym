@@ -1,34 +1,34 @@
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
-swebench_verified_opencode_sandboxed_agent:
+swebench_verified_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-swebench_multilingual_opencode_sandboxed_agent:
+swebench_multilingual_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-deepswe_opencode_sandboxed_agent:
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-swebench_pro_opencode_sandboxed_agent:
+swebench_pro_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
 
-terminal_bench_2_1_opencode_sandboxed_agent:
+terminal_bench_2_1_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 terminal_bench_2_1_opencode_resources_server:
