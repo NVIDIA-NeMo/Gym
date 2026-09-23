@@ -98,15 +98,16 @@ class SharedLogs:
         )
 
     async def initialize_role(self, environment):
-        result = await environment.exec("id -u; id -g", timeout_sec=60)
+        user_options = {"user": environment.role_user} if getattr(environment, "root_bootstrap", False) else {}
+        result = await environment.exec("id -u; id -g", timeout_sec=60, **user_options)
         try:
             uid, gid = (int(value) for value in result.stdout.split())
             if result.return_code or min(uid, gid) < 0:
                 raise ValueError("Invalid workload identity")
         except (TypeError, ValueError) as exc:
             raise RuntimeError("Unable to determine the task log owner") from exc
-        # Give the mounted directory to the image's actual user. Keeping it
-        # world-writable would let a dropped verifier child rename protected
+        # Give the mount to the execution role (or unchanged image default).
+        # A world-writable parent would let a dropped verifier child rename protected
         # /logs/verifier and replace its reward file despite chmod 700 there.
         await self.python(
             "import os, sys\n"

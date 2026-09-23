@@ -54,6 +54,50 @@ tests into the agent's working directory. The test command still runs as
 `verifier.user`; when absent, the existing image-default behavior is preserved.
 Images must support the requested identities and root setup operations.
 
+### Root-bootstrap compatibility images
+
+For single-container images republished with `USER root`, set
+`environment.root_bootstrap_image_users` to a trusted mapping from each **new,
+effective image reference** to the **original image's OCI User**. Include both
+agent and verifier images; prefer immutable digest references. An empty original
+OCI User is `""` (root), not missing metadata. For example:
+
+```yaml
+root_bootstrap_image_users:
+  registry.example/task:root-bootstrap: agent
+  registry.example/grader:root-bootstrap: grader
+```
+
+This option does not rebuild images or override the backend's startup user.
+Each sandbox must already start as root; the runner checks this with an
+image-default command and fails before task execution otherwise. Missing image
+metadata, unavailable users, or failed switches are errors, never root fallbacks.
+Omitting the option retains existing behavior; Compose is rejected in this mode.
+Account names and numeric UIDs are supported. Explicit `USER user:group` values
+are rejected rather than silently losing the group override.
+
+| Operation | Execution identity |
+| --- | --- |
+| Stage trusted solution/tests | Root |
+| Golden solution and live Mini-SWE commands | `agent.user`, otherwise original agent-image User |
+| Run verifier tests | `verifier.user`, otherwise original verifier-image User |
+| Healthcheck / collection hook without its own user | Original image User for that environment |
+
+The resolved agent identity is passed to both harnesses, not just resource-owned
+commands. Existing named-user switching remains: removing it would run agents
+as the root bootstrap user. Log setup probes the role's UID/GID and prepares only
+`/logs`, `/logs/agent`, `/logs/verifier`, and `/logs/artifacts` for that role,
+including EFS mounts. No workspace ownership or permissions are repaired.
+Per-role `sandbox/<session-id>.identity.json` records bootstrap UID, original
+image User, configured/effective execution user, and observed UID/GID.
+
+Keep the original USER record independently of the new image, preserve task
+users, and perform a live golden/model smoke before qualifying a new image.
+The separate image-startup option below can be combined with this mode; it
+preserves the new image's startup argv and does not impose a service account.
+
+### Reference solution checks
+
 Set `execution_mode: oracle` for a reference-solution check instead of Mini-SWE.
 The runner stages the trusted `solution/` directory into `/solution` as root,
 makes these reference assets readable, then executes `bash /solution/solve.sh`
@@ -111,7 +155,9 @@ The benchmark profile sets `environment.efs_logs_host_path` to
 `/mnt/efs/data/shared`. Each episode creates a unique EFS directory with separate
 agent and verifier subdirectories mounted read-write at `/logs`. The image's
 default UID/GID owns its log root with mode `755`; workloads keep their original
-execution user. This allows non-root images to initialize their log directories
+execution user. With root-bootstrap identity metadata enabled, the configured
+role's UID/GID owns these harness log directories instead of the bootstrap UID.
+This allows non-root images to initialize their log directories
 and keeps root verifier reward-directory protections effective. Compose mounts
 these logs in `main`; sidecar mounts and collection order remain unchanged.
 

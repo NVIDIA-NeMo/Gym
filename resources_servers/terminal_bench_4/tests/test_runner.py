@@ -74,6 +74,7 @@ async def fixture(tmp_path, monkeypatch):
             build_spec=lambda: None,
             resource_identities=lambda: [],
             main=MagicMock(),
+            role_user=task.config.verifier.user if verifier else task.config.agent.user,
             agent_workdir=AsyncMock(return_value="/task"),
             healthcheck=AsyncMock(),
             quiesce_agent=AsyncMock(side_effect=lambda _: events.append("quiesce")),
@@ -155,6 +156,38 @@ async def test_one_runner_reuses_live_sandbox_and_replays_exact_result(fixture):
     f.server._by_identity.clear()
     assert await f.server.run(f.request, f.body) == result
     assert len(f.harnesses) == 1
+
+
+@pytest.mark.parametrize("mode", ["miniswe", "oracle"])
+async def test_live_and_golden_harnesses_receive_resolved_image_default(fixture, monkeypatch, mode):
+    f = fixture
+    f.server.config.execution_mode = mode
+    f.server._loader.load.return_value.config.agent.user = None
+    f.server._loader.load.return_value.path = f.server.config.artifacts_dir
+    create = lifecycle.Environment
+
+    def environment(*args, **kwargs):
+        env = create(*args, **kwargs)
+        env.role_user = "original-image-user"
+        return env
+
+    oracle_contexts = []
+
+    def oracle_harness(**kwargs):
+        oracle_contexts.append(kwargs["context"])
+
+        async def execute(_budget):
+            return kwargs["response"], HarnessOutcome(reason="completed"), {"oracle_exit_code": 0}
+
+        return SimpleNamespace(setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
+
+    monkeypatch.setattr(lifecycle, "Environment", environment)
+    monkeypatch.setattr(module, "OracleHarness", oracle_harness)
+    result = await f.server.run(f.request, f.body)
+    assert result.evaluation_completed
+    assert f.harnesses[0].context.user == "original-image-user"
+    if mode == "oracle":
+        assert oracle_contexts[0].user == "original-image-user"
 
 
 @pytest.mark.parametrize("field", ["task_name", "task_ref", "dataset_ref"])

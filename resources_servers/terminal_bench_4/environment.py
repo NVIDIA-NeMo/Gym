@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import shlex
 from copy import deepcopy
 from dataclasses import replace
@@ -15,7 +16,7 @@ from time import monotonic
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field
+from pydantic import Field, StrictInt, StrictStr
 
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -42,6 +43,7 @@ class EnvironmentConfig(Settings):
     sandbox_split_endpoints: bool
     compose_image_configs: Path | None
     single_container_image_configs: Path | None = None
+    root_bootstrap_image_users: dict[str, StrictStr | StrictInt] | None = None
     sandbox_ttl_s: float = Field(gt=0)
     sandbox_ready_timeout_s: float = Field(gt=0)
     default_exec_timeout_s: float = Field(gt=0)
@@ -54,6 +56,22 @@ class EnvironmentConfig(Settings):
 
 class HealthcheckError(RuntimeError):
     pass
+
+
+def execution_user(value: str | int, *, image_default: bool = False) -> str | int:
+    """Normalize a Linux account/UID without silently discarding a requested group."""
+    if image_default and value == "":
+        return "root"  # OCI's empty User means UID 0, not an unknown default.
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        value = int(value)
+    if type(value) is int and 0 <= value < 2**32:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*\$?", value):
+        return value
+    raise ValueError(
+        "Root-bootstrap identities require an account name or unsigned UID; "
+        "USER user:group overrides are not supported and must not be discarded"
+    )
 
 
 class Environment:
@@ -80,6 +98,21 @@ class Environment:
             self.task_env | config.sandbox_env_by_task.get(task.name.split("/")[-1], {}) | config.sandbox_env
         )
         self.uses_compose = (self.environment_dir / "docker-compose.yaml").is_file()
+        self.root_bootstrap = config.root_bootstrap_image_users is not None
+        self.original_image_user = None
+        if self.root_bootstrap:
+            if self.uses_compose:
+                raise ValueError("Root-bootstrap identities currently require single-container environments")
+            image = rewrite_image(self.settings.docker_image, config.image_rewrites)
+            if image not in config.root_bootstrap_image_users:
+                raise ValueError(f"Root bootstrap requires the original image user for {image!r}")
+            self.original_image_user = config.root_bootstrap_image_users[image]
+            self.default_user = execution_user(self.original_image_user, image_default=True)
+            # Reject unsupported task identities before allocating either role.
+            if self.configured_user is not None:
+                execution_user(self.configured_user)
+        else:
+            self.default_user = None
         if not verifier and not self.uses_compose:
             services = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
             if services - {None, "main"}:
@@ -109,6 +142,19 @@ class Environment:
             raise ValueError("Offline verification requires a single OpenSandbox environment")
         if self.uses_compose and config.compose_image_configs is None:
             raise ValueError("Compose requires verified image startup metadata")
+
+    @property
+    def configured_user(self) -> str | int | None:
+        """The task-authored execution identity for this role."""
+        settings = self.task.config.verifier if self.log_role == "verifier" else self.task.config.agent
+        return settings.user
+
+    @property
+    def role_user(self) -> str | int | None:
+        """Resolve execution independently from the privileged bootstrap identity."""
+        if not self.root_bootstrap:
+            return self.configured_user
+        return self.default_user if self.configured_user is None else execution_user(self.configured_user)
 
     def _single_container_entrypoint(self, image: str) -> list[str] | None:
         path = self.config.single_container_image_configs
@@ -260,11 +306,32 @@ class Environment:
                 self.shared_logs = None
                 self.main = AsyncSandbox(resolve_provider_config(self.provider_config), self.build_spec())
                 await self.main.start()
+        if self.root_bootstrap:
+            # Do not request uid=0 here: prove the command daemon itself starts
+            # as root, rather than merely testing a privileged command override.
+            result = await self.main.exec("id -u", timeout_s=30)
+            if result.return_code or result.stdout.strip() != "0":
+                raise RuntimeError(
+                    "Root bootstrap requires an image/runtime whose default execution user is root; "
+                    "this option does not override OCI USER or escalate a non-root sandbox"
+                )
         if self.shared_logs is not None:
             await self.shared_logs.initialize_role(self)
-        result = await self.exec("mkdir -p /logs/agent /logs/verifier /logs/artifacts", timeout_sec=60)
+        log_setup = "mkdir -p /logs/agent /logs/verifier /logs/artifacts"
+        if self.root_bootstrap:
+            log_setup = (
+                'for p in /logs /logs/agent /logs/verifier /logs/artifacts; do test ! -L "$p" || exit 1; done && '
+                + log_setup
+            )
+        result = await self.exec(
+            log_setup,
+            timeout_sec=60,
+            user="root" if self.root_bootstrap else None,
+        )
         if result.return_code:
             raise RuntimeError(f"Failed to initialize task log directories: {result.stderr}")
+        if self.root_bootstrap:
+            await self._prepare_role_logs()
         # Published images with a build spec already contain these files.
         if (
             not self.uses_compose
@@ -292,12 +359,62 @@ class Environment:
         if shell:
             command = f"{shell} {shlex.quote(command)}"
         persistent = self.task_env if main and not self.uses_compose else {}
+        if main and self.root_bootstrap:
+            user = self.default_user if user is None else execution_user(user)
         return await self.sandbox(service).exec(
             command,
             cwd=cwd,
             env=(persistent | (env or {})) or None,
             timeout_s=timeout_sec if timeout_sec is not None else self.config.default_exec_timeout_s,
             user=user,
+        )
+
+    async def _prepare_role_logs(self) -> None:
+        expected_uid = self.role_user if isinstance(self.role_user, int) else 0 if self.role_user == "root" else None
+        command = "id -u && id -g"
+        if expected_uid is None:
+            command += f" && id -u -- {shlex.quote(self.role_user)}"
+        identity = await self.exec(command, user=self.role_user, timeout_sec=30)
+        try:
+            values = [int(value) for value in identity.stdout.split()]
+            if expected_uid is None:
+                uid, gid, expected_uid = values
+            else:
+                uid, gid = values
+            if identity.return_code or min(uid, gid) < 0 or uid != expected_uid:
+                raise ValueError("Invalid role identity")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Unable to execute as {self.log_role} user {self.role_user!r}: {identity.stderr}"
+            ) from exc
+        # Only harness-owned log directories are prepared. Never recursively
+        # chown the task workspace, restored artifacts, or trusted test assets.
+        paths = "/logs /logs/agent /logs/verifier /logs/artifacts"
+        result = await self.exec(
+            f'for p in {paths}; do test ! -L "$p" && test -d "$p" || exit 1; done && '
+            f"chown {uid}:{gid} {paths} && chmod 755 {paths}",
+            user="root",
+            timeout_sec=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Unable to prepare {self.log_role} log directories: {result.stderr}")
+        path = self.directory / "sandbox" / f"{self.session_id}.identity.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "role": self.log_role,
+                    "image": rewrite_image(self.settings.docker_image, self.config.image_rewrites),
+                    "bootstrap_uid": 0,
+                    "original_image_user": self.original_image_user,
+                    "configured_user": self.configured_user,
+                    "execution_user": self.role_user,
+                    "execution_uid": uid,
+                    "execution_gid": gid,
+                },
+                indent=2,
+            )
+            + "\n"
         )
 
     async def agent_workdir(self):

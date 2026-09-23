@@ -240,6 +240,21 @@ async def test_log_owner_uses_image_identity_and_protects_parent(tmp_path, monke
     await logs.stop()
 
 
+async def test_root_bootstrap_log_mount_uses_role_identity_not_daemon_identity(tmp_path, monkeypatch):
+    logs, _, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    env = SimpleNamespace(
+        log_role="agent",
+        root_bootstrap=True,
+        role_user="agent",
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=f"{os.getuid()}\n{os.getgid()}\n")),
+    )
+    await logs.initialize_role(env)
+    env.exec.assert_awaited_once_with("id -u; id -g", timeout_sec=60, user="agent")
+    assert (Path(logs.root) / "agent").stat().st_mode & 0o777 == 0o755
+    await logs.stop()
+
+
 @pytest.mark.parametrize("error", ["VOLUME::HOST_PATH_NOT_ALLOWED /mnt/efs/data/shared", "quota exceeded"])
 async def test_only_explicit_unsupported_efs_mount_uses_original_lifecycle(tmp_path, monkeypatch, error):
     env, box, create, _ = make_environment(tmp_path, monkeypatch)

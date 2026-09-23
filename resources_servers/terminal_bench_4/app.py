@@ -251,7 +251,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         task_id=body.task_name,
                         rollout_id=body.capture_rollout_id or body.rollout_id,
                         instruction=session.task.instruction,
-                        user=session.task.config.agent.user,
+                        user=session.environment.role_user,
                         workdir=await session.environment.agent_workdir(),
                         setup_timeout_sec=lifecycle.SETUP_TIMEOUT_SEC,
                         mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
