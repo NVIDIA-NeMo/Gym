@@ -23,9 +23,9 @@ datasets:
     jsonl_fpath: benchmarks/indic/aime_2026/data/aime_2026_benchmark.jsonl
     prepare_script: benchmarks/indic/aime_2026/prepare.py
     prompt_config: benchmarks/prompts/generic/math.yaml
-    num_repeats: 1
+    num_repeats: 4
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
-canonical_split: train
+canonical_split: benchmark
 session_model: episode
 state: none
 lifecycle: active
