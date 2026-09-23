@@ -440,7 +440,8 @@ class TestRolloutObservability:
         trajectory = self._trajectory_for(self._two_turn_output(), ["chatcmpl-a", "chatcmpl-b"])
 
         assert [[item["id"] for item in turn.answer] for turn in trajectory.turns] == [["msg_1", "fc_1"], ["msg_2"]]
-        assert [turn.step_count for turn in trajectory.turns] == [1, 0]
+        # cumulative within the invocation: turn 2 adds no tool call of its own
+        assert [turn.step_count for turn in trajectory.turns] == [1, 1]
 
     def test_a_turn_with_no_items_behind_it_stays_empty(self) -> None:
         """A claimed call that produced nothing is what `agent_turn_hollow` is for."""
@@ -448,6 +449,8 @@ class TestRolloutObservability:
 
         assert len(trajectory.turns) == 3
         assert trajectory.turns[2].answer == []
+        # the running count carries through a turn that did nothing
+        assert [turn.step_count for turn in trajectory.turns] == [1, 1, 1]
 
     def test_the_empty_token_placeholder_does_not_stand_in_for_a_turn(self) -> None:
         """`_convert_trajectory_to_output` appends a `msg_empty` placeholder when

@@ -472,10 +472,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         groups = _assistant_turn_groups(output)
         turns: list[TrajectoryTurn] = []
         now = time()
+        step_count = 0
         for index, ref in enumerate(model_calls, start=1):
             # A call with no items behind it is a genuinely empty turn; leaving
             # `answer` empty is what lets `agent_turn_hollow` say so.
             items = groups[index - 1] if index <= len(groups) else []
+            # step_count is cumulative within an invocation, not per turn.
+            step_count += sum(1 for item in items if item.get("type") == "function_call")
             turns.append(
                 TrajectoryTurn(
                     invocation_id=invocation_id,
@@ -484,7 +487,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                     turn_no=index,
                     timestamp=now,
                     answer=items,
-                    step_count=sum(1 for item in items if item.get("type") == "function_call"),
+                    step_count=step_count,
                     model_calls=[ref],
                 )
             )
