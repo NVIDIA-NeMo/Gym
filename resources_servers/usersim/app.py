@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
+    usersim_revision: str = Field(
+        "66c6064b6a1b6fa593f79af45a32a45f179cd456",
+        pattern=r"^[0-9a-f]{40}$",
+    )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
     api_response_model: ModelServerRef | None = None
     judge_model: ModelServerRef | None = None
@@ -409,6 +413,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 seed=sampling.seed,
                 personas_dataset_version=dataset.personas_dataset_version,
                 personas_panel_sha256=dataset.panel_sha256,
+                usersim_revision=self.config.usersim_revision,
             ),
         )
 
