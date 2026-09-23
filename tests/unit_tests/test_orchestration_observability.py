@@ -21,10 +21,10 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors import observability as obs_module
+from nemo_gym.orchestration.executors import otel as obs_module
 from nemo_gym.orchestration.executors import slurm as slurm_module
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.observability import (
+from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
     OTLP_GRPC_PORT,
     OTLP_HTTP_PORT,
@@ -290,6 +290,28 @@ def test_collector_config_never_contains_the_token_value(monkeypatch):
 def test_script_starts_the_collector_before_the_model_service():
     script = _script(_config())
     assert script.index("# service: otel_collector") < script.index("# service: policy")
+
+
+def _collector_line(script):
+    return next(line for line in script.splitlines() if "--output=logs/otel_collector.log" in line)
+
+
+def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
+    """srun without node flags fans a step out to every node of the allocation; the collector must
+    run once, on the batch host, where the vLLM head and the driver are."""
+    multi = _config(
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": {"gpu": {"partition": "p", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 8}},
+            }
+        }
+    )
+    line = _collector_line(_script(multi))
+    assert " --nodes=1 --ntasks=1" in line
+    assert " --nodes=1 --ntasks=1" not in _collector_line(_script(_config()))
 
 
 def test_script_runs_the_collector_on_the_node_by_default():

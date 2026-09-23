@@ -24,7 +24,7 @@ from nemo_gym import __version__
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
-from nemo_gym.orchestration.executors.observability import (
+from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
     observability_active,

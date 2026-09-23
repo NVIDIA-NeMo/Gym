@@ -29,7 +29,7 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
-from nemo_gym.orchestration.executors.observability import (
+from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
@@ -132,10 +132,15 @@ def _render_service_command(
     ntasks: int | None = None,
     pre_command: str = "",
     workdir: str | None = None,
+    single_node: bool = False,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
-    node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
+    if single_node:
+        # Pin to one node of a multi-node allocation; without it srun fans the step out to every node.
+        node_flags = " --nodes=1 --ntasks=1"
+    else:
+        node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     workdir_flag = f" --container-workdir={shlex.quote(workdir)}" if workdir else ""
     if pre_command:
@@ -339,12 +344,23 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
-def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
-    startup. In a container the job directory is mounted for the config and the local
-    `otel/*.jsonl` output; on the node it is simply there."""
+    startup.
+
+    Runs on exactly one node, the batch host. That is the first node of the allocation, which is
+    also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
+    so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
+    container the job directory is mounted for the config and the local `otel/*.jsonl` output; on
+    the node it is simply there, so no mounts or workdir are passed.
+    """
     obs = config.observability
     command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
+    container_kwargs = (
+        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
+        if obs.container is not None
+        else {}
+    )
     return _render_service_command(
         COLLECTOR_SERVICE_NAME,
         obs.container,
@@ -353,8 +369,8 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path) -> s
             obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}",
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
-        mounts=[f"{remote_bench_dir}:{remote_bench_dir}"],
-        workdir=str(remote_bench_dir),
+        single_node=is_multi_node,
+        **container_kwargs,
     )
 
 
@@ -432,7 +448,7 @@ def build_sbatch_script(
     observed = observability_active(config)
 
     service_commands = "\n\n".join(
-        ([_render_collector_service(config, remote_bench_dir)] if observed else [])
+        ([_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node)] if observed else [])
         + [
             _render_service_command(
                 name,
