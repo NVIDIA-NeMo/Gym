@@ -60,7 +60,7 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "66c6064b6a1b6fa593f79af45a32a45f179cd456",
+        "693865d7b33c3d96283a9742703c8c89413a9d2b",
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
