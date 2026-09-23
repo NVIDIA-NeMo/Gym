@@ -228,6 +228,17 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 ---
 
+## Pinned Upstream Dependencies (not vendored)
+
+These are installed from a pinned upstream revision into a server's own virtual environment.
+No upstream source is copied into this repository; the adapter imports and subclasses it.
+
+| Component | License | Pinned revision | Used by | Upstream |
+|-----------|---------|-----------------|---------|----------|
+| AgentDojo | MIT | `a75aba7631d3ca5fb7ab938965c97ead2f9ff84b` (tag `v0.1.35`) | `responses_api_agents/agentdojo_agent/` (suites, tools, attacks, defenses and verifiers run unmodified; `responses_api_agents/agentdojo_family/model_bridge.py` subclasses `agentdojo.agent_pipeline.llms.openai_llm.OpenAILLM` and reuses its message and tool converters) | https://github.com/ethz-spylab/agentdojo |
+
+---
+
 ## Cloned and Modified Components
 
 | Component | License | Upstream | Notes |
