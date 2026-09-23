@@ -42,8 +42,12 @@ Ambiguous matches remain unresolved rather than risking tokens from the wrong ca
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
+import socket
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -740,6 +744,15 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_root = Path(root)
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
+        # Identity marker for out-of-process readers (``FileManifestReader``):
+        # a framework that reads this ledger directly, instead of through the
+        # HTTP manifest route, needs proof that it sees the *same* directory
+        # this writer commits into. Best effort: a marker failure must never
+        # fail a serving process.
+        try:
+            write_writer_identity_marker(self._ledger_root)
+        except OSError:
+            pass
 
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
@@ -937,3 +950,303 @@ class FileLineageStore(IncrementalLineageStore):
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
             return bool(self._read(rollout_id))
+
+
+# ---------------------------------------------------------------------------
+# Direct (in-process, cache-free) manifest reads
+# ---------------------------------------------------------------------------
+# ``FileLineageStore.manifest`` serves the HTTP control route and keeps every
+# parsed ledger in ``_ledger_cache``. A training framework that reads
+# completed rollouts directly from the shared tmpfs wants neither the HTTP hop
+# nor a growing cache, so ``FileManifestReader`` snapshots one ledger under
+# the writer's per-rollout lock and returns the same manifest payload without
+# retaining anything.
+
+WRITER_IDENTITY_DIRNAME = "_writers"
+"""Subdirectory of a ledger root holding one identity marker per writer process.
+
+Rollout ledgers are flat ``<rollout_id>.lineage.jsonl`` files, so a directory
+can never collide with a rollout id.
+"""
+
+TMPFS_MAGIC = 0x01021994
+
+
+class ManifestReadTimeout(TimeoutError):
+    """The read (lock wait, snapshot, or parse) did not finish before its deadline."""
+
+
+class ManifestReadCancelled(RuntimeError):
+    """The caller cancelled the read before it finished."""
+
+
+class LedgerRootMismatch(RuntimeError):
+    """The reader does not see the writer's ledger directory."""
+
+
+def _filesystem_identity(path: Path) -> dict[str, Any]:
+    info = path.stat()
+    magic = _statfs_magic(path)
+    return {
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "fs_magic": magic,
+        "is_tmpfs": magic == TMPFS_MAGIC if magic is not None else None,
+    }
+
+
+def _statfs_magic(path: Path) -> int | None:
+    # ``os.statvfs`` does not expose f_type; read it from /proc/self/mountinfo
+    # via the mount's filesystem type instead (Linux only).
+    try:
+        best: tuple[int, str] | None = None
+        resolved = str(path.resolve())
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                mount_point = parts[4].replace("\\040", " ")
+                if resolved == mount_point or resolved.startswith(mount_point.rstrip("/") + "/"):
+                    separator = parts.index("-")
+                    fs_type = parts[separator + 1]
+                    if best is None or len(mount_point) > best[0]:
+                        best = (len(mount_point), fs_type)
+        if best is None:
+            return None
+        return TMPFS_MAGIC if best[1] in ("tmpfs", "shm", "devtmpfs") else 0
+    except (OSError, ValueError):
+        return None
+
+
+def write_writer_identity_marker(root: str | Path) -> Path:
+    """Record this process's view of ``root`` under ``<root>/_writers/<pid>.json``.
+
+    Written atomically (temp + rename). The marker lives outside rollout
+    ledgers so it can never be mistaken for training data.
+    """
+    root_path = Path(root)
+    marker_dir = root_path / WRITER_IDENTITY_DIRNAME
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "root": str(root_path.resolve()),
+        "written_at": time.time(),
+        **_filesystem_identity(root_path),
+    }
+    final = marker_dir / f"{os.getpid()}.json"
+    temp = marker_dir / f".{os.getpid()}.{threading.get_ident()}.tmp"
+    temp.write_bytes(orjson.dumps(payload))
+    os.replace(temp, final)
+    return final
+
+
+def read_writer_identity_markers(root: str | Path) -> list[dict[str, Any]]:
+    marker_dir = Path(root) / WRITER_IDENTITY_DIRNAME
+    if not marker_dir.is_dir():
+        return []
+    markers: list[dict[str, Any]] = []
+    for path in sorted(marker_dir.glob("*.json")):
+        try:
+            payload = orjson.loads(path.read_bytes())
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            markers.append(payload)
+    return markers
+
+
+def verify_ledger_root_visibility(
+    root: str | Path,
+    *,
+    require_writer_marker: bool = True,
+    wait_s: float = 0.0,
+) -> dict[str, Any]:
+    """Check that ``root`` exists and that a writer recorded the same filesystem view.
+
+    Returns a diagnostic dict (reader identity, matching marker count, tmpfs
+    flag). Raises :class:`LedgerRootMismatch` when the root is missing, no
+    writer marker is present (after ``wait_s``), or every marker names a
+    different device/inode or host than the reader sees.
+    """
+    root_path = Path(root)
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        if root_path.is_dir():
+            markers = read_writer_identity_markers(root_path)
+            if markers or not require_writer_marker:
+                break
+        if time.monotonic() >= deadline:
+            if not root_path.is_dir():
+                raise LedgerRootMismatch(f"ledger root {root_path} does not exist from the reader's view")
+            if require_writer_marker:
+                raise LedgerRootMismatch(
+                    f"ledger root {root_path} has no writer identity marker under "
+                    f"{WRITER_IDENTITY_DIRNAME}/; the ledger writer is not running or writes elsewhere"
+                )
+            markers = []
+            break
+        time.sleep(0.2)
+    reader = {"hostname": socket.gethostname(), "root": str(root_path.resolve()), **_filesystem_identity(root_path)}
+    matching = [
+        marker
+        for marker in markers
+        if marker.get("device") == reader["device"]
+        and marker.get("inode") == reader["inode"]
+        and marker.get("hostname") == reader["hostname"]
+    ]
+    if markers and not matching:
+        sample = markers[0]
+        raise LedgerRootMismatch(
+            "ledger writer and reader see different directories: writer "
+            f"{sample.get('hostname')} dev={sample.get('device')} ino={sample.get('inode')} vs reader "
+            f"{reader['hostname']} dev={reader['device']} ino={reader['inode']} ({root_path})"
+        )
+    return {"reader": reader, "writers": len(markers), "matching_writers": len(matching)}
+
+
+@dataclass
+class ManifestReadStats:
+    """Per-read timings and sizes (seconds / bytes), for the caller's histograms."""
+
+    lock_wait_s: float = 0.0
+    snapshot_s: float = 0.0
+    parse_s: float = 0.0
+    bytes_read: int = 0
+    rows: int = 0
+    lock_retries: int = 0
+
+
+class FileManifestReader:
+    """Synchronous, cache-free reader of committed ``<rollout_id>.lineage.jsonl`` ledgers.
+
+    Designed for a caller-owned thread pool: every method blocks the calling
+    thread and holds no state between calls. A read takes the writer's
+    per-rollout lock in *shared* mode with a non-blocking retry loop bounded
+    by ``deadline`` (``time.monotonic()`` seconds) and ``cancel_event``,
+    copies the file bytes, releases the lock, then parses and converts.
+    Missing ledgers yield an empty manifest, exactly like the HTTP route.
+    """
+
+    def __init__(self, root: str | Path, *, lock_poll_interval_s: float = 0.002) -> None:
+        from nemo_gym.token_id_capture.store import TokenCaptureStore
+
+        self._root = Path(root)
+        if not self._root.is_dir():
+            raise LedgerRootMismatch(f"ledger root {self._root} does not exist")
+        # Path/lock conventions stay owned by the store; it only mkdirs an
+        # existing directory here.
+        self._store = TokenCaptureStore(self._root)
+        self._lock_poll_interval_s = max(0.0005, float(lock_poll_interval_s))
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def ledger_path(self, rollout_id: str) -> Path:
+        from nemo_gym.token_id_capture.store import validate_rollout_id
+
+        return self._root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
+
+    @staticmethod
+    def _check(deadline: float | None, cancel_event: "threading.Event | None", stage: str, rollout_id: str) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ManifestReadCancelled(f"manifest read for {rollout_id} cancelled during {stage}")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ManifestReadTimeout(f"manifest read for {rollout_id} exceeded its deadline during {stage}")
+
+    def snapshot(
+        self,
+        rollout_id: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: "threading.Event | None" = None,
+        stats: ManifestReadStats | None = None,
+    ) -> bytes:
+        """Return the ledger bytes as of one consistent, shared-locked instant."""
+        path = self.ledger_path(rollout_id)
+        stats = stats if stats is not None else ManifestReadStats()
+        self._check(deadline, cancel_event, "admission", rollout_id)
+        if not path.exists():
+            # Never observed a commit: the same empty manifest the route returns.
+            # Do not mint a lock file for a rollout that never wrote one.
+            return b""
+        lock_started = time.perf_counter()
+        with self._store.lock_path_for(rollout_id).open("a+b") as lock_handle:
+            while True:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    stats.lock_retries += 1
+                    self._check(deadline, cancel_event, "lock acquisition", rollout_id)
+                    time.sleep(self._lock_poll_interval_s)
+            stats.lock_wait_s = time.perf_counter() - lock_started
+            try:
+                snapshot_started = time.perf_counter()
+                try:
+                    with path.open("rb") as handle:
+                        data = handle.read()
+                except FileNotFoundError:
+                    data = b""
+                stats.snapshot_s = time.perf_counter() - snapshot_started
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        stats.bytes_read = len(data)
+        return data
+
+    @staticmethod
+    def parse_rows(rollout_id: str, data: bytes) -> list[dict]:
+        rows: list[dict] = []
+        for line in data.split(b"\n"):
+            payload = line.strip()
+            if not payload:
+                continue
+            try:
+                record = orjson.loads(payload)
+            except ValueError as error:
+                raise ValueError(f"lineage record for {rollout_id} is malformed JSON: {error}") from error
+            if not isinstance(record, dict):
+                raise ValueError(f"lineage record for {rollout_id} is not an object")
+            rows.append(record)
+        return rows
+
+    def read_rows(
+        self,
+        rollout_id: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: "threading.Event | None" = None,
+        stats: ManifestReadStats | None = None,
+    ) -> list[dict]:
+        stats = stats if stats is not None else ManifestReadStats()
+        data = self.snapshot(rollout_id, deadline=deadline, cancel_event=cancel_event, stats=stats)
+        self._check(deadline, cancel_event, "parse", rollout_id)
+        parse_started = time.perf_counter()
+        rows = self.parse_rows(rollout_id, data)
+        stats.parse_s = time.perf_counter() - parse_started
+        stats.rows = len(rows)
+        self._check(deadline, cancel_event, "parse", rollout_id)
+        return rows
+
+    def read_manifest(
+        self,
+        rollout_id: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: "threading.Event | None" = None,
+        stats: ManifestReadStats | None = None,
+    ) -> dict:
+        """Return the ``RolloutManifest`` payload the HTTP manifest route would serve."""
+        stats = stats if stats is not None else ManifestReadStats()
+        rows = self.read_rows(rollout_id, deadline=deadline, cancel_event=cancel_event, stats=stats)
+        self._check(deadline, cancel_event, "manifest conversion", rollout_id)
+        convert_started = time.perf_counter()
+        try:
+            manifest = _manifest_from_rows(rollout_id, rows)
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"lineage record for {rollout_id} has invalid fields: {error}") from error
+        stats.parse_s += time.perf_counter() - convert_started
+        self._check(deadline, cancel_event, "manifest conversion", rollout_id)
+        return manifest
