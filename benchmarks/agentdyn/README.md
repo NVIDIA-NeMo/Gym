@@ -1,9 +1,10 @@
 # AgentDyn
 
-[AgentDyn](https://github.com/SaFo-Lab/AgentDyn) extends AgentDojo with three dynamic, long-horizon suites --
-`shopping`, `github` and `dailylife` -- and runs nine indirect prompt-injection defenses over them. Each selector
-runs one user task, either clean or with one injection task delivered by the `important_instructions` attack, through
-the pinned upstream harness (`SaFo-Lab/AgentDyn@5353cf7615b135cace8d07c8f12dac53a16b6db3`, benchmark `v1.2.2`),
+[AgentDyn](https://github.com/SaFo-Lab/AgentDyn) ([arXiv:2602.03117](https://arxiv.org/abs/2602.03117), "Are Your Agent
+Security Defenses Deployable in Real-World Dynamic Environments?") extends AgentDojo with three dynamic, long-horizon
+suites -- `shopping`, `github` and `dailylife` -- and runs nine indirect prompt-injection defenses over them. Each
+selector runs one user task, either clean or with one injection task delivered by the `important_instructions` attack,
+through the pinned upstream harness (`SaFo-Lab/AgentDyn@5353cf7615b135cace8d07c8f12dac53a16b6db3`, benchmark `v1.2.2`),
 which scores utility and attack success against the suite's own state.
 
 | Arm | Selectors |

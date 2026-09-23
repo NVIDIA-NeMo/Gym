@@ -1,6 +1,7 @@
 # AgentDyn agent
 
-A self-contained agent that runs [AgentDyn](https://github.com/SaFo-Lab/AgentDyn)'s pinned upstream harness
+A self-contained agent that runs [AgentDyn](https://github.com/SaFo-Lab/AgentDyn)'s
+([arXiv:2602.03117](https://arxiv.org/abs/2602.03117)) pinned upstream harness
 (`5353cf7615b135cace8d07c8f12dac53a16b6db3`, benchmark `v1.2.2`) against a NeMo Gym model server. Upstream owns the
 tasks, the tool environments, the attack, the defenses and the scoring; the adapter supplies the model, records the
 trajectory, and returns upstream's verdict. There is no resources server: AgentDojo-family suites verify against their
