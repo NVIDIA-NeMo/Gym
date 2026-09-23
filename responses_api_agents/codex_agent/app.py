@@ -24,7 +24,8 @@ import signal
 import tempfile
 from asyncio import Semaphore
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import monotonic, time
@@ -406,6 +407,7 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     session_close_retry_window_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_context_budget(self) -> "CodexAgentConfig":
@@ -439,6 +441,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         default_factory=OrderedDict
     )
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
+    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
+    _session_reapers: dict[str, asyncio.Task[None]] = PrivateAttr(default_factory=dict)
 
     def _session_marker(self, request: Request) -> Optional[str]:
         try:
@@ -452,16 +457,57 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Invalid Codex sandbox session marker")
         return marker
 
+    @asynccontextmanager
+    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[None]:
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            self._session_lock_users[session_id] -= 1
+            if not self._session_lock_users[session_id]:
+                del self._session_lock_users[session_id]
+                if session_id not in self._sandbox_sessions and session_id not in self._closed_sandbox_sessions:
+                    self._session_locks.pop(session_id, None)
+
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        """Borrow the Resources-owned task sandbox and install a pinned Codex runtime inside it."""
+        """Idempotently borrow the Resources sandbox under the caller's session identifier."""
         self._expire_closed_agent_sessions()
-        if self._session_marker(request) is not None:
-            raise HTTPException(409, "Codex session already exists")
-        session_id = f"codex-{uuid4().hex}"
-        state = await self._initialize_agent_session_state(session_id, body)
-        self._sandbox_sessions[session_id] = state
-        request.session[_SANDBOX_SESSION_KEY] = session_id
-        return AgentSeedSessionResponse(agent_session_id=session_id)
+        session_id = body.agent_session_id
+        marker = self._session_marker(request)
+        if marker is not None and marker != session_id:
+            raise HTTPException(409, "Codex seed does not match the session cookie")
+        async with self._locked_agent_session(session_id):
+            if session_id in self._closed_sandbox_sessions:
+                raise HTTPException(409, "Codex session is already closed")
+            state = self._sandbox_sessions.get(session_id)
+            if state is not None:
+                if state.seed != body or state.closing:
+                    raise HTTPException(409, "Codex session is bound to another seed or is closing")
+            else:
+                if marker is not None:
+                    raise HTTPException(409, "Codex session cookie has expired")
+                state = await self._initialize_agent_session_state(session_id, body)
+                self._sandbox_sessions[session_id] = state
+                self._session_reapers[session_id] = asyncio.create_task(self._expire_agent_session(session_id, body))
+            request.session[_SANDBOX_SESSION_KEY] = session_id
+            return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def _expire_agent_session(self, session_id: str, seed: AgentSeedSessionRequest) -> None:
+        try:
+            await asyncio.sleep(self.config.session_lifetime_seconds)
+            await self.close_agent_session(
+                Request({"type": "http", "session": {}}),
+                AgentCloseSessionRequest(agent_session_id=session_id, episode_id=seed.episode_id),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.exception("Could not close expired Codex session %s; owner recovery required", session_id)
+        finally:
+            if self._session_reapers.get(session_id) is asyncio.current_task():
+                self._session_reapers.pop(session_id, None)
 
     async def _initialize_agent_session_state(
         self, agent_session_id: str, body: AgentSeedSessionRequest
@@ -500,9 +546,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
         except BaseException:
             await provider.aclose()
             raise
-        directory = f"/tmp/nemo-gym-codex-sessions/{agent_session_id}"
+        directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
-        prepared_ok = False
+        state = CodexSandboxSession(body, sandbox, directory, runtime)
+        # Preserve the borrowed handle even if setup or its cleanup loses its response.
+        self._sandbox_sessions[agent_session_id] = state
         try:
             prepare = _sandbox_prepare_command(body.sandbox_access.workdir, directory, runtime)
             prepared = await sandbox.exec(prepare, timeout_s=30)
@@ -511,7 +559,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"Cannot prepare Codex session: {prepare}; exit={prepared.return_code}, "
                     f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
                 )
-            prepared_ok = True
             # Install only the agent runtime in the existing task sandbox.
             # Resources has already prepared the task repository and its dependencies.
             installer = "install_codex_runtime.sh"
@@ -529,55 +576,66 @@ class CodexAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException:
             try:
-                if prepared_ok:
-                    cleanup = await sandbox.exec(f"rm -rf -- {shlex.quote(directory)}", timeout_s=30)
-                    if cleanup.return_code != 0 or cleanup.error_type:
-                        LOG.error("Could not remove failed Codex setup files: %s", cleanup)
-            finally:
-                await sandbox.disconnect()
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                LOG.exception("Could not clean failed Codex setup %s; retaining session for close", agent_session_id)
+                self._session_reapers[agent_session_id] = asyncio.create_task(
+                    self._expire_agent_session(agent_session_id, body)
+                )
+            else:
+                self._sandbox_sessions.pop(agent_session_id, None)
             raise
-        return CodexSandboxSession(body, sandbox, directory, runtime)
+        return state
 
     async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        """Confirm Codex teardown before allowing verification; never destroy the borrowed sandbox."""
+        """Close by caller identity even when the seed response and cookie were lost."""
         self._expire_closed_agent_sessions()
-        session_id = self._session_marker(request)
-        closed = self._closed_sandbox_sessions.get(session_id)
-        if closed is not None and body.agent_session_id == session_id and body.episode_id == closed[0]:
-            return closed[1]
-        state = self._sandbox_sessions.get(session_id)
-        if state is None or body.agent_session_id != session_id or body.episode_id != state.seed.episode_id:
-            raise HTTPException(409, "Codex close does not match the seeded session and episode")
-        await state.close(self.config.session_close_timeout_seconds)
-        # Another close may have completed while this caller waited for the
-        # session's cleanup lock. Reuse its receipt without renewing its expiry.
-        self._expire_closed_agent_sessions()
-        closed = self._closed_sandbox_sessions.get(session_id)
-        if closed is not None:
-            return closed[1]
-        if self._sandbox_sessions.get(session_id) is not state:
-            raise HTTPException(409, "Codex close receipt has expired")
-        observations = state.observations or AgentObservationBundle(
-            source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]
-        )
-        self._sandbox_sessions.pop(session_id, None)
-        result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
-        # Keep the cookie as a tombstone so later activations cannot fall back
-        # to host execution. Other sessions must not shorten the retry window.
-        self._closed_sandbox_sessions[session_id] = (
-            body.episode_id,
-            result,
-            monotonic() + self.config.session_close_retry_window_seconds,
-        )
-        return result
+        session_id = body.agent_session_id
+        marker = self._session_marker(request)
+        if marker is not None and marker != session_id:
+            raise HTTPException(409, "Codex close does not match the session cookie")
+        async with self._locked_agent_session(session_id):
+            closed = self._closed_sandbox_sessions.get(session_id)
+            if closed is not None:
+                if body.episode_id != closed[0]:
+                    raise HTTPException(409, "Codex close does not match the seeded episode")
+                return closed[1]
+            state = self._sandbox_sessions.get(session_id)
+            if state is None:
+                if marker is not None:
+                    raise HTTPException(409, "Codex close receipt has expired")
+                # Close can win the race with a delayed seed. Retain a tombstone for the retry horizon.
+                result = AgentCloseSessionResponse(agent_session_id=session_id)
+            else:
+                if body.episode_id != state.seed.episode_id:
+                    raise HTTPException(409, "Codex close does not match the seeded episode")
+                await state.close(self.config.session_close_timeout_seconds)
+                observations = state.observations or AgentObservationBundle(
+                    source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]
+                )
+                self._sandbox_sessions.pop(session_id, None)
+                result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
+            # Stale cookies must never fall back to host execution. Retries do not renew this deadline.
+            request.session[_SANDBOX_SESSION_KEY] = session_id
+            self._closed_sandbox_sessions[session_id] = (
+                body.episode_id,
+                result,
+                monotonic() + self.config.session_close_retry_window_seconds,
+            )
+            reaper = self._session_reapers.pop(session_id, None)
+            if reaper is not None and reaper is not asyncio.current_task():
+                reaper.cancel()
+            return result
 
     def _expire_closed_agent_sessions(self) -> None:
-        """Prune receipts by close time, never by traffic or retry access order."""
+        """Prune receipts and idle locks by close time, never retry access order."""
         now = monotonic()
         while self._closed_sandbox_sessions:
             if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
                 break
-            self._closed_sandbox_sessions.popitem(last=False)
+            session_id, _ = self._closed_sandbox_sessions.popitem(last=False)
+            if not self._session_lock_users.get(session_id):
+                self._session_locks.pop(session_id, None)
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
