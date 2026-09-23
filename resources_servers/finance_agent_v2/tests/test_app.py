@@ -50,6 +50,7 @@ from resources_servers.finance_agent_v2.cached_tools import (
     CachedPriceHistory,
 )
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
+from resources_servers.sec_local_index import local_edgar_search
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
 
@@ -409,6 +410,14 @@ class TestSecMode:
     def test_an_unknown_mode_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="Input should be 'live' or 'local'"):
             _make_server(sec_mode="offline")
+
+    def test_an_index_needing_a_sidecar_fails_at_startup(self, tmp_path, monkeypatch) -> None:
+        """A tool registered as unavailable would let rollouts run and be scored
+        without edgar_search, so this has to fail the whole server instead."""
+        monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+
+        with pytest.raises(ValidationError, match="no metadata sidecar"):
+            _make_server(local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
 
 
 # ============================================================================
