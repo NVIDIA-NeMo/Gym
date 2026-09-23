@@ -158,6 +158,28 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
 
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
+    # "head" starts a cluster; "worker" joins the one at `address`. A worker is how a
+    # second node joins the driver's Ray cluster and offers its GPUs to actors the
+    # benchmark schedules (e.g. a scorer that runs off the policy's node).
+    mode: Literal["head", "worker"] = "head"
+    # Required for mode="worker": the head's host:port.
+    address: str | None = None
+    # Head only; ignored by a worker, which takes the port from `address`.
+    port: int = 6379
+    # Custom Ray resources this node advertises, e.g. {"extra_gpu": 4}. A benchmark
+    # asks for these by name rather than by num_gpus when it manages device placement
+    # itself.
+    resources: dict[str, float] = {}
+    num_cpus: int | None = None
+    num_gpus: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "RayServiceConfig":
+        if self.mode == "worker" and not self.address:
+            raise ValueError("A ray service with mode='worker' needs `address` set to the head's host:port.")
+        if self.mode == "head" and self.address:
+            raise ValueError("A ray service with mode='head' starts its own cluster; remove `address`.")
+        return self
 
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.

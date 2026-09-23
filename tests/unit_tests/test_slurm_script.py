@@ -21,13 +21,14 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import NodePool, SubmitConfig
+from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
 )
 from nemo_gym.orchestration.executors.slurm_script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
+    _build_ray_command,
     _build_service_command,
     _build_vllm_command,
     _build_vllm_multi_instance_multi_node_command,
@@ -1668,3 +1669,39 @@ def test_an_unpinned_service_keeps_the_whole_allocation(tmp_path):
 def test_an_unknown_node_pool_is_named(tmp_path):
     with pytest.raises(ValueError, match="node_pool 'nope' does not match any node pool"):
         _placement_config(tmp_path, {"policy": _vllm(8000, "nope", tensor_parallel_size=4)}, _TWO_POOLS)
+
+
+# ---------------------------------------------------------------------------
+# ray services
+# ---------------------------------------------------------------------------
+
+
+def test_a_ray_head_blocks_so_slurm_keeps_the_step_alive():
+    # `ray start` daemonises and returns; without --block the srun step exits the
+    # moment the node is up and the service is torn down again.
+    command = _build_ray_command(RayServiceConfig(type="ray", container="img"))
+    assert command == "ray start --block --head --port 6379"
+
+
+def test_a_ray_worker_joins_the_head_and_advertises_its_resources():
+    command = _build_ray_command(
+        RayServiceConfig(
+            type="ray",
+            container="img",
+            mode="worker",
+            address="10.0.0.1:6379",
+            num_gpus=4,
+            resources={"extra_gpu": 4},
+        )
+    )
+    assert command == "ray start --block --address 10.0.0.1:6379 --num-gpus 4 --resources='{\"extra_gpu\": 4}'"
+
+
+def test_a_ray_worker_without_an_address_is_refused():
+    with pytest.raises(ValueError, match="needs `address`"):
+        RayServiceConfig(type="ray", container="img", mode="worker")
+
+
+def test_a_ray_head_with_an_address_is_refused():
+    with pytest.raises(ValueError, match="starts its own cluster"):
+        RayServiceConfig(type="ray", container="img", address="10.0.0.1:6379")

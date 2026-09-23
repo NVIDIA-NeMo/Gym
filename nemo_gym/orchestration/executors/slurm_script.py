@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import re
 import shlex
 from pathlib import Path
@@ -332,8 +333,26 @@ def _build_vllm_ray_serve_command(
     )
 
 
-def _build_ray_command(_service: RayServiceConfig) -> str:
-    return "ray start --head"
+def _build_ray_command(service: RayServiceConfig) -> str:
+    # --block keeps the srun step alive. `ray start` daemonises and returns, so
+    # without it the step exits the moment the node is up and Slurm tears the
+    # service down again.
+    cmd = "ray start --block"
+    if service.mode == "head":
+        cmd += f" --head --port {service.port}"
+    else:
+        cmd += f" --address {shlex.quote(str(service.address))}"
+    if service.num_cpus is not None:
+        cmd += f" --num-cpus {service.num_cpus}"
+    if service.num_gpus is not None:
+        cmd += f" --num-gpus {service.num_gpus}"
+    if service.resources:
+        # Ray takes fractional custom resources, so the field is float-typed, but a
+        # whole number is written as one: {"extra_gpu": 4}, not 4.0, so the rendered
+        # command reads the way the config does.
+        resources = {k: int(v) if v.is_integer() else v for k, v in service.resources.items()}
+        cmd += " --resources=" + shlex.quote(json.dumps(resources, sort_keys=True))
+    return cmd
 
 
 _BUILDERS = {
