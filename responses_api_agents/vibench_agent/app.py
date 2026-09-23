@@ -24,11 +24,11 @@ Flow, mirroring ``responses_api_agents/cvdp_agent``:
     POST /seed_session          -> PRD text + asset dirs (no sandbox handle)
     create sandbox              -> ViBench's app-bench-base image, WORKDIR /app
     stage PRD + assets          -> via SandboxSpec.files, before the harness starts
-    run the OpenCode harness    -> inherited wholesale from OpenCodeSandboxedAgent
+    run the OpenCode harness    -> inherited wholesale from LegacyOpenCodeAgent
     harvest /app                -> tarball written into the shared artifact_dir
     POST /verify                -> resources server unpacks and grades it
 
-Only the sandbox acquisition and the harvest differ from ``opencode_sandboxed_agent``;
+Only the sandbox acquisition and the harvest differ from ``opencode_agent.legacy``;
 everything about installing and driving OpenCode is inherited.
 """
 
@@ -59,12 +59,12 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
-from responses_api_agents.opencode_sandboxed_agent.app import (
-    OpenCodeSandboxedAgent,
-    OpenCodeSandboxedAgentConfig,
-    OpenCodeSandboxedAgentRunRequest,
-    OpenCodeSandboxedAgentVerifyRequest,
-    OpenCodeSandboxedAgentVerifyResponse,
+from responses_api_agents.opencode_agent.legacy import (
+    LegacyOpenCodeAgent,
+    LegacyOpenCodeAgentConfig,
+    LegacyOpenCodeAgentRunRequest,
+    LegacyOpenCodeAgentVerifyRequest,
+    LegacyOpenCodeAgentVerifyResponse,
 )
 
 
@@ -136,7 +136,7 @@ def rewrite_loopback_url_for_docker(url: str, gateway_host: str = DOCKER_HOST_GA
     return _origin(urlunparse(parsed._replace(netloc=netloc)))
 
 
-class VibenchAgentConfig(OpenCodeSandboxedAgentConfig):
+class VibenchAgentConfig(LegacyOpenCodeAgentConfig):
     # ViBench's base image. Its WORKDIR is /app, which is where the harness lands.
     build_image: str
     app_workdir: str = "/app"
@@ -153,7 +153,7 @@ class VibenchAgentConfig(OpenCodeSandboxedAgentConfig):
     sandbox_model_base_url: Optional[str] = None
 
 
-class VibenchAgent(OpenCodeSandboxedAgent):
+class VibenchAgent(LegacyOpenCodeAgent):
     config: VibenchAgentConfig
 
     def _uses_docker_provider(self) -> bool:
@@ -267,10 +267,8 @@ class VibenchAgent(OpenCodeSandboxedAgent):
 
         return str(local)
 
-    async def run(
-        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
-    ) -> OpenCodeSandboxedAgentVerifyResponse:
-        # OpenCodeSandboxedAgentRunRequest is extra="allow"; BaseRunRequest is not, and
+    async def run(self, request: Request, body: LegacyOpenCodeAgentRunRequest) -> LegacyOpenCodeAgentVerifyResponse:
+        # LegacyOpenCodeAgentRunRequest is extra="allow"; BaseRunRequest is not, and
         # typing body as the latter silently drops the ViBench task fields (app, artifact,
         # prd_files, test_plans) so /seed_session rejects the request as missing 'app'.
         cookies = request.cookies
@@ -315,9 +313,9 @@ class VibenchAgent(OpenCodeSandboxedAgent):
                 print("Failed to stop build sandbox", format_exc(), file=sys.stderr)
             self._sandbox_id_to_sandbox.pop(session_id, None)
 
-        # OpenCodeSandboxedAgentVerifyRequest is extra="allow", so artifact_path rides along
+        # LegacyOpenCodeAgentVerifyRequest is extra="allow", so artifact_path rides along
         # to the resources server without a ViBench-specific request type.
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
+        verify_request = LegacyOpenCodeAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": response, "artifact_path": artifact_path}
         )
         verify_response = await self.server_client.post(
@@ -350,7 +348,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
             else:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
-        return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
+        return LegacyOpenCodeAgentVerifyResponse.model_validate(response_dict)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server.

@@ -14,8 +14,8 @@
 # limitations under the License.
 
 import json
-import sqlite3
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -23,8 +23,7 @@ from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from openai.types.responses import ResponseInputTextParam
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -36,25 +35,14 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
-    NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
-    ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
@@ -67,346 +55,41 @@ from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
     get_server_url,
-    is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.artifacts import (
+    opencode_export_usages,
+    parse_opencode_export,
+    parse_opencode_observations,
+)
+from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 
 
-def _load_json(value: Any) -> dict[str, Any]:
-    try:
-        parsed = json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+_NATIVE_SESSION_KEY = "nemo_gym_opencode_native_session"
 
 
-def _milliseconds(value: Any) -> Optional[float]:
-    """Convert OpenCode's Date.now()-based epoch milliseconds to seconds."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-        return None
-    return float(value) / 1000
+class LegacyOpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
+    """Configuration retained for unmigrated Resources consumers only."""
 
-
-def parse_opencode_observations(
-    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
-) -> AgentObservationBundle:
-    """Read OpenCode's persisted session tree before its workspace is removed."""
-    if not db_path.is_file():
-        return AgentObservationBundle(
-            source="opencode",
-            records=[AgentInvocation(invocation_id=fallback_invocation_id)],
-            gaps=[
-                ObservationGap(code="agent_artifact_unavailable"),
-                ObservationGap(code="agent_transcript_unavailable"),
-                ObservationGap(code="model_call_ownership_unavailable"),
-            ],
-        )
-
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    try:
-        session_rows = con.execute(
-            "select id, parent_id, time_created from session order by time_created, id"
-        ).fetchall()
-        message_rows = con.execute(
-            "select id, session_id, data, time_created from message order by time_created, id"
-        ).fetchall()
-        part_rows = con.execute(
-            "select id, message_id, session_id, data, time_created from part order by time_created, id"
-        ).fetchall()
-    finally:
-        con.close()
-
-    messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
-    message_sessions = {row["id"]: row["session_id"] for row in message_rows}
-    conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
-    invocation_status: dict[str, str] = {row["id"]: "unknown" for row in session_rows}
-    tools: list[ToolCallObservation] = []
-    child_tools: dict[str, set[str]] = {}
-    child_status: dict[str, str] = {}
-    compaction_parts: list[tuple[str, str, float | None, dict[str, Any]]] = []
-    gaps: list[ObservationGap] = []
-    summary_text: dict[str, list[str]] = {}
-    summaries_by_parent: dict[str, list[str]] = {}
-    first_item_id_by_message: dict[tuple[str, str], str] = {}
-
-    for row in message_rows:
-        message = messages[row["id"]]
-        session_id = row["session_id"]
-        if not isinstance(session_id, str) or session_id not in invocation_status:
-            gaps.append(ObservationGap(code="agent_artifact_record_unowned", detail=row["id"]))
-        elif message.get("role") == "assistant":
-            if isinstance(message.get("error"), dict):
-                invocation_status[session_id] = "failed"
-            message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
-            if invocation_status[session_id] != "failed" and _milliseconds(message_time.get("completed")) is not None:
-                invocation_status[session_id] = "completed"
-        if message.get("summary") is True:
-            summary_text[row["id"]] = []
-            parent_id = message.get("parentID")
-            if isinstance(parent_id, str):
-                summaries_by_parent.setdefault(parent_id, []).append(row["id"])
-
-    for row in part_rows:
-        part = _load_json(row["data"])
-        if not part:
-            gaps.append(ObservationGap(code="agent_artifact_record_unparseable"))
-            continue
-        ptype = part.get("type")
-        message_id = row["message_id"]
-        message = messages.get(message_id, {})
-        session_id = row["session_id"] or message_sessions.get(message_id)
-        if not isinstance(session_id, str):
-            gaps.append(ObservationGap(code="agent_artifact_record_unowned"))
-            continue
-        conversation = conversations.setdefault(session_id, [])
-        role = message.get("role")
-
-        if ptype == "step-finish":
-            continue
-
-        text = part.get("text")
-        if ptype == "text" and isinstance(text, str) and text.strip():
-            if message_id in summary_text:
-                summary_text[message_id].append(text)
-            if role == "user" and part.get("ignored") is not True:
-                conversation.append(NeMoGymEasyInputMessage(role="user", content=text))
-            elif role == "assistant":
-                item = NeMoGymResponseOutputMessage(
-                    id=row["id"],
-                    content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-                conversation.append(item)
-                first_item_id_by_message.setdefault((session_id, message_id), row["id"])
-            continue
-        if ptype == "reasoning" and role == "assistant" and isinstance(text, str) and text.strip():
-            conversation.append(
-                NeMoGymResponseReasoningItem(
-                    id=row["id"],
-                    summary=[NeMoGymSummary(type="summary_text", text=text)],
-                )
-            )
-            first_item_id_by_message.setdefault((session_id, message_id), row["id"])
-            continue
-        if ptype == "tool" and role == "assistant":
-            state = part.get("state") if isinstance(part.get("state"), dict) else {}
-            native_call_id = part.get("callID")
-            observed_call_id = native_call_id if isinstance(native_call_id, str) and native_call_id else None
-            call_id = observed_call_id or f"call-{uuid4().hex[:8]}"
-            tool_input = state.get("input") or {}
-            arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
-            native_status = state.get("status")
-            response_status = "completed" if native_status == "completed" else "incomplete"
-            call = NeMoGymResponseFunctionToolCall(
-                arguments=arguments,
-                call_id=call_id,
-                name=part.get("tool", ""),
-                type="function_call",
-                id=call_id,
-                status=response_status,
-            )
-            conversation.append(call)
-            first_item_id_by_message.setdefault((session_id, message_id), call_id)
-            native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if native_status == "completed" and native_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
-                result = NeMoGymFunctionCallOutput(
-                    type="function_call_output",
-                    call_id=call_id,
-                    output=str(observed_tool_output),
-                    status=response_status,
-                )
-                conversation.append(result)
-
-            native_start = native_time.get("start")
-            native_end = native_time.get("end")
-            valid_interval = (
-                isinstance(native_start, (int, float))
-                and not isinstance(native_start, bool)
-                and isinstance(native_end, (int, float))
-                and not isinstance(native_end, bool)
-                and native_end >= native_start
-            )
-            started_at = _milliseconds(native_start) if valid_interval else None
-            completed_at = _milliseconds(native_end) if valid_interval else None
-            duration_ms = float(native_end - native_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(native_status, "unknown")
-            if observed_call_id is not None:
-                tools.append(
-                    ToolCallObservation(
-                        invocation_id=session_id,
-                        tool_call_id=observed_call_id,
-                        tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
-                        started_at=started_at,
-                        completed_at=completed_at,
-                        duration_ms=duration_ms,
-                        timing_source="artifact" if started_at is not None else None,
-                        status=status,
-                        error_type="tool_error" if native_status == "error" else None,
-                    )
-                )
-            else:
-                gaps.append(
-                    ObservationGap(
-                        code="tool_call_identity_unavailable",
-                        invocation_id=session_id,
-                        detail=row["id"],
-                    )
-                )
-            if observed_call_id is not None and (
-                started_at is None or (native_status in {"completed", "error"} and completed_at is None)
-            ):
-                gaps.append(
-                    ObservationGap(
-                        code="tool_timing_unavailable",
-                        invocation_id=session_id,
-                        detail=observed_call_id,
-                    )
-                )
-            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-            if not metadata and isinstance(part.get("metadata"), dict):
-                metadata = part["metadata"]
-            child_id = metadata.get("sessionId")
-            if isinstance(child_id, str) and observed_call_id is not None:
-                child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
-            continue
-        if ptype == "compaction":
-            compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
-            continue
-
-    compactions: list[ContextCompactionObservation] = []
-    for session_id, message_id, observed_at, part in compaction_parts:
-        summary_ids = summaries_by_parent.get(message_id, [])
-        summary = "\n".join(summary_text.get(summary_ids[0], [])) if len(summary_ids) == 1 else None
-        if len(summary_ids) > 1:
-            gaps.append(
-                ObservationGap(
-                    code="compaction_summary_ambiguous",
-                    invocation_id=session_id,
-                )
-            )
-        trigger = "overflow" if part.get("overflow") is True else "automatic" if part.get("auto") is True else "manual"
-        tail_start_id = part.get("tail_start_id") if isinstance(part.get("tail_start_id"), str) else None
-        first_kept_item_id = (
-            first_item_id_by_message.get((session_id, tail_start_id)) if tail_start_id is not None else None
-        )
-        compactions.append(
-            ContextCompactionObservation(
-                invocation_id=session_id,
-                observed_at=observed_at,
-                trigger=trigger,
-                outcome="completed" if summary else "unknown",
-                summary=summary,
-                first_kept_item_id=first_kept_item_id,
-            )
-        )
-        if tail_start_id is not None and first_kept_item_id is None:
-            gaps.append(
-                ObservationGap(
-                    code="compaction_first_kept_item_unavailable",
-                    invocation_id=session_id,
-                    detail=tail_start_id,
-                )
-            )
-        if not summary:
-            gaps.append(ObservationGap(code="compaction_summary_unavailable", invocation_id=session_id))
-        gaps.append(ObservationGap(code="compaction_token_counts_unavailable", invocation_id=session_id))
-        gaps.append(
-            ObservationGap(
-                code="compaction_model_call_boundary_unavailable",
-                invocation_id=session_id,
-            )
-        )
-
-    session_ids = {row["id"] for row in session_rows}
-    invocations = []
-    for row in session_rows:
-        invocation_id = row["id"]
-        parent_id = row["parent_id"]
-        spawn_candidates = child_tools.get(invocation_id, set())
-        if parent_id is not None and parent_id not in session_ids:
-            gaps.append(
-                ObservationGap(
-                    code="subagent_parent_unavailable",
-                    invocation_id=invocation_id,
-                    detail=parent_id,
-                )
-            )
-        if len(spawn_candidates) > 1:
-            gaps.append(
-                ObservationGap(
-                    code="subagent_spawn_ambiguous",
-                    invocation_id=invocation_id,
-                )
-            )
-        elif parent_id is not None and not spawn_candidates:
-            gaps.append(
-                ObservationGap(
-                    code="subagent_spawn_tool_unavailable",
-                    invocation_id=invocation_id,
-                )
-            )
-        invocations.append(
-            AgentInvocation(
-                invocation_id=invocation_id,
-                parent_invocation_id=parent_id,
-                spawned_by_tool_call_id=next(iter(spawn_candidates)) if len(spawn_candidates) == 1 else None,
-                status=(
-                    invocation_status.get(invocation_id, "unknown")
-                    if invocation_status.get(invocation_id, "unknown") != "unknown"
-                    else child_status.get(invocation_id, "unknown")
-                ),
-                conversation=conversations.get(invocation_id, []),
-            )
-        )
-    if not invocations:
-        invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
-        gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-
-    if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
-
-    return AgentObservationBundle(
-        source="opencode",
-        records=[*invocations, *tools, *compactions],
-        gaps=gaps,
-    )
-
-
-class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
 
-    opencode_version: str
+    opencode_version: str = "1.17.11"
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
-    opencode_max_context_window: int
+    opencode_max_context_window: int = 262144
 
     # Sandbox config
-    sandbox_provider: str
-    sandbox_config: Dict[str, Any]
-    sandbox_timeout: float
+    sandbox_provider: str = "sandbox"
+    sandbox_config: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_timeout: float = 10800
 
     debug: bool = False
 
 
-class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
+class LegacyOpenCodeAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
 
@@ -436,12 +119,12 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     return session_id
 
 
-class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
+class LegacyOpenCodeAgentVerifyRequest(BaseVerifyRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
 
 
-class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
+class LegacyOpenCodeAgentVerifyResponse(BaseVerifyResponse):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
 
@@ -456,8 +139,22 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
-    config: OpenCodeSandboxedAgentConfig
+class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
+    """Temporary compatibility for Resources APIs that still own the old /run bridge."""
+
+    config: LegacyOpenCodeAgentConfig
+
+    def _native_session_marker(self, request: Request) -> str | None:
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping) or _NATIVE_SESSION_KEY not in session:
+            return None
+        marker = session[_NATIVE_SESSION_KEY]
+        if not isinstance(marker, str) or not marker:
+            raise HTTPException(409, "Invalid native OpenCode session marker")
+        return marker
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -575,88 +272,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
-        usages: List[NeMoGymResponseUsage] = []
-        for message in opencode_export["messages"]:
-            if message["info"]["role"] != "assistant":
-                continue
-
-            token_info = message["info"].get("tokens")
-            if not token_info:
-                continue
-
-            usage = NeMoGymResponseUsage(
-                input_tokens=token_info["input"],
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
-                output_tokens=token_info["output"],
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
-                total_tokens=token_info.get("total", 0),  # Somehow total may be missing
-            )
-            usages.append(usage)
-
-        return usages
+        return opencode_export_usages(opencode_export)
 
     def _opencode_export_to_output_items(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
-        messages = []
-        for message in opencode_export["messages"]:
-            if message["info"]["role"] == "user":
-                message_parts = []
-                for part in message["parts"]:
-                    if part["type"] != "text":
-                        continue
-
-                    message_parts.append(ResponseInputTextParam(text=part["text"], type="input_text"))
-
-                messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
-            elif message["info"]["role"] == "assistant":
-                converter = ResponsesConverter(return_token_id_information=True)
-                for part in message["parts"]:
-                    if part["type"] == "text":
-                        output_items = converter.postprocess_assistant_message_dict(
-                            message_dict={
-                                "content": part["text"],
-                                "role": "assistant",
-                            }
-                        )
-                        messages.extend(output_items)
-                    elif part["type"] == "reasoning":
-                        output_items = converter.postprocess_assistant_message_dict(
-                            message_dict={
-                                "content": converter._wrap_reasoning_in_think_tags([part["text"]]),
-                                "role": "assistant",
-                            }
-                        )
-                        messages.extend(output_items)
-                    elif part["type"] == "tool":
-                        messages.append(
-                            NeMoGymResponseFunctionToolCall(
-                                arguments=json.dumps(part["state"]["input"]),
-                                call_id=part["callID"],
-                                name=part["tool"],
-                            )
-                        )
-                        messages.append(
-                            NeMoGymFunctionCallOutput(
-                                call_id=part["callID"],
-                                # @bxyu-nvidia: Somehow the output here may be missing...
-                                output=part["state"].get("output", ""),
-                            )
-                        )
-                    elif part["type"] in ("step-finish", "step-start", "patch"):
-                        pass
-                    else:
-                        # @bxyu-nvidia: Defensive raise in case we're missing something.
-                        raise NotImplementedError(part)
-            else:
-                # @bxyu-nvidia: Defensive raise in case we're missing something.
-                raise NotImplementedError(message)
-
-        return messages
+        return parse_opencode_export(opencode_export)
 
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self._native_session_marker(request) is not None:
+            raise HTTPException(409, "Native OpenCode sessions cannot enter the legacy sandbox bridge")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
@@ -898,9 +525,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             usage=usage,
         )
 
-    async def run(
-        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
-    ) -> OpenCodeSandboxedAgentVerifyResponse:
+    async def run(self, request: Request, body: LegacyOpenCodeAgentRunRequest) -> LegacyOpenCodeAgentVerifyResponse:
+        if self._native_session_marker(request) is not None:
+            raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
+        if self.config.resources_server is None:
+            raise HTTPException(
+                422, "Submit native episodes to EnvironmentServer /run; legacy /run requires resources_server"
+            )
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
@@ -935,7 +566,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {})
             observations = run_result.pop("_ng_agent_observations", None)
 
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
+        verify_request = LegacyOpenCodeAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -986,10 +617,4 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             else:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
-        return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
-
-
-if __name__ == "__main__":
-    OpenCodeSandboxedAgent.run_webserver()
-elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = OpenCodeSandboxedAgent.run_webserver()  # noqa: F401
+        return LegacyOpenCodeAgentVerifyResponse.model_validate(response_dict)

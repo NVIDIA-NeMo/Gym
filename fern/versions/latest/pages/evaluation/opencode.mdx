@@ -1,0 +1,198 @@
+---
+title: "OpenCode Wiring"
+description: "Run OpenCode through native EnvironmentServer sessions and migrate older OpenCode configurations."
+position: 4
+---
+
+# OpenCode Wiring
+
+`responses_api_agents/opencode_agent` is the canonical OpenCode package. Its shipped
+`opencode_agent.yaml` selects native sandbox execution. OpenCode and its tools run in
+the task sandbox created by Resources; EnvironmentServer owns the episode lifecycle.
+
+## Select the execution mode
+
+| `execution_mode` | Caller | Execution and ownership |
+|---|---|---|
+| `sandbox` | EnvironmentServer | Borrows Resources' `SandboxAccess`; installs and runs OpenCode inside that sandbox. |
+| `local` | A guest runner already inside its task container | Runs OpenCode in the current process's filesystem, using `repo_dir` when set. |
+| `legacy_sandbox` | Existing agent `/run` benchmark recipes | Uses the older Resources `/seed_session` and `sandbox_handle` bridge. |
+
+The Python config defaults to `local` to preserve existing embedded callers in the
+generic harness, AnySWE, and CVDP. Use `opencode_agent.yaml` for native deployment,
+`opencode_local_agent.yaml` for local execution, or `opencode_legacy_agent.yaml` only
+for a Resources lifecycle that has not migrated. Native requests never fall back to
+host execution or the legacy bridge.
+
+## Wire a native episode
+
+Compose the single-agent EnvironmentServer, this agent, a Gym model server, and a
+Resources implementation that supports native sessions and returns `SandboxAccess`.
+SWE-bench Pro implements that Resources contract. The model server's advertised
+address must be reachable from inside the task sandbox.
+
+The [native SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/opencode_native.yaml)
+provides those bindings and selects `environment_routing_mode: taskset`. It routes
+`swebench_pro:smoke` tasks to the `swebench_pro_opencode` EnvironmentServer. Add your
+model and sandbox provider configurations when starting the servers. The earlier
+`opencode_agent_swebench_pro_native.yaml` path includes this composition and preserves
+its direct API deployment alias.
+
+```yaml
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+single_agent_turn:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent
+      resources_server:
+        type: resources_servers
+        name: task_resources  # Add a native Resources config to this composition.
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      execution_mode: sandbox
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      opencode_version: 1.17.11
+      context_window: 40960  # Match the served model.
+      timeout: 1200
+      setup_timeout: 900
+```
+
+For native collection, materialize prepared SWE-bench Pro rows and run the collector
+against the started composition:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
+    benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+    /tmp/swebench_pro_native.jsonl
+
+gym env start \
+    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --model-type vllm_model \
+    --input /tmp/swebench_pro_native.jsonl \
+    --output results/opencode-native.jsonl
+```
+
+Set `policy_base_url`, `policy_model_name`, `policy_api_key`, and the sandbox provider
+in `env.yaml`, or pass the same deployment overlay with `--config` to both commands.
+The collector loads taskset routing and server definitions from its local configuration.
+The materializer's default taskset is `swebench_pro:smoke`; a different taskset needs a
+matching `environment_server_routes` entry. Each materialized row has `task_id` and
+`task_input`, with prompt controls under `task_input.responses_create_params` and
+benchmark data under `task_input.task_data`. Grader data never enters the agent prompt.
+Do not use `--agent` or `--agent-type` to route these native rows.
+
+The collector wraps each row in a `SingleAgentTurnRequest` and calls **EnvironmentServer
+`/run`**. Direct API clients can submit the same request with explicit `episode_id`
+(`rollout_id` and `attempt`) and `task`. The EnvironmentServer calls the agent's
+attempt-qualified `/v1/responses`, never its legacy `/run`.
+
+EnvironmentServer seeds Resources, opens the agent session, activates it once, closes
+the agent, verifies the task, and closes Resources. The agent calls the Gym model
+endpoint directly using `/ng-rollout/<capture_key>/v1` for attempt-qualified capture.
+There is no agent-side model relay in native mode. If a remote sandbox cannot reach a
+workstation endpoint, expose a reachable model endpoint as part of the deployment.
+
+The activation accepts a string or one user text message, optionally preceded by
+system/developer text; `instructions` is appended through OpenCode instruction files.
+Images, conversation replay, required Resources HTTP/MCP tools, and unsupported
+Responses request controls are rejected before consuming the activation. Native
+`opencode_config` accepts only `permission` and `tools`, so provider overrides cannot
+bypass Gym capture. Set sampling and per-call output limits on the Gym model server;
+context metadata alone does not enforce an output-token limit. The adapter preserves
+the reasoning and tool history OpenCode sends through Chat Completions.
+
+## Runtime and cleanup
+
+The supported native runtime is Linux glibc x86_64 or aarch64 with Bash and Python 3.9+
+(including SQLite and `fcntl`). Online installation needs GitHub release access and
+tar/gzip. Missing curl and CA certificates are installed only when root and apt-get are
+available. Other images must include them. Setup failures report the command, exit
+code, and stderr.
+
+For offline setup, `remote_opencode_binary_path` can identify a binary already inside
+the sandbox. Optional staged installer and dual-binary fields remain available; the
+installed binary must match `opencode_version`. A versioned runtime cache under
+`/tmp/nemo-gym-opencode-runtime-<version>` is protected by an installation lock.
+Per-session state lives under `/tmp/nemo-gym-opencode-sessions/<id>`, outside the task
+repository. Overlapping workdirs and resolved path aliases are rejected.
+
+A Linux subreaper kills and reaps tool descendants, including detached processes.
+Session close requires a positive cleanup receipt, removal of adapter files, and
+disconnect before verification proceeds. Unknown launch outcomes and unconfirmed
+cleanup fail closed and retain state for retries. Successful close receipts remain
+available for `session_close_retry_window_seconds` (300 seconds by default).
+Caller-assigned session IDs are idempotent for identical seed inputs. Close accepts an
+explicit ID without a cookie when the seed response is lost, and closing an unknown ID
+blocks a delayed seed. Session files use independent random paths. Abandoned sessions
+expire after `session_lifetime_seconds` (21600 by default); failed cleanup retains the
+closing state and logs the failure so activation stays blocked. State is process-local,
+so native mode requires one worker and there is no cross-worker crash recovery. This
+process cleanup prevents verification races and is not a security boundary against hostile code.
+
+Text, reasoning, tool results, partial output, and usage are recovered from OpenCode's
+SQLite session tree. Auxiliary calls not persisted as assistant messages can remain
+unaccounted for; compare totals with captured Gym model calls. Missing artifacts and
+reconciliation are reported as observation gaps. Inspect agent failures and verifier
+outcomes separately: a failed model call can still leave a useful patch.
+
+## Migrate an older configuration
+
+The `opencode_sandboxed_agent` package and config path have been removed. Change package
+keys, Python imports, `allowed_agents`, and agent instance names to `opencode_agent`.
+For example, `swebench_pro_opencode_sandboxed_agent` becomes
+`swebench_pro_opencode_agent`. Regenerate prepared rows that contain the old routing
+name, and update `--agent` arguments and overlays together.
+Frozen release documentation and saved example rollouts retain their historical names;
+they do not identify a supported current entrypoint.
+
+For native execution, replace `opencode_max_context_window` with `context_window` and
+`sandbox_timeout` with `timeout`. Resources owns sandbox provisioning; native mode
+does not use the agent's legacy `sandbox_provider` or `sandbox_config` fields.
+`setup_timeout` bounds native runtime installation.
+
+The existing SWE-bench Verified/Multilingual/Pro, DeepSWE, and Terminal Bench 2.1
+flat-row recipes explicitly select `legacy_sandbox` and are fronted by a compatibility
+EnvironmentServer that still delegates orchestration to agent `/run`. Use
+`swebench/pro/opencode_native` for native SWE-bench Pro collection. ViBench uses the
+compatibility implementation in `opencode_agent.legacy`
+because it owns and harvests its build sandbox. This keeps the package name stable
+while those lifecycles migrate; the compatibility bridge is outside the native path.
+
+To swap OpenCode into another supported flat-row benchmark, select the explicit
+package/flavor rather than the native default:
+
+```bash
+gym eval run \
+    --benchmark terminal_bench_2_1/terminus_2 \
+    --agent-type opencode_agent/opencode_legacy_agent \
+    --model-type vllm_model
+```
+
+The resulting instance is `terminal_bench_2_1_opencode_agent`. The native default requires
+taskset-routed EnvironmentServer composition and materialized rows; an agent-only swap
+does not migrate the Resources lifecycle.
+
+Local callers retain `model_server=None` with custom OpenCode provider configuration,
+or can bind a Gym model server. OpenCode is installed lazily on the first local
+invocation. `repo_dir` is preserved for the enclosing runner to grade; an unset value
+uses a temporary workspace that is deleted after the call. A local `repo_dir` is a
+working directory, not a filesystem boundary, and must not be shared across concurrent
+tasks without filesystem isolation.
+
+Real model smoke tests validate wiring and cleanup, not benchmark accuracy. Pin the
+model, prompt, image, limits, verifier, and concurrency for comparisons. Token IDs and
+logprobs, additional image families, and production concurrency need separate validation.

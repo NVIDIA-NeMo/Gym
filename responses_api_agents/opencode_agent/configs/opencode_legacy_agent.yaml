@@ -1,8 +1,15 @@
-opencode_sandboxed_agent:
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Compatibility profile for existing flat-row agent /run benchmark recipes.
+# A compatibility EnvironmentServer delegates to agent /run; native sessions are not used.
+opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       entrypoint: app.py
-      num_workers: 4
+      execution_mode: legacy_sandbox
+      num_workers: 1
+      # Unbound for --agent-type opencode_agent/opencode_legacy_agent composition.
       resources_server:
         type: resources_servers
         name: ???

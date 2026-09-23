@@ -6,7 +6,7 @@ and copies the result out as a tarball for
 [`resources_servers/vibench`](../../resources_servers/vibench/README.md) to stand up and grade.
 
 Everything about installing and driving the OpenCode harness is inherited from
-`opencode_sandboxed_agent`. Only two things are overridden: how the sandbox is acquired, and
+`opencode_agent.legacy`. Only two things are overridden: how the sandbox is acquired, and
 how the finished app is harvested.
 
 ## Shape
@@ -15,7 +15,7 @@ how the finished app is harvested.
 POST /seed_session   PRD text + asset dirs (no sandbox handle)
 create sandbox       ViBench's app-bench-base image, WORKDIR /app
 stage PRD + assets   via SandboxSpec.files, before the harness starts
-run OpenCode         inherited from OpenCodeSandboxedAgent
+run OpenCode         inherited from LegacyOpenCodeAgent
 harvest /app         tarball written into the shared artifact_dir
 POST /verify         resources server unpacks and grades it
 ```
