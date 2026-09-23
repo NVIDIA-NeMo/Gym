@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wires the opencode sandboxed agent to scale_swe_resources_server for a training run --
+# `scale_swe.yaml` alone only defines the resources server, which is enough for golden-patch
+# validation (apply_golden_patch.py talks to it directly, no agent involved) but not enough to
+# actually run an agent against the dataset. This is a separate file, not folded into
+# scale_swe.yaml, so golden-patch validation keeps working without pulling in the agent's (much
+# larger) opencode/sandbox config.
+#
+# This is training data (data/scale_swe_training.jsonl, only the 17,696 already-supported
+# instances -- see the README), not a fixed eval benchmark.
+#
+#   gym env start --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/scale_swe/configs/scale_swe.yaml
+
+scale_swe_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: scale_swe_resources_server
+      datasets:
+        - name: scale_swe
+          type: train
+          jsonl_fpath: resources_servers/scale_swe/data/scale_swe_training.jsonl
+          num_repeats: 1
+          # AweAI-Team/Scale-SWE has no declared license on the Hub (no license tag, empty card
+          # data) -- TBD rather than guessing one of the enum's real licenses.
+          license: TBD
