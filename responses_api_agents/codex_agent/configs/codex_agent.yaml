@@ -7,6 +7,8 @@ codex_agent:
         name: ???
       concurrency: 32
       model: null  # null -> the Codex CLI's own default model; set explicitly for direct endpoints
+      model_context_window: null  # set to the actual custom endpoint context window
+      model_auto_compact_token_limit: null  # null -> CLI default; at most 90% of an explicit context window
       openai_api_key: ${openai_api_key}
       openai_base_url: null  # null -> https://api.openai.com/v1 (must include /v1; Codex appends /responses)
       sandbox_mode: danger-full-access  # read-only | workspace-write | danger-full-access

@@ -327,6 +327,106 @@ NAMESPACE_TOOL = {
 
 
 class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("missing_id", [False, True])
+    @pytest.mark.parametrize("missing_annotations", [False, True])
+    def test_codex_compacted_message_replay_keeps_text_and_order(self, missing_id, missing_annotations) -> None:
+        text = "Summary line 1\n\n  Keep indentation, Unicode 雪, and literal \\n.\n"
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }
+        if not missing_id:
+            message["id"] = "msg_original"
+        if not missing_annotations:
+            message["content"][0]["annotations"] = []
+        body = {
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "before"},
+                message,
+                {"role": "user", "content": "after"},
+            ],
+        }
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        assert len(cleaned["input"]) == 3
+        actual = cleaned["input"][1]
+        assert actual == {**message, "id": actual["id"], "content": [{**message["content"][0], "annotations": []}]}
+        assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert converted.messages == [
+            {"role": "user", "content": "before"},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": "after"},
+        ]
+
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_message_replay_keeps_supplied_id_annotations_and_phase(self, phase) -> None:
+        message = _message_item("Keep every character.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [message]})
+        assert cleaned["input"] == [message]
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json", exclude_none=True)
+        assert actual == message
+        # Chat cannot express phase; preserving it must keep that explicit error.
+        with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
+            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
+        summary = "Inspect /app/arithmetic.py, fix multiply, and run Python checks.\n"
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": summary}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        call = _function_call_item("exec_command")
+        result = {"type": "function_call_output", "call_id": call["call_id"], "output": "6"}
+        body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        item_id = cleaned["input"][1]["id"]
+        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
+        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].summary[0].text == summary
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
+        assert converted.messages[1]["content"] == f"<think>{summary}</think>"
+        assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
+        assert converted.messages[1]["tool_calls"][0]["function"] == {
+            "name": call["name"],
+            "arguments": call["arguments"],
+        }
+        assert converted.messages[2] == {"role": "tool", "tool_call_id": call["call_id"], "content": "6"}
+
+    def test_reasoning_content_remains_available_for_responses_backends(self) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Known reasoning text"}],
+            "encrypted_content": "opaque-content",
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json")
+        assert actual == {**reasoning, "id": actual["id"]}
+
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
@@ -539,6 +639,73 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    @pytest.mark.parametrize(
+        "status,details,error",
+        [
+            ("incomplete", {"reason": "max_output_tokens"}, None),
+            ("incomplete", {"reason": "content_filter"}, None),
+            ("failed", None, {"code": "server_error", "message": "Backend failed"}),
+        ],
+    )
+    def test_unsuccessful_terminal_preserves_partial_reasoning_and_usage(self, status, details, error) -> None:
+        partial = {**_message_item("Partial answer"), "status": "incomplete"}
+        response = _build_response([ITEM_FIXTURES["reasoning"], partial]).model_dump(mode="json")
+        response.update(status=status, incomplete_details=details, error=error)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            f"response.{status}",
+        ]
+        assert events[1]["item"] == response["output"][0]
+        assert events[2]["item"]["status"] == "incomplete"
+        assert events[-1]["response"] == response
+        assert response == original
+
+    @pytest.mark.parametrize(
+        "details,expected",
+        [
+            (
+                {"input_tokens_details": {"cached_tokens": None}, "output_tokens_details": {"reasoning_tokens": None}},
+                {},
+            ),
+            ({"input_tokens_details": None, "output_tokens_details": None}, {}),
+            ({"input_tokens_details": {}, "output_tokens_details": {}}, {}),
+            (
+                {"input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": None}},
+                {"input_tokens_details": {"cached_tokens": 0}},
+            ),
+            (
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+            ),
+        ],
+    )
+    def test_unknown_usage_details_are_omitted_without_fabricating_counts(self, details, expected) -> None:
+        response = _build_response(
+            [ITEM_FIXTURES["reasoning"], _function_call_item("exec_command"), _message_item("done")]
+        ).model_dump(mode="json")
+        response["usage"].update(details)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected_usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, **expected}
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["output"] == response["output"]
+        assert [event["item"] for event in events if event["type"] == "response.output_item.done"] == response[
+            "output"
+        ]
+        assert response == original
+
+    @pytest.mark.parametrize("usage", [None, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}])
+    def test_usage_without_details_is_preserved(self, usage) -> None:
+        response = _build_response([_message_item("done")]).model_dump(mode="json")
+        response["usage"] = usage
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert events[-1]["response"]["usage"] == usage
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
@@ -619,6 +786,13 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _IncompleteModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response([ITEM_FIXTURES["reasoning"]]).model_dump(mode="json")
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return NeMoGymResponse.model_validate(response)
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -628,6 +802,87 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_streaming_message_keeps_id_annotations_and_phase(self, phase) -> None:
+        client, server = _client(_EchoModel)
+        message = _message_item("Keep this exact replay.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        response = client.post("/v1/responses", json={"stream": True, "input": [message]})
+        assert response.status_code == 200
+        assert "event: response.completed" in response.text
+        assert server.last_params.input[0].model_dump(mode="json", exclude_none=True) == message
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"id": None},
+            {"id": []},
+            {"content": [{"type": "output_text", "text": "keep", "annotations": None}]},
+            {"content": [{"type": "output_text", "text": None}]},
+            {"content": [{"type": "output_text"}]},
+            {"content": [{"type": "unknown", "text": "keep"}]},
+            {"phase": "unknown"},
+            {"status": "unknown"},
+            {"role": "developer", "content": [{"type": "input_text", "text": None}]},
+            {"role": "user", "content": None},
+        ],
+    )
+    def test_malformed_streaming_message_fails_before_backend(self, changes) -> None:
+        client, server = _client(_EchoModel)
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "keep"}]}
+        response = client.post("/v1/responses", json={"stream": True, "input": [{**message, **changes}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
+        client, _ = _client(_IncompleteModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": "task"})
+        assert response.status_code == 200
+        assert "event: response.completed" not in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["type"] == "response.incomplete"
+        terminal = events[-1]["response"]
+        assert terminal["status"] == "incomplete"
+        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["usage"]["total_tokens"] == 10
+        assert terminal["output"][0]["summary"][0]["text"] == "thinking"
+
+    def test_streaming_codex_reasoning_replay_keeps_history(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Inspect multiply"}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert len(server.last_params.input) == 1
+        assert server.last_params.input[0].summary[0].text == "Inspect multiply"
+        assert server.last_params.input[0].id.startswith("rs_")
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [
+            {"summary": None},
+            {},
+            {"summary": [{"type": "unknown", "text": "Do not drop this"}]},
+            {"summary": [], "id": None},
+            {"summary": [], "content": ["Do not drop this"]},
+            {"summary": [], "encrypted_content": {"opaque": "Do not drop this"}},
+        ],
+    )
+    def test_malformed_streaming_reasoning_fails_before_backend(self, reasoning) -> None:
+        client, server = _client(_EchoModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": [{"type": "reasoning", **reasoning}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})

@@ -66,11 +66,14 @@ def _config(**kwargs) -> CodexAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_host_install(monkeypatch):
+    # Local execution installs lazily; mocks must cover the invocation, not just construction.
+    monkeypatch.setattr("responses_api_agents.codex_agent.app.ensure_codex", lambda version: None)
+
+
 def _make_agent(**kwargs) -> CodexAgent:
-    # Patch only the external side effect (codex install/version check) so the real
-    # model_post_init still runs — it initializes the semaphore.
-    with patch("responses_api_agents.codex_agent.app.ensure_codex"):
-        return CodexAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    return CodexAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:
@@ -98,9 +101,35 @@ class TestSanity:
         assert cfg.concurrency == 32
         assert cfg.timeout == 600
         assert cfg.model is None
+        assert cfg.model_context_window is None
+        assert cfg.model_auto_compact_token_limit is None
         assert cfg.sandbox_mode == "danger-full-access"
         assert cfg.cwd is None
         assert cfg.extra_config == {}
+
+    @pytest.mark.parametrize("field", ["model_context_window", "model_auto_compact_token_limit"])
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5, "40960"])
+    def test_context_settings_require_positive_integers(self, field: str, value: object) -> None:
+        with pytest.raises(ValidationError, match=field):
+            _config(**{field: value})
+
+    def test_compaction_threshold_cannot_exceed_cli_context_limit(self) -> None:
+        with pytest.raises(ValidationError, match="must not exceed 90%"):
+            _config(model_context_window=40960, model_auto_compact_token_limit=36865)
+        assert _config(model_context_window=40960, model_auto_compact_token_limit=36864).model_context_window == 40960
+
+    @pytest.mark.parametrize(
+        "settings",
+        [{}, {"model_context_window": 40960}, {"model_auto_compact_token_limit": 32768}],
+    )
+    def test_optional_context_settings_preserve_unset_cli_defaults(self, settings: dict[str, int]) -> None:
+        config = _make_agent(**settings)._build_config("http://model:9000/v1")
+        emitted = {
+            key: value
+            for key, value in config.items()
+            if key in ("model_context_window", "model_auto_compact_token_limit")
+        }
+        assert emitted == settings
 
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
@@ -658,6 +687,13 @@ class TestParseExecJsonl:
         assert items == []
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
+        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+
+    @pytest.mark.parametrize("details", [{}, {"cached_input_tokens": 0, "reasoning_output_tokens": 0}])
+    def test_legacy_optional_usage_defaults_are_unchanged(self, details) -> None:
+        _, usage = parse_exec_jsonl(_event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details}))
+        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["input_tokens"] == 7 and usage["output_tokens"] == 3
 
     def test_agent_message(self) -> None:
         line = _item_completed({"id": "item_1", "type": "agent_message", "text": "hello"})
