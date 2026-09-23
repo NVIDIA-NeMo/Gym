@@ -33,6 +33,7 @@ class UserSimScenario(BaseModel):
     theme: dict[str, Any] | str
     goal: str = ""
     locale: str = "en_US"
+    probe_data: dict[str, Any] = Field(default_factory=dict)
 
 
 class UserSimTheme(BaseModel):
@@ -79,6 +80,7 @@ class UserSimTaskInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sampling: UserSimSamplingRequest
+    probe_data: dict[str, Any] = Field(default_factory=dict)
     model_responses_create_params: dict[str, NeMoGymResponseCreateParamsNonStreaming] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -105,6 +107,7 @@ class UserSimSeedResponse(ResourcesSeedSessionResponse):
 
     scenario: UserSimScenario
     usersim_context: ResolvedUserSimContext
+    assistant_tools: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UserSimSimulationResult(BaseModel):
@@ -128,16 +131,6 @@ class UserSimSimulationResult(BaseModel):
     @classmethod
     def decode_json_columns(cls, value: Any) -> Any:
         return json.loads(value) if isinstance(value, str) else value
-
-
-class UserSimEpisodeStatus(BaseModel):
-    """Resources-owned state visible to UserSim participants."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    state: dict[str, Any] = Field(default_factory=dict)
-    terminated: bool = False
-    termination_reason: str | None = None
 
 
 class UserSimInvocation(BaseModel):
@@ -187,6 +180,7 @@ class UserSimVerification(BaseModel):
     reward_components: dict[str, float]
     scenario_completed: bool
     verifier_data: dict[str, Any] = Field(default_factory=dict)
+    native_usersim_result: UserSimSimulationResult | None = None
 
 
 class UserSimEpisodeResult(BaseModel):

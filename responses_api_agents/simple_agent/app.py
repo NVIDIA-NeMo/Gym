@@ -15,11 +15,12 @@
 import json
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from time import perf_counter, time
 from typing import Any, List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -29,6 +30,10 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
@@ -45,13 +50,16 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    ToolCallObservation,
     TrajectoryRecord,
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.tool_access import DirectHTTPToolAccess
 
 
 LOG = logging.getLogger(__name__)
@@ -77,8 +85,72 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class _SimpleAgentSession:
+    agent_session_id: str
+    episode_id: Any
+    task_id: Any
+    resources_cookies: dict[str, str]
+    trajectories: list[TrajectoryRecord] = field(default_factory=list)
+
+
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
+    session_id_to_state: dict[str, _SimpleAgentSession] = Field(default_factory=dict)
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        """Activate episode-scoped Resources access for this Agent."""
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id in self.session_id_to_state:
+            raise RuntimeError("SimpleAgent session is already active")
+        direct_accesses = [
+            access for access in self.effective_tool_accesses(body) if isinstance(access, DirectHTTPToolAccess)
+        ]
+        if len(direct_accesses) > 1:
+            raise ValueError("SimpleAgent supports at most one direct HTTP Resources access")
+        resources_cookies = dict(direct_accesses[0].cookies) if direct_accesses else {}
+        self.session_id_to_state[session_id] = _SimpleAgentSession(
+            agent_session_id=session_id,
+            episode_id=body.episode_id,
+            task_id=body.task_id,
+            resources_cookies=resources_cookies,
+        )
+        return AgentSeedSessionResponse(agent_session_id=session_id)
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Close an Agent session and return its tool/model observations."""
+        session_id = request.session[SESSION_ID_KEY]
+        state = self.session_id_to_state.get(session_id)
+        if state is None:
+            raise RuntimeError("SimpleAgent session is not active")
+        if state.agent_session_id != body.agent_session_id or state.episode_id != body.episode_id:
+            raise ValueError("SimpleAgent session does not match the active episode")
+        records = []
+        gaps = []
+        for trajectory in state.trajectories:
+            records.extend(trajectory.invocations)
+            records.extend(
+                ToolCallObservation.model_validate(tool.model_dump(exclude={"output"}))
+                for tool in trajectory.tool_calls
+            )
+            gaps.extend(trajectory.gaps)
+        observations = (
+            AgentObservationBundle(source=self.config.name, records=records, gaps=gaps) if records or gaps else None
+        )
+        del self.session_id_to_state[session_id]
+        return AgentCloseSessionResponse(
+            agent_session_id=body.agent_session_id,
+            agent_observations=observations,
+            resources_cookies=state.resources_cookies,
+        )
 
     async def _create_episode(
         self,
@@ -285,14 +357,23 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
-        collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        session_id = request.session[SESSION_ID_KEY]
+        session = self.session_id_to_state.get(session_id)
+        collect_trajectory = session is not None or (
+            self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        )
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
-            resources_server_cookies=request.cookies,
+            resources_server_cookies=session.resources_cookies if session is not None else request.cookies,
+            task_id=str(session.task_id) if session is not None else "unscoped",
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
         )
+        if session is not None:
+            session.resources_cookies = dict(resources_server_cookies)
+            if trajectory is not None:
+                session.trajectories.append(trajectory)
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)

@@ -174,37 +174,68 @@ def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
     assert second_seed["scenario"]["probe_type"] == "general_educational"
 
 
-def test_participant_tools_share_task_state_and_keep_sessions_isolated(tmp_path: Path) -> None:
+def test_probe_tools_are_scoped_to_seeded_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        assistant_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "safe_action",
+                    "description": "Perform a simulated action.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        def simulate_tool_call(self, name, body):
+            if name != "safe_action":
+                raise ValueError(f"Tool {name!r} is not available")
+            return json.dumps({"session_seed": body["seed"]})
+
+    monkeypatch.setattr(
+        UserSimResourcesServer,
+        "_create_probe_runtime",
+        lambda *_args, **_kwargs: Runtime(),
+    )
     _write_personas(tmp_path)
     app = _app(tmp_path)
     with TestClient(app) as first, TestClient(app) as second:
-        first_seed = first.post("/seed_session", json=_seed_body(seed=1)).json()
-        second.post("/seed_session", json=_seed_body(seed=2))
-
-        recorded = first.post(
-            "/record_user_context",
-            json={"key": "dietary_preference", "value": "vegetarian"},
+        first_seed = first.post(
+            "/seed_session",
+            json=_seed_body(seed=1, probe_type="safety_agentic"),
         )
-        observed = first.post("/read_user_context", json={})
-        isolated = second.post("/episode_status", json={})
-        finished = first.post("/finish_episode", json={"reason": "user_goal_satisfied"})
-        verified = first.post("/verify", json=_verify_body(first_seed))
+        second_seed = second.post(
+            "/seed_session",
+            json=_seed_body(seed=2, probe_type="safety_agentic"),
+        )
+        first_result = first.post("/safe_action", json={"seed": 1})
+        second_result = second.post("/safe_action", json={"seed": 2})
+        rejected = first.post("/other_action", json={})
 
-    assert recorded.json()["state"]["user_context"] == {"dietary_preference": "vegetarian"}
-    assert observed.json()["state"] == {
-        "user_context": {"dietary_preference": "vegetarian"},
-        "assistant_context_reads": 1,
-    }
-    assert isolated.json()["state"]["user_context"] == {}
-    assert finished.json()["terminated"] is True
-    assert finished.json()["termination_reason"] == "user_goal_satisfied"
-    assert verified.json()["reward"] == 1
-    assert verified.json()["reward_components"] == {
-        "participants_completed": 1,
-        "shared_state_exercised": 1,
-        "terminated": 1,
-    }
-    assert verified.json()["verifier_data"]["termination_reason"] == "user_goal_satisfied"
+    assert first_seed.json()["assistant_tools"][0]["function"]["name"] == "safe_action"
+    assert second_seed.status_code == 200
+    assert first_result.json() == {"session_seed": 1}
+    assert second_result.json() == {"session_seed": 2}
+    assert rejected.status_code == 404
+
+
+def test_native_safety_probe_exposes_and_simulates_selected_tools(tmp_path: Path) -> None:
+    pytest.importorskip("usersim.engine.core.episode_runtime")
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post(
+            "/seed_session",
+            json=_seed_body(seed=42, probe_type="safety_agentic"),
+        )
+        tool_name = seed.json()["assistant_tools"][0]["function"]["name"]
+        result = client.post(f"/{tool_name}", json={})
+
+    assert seed.status_code == 200
+    assert result.status_code == 200
+    assert isinstance(result.json(), dict)
 
 
 def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,7 +319,5 @@ def test_close_session_releases_seeded_state(tmp_path: Path) -> None:
         )
         with pytest.raises(RuntimeError, match="No active NeMo UserSim scenario"):
             client.post("/verify", json=_verify_body(seed))
-        with pytest.raises(RuntimeError, match="No active NeMo UserSim scenario"):
-            client.post("/episode_status", json={})
 
     assert closed.status_code == 200

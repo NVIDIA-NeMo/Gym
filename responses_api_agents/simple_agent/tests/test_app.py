@@ -95,6 +95,37 @@ class TestApp:
         )
         SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    def test_agent_session_preserves_episode_resources_access(self) -> None:
+        server, _ = _make_agent(observability_enabled=False)
+        with TestClient(server.setup_webserver()) as client:
+            seeded = client.post(
+                "/v1/agent_sessions",
+                json={
+                    "episode_id": {"rollout_id": "rollout", "attempt": 0},
+                    "task_id": {"taskset": "usersim:example", "task_id": "task"},
+                    "tool_accesses": [
+                        {
+                            "kind": "direct_http",
+                            "name": "usersim.direct_http",
+                            "required": True,
+                            "base_url": "http://resources:8080",
+                            "cookies": {"resources-session": "episode-cookie"},
+                        }
+                    ],
+                },
+            )
+            assert seeded.status_code == 200
+            closed = client.post(
+                "/v1/agent_sessions/close",
+                json={
+                    "agent_session_id": seeded.json()["agent_session_id"],
+                    "episode_id": {"rollout_id": "rollout", "attempt": 0},
+                },
+            )
+
+        assert closed.status_code == 200
+        assert closed.json()["resources_cookies"] == {"resources-session": "episode-cookie"}
+
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",

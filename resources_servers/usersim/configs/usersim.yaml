@@ -50,6 +50,12 @@ usersim:
       description: Deterministic NeMo UserSim persona and general-probe initialization.
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
+      api_response_model:
+        type: responses_api_models
+        name: simulation_support_model
+      judge_model:
+        type: responses_api_models
+        name: simulation_support_model
       personas_locales:
       - en_US
       probe_mix:
@@ -74,6 +80,9 @@ usersim_user:
       model_server:
         type: responses_api_models
         name: user_policy_model
+      resources_server:
+        type: resources_servers
+        name: usersim
       max_steps: 2
 
 usersim_assistant:
@@ -83,7 +92,10 @@ usersim_assistant:
       model_server:
         type: responses_api_models
         name: assistant_policy_model
-      max_steps: 2
+      resources_server:
+        type: resources_servers
+        name: usersim
+      max_steps: 10
       datasets:
         - name: example
           type: example
