@@ -110,7 +110,10 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             usage = message.get("usage") or {}
             if not isinstance(usage, dict):
                 usage = {}
-            input_tokens += int(usage.get("input") or 0) + int(usage.get("cacheRead") or 0)
+            cache_read = usage.get("cacheRead")
+            input_tokens += int(usage.get("input") or 0)
+            if type(cache_read) is int and cache_read >= 0:
+                input_tokens += cache_read
             output_tokens += int(usage.get("output") or 0)
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
@@ -583,7 +586,17 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
+        if body.model is not None and body.model != self.config.model:
+            raise HTTPException(422, "Native Pi model must match the configured model")
         unsupported = (
+            "include",
+            "store",
+            "service_tier",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "stream_options",
+            "user",
             "temperature",
             "top_p",
             "reasoning",
@@ -687,8 +700,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         events = [tuple(json.loads(line)) for line in raw.splitlines() if line.strip()]
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
-        cached_tokens = 0
-        errors = []
+        cached_tokens: int | None = 0
+        terminal_error = None
         stop_reasons = []
         for _, event in events:
             message = event.get("message") or {}
@@ -701,16 +714,27 @@ class PiAgent(SimpleResponsesAPIAgent):
                                 summary=[{"type": "summary_text", "text": part["thinking"]}],
                             )
                         )
-                cached_tokens += int((message.get("usage") or {}).get("cacheRead") or 0)
+                cache_read = (message.get("usage") or {}).get("cacheRead")
+                if type(cache_read) is not int or cache_read < 0:
+                    cached_tokens = None
+                elif cached_tokens is not None:
+                    cached_tokens += cache_read
                 stop_reasons.append(message.get("stopReason"))
-                if message.get("stopReason") in ("error", "aborted"):
-                    errors.append(message.get("errorMessage") or message["stopReason"])
+                # Pi emits failed attempts before retrying; only the terminal assistant decides the outcome.
+                terminal_error = (
+                    message.get("errorMessage") or message["stopReason"]
+                    if message.get("stopReason") in ("error", "aborted")
+                    else None
+                )
             parsed, tokens = parse_pi_events(json.dumps(event))
-            output.extend(parsed)
+            for item in parsed:
+                if isinstance(item, NeMoGymResponseOutputMessage):
+                    item.id = f"msg-{len(output)}"
+                output.append(item)
             for key in usage:
                 usage[key] += tokens[key]
         result = state.result
-        error = result.error or ("; ".join(errors) if errors else None)
+        error = result.error or terminal_error
         if result.return_code != 0 and not result.timed_out:
             error = error or f"Pi exited with code {result.return_code}"
         if not stop_reasons:
@@ -734,7 +758,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 output_tokens=usage["output_tokens"],
                 total_tokens=usage["input_tokens"] + usage["output_tokens"],
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             ),
             metadata={
                 "harness_execution": "sandbox",

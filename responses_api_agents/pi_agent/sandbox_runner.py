@@ -106,7 +106,8 @@ def run(params: dict) -> dict:
                     except ProcessLookupError:
                         pass
                     process.wait(timeout=params["cleanup_timeout"])
-                    drain_children(params["cleanup_timeout"])
+                # Popen can fail after creating a child, leaving no handle to clean up above.
+                drain_children(params["cleanup_timeout"])
                 if reader is not None:
                     reader.join(timeout=params["cleanup_timeout"])
                     if reader.is_alive():

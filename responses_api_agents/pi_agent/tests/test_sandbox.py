@@ -69,7 +69,7 @@ def events(*, stop_reason="stop") -> str:
                         "role": "assistant",
                         "responseId": "call-2",
                         "content": [{"type": "text", "text": "Fixed"}],
-                        "usage": {"input": 5, "output": 2},
+                        "usage": {"input": 5, "output": 2, "cacheRead": 0},
                         "stopReason": stop_reason,
                         "errorMessage": "model error" if stop_reason == "error" else None,
                     },
@@ -626,3 +626,137 @@ async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
     sandbox.pty.create.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"model": "different-model"},
+        {"include": ["reasoning.encrypted_content"]},
+        {"store": True},
+        {"service_tier": "priority"},
+        {"prompt_cache_key": "cache"},
+        {"prompt_cache_retention": "24h"},
+        {"safety_identifier": "caller"},
+        {"stream_options": {"include_obfuscation": True}},
+        {"user": "caller"},
+    ],
+)
+def test_unsupported_controls_do_not_consume_activation(setup, control):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", **control})
+        assert response.status_code == 422, response.text
+        assert not next(iter(agent._sandbox_sessions.values())).activated
+        sandbox.pty.create.assert_not_awaited()
+        response = client.post(
+            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "model": "test-model"}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "completed"
+
+
+def native_event_response(agent, sandbox, recorded_events):
+    sandbox.events = "\n".join(json.dumps([i, event]) for i, event in enumerate(recorded_events))
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert response.status_code == 200, response.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    return response.json(), closed.json()["agent_observations"]
+
+
+@pytest.mark.parametrize(
+    "final_stop, expected", [("stop", "completed"), ("length", "incomplete"), ("error", "failed")]
+)
+def test_retry_uses_terminal_assistant_outcome(setup, final_stop, expected):
+    agent, sandbox = setup
+    initial = {
+        "role": "assistant",
+        "responseId": "retry-1",
+        "content": [],
+        "usage": {"input": 0, "output": 0, "cacheRead": 0},
+        "stopReason": "error",
+        "errorMessage": "503 Service unavailable",
+    }
+    final = {
+        "role": "assistant",
+        "responseId": "retry-2",
+        "content": [{"type": "text", "text": "Result"}],
+        "usage": {"input": 5, "output": 2, "cacheRead": 0},
+        "stopReason": final_stop,
+        "errorMessage": "retry exhausted" if final_stop == "error" else None,
+    }
+    response, observations = native_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "message_end", "message": initial},
+            {"type": "agent_end", "messages": [initial], "willRetry": True},
+            {
+                "type": "auto_retry_start",
+                "attempt": 1,
+                "maxAttempts": 3,
+                "delayMs": 1,
+                "errorMessage": initial["errorMessage"],
+            },
+            {"type": "message_end", "message": final},
+            {"type": "auto_retry_end", "success": final_stop != "error", "attempt": 1},
+            {"type": "agent_end", "messages": [final], "willRetry": False},
+        ],
+    )
+    assert response["status"] == expected
+    assert response["error"] == (
+        {"code": "server_error", "message": "retry exhausted"} if final_stop == "error" else None
+    )
+    assert response["output"][-1]["content"][0]["text"] == "Result"
+    assert response["usage"]["total_tokens"] == 7
+    assert observations["records"][0]["status"] == expected
+    assert len(observations["records"][0]["model_calls"]) == 2
+
+
+def test_multiturn_message_ids_are_unique_and_tool_ids_preserved(setup):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events().splitlines()]
+    recorded[0]["message"]["content"].insert(1, {"type": "text", "text": "Inspecting"})
+    response, _ = native_event_response(agent, sandbox, recorded)
+    output = response["output"]
+    messages = [item for item in output if item["type"] == "message"]
+    assert [item["content"][0]["text"] for item in messages] == ["Inspecting", "Fixed"]
+    ids = [item["id"] for item in output if "id" in item]
+    assert len(ids) == len(set(ids))
+    assert [item["call_id"] for item in output if item["type"].startswith("function_call")] == ["tool-1", "tool-1"]
+
+
+@pytest.mark.parametrize(
+    "cache_read, expected", [(0, 2), (3, 5), (None, None), (-1, None), ("3", None), ("invalid", None), (True, None)]
+)
+def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read, expected):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events().splitlines()]
+    final_usage = recorded[2]["message"]["usage"]
+    if cache_read is None:
+        final_usage.pop("cacheRead")
+    else:
+        final_usage["cacheRead"] = cache_read
+    response, _ = native_event_response(agent, sandbox, recorded)
+    assert response["usage"]["input_tokens_details"]["cached_tokens"] == expected
+    assert response["usage"]["input_tokens"] == (20 if cache_read == 3 and type(cache_read) is int else 17)
+    assert response["usage"]["output_tokens"] == 5
+    assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+    assert response["output"][0]["type"] == "reasoning"
+
+
+def test_reported_cache_zero_remains_known(setup):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events().splitlines()]
+    for event in recorded:
+        message = event.get("message", {})
+        if message.get("role") == "assistant":
+            message["usage"]["cacheRead"] = 0
+    response, _ = native_event_response(agent, sandbox, recorded)
+    assert response["usage"]["input_tokens_details"]["cached_tokens"] == 0
