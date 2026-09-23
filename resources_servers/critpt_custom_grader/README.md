@@ -294,7 +294,9 @@ can time out although the queue had room. Concurrency past `1 + max_queued_jobs`
 - `problem_id` — the task id, or null when the task could not be parsed.
 - `responses_create_params`, `response` — the query and the saved candidate response.
 - `_ng_failure_class`, `_ng_failure_subcategory`, `_ng_failure_terminal` — set only when the
-  row is not a clean score.
+  row is not a clean score. `failure_kind` carries the same value as `_ng_failure_class`. Two
+  class names come from core's `FAILURE_KINDS` registry (`nemo_gym/failure_kinds.py`). The third
+  uses the `critpt_custom_grader:` prefix that the registry asks for a server-specific kind.
 
 ### Categories
 
@@ -314,17 +316,18 @@ can time out although the queue had room. Concurrency past `1 + max_queued_jobs`
   provider-ambiguous and unscorable.
 
 **Terminal, not scored.** A defect in the task or the reference. `_ng_failure_terminal` true,
-`_ng_failure_class` `reference_failed`.
+`_ng_failure_class` `verifier_error`.
 
 - `task_invalid` — the task spec is invalid.
 - `reference_invalid` — the reference contradicts its own stored expectation.
 
 **Not scored, not terminal.** Infrastructure uncertainty, `_ng_failure_class`
-`verifier_unavailable`. Examples: `reference_error`, `reference_timeout`, `comparator_uncertain`,
+`provider_unavailable`. Examples: `reference_error`, `reference_timeout`, `comparator_uncertain`,
 `provider_create`, `provider_exec`, `transfer_limit`, `result_invalid`, `queue_timeout`. The
 saved response is good, so reverification re-checks it once the server is healthy (see "Recovery").
 
-**Not scored, not terminal, needs a new candidate.** `_ng_failure_class` `needs_regeneration`.
+**Not scored, not terminal, needs a new candidate.** `_ng_failure_class`
+`critpt_custom_grader:response_incomplete`.
 
 - `response_incomplete` — the saved response did not complete, or carries an incomplete or error
   envelope, so it has no usable source. The grader rejects it the same way on every pass, so
@@ -380,26 +383,60 @@ by its exact stable name. A record that cannot resolve yet, such as a create sti
 settle deadline, is retried before the first job is admitted. The operator does not edit the
 journal by hand. Point the restarted server at the same `journal_dir` and let reconciliation run.
 
-Recovery after a lost verify response uses `gym eval reverify`. A lost verify leaves a saved
-candidate in a `verifier_unavailable` record, which reverification re-grades with no new model
-call. Reverification is recovery-only, so select the class explicitly and run it in
-failed-only mode:
+**Re-grade a saved candidate.** A `provider_unavailable` row holds a good saved candidate that
+the grader could not score. `gym eval reverify` re-sends the saved response with no new model call.
+Core has no option that selects failure rows by class. `--judge-failed-only` selects only
+`judge_failed` rows, so it does not recover these. Select the rows yourself: take the latest
+attempt per rollout, drop rollouts that already succeeded, and keep `provider_unavailable`.
 
 ```bash
+jq -cn --slurpfile ok <(jq -c '[._ng_task_index, ._ng_rollout_index]' <rollouts>.jsonl) '
+  ($ok | map({key: tostring, value: true}) | from_entries) as $done
+  | reduce inputs as $r ({}; .[([$r._ng_task_index, $r._ng_rollout_index] | tostring)] = $r)
+  | to_entries[] | select($done[.key] | not) | .value
+  | select(._ng_failure_class == "provider_unavailable")' \
+  <rollouts>_failures.jsonl > <retry>.jsonl
+
 gym eval reverify \
-    --inputs <materialized_inputs>.jsonl \
-    --rollouts <rollouts>.jsonl \
+    --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
+    --model-type openai_model \
+    '+policy_model_name=<model-name>' \
+    '+policy_base_url=<model-base-url>' \
+    '+policy_api_key=${oc.env:CRITPT_GRADER_MODEL_API_KEY}' \
+    '+model_endpoint_readiness_timeout_seconds=0' \
+    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.snapshot=<snapshot>' \
+    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.os_user=<os-user>' \
+    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.owner_id=<owner-id>' \
+    '+critpt_custom_grader.resources_servers.critpt_custom_grader.execution.journal_dir=<journal-dir>' \
+    --inputs <rollouts>_materialized_inputs.jsonl \
+    --rollouts <retry>.jsonl \
     --output <recovered>.jsonl \
-    --judge-failed-only \
-    '+recover_failure_classes=[verifier_unavailable]'
+    --concurrency 1
 ```
 
-`recover_failure_classes` is a config field, valid only together with `--judge-failed-only`, and
-it re-sends the saved response as-is. Recover only `verifier_unavailable` this way. A
-`needs_regeneration` record (category `response_incomplete`) holds a response with no usable
-source, so a reverify fails the same way every pass. Use `gym eval run --resume` instead when no
-usable saved candidate exists: a `needs_regeneration` row, a lost outer `/run` response, or a
-no-result failure class.
+`gym eval reverify` starts its own servers, so stop `gym env start` first. Only one grader process
+may use the `journal_dir`. Reverify has no `--model` or `--model-url` flag. Pass the model with the
+`policy_*` overrides instead. Reverify never calls the model, so
+`model_endpoint_readiness_timeout_seconds=0` skips the wait for a model endpoint. `gym eval run`
+writes `<rollouts>_materialized_inputs.jsonl` next to its output.
+
+Rows that fail again go to `<recovered>_failures.jsonl`. To score the union, start the servers
+again with `gym env start` and the same config. Aggregate needs the running head server. Then run:
+
+```bash
+gym eval aggregate -i "'<rollouts>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
+```
+
+Keep the inner single quotes. Without them, Hydra rejects the comma list as an ambiguous value. Do
+not include `<retry>.jsonl` in that list.
+
+**Regenerate a candidate.** Use `gym eval run --resume` only when no usable saved candidate
+exists: a `critpt_custom_grader:response_incomplete` row, or an `agent_run_error` or
+`agent_request_failed` row (a lost outer `/run` response, or a `/verify` call that returned an
+error body such as a 503). Resume re-dispatches every non-terminal failure row of every class and
+calls the model again, so it also regenerates `provider_unavailable` rows. Before you resume,
+append `<recovered>.jsonl` to `<rollouts>.jsonl` so that resume skips the rows that reverify
+already scored. `verifier_error` rows are terminal and are never retried.
 
 ## Tests
 
