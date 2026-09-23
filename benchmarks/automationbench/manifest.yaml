@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: automationbench
+# Initial manifest composition version, not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: >-
+  AutomationBench enterprise workflows scored by guardrail-gated objective completion.
+modality: text
+licensing: MIT
+# Integration authors from the introducing config commits.
+authors:
+  - Christian Munley
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: null
+agent_server: verifiers_agent
+model_server: policy_model
+prompt_source: prepared
+datasets:
+  - name: example
+    type: example
+    jsonl_fpath: benchmarks/automationbench/data/example.jsonl
+    num_repeats: 1
+  - name: automationbench
+    type: benchmark
+    jsonl_fpath: benchmarks/automationbench/data/automationbench-600.jsonl
+    prepare_script: benchmarks/automationbench/prepare.py
+    num_repeats: 1
+# Gym evaluation split; upstream splits are described separately.
+canonical_split: benchmark
+lifecycle: active

@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: arxivmath_0526/config_with_system
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: ArXivMath May 2026 with a system prompt, symbolic-first grading, and a Luna judge fallback with swapped-answer
+  confirmation.
+modality: text
+licensing: unknown
+authors:
+- wedu-nvidia
+reward:
+  range:
+  - 0
+  - 1
+  higher_is_better: true
+determinism: unknown
+resources_server: math_with_judge
+agent_server: simple_agent
+datasets:
+- name: arxivmath_0526
+  type: benchmark
+  jsonl_fpath: benchmarks/arxivmath_0526/data/arxivmath_0526_withsys.jsonl
+  prepare_script: benchmarks/arxivmath_0526/prepare.py
+  prompt_config: benchmarks/arxivmath_0526/prompts/with_system.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/arxivmath_0526/prompts/with_system.yaml
+lifecycle: active
+config_path: ../config_with_system.yaml
+prompt_source: template

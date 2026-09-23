@@ -79,6 +79,23 @@ class TestListBenchmarks:
         found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
         assert found == {"bench/config.yaml"}
 
+    def test_config_paths_exclude_repo_manifests_but_include_executable_config(self) -> None:
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        benchmark_dir = Path(__file__).parents[2] / "benchmarks" / "aime24"
+        manifest_path = benchmark_dir / "manifest.yaml"
+        config_path = benchmark_dir / "config.yaml"
+        manifest = safe_load(manifest_path.read_text())
+        config = safe_load(config_path.read_text())
+        assert manifest["datasets"][0]["type"] == "benchmark"
+        agent_config = config["aime24_math_with_judge_simple_agent"]["responses_api_agents"]["simple_agent"]
+        assert agent_config["datasets"][0]["type"] == "benchmark"
+
+        found = _benchmark_config_paths(benchmark_dir)
+
+        assert config_path in found
+        assert manifest_path not in found
+
     @pytest.mark.parametrize(
         ("text", "is_benchmark"),
         [

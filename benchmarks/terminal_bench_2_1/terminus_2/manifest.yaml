@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: terminal_bench_2_1/terminus_2
+# Initial catalog composition version; not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+config_path: ../terminus_2.yaml
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: >-
+  Terminal-Bench 2.1 tasks with prepared instruction messages, sandboxed agent execution, and task-provided
+  verification.
+modality: text
+licensing: unknown
+# Contributor attribution follows the NVIDIA source headers.
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: unknown
+prompt_source: prepared
+resources_server: terminal_bench_2_1
+agent_server: terminus_2_sandboxed_agent
+model_server: policy_model
+datasets:
+  - name: terminal_bench_2_1
+    type: benchmark
+    jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+    prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+    num_repeats: 8
+canonical_split: benchmark
+lifecycle: active

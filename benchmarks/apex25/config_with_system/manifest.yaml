@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: apex25/config_with_system
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: APEX 2025 math problems with a system prompt and symbolic-only math-verify grading.
+modality: text
+licensing: unknown
+authors:
+- wedu-nvidia
+reward:
+  range:
+  - 0
+  - 1
+  higher_is_better: true
+determinism: unknown
+resources_server: math_with_judge
+agent_server: simple_agent
+datasets:
+- name: apex25
+  type: benchmark
+  jsonl_fpath: benchmarks/apex25/data/apex25_withsys.jsonl
+  prepare_script: benchmarks/apex25/prepare.py
+  prompt_config: benchmarks/apex25/prompts/with_system.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/apex25/prompts/with_system.yaml
+lifecycle: active
+config_path: ../config_with_system.yaml
+prompt_source: template

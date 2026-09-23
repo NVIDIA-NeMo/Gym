@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: osworld
+# Initial catalog composition version; not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: >-
+  Five committed OSWorld example desktop tasks using the OSWorld agent and inline evaluator with binary
+  reward; train and validation datasets are also declared.
+modality: text, image
+licensing: Apache-2.0
+# Contributor attribution follows the NVIDIA source headers.
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: unknown
+prompt_source: agent
+resources_server: null
+agent_server: osworld_agent
+model_server: policy_model
+datasets:
+  - name: train
+    type: train
+    jsonl_fpath: benchmarks/osworld/data/train.jsonl
+    num_repeats: 1
+  - name: validation
+    type: validation
+    jsonl_fpath: benchmarks/osworld/data/validation.jsonl
+    num_repeats: 1
+  - name: example
+    type: example
+    jsonl_fpath: benchmarks/osworld/data/example.jsonl
+    num_repeats: 1
+  - name: osworld
+    type: benchmark
+    jsonl_fpath: benchmarks/osworld/data/example.jsonl
+    prepare_script: benchmarks/osworld/prepare.py
+    num_repeats: 1
+canonical_split: example
+lifecycle: active

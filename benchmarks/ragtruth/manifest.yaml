@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Version identifies this initial manifest composition, not the upstream dataset release.
+name: "ragtruth"
+version: "0.1.0"
+experimental: true
+kind: "benchmark"
+config_path: "config.yaml"
+integration_profile: "custom-gym-verifier"
+domain: "knowledge"
+description: "RAGTruth hallucination detection over QA, summary, and data-to-text slices; reward is binary verdict accuracy."
+modality: "text"
+licensing: "MIT"
+authors:
+  - "Maria Bagdasarova"
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: "unknown"
+resources_server: "ragtruth"
+agent_server: "simple_agent"
+model_server: "policy_model"
+prompt_source: "prepared"
+datasets:
+  - name: "ragtruth"
+    type: "benchmark"
+    jsonl_fpath: "benchmarks/ragtruth/data/ragtruth_benchmark.jsonl"
+    prepare_script: "benchmarks/ragtruth/prepare.py"
+    num_repeats: 1
+canonical_split: "benchmark"
+lifecycle: "active"

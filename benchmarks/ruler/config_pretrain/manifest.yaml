@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Version identifies this initial manifest composition, not the upstream dataset release.
+name: "ruler/config_pretrain"
+version: "0.1.0"
+experimental: true
+kind: "benchmark"
+config_path: "../config_pretrain.yaml"
+integration_profile: "custom-gym-verifier"
+domain: "other"
+description: "RULER text-completion evaluation; preparation requires model, length, and data_format=default or base."
+modality: "text"
+licensing: "unknown"
+authors:
+  - "Jonathan Li"
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: "unknown"
+resources_server: "ruler"
+agent_server: "simple_agent"
+model_server: "policy_model"
+prompt_source: "prepared"
+datasets:
+  - name: "ruler_pretrain"
+    type: "benchmark"
+    jsonl_fpath: "benchmarks/ruler/data/ruler_pretrain.jsonl"
+    prepare_script: "benchmarks/ruler/prepare_utils.py"
+    num_repeats: 1
+canonical_split: "benchmark"
+lifecycle: "active"

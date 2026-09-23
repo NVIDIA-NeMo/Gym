@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: legal_agent_bench
+# Initial manifest composition version, not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: >-
+  Harbor-native Legal Agent Benchmark document tasks scored by the official all-criteria full-task metric.
+modality: multimodal
+licensing: MIT
+# Integration authors from the introducing config commits.
+authors:
+  - rystewart-nvidia
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: null
+agent_server: harbor_agent
+model_server: policy_model
+prompt_source: agent
+datasets:
+  - name: legal_agent_bench
+    type: benchmark
+    jsonl_fpath: benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl
+    prepare_script: benchmarks/legal_agent_bench/prepare.py
+    num_repeats: 1
+# Gym evaluation split; upstream splits are described separately.
+canonical_split: benchmark
+lifecycle: active

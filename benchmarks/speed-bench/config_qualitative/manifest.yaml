@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: speed-bench/config_qualitative
+# Initial catalog composition version; not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+config_path: ../config_qualitative.yaml
+integration_profile: custom-gym-agent-loop
+domain: other
+description: >-
+  SPEED-Bench qualitative speculative-decoding workload. Prepared multi-turn prompts measure
+  acceptance length and acceptance rate from model-server counters; reward is a constant zero
+  placeholder, not a correctness score.
+modality: text
+# Dataset uses the NVIDIA Evaluation Dataset License Agreement, not an SPDX license.
+licensing: unknown
+# Contributor attribution follows the NVIDIA source headers.
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 0]
+  higher_is_better: false
+determinism: unknown
+prompt_source: prepared
+resources_server: speed_bench
+agent_server: speed_bench_agent
+model_server: policy_model
+datasets:
+  - name: speed_bench_qualitative
+    type: benchmark
+    jsonl_fpath: benchmarks/speed-bench/data/speed_bench_qualitative_benchmark.jsonl
+    prepare_script: benchmarks/speed-bench/prepare.py
+    num_repeats: 1
+canonical_split: test
+lifecycle: active

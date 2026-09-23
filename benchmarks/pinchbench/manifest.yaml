@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: pinchbench
+# Initial catalog composition version; not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: >-
+  PinchBench v2.0.0 tasks run through the native OpenClaw benchmark harness, with continuous grading in [0,
+  1].
+modality: text
+licensing: MIT
+# Contributor attribution follows the NVIDIA source headers.
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: unknown
+prompt_source: agent
+resources_server: null
+agent_server: pinchbench
+model_server: null
+datasets:
+  - name: pinchbench
+    type: benchmark
+    jsonl_fpath: benchmarks/pinchbench/data/pinchbench_benchmark.jsonl
+    prepare_script: benchmarks/pinchbench/prepare.py
+    num_repeats: 10
+canonical_split: benchmark
+lifecycle: active

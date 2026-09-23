@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: litmus-bench/config_tier12
+# Initial manifest composition version, not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+config_path: ../config_tier12.yaml
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: >-
+  Paired direct and Python-tool Litmus Tier 1/2 chemistry examples with matched questions and answer verification.
+modality: text
+licensing: CC-BY-4.0
+# Integration authors from the introducing config commits.
+authors:
+  - Olivia Viessmann
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: litmus_agent
+agent_server: simple_agent
+model_server: policy_model
+prompt_source: prepared
+datasets:
+  - name: litmus-tier12-paired
+    type: benchmark
+    jsonl_fpath: benchmarks/litmus-bench/data/litmus-tier12-paired_benchmark.jsonl
+    prepare_script: benchmarks/litmus-bench/prepare_tier12.py
+    num_repeats: 1
+# Gym evaluation split; upstream splits are described separately.
+canonical_split: benchmark
+lifecycle: active

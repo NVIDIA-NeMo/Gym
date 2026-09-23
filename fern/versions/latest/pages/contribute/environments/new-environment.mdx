@@ -22,9 +22,22 @@ The manifest is the place to read this declaration, but not every field is autho
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
-| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+| Benchmark protocol: `canonical_split`, `prompt_source`, and `standard_prompt_config` | Manifest |
+| Configuration selection: `config_path` and optional `dataset_owner` | Manifest; selects the existing config and dataset-bearing instance to describe |
 
 When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
+
+`prompt_source` records who constructs the benchmark's input messages:
+
+- `template` (the default for existing manifests) requires `standard_prompt_config`. Static validation applies that template to each benchmark row.
+- `prepared` means the dataset already contains the complete `responses_create_params.input`. Omit `standard_prompt_config`; validation checks the messages without replacing them.
+- `agent` means the agent or external harness constructs the prompt during execution. An optional `standard_prompt_config` may identify its actual template. Validation checks that template without applying it to dataset rows, whose fields may differ from the agent's per-step context.
+
+For `prepared` and `agent`, mirrored datasets must not declare a `prompt_config`. Declare `resources_server: null` explicitly when verification is owned by an agent without a separate resources server; this is not valid for the `custom-gym-verifier` profile. This does not add an in-process verifier fixture for external agents: `gym env test` and `gym env publish` still require a resources-server fixture.
+
+`config_path` defaults to `config.yaml` beside the manifest. A named configuration can have a separate catalog entry, for example `benchmarks/finance_sec_search/config_web_search/manifest.yaml` with `name: finance_sec_search/config_web_search` and `config_path: ../config_web_search.yaml`. The relative path must stay inside the catalog tree. The registry lists the manifest in place of that legacy config entry.
+
+When a config contains multiple dataset-bearing instances, set `dataset_owner` to the exact instance name whose datasets this manifest mirrors. This selects the declaration for validation, not a new runtime routing rule; execution still follows the referenced config. Without an explicit owner, ambiguous compositions remain errors.
 
 The repository's reference environment is [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/blob/main/environments/example_single_tool_call/manifest.yaml):
 
@@ -116,7 +129,7 @@ Static manifest validation runs without starting the workload. It:
 - compares manifest composition mirrors with the authoritative configuration;
 - reports an inferred integration profile and the static evidence behind it;
 - parses referenced preparation and rollout-driver hooks without importing or executing them; and
-- streams declared JSONL data, applies benchmark prompts row by row, and checks the resulting rollout inputs.
+- streams declared JSONL data, applies only `template` prompts row by row, and checks the resulting rollout inputs.
 
 With synchronization enabled, it writes corrected composition mirrors atomically only after every static check passes. Authored metadata remains unchanged.
 

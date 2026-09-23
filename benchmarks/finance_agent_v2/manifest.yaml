@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: finance_agent_v2
+# Initial manifest composition version, not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: >-
+  Public 27-question Finance Agent v2 evaluation with upstream tools and severity-weighted rubric partial credit.
+modality: text
+licensing: MIT
+# Integration authors from the introducing config commits.
+authors:
+  - ushnish-de
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: finance_agent_v2
+agent_server: finance_agent
+model_server: policy_model
+prompt_source: prepared
+datasets:
+  - name: finance_agent_v2
+    type: benchmark
+    jsonl_fpath: benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl
+    prepare_script: benchmarks/finance_agent_v2/prepare.py
+    num_repeats: 1
+# Gym evaluation split; upstream splits are described separately.
+canonical_split: benchmark
+lifecycle: active

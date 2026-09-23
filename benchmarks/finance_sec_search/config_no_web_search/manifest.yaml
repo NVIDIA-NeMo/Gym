@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: finance_sec_search/config_no_web_search
+# Initial manifest composition version, not an upstream dataset release.
+version: 0.1.0
+experimental: true
+kind: benchmark
+config_path: ../config_no_web_search.yaml
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: >-
+  Financial research over SEC filings with grounded answer verification, without web search.
+modality: text
+licensing: unknown
+# Integration authors from the introducing config commits.
+authors:
+  - ushnish-de
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: finance_sec_search
+agent_server: finance_agent
+model_server: policy_model
+prompt_source: prepared
+datasets:
+  - name: finance_sec_search
+    type: benchmark
+    jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl
+    prepare_script: benchmarks/finance_sec_search/prepare.py
+    num_repeats: 3
+# Gym evaluation split; upstream splits are described separately.
+canonical_split: benchmark
+lifecycle: active

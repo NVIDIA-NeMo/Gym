@@ -78,13 +78,19 @@ class DatasetKind(StrEnum):
     BENCHMARK = "benchmark"
 
 
+class PromptSource(StrEnum):
+    TEMPLATE = "template"
+    PREPARED = "prepared"
+    AGENT = "agent"
+
+
 _PROFILE_REQUIRED_FIELDS = {
-    IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server",),
+    IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server", "resources_server"),
     IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: ("model_server",),
     IntegrationProfile.EXTERNAL_AGENT_LOOP: (),
     IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER: ("rollout_driver",),
 }
-_BENCHMARK_REQUIRED_FIELDS = ("canonical_split", "standard_prompt_config")
+_BENCHMARK_REQUIRED_FIELDS = ("canonical_split",)
 
 
 class _ManifestModel(BaseModel):
@@ -97,8 +103,8 @@ class Reward(_ManifestModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> "Reward":
-        if self.range[0] >= self.range[1]:
-            raise ValueError("reward.range must be ordered with lower < upper")
+        if self.range[0] > self.range[1]:
+            raise ValueError("reward.range must be ordered with lower <= upper")
         return self
 
 
@@ -159,7 +165,6 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             "then": {
                 "properties": {
                     "canonical_split": nonempty_string,
-                    "standard_prompt_config": nonempty_string,
                     "datasets": {
                         **nonempty_datasets,
                         "contains": {
@@ -169,6 +174,31 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": list(_BENCHMARK_REQUIRED_FIELDS),
+            },
+        },
+        {
+            "if": {
+                "properties": {"kind": {"const": "benchmark"}, "prompt_source": {"const": "template"}},
+                "required": ["kind"],
+            },
+            "then": {
+                "properties": {"standard_prompt_config": nonempty_string},
+                "required": ["standard_prompt_config"],
+            },
+        },
+        {
+            "if": {"properties": {"prompt_source": {"const": "prepared"}}, "required": ["prompt_source"]},
+            "then": {"properties": {"standard_prompt_config": {"type": "null"}}},
+        },
+        {
+            "if": {
+                "properties": {"prompt_source": {"enum": ["prepared", "agent"]}},
+                "required": ["prompt_source"],
+            },
+            "then": {
+                "properties": {
+                    "datasets": {"items": {"properties": {"prompt_config": {"type": "null"}}}},
+                },
             },
         },
         *(requires(profile, fields) for profile, fields in _PROFILE_REQUIRED_FIELDS.items() if fields),
@@ -214,7 +244,9 @@ class EnvironmentManifest(_ManifestModel):
     reward: Reward
     determinism: Determinism = Determinism.UNKNOWN
 
-    resources_server: NonEmptyString
+    config_path: NonEmptyString = Field(default="config.yaml", description="Config path relative to the manifest.")
+    dataset_owner: NonEmptyString | None = None
+    resources_server: NonEmptyString | None
     agent_server: NonEmptyString
     datasets: list[ManifestDataset] = Field(min_length=1)
     model_server: NonEmptyString | None = None
@@ -225,7 +257,11 @@ class EnvironmentManifest(_ManifestModel):
     state: EnvironmentState | None = None
     sandbox: NonEmptyString | None = None
     canonical_split: NonEmptyString | None = None
-    standard_prompt_config: NonEmptyString | None = None
+    prompt_source: PromptSource = PromptSource.TEMPLATE
+    standard_prompt_config: NonEmptyString | None = Field(
+        default=None,
+        description="Required for template benchmarks; informational agent template; absent for prepared prompts.",
+    )
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
@@ -255,8 +291,16 @@ class EnvironmentManifest(_ManifestModel):
         ]
         if self.kind == EnvironmentKind.BENCHMARK:
             missing.extend(field for field in _BENCHMARK_REQUIRED_FIELDS if getattr(self, field) is None)
+            if self.prompt_source == PromptSource.TEMPLATE and self.standard_prompt_config is None:
+                missing.append("standard_prompt_config")
         if missing:
             raise ValueError("manifest requires: " + ", ".join(dict.fromkeys(missing)))
+        if self.prompt_source == PromptSource.PREPARED and self.standard_prompt_config is not None:
+            raise ValueError("standard_prompt_config is forbidden for prepared prompts")
+        if self.prompt_source != PromptSource.TEMPLATE and any(
+            dataset.prompt_config is not None for dataset in self.datasets
+        ):
+            raise ValueError("dataset.prompt_config is only valid for template prompts")
         if self.integration_profile != IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER and self.rollout_driver is not None:
             raise ValueError("rollout_driver is only valid for the external-rollout-driver profile")
         names = [dataset.name for dataset in self.datasets]
@@ -271,6 +315,23 @@ class EnvironmentManifest(_ManifestModel):
 
 class ManifestError(ConfigError):
     """A manifest could not be read, parsed, or validated."""
+
+
+def resolve_manifest_config_path(manifest_path: str | Path, manifest: EnvironmentManifest) -> Path:
+    """Resolve a relative config without leaving its benchmarks/environments tree.
+
+    Standalone manifests are confined to their own directory. Resolve symlinks
+    before checking containment so a linked config cannot escape the catalog.
+    """
+    path = Path(manifest_path).absolute()
+    config_path = Path(manifest.config_path)
+    if config_path.is_absolute():
+        raise ManifestError(f"Manifest '{path}' config_path must be relative.")
+    catalog = next((parent for parent in path.parents if parent.name in {"benchmarks", "environments"}), path.parent)
+    resolved = (path.parent / config_path).resolve()
+    if not resolved.is_relative_to(catalog.resolve()):
+        raise ManifestError(f"Manifest '{path}' config_path escapes catalog tree '{catalog}'.")
+    return resolved
 
 
 def _validation_error(path: Path, error: ValidationError) -> ManifestError:
@@ -307,8 +368,11 @@ def dump_manifest(manifest: EnvironmentManifest | Mapping[str, Any]) -> str:
             manifest = EnvironmentManifest.model_validate(manifest)
         except ValidationError as error:
             raise _validation_error(Path("<memory>"), error) from error
+    data = manifest.model_dump(mode="json", exclude_none=True)
+    # Required nullable composition fields must survive a load/dump round trip.
+    data["resources_server"] = manifest.resources_server
     return yaml.safe_dump(
-        manifest.model_dump(mode="json", exclude_none=True),
+        data,
         sort_keys=False,
         allow_unicode=True,
     )
