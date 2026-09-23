@@ -327,6 +327,60 @@ NAMESPACE_TOOL = {
 
 
 class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("missing_id", [False, True])
+    @pytest.mark.parametrize("missing_annotations", [False, True])
+    def test_codex_compacted_message_replay_keeps_text_and_order(self, missing_id, missing_annotations) -> None:
+        text = "Summary line 1\n\n  Keep indentation, Unicode 雪, and literal \\n.\n"
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }
+        if not missing_id:
+            message["id"] = "msg_original"
+        if not missing_annotations:
+            message["content"][0]["annotations"] = []
+        body = {
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "before"},
+                message,
+                {"role": "user", "content": "after"},
+            ],
+        }
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        assert len(cleaned["input"]) == 3
+        actual = cleaned["input"][1]
+        assert actual == {**message, "id": actual["id"], "content": [{**message["content"][0], "annotations": []}]}
+        assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert converted.messages == [
+            {"role": "user", "content": "before"},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": "after"},
+        ]
+
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_message_replay_keeps_supplied_id_annotations_and_phase(self, phase) -> None:
+        message = _message_item("Keep every character.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [message]})
+        assert cleaned["input"] == [message]
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json", exclude_none=True)
+        assert actual == message
+        # Chat cannot express phase; preserving it must keep that explicit error.
+        with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
+            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+
     @pytest.mark.parametrize("provided_id", [None, "rs_original"])
     def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
         summary = "Inspect /app/arithmetic.py, fix multiply, and run Python checks.\n"
@@ -748,6 +802,42 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_streaming_message_keeps_id_annotations_and_phase(self, phase) -> None:
+        client, server = _client(_EchoModel)
+        message = _message_item("Keep this exact replay.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        response = client.post("/v1/responses", json={"stream": True, "input": [message]})
+        assert response.status_code == 200
+        assert "event: response.completed" in response.text
+        assert server.last_params.input[0].model_dump(mode="json", exclude_none=True) == message
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"id": None},
+            {"id": []},
+            {"content": [{"type": "output_text", "text": "keep", "annotations": None}]},
+            {"content": [{"type": "output_text", "text": None}]},
+            {"content": [{"type": "output_text"}]},
+            {"content": [{"type": "unknown", "text": "keep"}]},
+            {"phase": "unknown"},
+            {"status": "unknown"},
+            {"role": "developer", "content": [{"type": "input_text", "text": None}]},
+            {"role": "user", "content": None},
+        ],
+    )
+    def test_malformed_streaming_message_fails_before_backend(self, changes) -> None:
+        client, server = _client(_EchoModel)
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "keep"}]}
+        response = client.post("/v1/responses", json={"stream": True, "input": [{**message, **changes}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
     def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
         client, _ = _client(_IncompleteModel)
         response = client.post("/v1/responses", json={"stream": True, "input": "task"})

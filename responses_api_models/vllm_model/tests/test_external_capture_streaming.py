@@ -216,6 +216,36 @@ def _events(messages):
     return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
 
 
+async def test_codex_compacted_messages_reach_backend_and_evaluation_capture(make_harness, tmp_path):
+    h = make_harness(evaluation=True)
+    first = "Compacted summary 1\n\n  Keep whitespace and literal \\n.\n"
+    second = "Compacted summary 2: 雪\n"
+    # Captured Codex 0.144.4 compaction replay omits IDs and annotations.
+    replay = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+        for text in (first, second)
+    ]
+    body = {
+        "model": "test",
+        "stream": True,
+        "input": [{"role": "user", "content": "before"}, *replay, {"role": "user", "content": "after"}],
+    }
+    messages = await _request(h.app, "/ng-rollout/r1/v1/responses", body)
+    assert messages[0]["status"] == 200
+    assert _events(messages)[-1]["type"] == "response.completed"
+    assert len(h.worker.requests) == 1
+    assert h.worker.requests[0]["messages"] == [
+        {"role": "user", "content": "before"},
+        {"role": "assistant", "content": first + second},
+        {"role": "user", "content": "after"},
+    ]
+    captures = [json.loads(line) for line in (tmp_path / "responses/r1.capture.jsonl").read_text().splitlines()]
+    assert len(captures) == 1
+    assert captures[0]["dialect"] == "responses"
+    assert captures[0]["request"] == body
+    assert captures[0]["response"]["status"] == "completed"
+
+
 @pytest.mark.parametrize("dialect", DIALECTS)
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("evaluation", [False, True])
