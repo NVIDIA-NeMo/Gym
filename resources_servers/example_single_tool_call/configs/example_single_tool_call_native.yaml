@@ -1,6 +1,6 @@
 environment_routing_mode: taskset
 environment_server_routes:
-  "example_single_tool_call:native": example_single_tool_call_native_environment_server
+  "example_single_tool_call:native": example_single_tool_call_native_turn
 
 example_single_tool_call_native:
   resources_servers:
@@ -22,9 +22,9 @@ example_single_tool_call_native_simple_agent:
           type: example
           jsonl_fpath: resources_servers/example_single_tool_call/data/native_example.jsonl
 
-example_single_tool_call_native_environment_server:
+example_single_tool_call_native_turn:
   environment_servers:
-    single_agent:
+    single_agent_turn:
       entrypoint: app.py
       resources_server:
         type: resources_servers
