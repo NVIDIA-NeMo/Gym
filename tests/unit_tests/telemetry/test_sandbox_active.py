@@ -150,15 +150,28 @@ async def test_failed_initial_upload_releases_the_count(collected_metrics, sandb
 
 
 @pytest.mark.asyncio
-async def test_counter_is_released_even_when_provider_close_fails(collected_metrics, sandbox_group_on):
-    class _StickyClose(FakeSandboxProvider):
-        async def close(self, handle):
-            raise RuntimeError("close failed")
+async def test_failed_close_keeps_the_sandbox_counted_until_a_retry_releases_it(collected_metrics, sandbox_group_on):
+    """A close the provider rejected has not released anything; stop() stays retryable and the
+    count drops on the attempt that succeeds, once."""
 
-    sandbox = AsyncSandbox(_StickyClose(), SandboxSpec(image="img"))
+    class _FlakyClose(FakeSandboxProvider):
+        fail = True
+
+        async def close(self, handle):
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("close failed")
+            await super().close(handle)
+
+    # owns_provider=False is the retryable shape (what the compose group uses): an owned provider
+    # is closed in stop()'s finally even when the sandbox close failed, which ends the instance.
+    sandbox = AsyncSandbox(_FlakyClose(), SandboxSpec(image="img"), owns_provider=False)
     await sandbox.start()
     with pytest.raises(RuntimeError):
         await sandbox.stop()
+    assert _active_by_provider(collected_metrics()[ACTIVE]) == {"fake": 1}
+
+    await sandbox.stop()
     assert _active_by_provider(collected_metrics()[ACTIVE]) == {"fake": 0}
 
 
