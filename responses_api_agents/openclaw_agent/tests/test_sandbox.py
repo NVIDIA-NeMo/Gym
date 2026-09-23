@@ -205,7 +205,8 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
                 "message",
             ]
             assert body["usage"]["total_tokens"] == 22
-            assert body["usage"]["input_tokens_details"]["cached_tokens"] == 2
+            assert body["usage"]["input_tokens_details"]["cached_tokens"] is None
+            assert body["usage"]["output_tokens_details"]["reasoning_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
             assert "_ng_agent_observations" not in body
             payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
@@ -691,6 +692,74 @@ def test_usage_sums_cache_writes_and_failed_calls(setup):
     assert response.json()["usage"]["total_tokens"] == 26
 
 
+@pytest.mark.parametrize(
+    "first_cache,second_cache,expected_cache,expected_input",
+    [
+        (2, {}, None, 17),
+        (2, {"cacheRead": None}, None, 17),
+        (2, {"cacheRead": -1}, None, 17),
+        (2, {"cacheRead": True}, None, 17),
+        (2, {"cacheRead": "3"}, None, 17),
+        (2, {"cacheRead": 3.0}, None, 17),
+        (None, {"cacheRead": 2}, None, 17),
+        (0, {"cacheRead": 0}, 0, 15),
+        (2, {"cacheRead": 3}, 5, 20),
+    ],
+)
+def test_native_usage_details_preserve_unknown_and_known_counts(
+    setup, first_cache, second_cache, expected_cache, expected_input
+):
+    agent, sandbox = setup
+    transcript = [json.loads(line) for line in events().splitlines()]
+    transcript[0]["message"]["usage"]["cacheRead"] = first_cache
+    transcript[2]["message"]["usage"].update(second_cache)
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        response.raise_for_status()
+        body = response.json()
+        assert body["status"] == "completed"
+        assert body["output"][0]["type"] == "reasoning"
+        assert body["usage"] == {
+            "input_tokens": expected_input,
+            "output_tokens": 5,
+            "total_tokens": expected_input + 5,
+            "input_tokens_details": {"cached_tokens": expected_cache},
+            "output_tokens_details": {"reasoning_tokens": None},
+        }
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert ("cached_token_usage_unavailable" in gaps) == (expected_cache is None)
+    assert "reasoning_token_usage_unavailable" in gaps
+
+
+@pytest.mark.parametrize("second_usage", [None, "unavailable"])
+def test_missing_call_usage_keeps_native_cache_aggregate_unknown(setup, second_usage):
+    agent, sandbox = setup
+    transcript = [json.loads(line) for line in events().splitlines()]
+    transcript[2]["message"]["usage"] = second_usage
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        response.raise_for_status()
+        assert response.json()["usage"] == {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "total_tokens": 15,
+            "input_tokens_details": {"cached_tokens": None},
+            "output_tokens_details": {"reasoning_tokens": None},
+        }
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert {"model_call_usage_unavailable", "cached_token_usage_unavailable"} <= gaps
+
+
 def test_rewritten_transcript_and_cli_mirror_count_each_model_call_once(setup):
     agent, sandbox = setup
     # Scalar usage from the real Ansible run: eight main calls, three rewritten
@@ -914,6 +983,30 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
     assert response.output[-1].content[0].text == "Fixed"
     assert response.usage.total_tokens == 22
     assert "agent_stdout_unparseable" in {gap.code for gap in state.observations.gaps}
+
+
+@pytest.mark.parametrize("cache", [{}, {"cacheRead": None}, {"cacheRead": 0}, {"cacheRead": 5}])
+async def test_native_envelope_fallback_preserves_known_and_unknown_cache_details(setup, cache):
+    agent, sandbox = setup
+    request, session_id, task = await activate(agent, sandbox)
+    await task
+    state = agent._sandbox_sessions[session_id]
+    sandbox.files[f"{state.directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl"] = ""
+    response = await agent._collect_sandbox_response(
+        state,
+        NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        prompt="task",
+        system="",
+        stdout=json.dumps({"meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}}}),
+    )
+    assert response.usage.input_tokens == 10 + (cache.get("cacheRead") or 0)
+    assert response.usage.output_tokens == 3
+    assert response.usage.input_tokens_details.cached_tokens == cache.get("cacheRead")
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    gaps = {gap.code for gap in state.observations.gaps}
+    assert ("cached_token_usage_unavailable" in gaps) == (cache.get("cacheRead") is None)
+    assert "model_call_usage_unavailable" in gaps
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 @pytest.mark.parametrize("owned_root", ["sessions", "runtime"])
