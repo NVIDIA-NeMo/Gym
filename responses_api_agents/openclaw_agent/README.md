@@ -93,11 +93,29 @@ openclaw_native:
 
 native_environment:
   environment_servers:
-    single_agent:
+    single_agent_turn:
       entrypoint: app.py
       resources_server: {type: resources_servers, name: task_resources}
       agent_server: {type: responses_api_agents, name: openclaw_native}
 ```
+
+The runnable SWE-Pro composition is `benchmarks/swebench/pro/openclaw_native.yaml`. It selects
+`environment_routing_mode: taskset` and binds `swebench_pro:smoke` to the native `single_agent_turn`
+EnvironmentServer. The separate native agent config has no legacy Resources reference or local
+provider overrides. With sandbox and policy model configuration ready:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
+  resources_servers/swebench_pro/data/example.jsonl /tmp/swe-pro-native.jsonl
+
+gym eval run --config benchmarks/swebench/pro/openclaw_native.yaml \
+  --model-type openai_model --input /tmp/swe-pro-native.jsonl \
+  --output outputs/openclaw-native.jsonl --limit 1
+```
+
+Supply the sandbox provider config through `env.yaml` or an additional `--config` file, and ensure
+`policy_model_name`, `policy_base_url`, and `policy_api_key` match the reachable model endpoint.
+Do not add `--agent`: this recipe routes materialized tasks by taskset.
 
 Submit episodes to **EnvironmentServer `/run`**. It seeds Resources, opens the agent session,
 calls the rollout-scoped Responses endpoint, closes the agent, verifies, and closes Resources.
@@ -124,6 +142,10 @@ exec host refers to the embedded CLI process inside the borrowed sandbox.
 Native request support is deliberately explicit:
 
 - One activation per session; one worker per agent server. Concurrent sessions are independent.
+- EnvironmentServer assigns the session ID. Repeating the full seed request is idempotent, even
+  without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
+  explicit ID and episode without a cookie, including after a lost seed response. Closing an
+  unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
 - A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
@@ -158,6 +180,10 @@ or negative cleanup evidence fail closed and block verification. Successful clos
 retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
 receipt expiry and never enter the host CLI path.
+
+Abandoned sessions expire after `session_lifetime_seconds` (21600 seconds by default) through the
+same cleanup path. Expiry failures retain closing state and block activation. Closed-ID tombstones
+remain for the longer of the session lifetime and close retry window, then are pruned.
 
 Session state is process-local. Keep requests on one worker. Failed cleanup sessions are retained
 until owner/provider recovery and agent restart; they are never relabeled as successfully closed.

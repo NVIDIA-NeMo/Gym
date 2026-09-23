@@ -1,0 +1,24 @@
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench_pro:smoke": swebench_pro_openclaw
+
+swebench_pro_openclaw_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [openclaw_agent]
+
+swebench_pro_openclaw_agent:
+  _inherit_from: openclaw_agent_native
+
+swebench_pro_openclaw:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server: {type: resources_servers, name: swebench_pro_openclaw_resources_server}
+      agent_server: {type: responses_api_agents, name: swebench_pro_openclaw_agent}
