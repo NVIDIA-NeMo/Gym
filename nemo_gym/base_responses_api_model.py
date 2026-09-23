@@ -173,7 +173,8 @@ def _orjson_dispatch_response(content: Any) -> Any:
     if isinstance(content, Response):
         return content
     if isinstance(content, BaseModel):
-        content = content.model_dump(mode="json")
+        # Preserve API aliases (e.g. schema_ -> schema), as FastAPI's encoder does.
+        content = content.model_dump(mode="json", by_alias=True)
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 

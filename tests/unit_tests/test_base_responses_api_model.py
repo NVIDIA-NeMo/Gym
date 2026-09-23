@@ -96,6 +96,34 @@ def test_orjson_dispatch_response_preserves_existing_response():
     assert _orjson_dispatch_response(existing_response) is existing_response
 
 
+def test_orjson_dispatch_response_preserves_json_schema_alias() -> None:
+    """Structured judge replies must retain API field names across the HTTP boundary."""
+    schema = {
+        "type": "object",
+        "properties": {"correct": {"type": "boolean"}},
+        "required": ["correct"],
+        "additionalProperties": False,
+    }
+    original = NeMoGymResponse(
+        id="structured_judge",
+        created_at=0,
+        model="fixture",
+        object="response",
+        status="completed",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        text={"format": {"type": "json_schema", "name": "judge", "schema": schema, "strict": True}},
+    )
+
+    payload = orjson.loads(_orjson_dispatch_response(original).body)
+
+    assert payload["text"]["format"]["schema"] == schema
+    assert "schema_" not in payload["text"]["format"]
+    assert NeMoGymResponse.model_validate(payload) == original
+
+
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
     return ModelCallCaptureConfig(
         observability_enabled=enabled,
