@@ -558,6 +558,10 @@ async def test_transient_http_failure_recovers_without_regenerating_answers(serv
 
 @pytest.mark.parametrize("recovers", [True, False])
 async def test_interrupted_judge_body_retries_without_regenerating_answers(services, recovers):
+    # Allow Uvicorn to close the truncated response before the independent request
+    # deadline can win on a loaded runner. Keep both failure paths bounded.
+    services.resource.config.judge_request_timeout_s = 2.0
+    services.resource.config.cohort_evaluation_timeout_s = 10.0
     services.truncated_judge_responses = 1 if recovers else 100
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
     assert services.policy_calls == 4
