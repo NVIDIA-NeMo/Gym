@@ -1401,11 +1401,8 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        # A flag rejected for its position (not for being unknown) is still in known_options, so exclude it
-        # from its own candidate set — otherwise it matches itself and is suggested as its own correction.
         hints = "".join(
-            did_you_mean(name, [opt for opt in known_options if opt != name])
-            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
