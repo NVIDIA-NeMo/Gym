@@ -64,6 +64,11 @@ hermes_agent:
       max_turns: 30
       concurrency: 32
       temperature: 1.0
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: my-agent-image
+        ttl_s: 3600
+        workdir: /workspace
       system_prompt: |
         your system prompt here.
 ```
@@ -78,6 +83,8 @@ hermes_agent:
 | `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
 | `terminal_backend` | `local` | sets `TERMINAL_ENV` (process-global); `local`, `docker`, `daytona`, `modal`, `ssh` |
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
+| `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
+| `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
 | `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
