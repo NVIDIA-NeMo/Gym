@@ -201,6 +201,7 @@ class TestApp:
         assert not_equal_verify_response.judge_evaluations is None
         server_mock.post.assert_not_awaited()
         assert sorted(list(not_equal_verify_response.model_dump())) == [
+            "env_session_id",
             "expected_answer",
             "extracted_answer",
             "failure_kind",
@@ -242,6 +243,7 @@ class TestApp:
         assert equal_verify_response.library_reward == approx(1.0)
         assert equal_verify_response.judge_evaluations is None
         assert sorted(list(equal_verify_response.model_dump())) == [
+            "env_session_id",
             "expected_answer",
             "extracted_answer",
             "failure_kind",
