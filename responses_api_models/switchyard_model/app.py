@@ -63,6 +63,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, request
 
 
@@ -104,6 +105,42 @@ class _RolloutSessionMiddleware:
             await self._app(scope, receive, send)
         finally:
             _ROLLOUT_ID.reset(token)
+
+
+def _reasoning_to_fields(messages: List[Dict[str, Any]], *, interleaved: bool) -> None:
+    """Move a replayed assistant turn's ``<think>`` block out of content, in place.
+
+    Mirrors vllm_model's outbound rewrite. This server hands the agent reasoning
+    folded into content as ``<think>`` tags (see ``_fold_reasoning_into_content``),
+    and the agent replays that turn verbatim. vLLM's chat template expects a prior
+    turn's reasoning in ``reasoning_content`` and renders it from there; inline
+    tags are rendered too, but not identically, and the two must not diverge if
+    a proxied run is to stand in for a direct one.
+
+    ``reasoning`` is set alongside ``reasoning_content`` because vLLM >= 0.16
+    reads the former; the first block wins when a turn carries several.
+    """
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant" or "content" not in message:
+            continue
+        content = message["content"]
+        reasoning: Optional[str] = None
+        if isinstance(content, str):
+            matches, remaining = ResponsesConverter._parse_think_tags(content)
+            message["content"] = remaining
+            if matches:
+                reasoning = matches[0]
+        elif isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                    continue
+                matches, remaining = ResponsesConverter._parse_think_tags(item["text"])
+                item["text"] = remaining
+                if matches and reasoning is None:
+                    reasoning = matches[0]
+        if reasoning and interleaved:
+            message["reasoning_content"] = reasoning
+            message["reasoning"] = reasoning
 
 
 class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
@@ -154,6 +191,38 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     # identity -- e.g. {"switchyard_commit": ..., "deployment_sha256": ...}. Ignored when hosting:
     # the manifest already identifies the hosted proxy exactly.
     proxy_provenance: Dict[str, Any] = Field(default_factory=dict)
+
+    # Fold a reasoning model's separate reasoning field back into the assistant
+    # content, the way vllm_model does when its own reasoning parser is on.
+    #
+    # Without this, a server started against an upstream that runs a reasoning
+    # parser hands the agent a message carrying `reasoning_content`. Agents
+    # replay the assistant turn verbatim on the next call, and Gym's chat
+    # request schema forbids that field on an assistant message, so every
+    # multi-turn rollout against a reasoning model dies on its second turn.
+    # Folding the text into `<think>` tags keeps the reasoning visible while
+    # leaving a response that is valid to send back.
+    #
+    # Off by default: a proxy is normally transparent, and an upstream with no
+    # reasoning parser has nothing to fold.
+    uses_reasoning_parser: bool = False
+
+    # With uses_reasoning_parser, replayed assistant turns also get their
+    # <think> block moved back into reasoning_content/reasoning on the way
+    # upstream, as vllm_model does under the same flag name. Off only for an
+    # upstream whose template must see the tags inline.
+    uses_interleaved_reasoning: bool = True
+
+    # Force these fields onto every outbound body, the way vllm_model's pin of
+    # the same name does. Without it a proxied run cannot state its sampling at
+    # all: this server has no other way to reach the upstream, so the engine
+    # falls back to the checkpoint's generation defaults while the direct
+    # profile pins its own -- and the two arms stop being comparable even
+    # though they serve the same weights. A null value clears a field the
+    # caller set, which is how an agent's blanket max_tokens gets removed.
+    #
+    # Unset means no pin, so a proxy stays transparent by default.
+    sampling_overrides: Optional[Dict[str, Any]] = None
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     default_headers: Dict[str, str] = Field(default_factory=dict)
@@ -492,19 +561,54 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         return self._client.model_copy(update={"default_headers": headers})
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.switchyard_model
+        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True))
         async with self._semaphore:
             response_dict = await self.client_for_request().create_response(**body_dict)
         return NeMoGymResponse.model_validate(response_dict)
 
+    def _finalize_body(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Pin sampling, then name the route, in that order.
+
+        The pin is applied after the caller's body so it wins, matching
+        vllm_model. The route id is set last and deliberately not pinnable: it
+        is what selects the Switchyard route, so a stray override there would
+        silently benchmark a different one.
+        """
+        if self.config.sampling_overrides:
+            body_dict.update(self.config.sampling_overrides)
+        body_dict["model"] = self.config.switchyard_model
+        return body_dict
+
+    @staticmethod
+    def _fold_reasoning_into_content(response_dict: Dict[str, Any]) -> None:
+        """Move a choice's reasoning field into its content, in ``<think>`` tags.
+
+        Mirrors vllm_model's behaviour under ``uses_reasoning_parser``. vLLM
+        emits ``reasoning``; ``reasoning_content`` is the older name, so accept
+        either and drop both. Only the chat shape needs this: the Responses API
+        models reasoning as a first-class output item, so nothing there is
+        rejected on replay.
+        """
+        for choice in response_dict.get("choices") or []:
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            reasoning = message.get("reasoning_content") or message.get("reasoning")
+            message.pop("reasoning_content", None)
+            message.pop("reasoning", None)
+            if reasoning:
+                message["content"] = f"<think>{reasoning}</think>{message.get('content') or ''}"
+
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.switchyard_model
+        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True))
+        if self.config.uses_reasoning_parser:
+            _reasoning_to_fields(body_dict.get("messages") or [], interleaved=self.config.uses_interleaved_reasoning)
         async with self._semaphore:
             response_dict = await self.client_for_request().create_chat_completion(**body_dict)
+        if self.config.uses_reasoning_parser:
+            self._fold_reasoning_into_content(response_dict)
         return NeMoGymChatCompletion.model_validate(response_dict)
 
 

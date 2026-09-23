@@ -76,6 +76,34 @@ from the caller-supplied `proxy_provenance` mapping instead of the local wheel v
 what makes two routed runs comparable and one routed run reproducible after the fact; the
 documented comparison workflow in the docs page builds on it.
 
+## Reasoning models
+
+Set `uses_reasoning_parser: true` when the upstream runs a reasoning parser (for example vLLM's
+`--reasoning-parser`). The server then behaves like `vllm_model` on both legs of a turn:
+
+- On the way back, the upstream's separate `reasoning` / `reasoning_content` field is folded into
+  the assistant content as `<think>…</think>`. Agents replay the assistant turn verbatim, and Gym's
+  chat request schema does not accept a bare `reasoning_content` field on that replay.
+- On the way out, a replayed turn's `<think>` block is moved back into `reasoning_content` /
+  `reasoning` before forwarding (`uses_interleaved_reasoning`, on by default). A chat template
+  renders the two forms differently, and some models react to the inline form: on SWE-bench
+  Verified with Nemotron 3 Nano, forwarding the tags inline made about a quarter of later turns end
+  right after the think block without acting, and the proxied arm scored 17.5% against 30.9% for a
+  direct `vllm_model` run of the same weights. With the rewrite the two arms agree.
+
+## Pinned sampling
+
+`sampling_overrides` forces fields onto every outbound body after the caller's, with `vllm_model`'s
+semantics: a pinned value wins over what the agent sent, and a null value clears a field the agent
+set (typically an agent's blanket `max_tokens`). The route id is applied last and is not pinnable,
+so an override cannot silently benchmark a different route.
+
+```bash
+++policy_model.responses_api_models.switchyard_model.uses_reasoning_parser=true \
+++policy_model.responses_api_models.switchyard_model.sampling_overrides.temperature=1.0 \
+++policy_model.responses_api_models.switchyard_model.sampling_overrides.max_tokens=null
+```
+
 ## Dependency direction
 
 Gym knows Switchyard; Switchyard does not know Gym.
@@ -84,7 +112,7 @@ Gym knows Switchyard; Switchyard does not know Gym.
 through Switchyard pay for it. No Gym code imports Switchyard on Gym's side of the boundary; this
 server speaks OpenAI-compatible HTTP to the proxy and hosts the native server when asked to.
 
-The dependency is pinned exactly (`nemo-switchyard==0.2.0`) because this server hosts the pinned
+The dependency is pinned exactly (`nemo-switchyard==0.3.0`) because this server hosts the pinned
 code in-process and depends on its wire behavior — the TOML deployment schema, the session header,
 and the endpoint set are all version-coupled, and Switchyard is evolving quickly. Upgrades should
 be deliberate, tested events; see the comment in `pyproject.toml`.
