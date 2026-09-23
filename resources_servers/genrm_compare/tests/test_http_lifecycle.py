@@ -301,7 +301,10 @@ async def test_production_graceful_shutdown_releases_active_state(services):
 
 
 @pytest.mark.parametrize("judge_failure", [False, True])
-async def test_collector_saves_actual_cohort_failure_class_and_reason(services, tmp_path, monkeypatch, judge_failure):
+@pytest.mark.parametrize("count_failure", [False, True])
+async def test_collector_saves_actual_cohort_failure_class_and_reason(
+    services, tmp_path, monkeypatch, judge_failure, count_failure
+):
     import nemo_gym.rollout_collection as collection
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
@@ -325,12 +328,19 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(services, 
         num_samples_in_parallel=4,
         route_failures_to_sidecar=True,
         disable_health_check=True,
-        count_failure_classes_as_zero=["agent_run_error"],
+        count_failure_classes_as_zero=["judge_failed" if judge_failure else "agent_run_error"]
+        if count_failure
+        else [],
     )
-    with pytest.raises(RuntimeError, match="produced a result"):
+    if count_failure:
         await collection.RolloutCollectionHelper().run_from_config(config)
+    else:
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await collection.RolloutCollectionHelper().run_from_config(config)
     assert not output_path.read_text().strip()
-    failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    sidecar_path = tmp_path / "output_failures.jsonl"
+    original_sidecar = sidecar_path.read_bytes()
+    failures = [json.loads(line) for line in original_sidecar.splitlines()]
     assert len(failures) == (4 if judge_failure else 1)
     for row in failures:
         if judge_failure:
@@ -347,7 +357,23 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(services, 
     assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in failures} == {
         (r["_ng_task_index"], r["_ng_rollout_index"]) for r in inputs
     }
-    assert not (tmp_path / "output_aggregate_metrics.json").exists()
+    online_path = tmp_path / "output_aggregate_metrics.json"
+    if count_failure:
+        online = json.loads(online_path.read_text())
+        assert online[0]["key_metrics"] == {"mean/reward": 0.0}
+        offline_path = await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                count_failure_classes_as_zero=config.count_failure_classes_as_zero,
+                disable_health_check=True,
+            )
+        )
+        assert json.loads(offline_path.read_text()) == online
+        assert output_path.read_bytes() == (tmp_path / "merged.jsonl").read_bytes() == b""
+        assert sidecar_path.read_bytes() == original_sidecar
+    else:
+        assert not online_path.exists()
 
 
 async def test_collector_can_repeat_legacy_task_on_same_live_server(services, tmp_path, monkeypatch):

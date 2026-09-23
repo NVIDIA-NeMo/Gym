@@ -1197,6 +1197,93 @@ class TestRolloutCollection:
         assert all(saved_failure[key] == value for key, value in failure.items())
         assert len(output_path.read_text().splitlines()) == 3
 
+    @pytest.mark.parametrize("num_failures", [1, 4])
+    @pytest.mark.parametrize("counted_classes", [[], [AGENT_RUN_ERROR_FAILURE_CLASS], ["judge_failed"]])
+    @pytest.mark.parametrize("disable_aggregation", [False, True])
+    async def test_all_judge_failures_only_produce_metrics_when_explicitly_counted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        num_failures: int,
+        counted_classes: list[str],
+        disable_aggregation: bool,
+    ) -> None:
+        """An opted-in all-failure run has a score, but never synthetic successful rollouts."""
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+                for _ in range(num_failures)
+            )
+        )
+        output_path = tmp_path / "output.jsonl"
+        failure = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "instance_config": {"mask_sample": True},
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "_ng_failure_judge_error": "judge unavailable",
+        }
+        metric_inputs = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, deepcopy(failure))
+            metric_inputs.append(json.verify_responses)
+            return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            route_failures_to_sidecar=True,
+            count_failure_classes_as_zero=counted_classes,
+            disable_aggregation=disable_aggregation,
+            disable_health_check=True,
+        )
+        counted = "judge_failed" in counted_classes
+        if counted:
+            results = await RolloutCollectionHelper().run_from_config(config)
+            assert len(results) == num_failures and all(row["mask_sample"] for row in results)
+        else:
+            # A nonempty opt-in for another class must not bypass the no-results guard.
+            with pytest.raises(RuntimeError, match="produced a result"):
+                await RolloutCollectionHelper().run_from_config(config)
+
+        sidecar_path = _failures_path_for(output_path)
+        original_sidecar = sidecar_path.read_bytes()
+        saved = [orjson.loads(line) for line in original_sidecar.splitlines()]
+        assert len(saved) == num_failures
+        assert all(all(row[key] == value for key, value in failure.items()) for row in saved)
+        assert output_path.read_bytes() == b""
+        online_path = output_path.with_stem("output_aggregate_metrics").with_suffix(".json")
+        if counted and not disable_aggregation:
+            assert orjson.loads(online_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+        else:
+            assert not online_path.exists() and not metric_inputs
+
+        offline_path = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                count_failure_classes_as_zero=counted_classes,
+                disable_health_check=True,
+            )
+        )
+        if counted:
+            assert orjson.loads(offline_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+            assert len(metric_inputs) == (1 if disable_aggregation else 2)
+            for inputs in metric_inputs:
+                assert len(inputs) == num_failures
+                assert all(row["reward"] == 0.0 and row["mask_sample"] is False for row in inputs)
+        else:
+            assert offline_path is None and not metric_inputs
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert output_path.read_bytes() == (tmp_path / "merged.jsonl").read_bytes() == b""
+
     async def test_run_from_config_fails_when_no_rollout_produced_a_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
