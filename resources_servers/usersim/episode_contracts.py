@@ -79,7 +79,7 @@ class UserSimTaskInput(BaseModel):
 
     sampling: UserSimSamplingRequest
     probe_data: dict[str, Any] = Field(default_factory=dict)
-    agent_responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
+    responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
         default_factory=dict
     )
 
