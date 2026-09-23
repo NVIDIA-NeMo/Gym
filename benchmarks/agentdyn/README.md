@@ -24,8 +24,9 @@ gym eval prepare --benchmark agentdyn
 
 # Start servers, then collect the undefended arm at upstream's sampling setting.
 gym env start --benchmark agentdyn --model-type vllm_model
-gym eval run --no-serve --benchmark agentdyn --model-type vllm_model --temperature 0.0 \
-    --output results/agentdyn-undefended.jsonl
+gym eval run --no-serve --benchmark agentdyn --model-type vllm_model \
+    --agent agentdyn_benchmark --input benchmarks/agentdyn/data/agentdyn_v1_2_2.jsonl \
+    --temperature 0.0 --output results/agentdyn-undefended.jsonl
 ```
 
 Pass `--temperature 0.0` to match upstream's harness, whose `OpenAILLM` samples at 0. The adapter forwards only the
