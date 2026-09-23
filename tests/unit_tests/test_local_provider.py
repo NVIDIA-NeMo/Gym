@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -66,6 +67,28 @@ async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
     assert result.return_code == 125 and result.error_type == "timeout"
     await asyncio.sleep(2)
     assert not marker.exists(), "backgrounded child outlived the timed-out command"
+
+
+async def test_cancellation_kills_the_whole_process_tree(tmp_path: Path) -> None:
+    sandbox = AsyncSandbox(create_provider({"local": {}}))
+    await sandbox.start(SandboxSpec(workdir=str(tmp_path)))
+    async with sandbox:
+        task = asyncio.create_task(sandbox.exec("(touch ready && sleep 1 && touch survived) & wait"))
+        try:
+            async with asyncio.timeout(5):
+                while not (tmp_path / "ready").exists():
+                    await asyncio.sleep(0.01)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=10)
+
+            await asyncio.sleep(2)
+            assert not (tmp_path / "survived").exists(), "backgrounded child outlived the cancelled command"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def test_timeout_returns_even_when_a_child_escapes_the_process_group(tmp_path: Path) -> None:
