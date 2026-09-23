@@ -59,12 +59,10 @@ from nemo_gym.token_id_capture.lineage import (
     LedgerRootMismatch,
     LineageIndex,
     ManifestReadCancelled,
-    ManifestReadStats,
     ManifestReadTimeout,
     RolloutLineage,
     stamp_continuation,
     verify_ledger_root_visibility,
-    write_writer_identity_marker,
 )
 from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
@@ -131,10 +129,8 @@ __all__ = [
     "FileManifestReader",
     "LedgerRootMismatch",
     "ManifestReadCancelled",
-    "ManifestReadStats",
     "ManifestReadTimeout",
     "verify_ledger_root_visibility",
-    "write_writer_identity_marker",
     "validate_rollout_id",
     "make_token_store",
     "TokenSink",

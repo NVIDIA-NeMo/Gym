@@ -23,9 +23,7 @@ from nemo_gym.token_id_capture.lineage import (
     FileManifestReader,
     LedgerRootMismatch,
     ManifestReadCancelled,
-    ManifestReadStats,
     ManifestReadTimeout,
-    read_writer_identity_markers,
     verify_ledger_root_visibility,
 )
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
@@ -77,13 +75,11 @@ async def test_reader_matches_http_route_for_multi_turn_and_failure_rows(store, 
     await store.record(_commit("r1", 2, parent="c1", prev_len=16))  # duplicate commit: idempotent
     await store.record_failure("r1", "c3", "worker_capture_failed")
     reader = FileManifestReader(root)
-    stats = ManifestReadStats()
-    direct = reader.read_manifest("r1", deadline=time.monotonic() + 5, stats=stats)
+    direct = reader.read_manifest("r1", deadline=time.monotonic() + 5)
     assert direct == await store.manifest("r1")
     manifest = RolloutManifest.model_validate(direct)
     assert [record.model_call_id for record in manifest.records] == ["c1", "c2"]
     assert [failure.model_call_id for failure in manifest.failures] == ["c3"]
-    assert stats.rows == 3 and stats.bytes_read > 0
 
 
 @pytest.mark.asyncio
@@ -120,7 +116,7 @@ async def test_reader_times_out_and_cancels_while_writer_lock_is_held(store, roo
     with open(root / "r1.tokens.lock", "a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         started = time.monotonic()
-        with pytest.raises(ManifestReadTimeout, match="lock acquisition"):
+        with pytest.raises(ManifestReadTimeout, match="deadline"):
             reader.read_manifest("r1", deadline=time.monotonic() + 0.2)
         assert time.monotonic() - started < 1.0
         cancel = threading.Event()
@@ -166,24 +162,17 @@ async def test_reader_snapshots_stay_consistent_under_concurrent_appends(store, 
 
 
 def test_writer_identity_marker_and_visibility_check(store, root):
-    markers = read_writer_identity_markers(root)
-    assert len(markers) == 1
-    assert markers[0]["hostname"]
-    assert (root / WRITER_IDENTITY_DIRNAME).is_dir()
-    diagnostics = verify_ledger_root_visibility(root)
-    assert diagnostics["writers"] == 1
-    assert diagnostics["matching_writers"] == 1
-    assert diagnostics["reader"]["inode"] == markers[0]["inode"]
+    assert len(list((root / WRITER_IDENTITY_DIRNAME).glob("*.json"))) == 1
+    verify_ledger_root_visibility(root)
 
 
 def test_visibility_check_fails_without_root_or_marker_or_on_mismatch(tmp_path, root, store):
-    with pytest.raises(LedgerRootMismatch, match="does not exist"):
+    with pytest.raises(LedgerRootMismatch, match="missing"):
         verify_ledger_root_visibility(tmp_path / "missing", wait_s=0.0)
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(LedgerRootMismatch, match="no writer identity marker"):
         verify_ledger_root_visibility(empty, wait_s=0.0)
-    assert verify_ledger_root_visibility(empty, require_writer_marker=False)["writers"] == 0
     # A marker written from a different directory (different inode) is a mismatch.
     other = tmp_path / "other"
     FileLineageStore(other)
@@ -239,7 +228,7 @@ def test_reader_rechecks_deadline_after_manifest_conversion(store, root, monkeyp
         return real_convert(*args)
 
     monkeypatch.setattr(module, "_manifest_from_rows", convert)
-    with pytest.raises(ManifestReadTimeout, match="manifest conversion"):
+    with pytest.raises(ManifestReadTimeout, match="deadline"):
         FileManifestReader(root).read_manifest("absent", deadline=time.monotonic() + 0.01)
 
 
@@ -270,6 +259,6 @@ asyncio.run(main())
         check=True,
         timeout=30,
     )
-    assert all(marker["pid"] != os.getpid() for marker in read_writer_identity_markers(root))
-    assert verify_ledger_root_visibility(root)["matching_writers"] == 1
+    assert all(int(path.stem) != os.getpid() for path in (root / WRITER_IDENTITY_DIRNAME).glob("*.json"))
+    verify_ledger_root_visibility(root)
     assert FileManifestReader(root).read_manifest("separate-process") == json.loads(completed.stdout)
