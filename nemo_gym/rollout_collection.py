@@ -232,17 +232,32 @@ def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
+    """Pick the environment server a row is dispatched to, or None for today's agent path.
+
+    A materialized task (``task_id.taskset`` plus ``task_input``) always routes by its taskset:
+    it is the native episode request and no agent-server ``/run`` accepts it. A flat row follows
+    ``environment_routing_mode``: ``agent`` keeps today's routing (its agent's environment server
+    is resolved at dispatch), ``legacy`` sends every flat row to ``environment_server_name``, and
+    ``taskset`` refuses flat rows so a native-only run cannot silently pick up legacy input.
+
+    One batch may therefore hold both kinds of rows in ``agent`` and ``legacy`` mode. The chosen
+    server is stamped on the row as ``_ng_environment_server`` and travels with it through the
+    materialized input file, retries, and results.
+    """
+    taskset = _materialized_taskset(row)
+    if taskset is not None:
+        try:
+            return config.environment_server_routes[taskset]
+        except KeyError as error:
+            raise ValueError(f"No environment server route is configured for taskset {taskset!r}") from error
     if config.environment_routing_mode == "agent":
         return None
     if config.environment_routing_mode == "legacy":
         return config.environment_server_name
-    taskset = _materialized_taskset(row)
-    if taskset is None:
-        raise ValueError("taskset routing requires rows containing task_id.taskset and task_input")
-    try:
-        return config.environment_server_routes[taskset]
-    except KeyError as error:
-        raise ValueError(f"No environment server route is configured for taskset {taskset!r}") from error
+    raise ValueError(
+        "taskset routing requires rows containing task_id.taskset and task_input; "
+        "use environment_routing_mode=agent to mix materialized and flat rows in one batch"
+    )
 
 
 def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -742,11 +757,17 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     )
     environment_routing_mode: Literal["agent", "legacy", "taskset"] = Field(
         default="agent",
-        description="Select existing agent routing, whole-run legacy environment routing, or native taskset routing.",
+        description=(
+            "How flat (non-materialized) rows are routed. `agent`: today's routing, each row through its "
+            "agent's environment server. `legacy`: every flat row to `environment_server_name`. `taskset`: "
+            "flat rows are rejected, so the run is native-only. Materialized rows (`task_id.taskset` plus "
+            "`task_input`) always route by `environment_server_routes`, in every mode, so one batch may mix "
+            "native and compatibility-routed tasksets."
+        ),
     )
     environment_server_name: str | None = Field(
         default=None,
-        description="Compatibility environment server used for every row when environment_routing_mode=legacy.",
+        description="Compatibility environment server used for every flat row when environment_routing_mode=legacy.",
     )
     environment_server_routes: dict[str, str] = Field(
         default_factory=dict,
@@ -1237,6 +1258,10 @@ class RolloutCollectionHelper(BaseModel):
                     raise ValueError("responses_create_params overrides are not supported for materialized task rows")
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
+                if config.num_repeats_add_seed:
+                    # The seed is written into the top-level responses_create_params, which a
+                    # materialized row keeps under task_input; the planner does not modify task_input.
+                    raise ValueError("num_repeats_add_seed is not supported for materialized task rows")
             else:
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                     row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
