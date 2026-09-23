@@ -80,6 +80,9 @@ until after a smaller endpoint has overflowed. Optionally set `model_auto_compac
 that window to leave room for tool output and the next model response; for a 40,960-token endpoint,
 40,960 and 32,768 respectively are a conservative starting point. Both settings must be positive
 integers, and an explicit compaction threshold cannot exceed 90% of an explicit context window.
+Codex additionally clamps these settings to its model metadata: the unknown-model fallback caps
+the context override at 272,000 and compaction at 90% of that cap. Larger values therefore do not
+enable a larger context; they need a separately validated model metadata/runtime configuration.
 Omitted values preserve CLI defaults. These are harness context-management settings, not per-call
 generation limits; configure those on the Gym model server. Compaction remains owned by Codex.
 
