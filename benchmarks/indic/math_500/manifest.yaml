@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: indic/math_500
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: MATH-500 in 14 Indic languages using the English prompt and symbolic verifier.
+modality: text
+licensing: Apache-2.0
+authors: [anushaknvidia]
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: stochastic
+resources_server: math_with_judge
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: indic_math_500
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/math_500/data/math_500_benchmark.jsonl
+    prepare_script: benchmarks/indic/math_500/prepare.py
+    prompt_config: benchmarks/prompts/generic/math.yaml
+    num_repeats: 1
+standard_prompt_config: benchmarks/prompts/generic/math.yaml
+canonical_split: test
+session_model: episode
+state: none
+lifecycle: active
