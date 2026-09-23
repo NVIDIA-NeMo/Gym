@@ -715,7 +715,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                             )
                         )
                 cache_read = (message.get("usage") or {}).get("cacheRead")
-                if type(cache_read) is not int or cache_read < 0:
+                # Pi also emits zero when backend cache details are absent; zero has no measured provenance.
+                if type(cache_read) is not int or cache_read <= 0:
                     cached_tokens = None
                 elif cached_tokens is not None:
                     cached_tokens += cache_read
@@ -738,6 +739,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         if result.return_code != 0 and not result.timed_out:
             error = error or f"Pi exited with code {result.return_code}"
         if not stop_reasons:
+            cached_tokens = None
             error = error or "Pi produced no assistant result"
         elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not result.timed_out:
             error = error or "Pi ended without a terminal assistant result"
@@ -783,6 +785,14 @@ class PiAgent(SimpleResponsesAPIAgent):
             LOG.exception("failed to build sandbox Pi observations")
             state.observations = AgentObservationBundle(
                 source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
+            )
+        state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
+        if cached_tokens is None:
+            state.observations.gaps.append(
+                ObservationGap(
+                    code="cached_token_usage_unavailable",
+                    detail="Pi cache counters are absent, invalid, or defaulted to zero",
+                )
             )
         return response
 
