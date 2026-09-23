@@ -11,6 +11,19 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## Anthropic Political Even-handedness Evaluation V1
+
+The dataset and grader rubrics used by `even_handedness` come from
+[anthropics/political-neutrality-eval](https://github.com/anthropics/political-neutrality-eval)
+at revision `c5ed67908b56edc0781f47821241ca44114bd4ff`.
+
+- Copyright: © 2025 Anthropic PBC
+- License: [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/)
+- Gym adaptation: Responses API policy transport, probability/discrete scoring
+  modes, failure accounting, and aggregate metrics
+
+---
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |
