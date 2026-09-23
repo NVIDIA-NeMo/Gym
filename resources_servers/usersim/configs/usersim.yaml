@@ -122,9 +122,6 @@ usersim_environment:
       summary_model:
         type: responses_api_models
         name: tool_simulation_model
-      api_response_model:
-        type: responses_api_models
-        name: tool_simulation_model
       resources_tool_transports:
         - direct_http
       max_turns: 6
