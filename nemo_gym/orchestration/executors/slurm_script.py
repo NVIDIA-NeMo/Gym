@@ -420,15 +420,18 @@ def _build_router_command(
     decode = services[router.decode]
     assert isinstance(prefill, VllmServiceConfig) and isinstance(decode, VllmServiceConfig)
     assert prefill.node_pool is not None and decode.node_pool is not None
-    prefill_head = _pool_head(offsets[prefill.node_pool][0])
-    decode_head = _pool_head(offsets[decode.node_pool][0])
+    endpoints = ""
+    for flag, tier in (("--prefill", prefill), ("--decode", decode)):
+        start, count = offsets[tier.node_pool]
+        # A per-node tier is one server per node; otherwise the tier's API rank is its head.
+        for i in range(count if tier.server_per_node else 1):
+            endpoints += f' {flag} "http://{_pool_head(start + i)}:{tier.port}"'
     return (
         "vllm-router"
         f" --prefill-policy {shlex.quote(router.prefill_policy)}"
         f" --decode-policy {shlex.quote(router.decode_policy)}"
         " --vllm-pd-disaggregation"
-        f' --prefill "http://{prefill_head}:{prefill.port}"'
-        f' --decode "http://{decode_head}:{decode.port}"'
+        f"{endpoints}"
         f" --host $(hostname)"
         f" --port {router.port}"
         f" --intra-node-data-parallel-size {router.intra_node_data_parallel_size}"
@@ -762,6 +765,13 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
     return None
 
 
+def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
+    """Nodes the service command is written for; a per-node server is a single-node command."""
+    if isinstance(service, VllmServiceConfig) and service.server_per_node:
+        return 1
+    return _service_nodes(service, compute, total_nodes)
+
+
 def _srun_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int | None:
     nodes = _service_nodes(service, compute, total_nodes)
     if service.node_pool is not None:
@@ -884,7 +894,7 @@ def build_sbatch_script(
                 service.container,
                 _build_service_command(
                     service,
-                    _service_nodes(service, compute, total_nodes),
+                    _build_nodes(service, compute, total_nodes),
                     gpus_per_node_values,
                     config.services,
                     offsets,
