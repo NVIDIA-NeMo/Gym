@@ -2042,3 +2042,22 @@ def test_the_router_answers_on_localhost(tmp_path):
     # binding $(hostname) would leave nothing listening there.
     router = _pd_script(tmp_path).split("# service: router")[1]
     assert "--host 0.0.0.0" in router and "$(hostname)" not in router.split("\n", 2)[1]
+
+
+def test_the_policy_host_can_be_routable(tmp_path):
+    # An agent in a remote sandbox cannot reach the driver's localhost.
+    config = SubmitConfig.model_validate(
+        {
+            "services": _per_node_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
+            "driver": {
+                "container": "img",
+                "policy_model": "router",
+                "policy_host": "${oc.env:HEAD_NODE_IP}",
+                "benchmarks": {"b": {"run": {}}},
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == "http://${oc.env:HEAD_NODE_IP}:8000/v1"
+    assert _pd_config(tmp_path).driver.benchmarks["b"].run["policy_base_url"] == "http://localhost:8000/v1"
