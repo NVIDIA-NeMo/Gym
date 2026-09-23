@@ -1,0 +1,36 @@
+# Reward profiling: run swe_next's training tasks through the opencode sandboxed agent (not
+# the golden patch) to collect real rollouts + rewards for a policy checkpoint, 8 repeats per
+# task. See resources_servers/swe_next/configs/swe_next.yaml for the base resources server.
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+- resources_servers/swe_next/configs/swe_next.yaml
+
+swe_next_reward_profiling_resources_server:
+  _inherit_from: swe_next_resources_server
+
+  resources_servers:
+    swe_next:
+      allowed_agents: [opencode_sandboxed_agent]
+      evaluation_timeout: 1200
+
+swe_next_reward_profiling_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swe_next_reward_profiling_resources_server
+      # 1hr harness execution budget per rollout, not the eval-server's own evaluation_timeout.
+      sandbox_timeout: 3600
+      # Keep every full turn in the rollout for reward profiling -- no OpenCode-side
+      # auto-summarization/pruning of earlier context.
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+      datasets:
+        - name: swe_next_reward_profiling
+          type: benchmark
+          jsonl_fpath: resources_servers/swe_next/data/swe_next_training_with_prompt_template.jsonl
+          prepare_script: benchmarks/reward_profiling/swe_next/prepare.py
+          num_repeats: 8
