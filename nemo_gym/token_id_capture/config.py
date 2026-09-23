@@ -25,6 +25,13 @@ env:
       lineage_store: my_pkg.sinks:MyResolver  # Required with a custom sink (same backend namespace).
       delta_records: true                  # Store RESOLVED continuations as parent-relative suffixes.
       max_mask_fraction: 0.5               # Abort a run that is mostly producing masked rollouts.
+
+my_model:
+  responses_api_models:
+    custom_model:
+      token_id_capture_non_generating_requests:
+        - method: GET
+          path: /custom/metadata
 ```
 
 Evaluation capture uses ``/ng-rollout/<id>/...``.
@@ -71,9 +78,9 @@ import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
     LineageResolver,
@@ -86,6 +93,35 @@ from nemo_gym.token_id_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+ExternalStagingBackend = Literal["vllm_worker", "megatron_worker"]
+
+
+class NonGeneratingRequest(BaseModel):
+    """Declare one exact model request that cannot return policy-generated content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str
+    path: str
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _normalize_method(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("method must be a string")
+        method = value.upper()
+        if not method or not method.isascii() or not method.isalpha():
+            raise ValueError("method must be an HTTP method without wildcards")
+        return method
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, path: str) -> str:
+        if not path.startswith("/"):
+            raise ValueError("path must start with '/'")
+        if any(character in path for character in "?#*{}"):
+            raise ValueError("path must be exact and cannot contain query strings, fragments, or wildcards")
+        return path
 
 
 class TokenIdCaptureSettings(BaseModel):
@@ -133,6 +169,8 @@ class TokenIdCaptureSettings(BaseModel):
     # It also makes committed parents visible to every serving worker.
     # No additional in-memory coordinator is used.
     external_staging: bool = False
+    # Both backends stage a canonical delta before returning coordinates.
+    external_staging_backend: ExternalStagingBackend = "vllm_worker"
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.
     control_auth_token_env: str = Field(
@@ -170,6 +208,8 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
+        if block.external_staging_backend == "megatron_worker" and not block.external_staging:
+            raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.

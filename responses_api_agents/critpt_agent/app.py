@@ -24,7 +24,13 @@ from pydantic import ConfigDict
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
+)
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
@@ -124,6 +130,18 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         await raise_for_status(turn2_response)
         cookies = turn2_response.cookies
         turn2_json = await get_response_json(turn2_response)
+
+        # Report the full two-turn cost, without presenting partial usage as a total.
+        turn1_usage = turn1_json.get("usage")
+        turn2_usage = turn2_json.get("usage")
+        if turn1_usage is not None and turn2_usage is not None:
+            usage = accumulate_response_usage(
+                NeMoGymResponseUsage.model_validate(turn1_usage),
+                NeMoGymResponseUsage.model_validate(turn2_usage),
+            )
+            turn2_json["usage"] = usage.model_dump()
+        else:
+            turn2_json["usage"] = None
 
         # Verify Turn 2 output against the Artificial Analysis API
         verify_request_data = body.model_dump() | {"response": turn2_json}

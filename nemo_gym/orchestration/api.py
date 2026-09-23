@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import re
 import warnings
 from typing import Annotated, Any, Literal
 
@@ -22,6 +24,49 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator,
 # Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
+# (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
+# of a literal, so the value is picked up from the job's actual environment at run time.
+RUNTIME_ENV_PREFIX = "runtime:"
+
+
+def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
+    """Resolve `lit:`/`host:`/`runtime:` prefixes on `env` values. Every value must use one
+    of these prefixes; a missing or misspelled prefix raises rather than being guessed at.
+
+    - `lit:VALUE` -> literal VALUE.
+    - `host:VAR` -> read from os.environ[VAR] on the machine running `gym eval submit`;
+      raises if VAR isn't set there.
+    - `runtime:VAR` -> left unresolved; canonicalized to `runtime:VAR` for executors to
+      pick up and reference from the job's own environment at run time.
+    """
+    resolved = {}
+    for key, raw in env.items():
+        if raw.startswith("lit:"):
+            resolved[key] = raw[len("lit:") :]
+        elif raw.startswith("host:"):
+            var = raw[len("host:") :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for host:{var}")
+            value = os.environ.get(var)
+            if value is None:
+                raise ValueError(
+                    f"env[{key!r}] references host:{var}, but {var!r} is not set in the submitting shell's environment"
+                )
+            resolved[key] = value
+        elif raw.startswith(RUNTIME_ENV_PREFIX):
+            var = raw[len(RUNTIME_ENV_PREFIX) :]
+            if not _ENV_VAR_NAME_RE.match(var):
+                raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for runtime:{var}")
+            resolved[key] = f"{RUNTIME_ENV_PREFIX}{var}"
+        else:
+            raise ValueError(
+                f"env[{key!r}]: {raw!r} must start with one of the prefixes 'lit:', 'host:', or 'runtime:'"
+            )
+    return resolved
 
 
 class HealthCheckConfig(_StrictModel):
@@ -36,6 +81,9 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
@@ -48,6 +96,11 @@ class BaseServiceConfig(_StrictModel):
     # service-specific extra_args (appended to that service's own command
     # line), this runs as its own statement(s) ahead of the command.
     pre_command: str = ""
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -166,10 +219,18 @@ class DriverConfig(_StrictModel):
     # at all, for a benchmark whose own config already declares a complete one.
     policy_model_type: str = "openai_model"
     benchmarks: dict[str, BenchmarkRunConfig]
+    # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
+    # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
+    # Every value must use one of these prefixes. See resolve_env_dict.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @field_validator("env")
+    @classmethod
+    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
+        return resolve_env_dict(v)
 
 
 class JobConfig(_StrictModel):
@@ -177,11 +238,59 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
+class OtelConfig(_StrictModel):
+    """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
+    Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
+    both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
+    a run is observable unless it opts out; `endpoint` and `service_name` come from the
+    deployment's own config (a cluster fragment, typically) and are required while enabled."""
+
+    enabled: bool = True
+    # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
+    # on shared storage) when `container` is unset, else a path inside `container`.
+    binary: str = "otelcol-contrib"
+    # Optional image for the collector step. Unset runs the binary directly on the node, which is
+    # what enroot-based clusters need: the upstream collector image is distroless, and enroot
+    # cannot start a container without /bin/sh.
+    container: str | None = None
+    # OTLP/HTTP ingest base URL (`/v1/metrics` etc. are appended by the exporter).
+    endpoint: str | None = None
+    # Env var holding the ingest bearer token on the machine running `gym eval submit`. Read at
+    # submit time and forwarded into the job's environment; never written into the job directory.
+    token_env: str = "OTEL_TOKEN"
+    # Sent as the `service.name` resource attribute: the identity the backend routes the token by.
+    service_name: str | None = None
+    # Display identity of the scraped metrics in the backend (`service.name.override`).
+    component: str = "gym-vllm"
+    # Node-level exporters that clusters commonly run as system services on every compute node;
+    # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
+    # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
+    gpu_metrics_port: int | None = 9400
+    node_metrics_port: int | None = 9100
+    scrape_interval_seconds: int = 15
+    health_check_timeout_seconds: int = 300
+
+    @field_validator("token_env")
+    @classmethod
+    def _validate_token_env(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(f"otel.token_env: {v!r} is not a valid environment variable name")
+        return v
+
+    @field_validator("scrape_interval_seconds", "health_check_timeout_seconds")
+    @classmethod
+    def _validate_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
+    otel: OtelConfig = OtelConfig()
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":

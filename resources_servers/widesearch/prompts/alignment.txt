@@ -1,0 +1,17 @@
+Your task is to align two vocabularies. The inputs are the vocabulary to be aligned and the reference vocabulary respectively. Note that you need to perform semantic alignment (not positional alignment). If two strings are exactly the same, they must correspond to each other. These two strings are supposed to represent the same entity, with differences only in the expression forms and formats.
+
+The vocabulary to be aligned is as follows:
+{response}
+
+The reference vocabulary is as follows:
+{reference}
+
+List the values in the vocabulary to be aligned one by one. If there is a value in the reference vocabulary that has the same meaning, `transform` must be the value from the reference vocabulary. Otherwise retain the original value. `origin` must preserve the original input format. Omit entities that do not correspond.
+
+Output the alignment as Markdown JSON:
+```json
+{{
+    "origin_str1": "transform_str1",
+    "origin_str2": "transform_str2"
+}}
+```
