@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = "1.4"
+
+[task]
+name = "nemo-gym/hello-mcp-tool"
+version = "1.0.0"
+description = "Use an MCP tool to write its greeting to a file"
+authors = []
+keywords = ["tutorial", "mcp", "tools"]
+
+[metadata]
+difficulty = "easy"
+category = "tool-use"
+tags = ["example"]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+workdir = "/workspace"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+
+[[environment.mcp_servers]]
+name = "hello-tools"
+transport = "stdio"
+command = "python"
+args = ["/opt/hello-tools/server.py"]
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
