@@ -133,9 +133,7 @@ def test_active_without_a_model_service():
 
 def test_collector_without_scrape_targets_has_no_prometheus_receiver():
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
-    doc = _rendered(
-        _config(services={}, driver=driver, observability={"gpu_metrics_port": None, "node_metrics_port": None})
-    )
+    doc = _rendered(_config(services={}, driver=driver, otel={"gpu_metrics_port": None, "node_metrics_port": None}))
     assert "prometheus" not in doc["receivers"]
     assert doc["service"]["pipelines"]["metrics"]["receivers"] == ["otlp", "span_metrics"]
     # With the node exporters on, the scrape jobs alone justify the receiver.
@@ -449,12 +447,12 @@ def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
     # Lens exports logs over gRPC whatever the protocol says; they must not be sent to the HTTP port.
     assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317" in line
-    off = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_logs": False})
+    off = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False})
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
 
 
 def test_script_honours_configured_gym_span_groups():
-    config = _config(driver=_DRIVER_WITH_INSTALL, observability={"gym_span_groups": "per_rollout,sandbox"})
+    config = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_span_groups": "per_rollout,sandbox"})
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
 
 
