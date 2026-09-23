@@ -1,0 +1,62 @@
+# AgentENV lifecycle provider for OSWorld, driven through Gym's E2B provider.
+#
+# AgentENV (kvcache-ai/AgentENV) speaks the E2B control-plane API, so it needs
+# no provider of its own: point the E2B provider's api_url/sandbox_url at the
+# AgentENV deployment. Sandboxes are Firecracker microVMs restored from a
+# template snapshot, so there is no qcow2 to mount and no inner QEMU.
+#
+# Credentials stay in environment variables; generated env.yaml files never
+# contain the API key.
+#
+#   export AGENTENV_URL=http://<agentenv-control-plane>   # http, see below
+#   export AGENTENV_API_KEY=<key>
+#   export AGENTENV_TEMPLATE=osworld-slim
+#
+# Two deployment facts drive the settings below, both verified against a live
+# AgentENV on 2026-09-02:
+#
+#  1. No wildcard DNS for sandbox subdomains. `get_host(5000)` returns
+#     `5000-<sandboxID>.<domain>`, which does not resolve; the request instead
+#     lands on the control plane, which answers 404. Setting `sandbox_url`
+#     selects gateway routing, where the proxy picks the target from
+#     `X-Access-Token` / `E2b-Sandbox-Id` / `E2b-Sandbox-Port` headers. That
+#     token is minted per sandbox and is NOT the deployment API key.
+#  2. The control plane is addressed over http. A deployment serving a
+#     certificate signed by an internal CA makes the SDK abort with
+#     `invalid peer certificate: UnknownIssuer`.
+#
+# OSWorld only understands one host plus four integer ports, so the adapter
+# gives each service a loopback forwarder that injects those headers and
+# carries Chrome CDP WebSockets. OSWorld itself is unmodified.
+
+osworld_agentenv:
+  default_metadata:
+    sandbox-api: e2b
+    workload: osworld
+  e2b:
+    connection:
+      api_key: ${oc.env:AGENTENV_API_KEY}
+      api_url: ${oc.env:AGENTENV_URL}
+      # Setting sandbox_url is what selects gateway port routing under
+      # `port_routing: auto`; it is the same signal the E2B SDK uses to decide
+      # that one origin fronts every sandbox.
+      sandbox_url: ${oc.env:AGENTENV_URL}
+      request_timeout_s: 300.0
+      port_routing: auto
+    create:
+      # AgentENV templates are prebuilt; `osworld-slim` is an unambiguous
+      # direct name, so sandbox_spec.image resolves it without a template_map.
+      template: null
+      template_map: {}
+      timeout_s: 7200.0
+      # The template fixes CPU/memory, so a SandboxSpec asking for resources is
+      # a config error rather than something to silently drop.
+      strict_resources: true
+    exec:
+      # OSWorld does its own file and command work through the guest's HTTP
+      # server on 5000; this is only for out-of-band sandbox commands.
+      default_timeout_s: 180.0
+    operations:
+      retries: 3
+      retry_delay_s: 1.0
+      retry_max_delay_s: 30.0

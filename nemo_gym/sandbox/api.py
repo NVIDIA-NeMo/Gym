@@ -393,6 +393,7 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self._connected = False
         self.pty = SandboxPty(self)
 
     def _telemetry_provider_name(self) -> str:
@@ -581,6 +582,22 @@ class AsyncSandbox:
                 self._closed = True
         self._closed = True
 
+    async def disconnect(self) -> None:
+        """Release this client without stopping a borrowed sandbox.
+
+        Use this only for a sandbox rebuilt with :meth:`connect`.
+        The component that created the sandbox remains responsible for stopping it.
+        """
+        if self._closed:
+            return
+        if not self._connected:
+            raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        if self._owns_provider:
+            await self._provider.aclose()
+        self._handle = None
+        self._stopped = True
+        self._closed = True
+
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.
 
@@ -619,6 +636,7 @@ class AsyncSandbox:
         sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
+        sandbox._connected = True
         return sandbox
 
     async def __aenter__(self) -> "AsyncSandbox":
