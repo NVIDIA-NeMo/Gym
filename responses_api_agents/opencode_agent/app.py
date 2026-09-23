@@ -822,23 +822,41 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Restore inclusive OpenAI counters across the root and subagent model turns.
         infos = export.get("usage_messages", [message["info"] for message in export.get("messages", [])])
         usages = []
+        missing_usage = False
         for info in infos:
-            tokens = info.get("tokens")
-            if info.get("role") != "assistant" or not tokens:
+            if info.get("role") != "assistant":
                 continue
-            cache = tokens.get("cache") or {}
-            input_tokens = int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
-            output_tokens = int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+            tokens = info.get("tokens")
+            if not isinstance(tokens, dict) or not tokens:
+                missing_usage = True
+                continue
+            cache = tokens.get("cache")
+            cache = cache if isinstance(cache, dict) else {}
+
+            def count(value: object) -> int:
+                return value if type(value) is int and value >= 0 else 0
+
+            cache_read = count(cache.get("read"))
+            reasoning = count(tokens.get("reasoning"))
+            input_tokens = int(tokens.get("input") or 0) + cache_read + count(cache.get("write"))
+            output_tokens = int(tokens.get("output") or 0) + reasoning
+            # Pinned 1.17.11 Session.getUsage defaults absent/invalid optional counters
+            # to zero before persistence. Only positive values establish measured details;
+            # a stored zero cannot prove a backend-reported zero.
             usages.append(
                 NeMoGymResponseUsage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
-                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cache.get("read")),
-                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=tokens.get("reasoning")),
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cache_read or None),
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning or None),
                 )
             )
-        return NeMoGymResponseUsage.sum_from_list(usages) if usages else None
+        total = NeMoGymResponseUsage.sum_from_list(usages) if usages else None
+        if total is not None and missing_usage:
+            total.input_tokens_details.cached_tokens = None
+            total.output_tokens_details.reasoning_tokens = None
+        return total
 
     async def _native_response(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
@@ -945,16 +963,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 output = self._native_output(export, state.observations)
                 usage = self._native_usage(export)
-                infos = export.get("usage_messages", [message["info"] for message in export.get("messages", [])])
-                if any(
-                    info.get("role") == "assistant"
-                    and (
-                        "reasoning" not in (info.get("tokens") or {})
-                        or "read" not in ((info.get("tokens") or {}).get("cache") or {})
-                    )
-                    for info in infos
+                if (
+                    usage is None
+                    or usage.input_tokens_details.cached_tokens is None
+                    or usage.output_tokens_details.reasoning_tokens is None
                 ):
-                    state.observations.gaps.append(ObservationGap(code="token_usage_detail_unavailable"))
+                    state.observations.gaps.append(
+                        ObservationGap(
+                            code="token_usage_detail_unavailable",
+                            detail="Persisted optional counters are absent, invalid, or runtime-defaulted zeros",
+                        )
+                    )
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
         result = state.result
