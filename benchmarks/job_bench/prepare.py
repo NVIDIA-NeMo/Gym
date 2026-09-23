@@ -5,27 +5,18 @@ import json
 import os
 from pathlib import Path
 
+from resources_servers.job_bench.task_data import snapshot_root
+
 
 DATA_DIR = Path(__file__).parent / "data"
 OUTPUT_FPATH = DATA_DIR / "job_bench.jsonl"
 
 
 def prepare() -> Path:
-    from huggingface_hub import snapshot_download
-
     split = os.environ.get("JOB_BENCH_SPLIT", "main")
     source_dir = "dataset" if split == "main" else "dataset_easy"
-    root = (
-        Path(
-            snapshot_download(
-                "JobBench/job-bench",
-                repo_type="dataset",
-                allow_patterns=f"{source_dir}/**",
-            )
-        )
-        / source_dir
-    )
-    tasks = sorted(root.glob("*/task[0-9]*"))
+    snapshot = snapshot_root(source_dir)
+    tasks = sorted((snapshot / source_dir).glob("*/task[0-9]*"))
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FPATH.open("w", encoding="utf-8") as output:
         for task in tasks:
@@ -49,8 +40,8 @@ If information conflicts, explain and justify the chosen approach. Use appropria
                     {
                         "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
                         "task_id": task_id,
-                        "task_dir": str(task),
-                        "rubrics_file": str(task / "RUBRICS.json"),
+                        "task_dir": task.relative_to(snapshot).as_posix(),
+                        "rubrics_file": (task / "RUBRICS.json").relative_to(snapshot).as_posix(),
                     }
                 )
                 + "\n"

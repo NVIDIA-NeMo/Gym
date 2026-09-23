@@ -30,6 +30,7 @@ from nemo_gym.judge import JudgeError
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from resources_servers.job_bench.task_data import resolve_task_path
 from resources_servers.job_bench.vendor import judge
 
 
@@ -84,7 +85,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
         self._sandboxes: dict[str, AsyncSandbox] = {}
 
     async def seed_session(self, request: Request, body: JobBenchRequest) -> JobBenchSeedResponse:
-        task_dir = Path(body.task_dir)
+        task_dir = await asyncio.to_thread(resolve_task_path, body.task_dir)
         if not (task_dir / "task_folder" / "TASK_INSTRUCTIONS.txt").is_file():
             raise ValueError(f"Invalid Job-Bench task directory: {task_dir}")
 
@@ -222,7 +223,8 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                 archive = (saved or local_dir) / "output.tar.gz"
                 if sandbox is not None:
                     if saved is not None:
-                        shutil.copyfile(body.rubrics_file, saved / "rubrics.json")
+                        rubrics_source = await asyncio.to_thread(resolve_task_path, body.rubrics_file)
+                        shutil.copyfile(rubrics_source, saved / "rubrics.json")
                         pending = saved / "request.partial"
                         pending.write_text(body.model_dump_json())
                         pending.replace(saved / "request.json")
@@ -250,7 +252,11 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                         )
                     )
                     tar.extractall(output_dir, members=members, filter="data")
-                rubrics_file = saved / "rubrics.json" if saved is not None else Path(body.rubrics_file)
+                rubrics_file = (
+                    saved / "rubrics.json"
+                    if saved is not None
+                    else await asyncio.to_thread(resolve_task_path, body.rubrics_file)
+                )
                 try:
                     scorecard, rubrics = await asyncio.to_thread(self._judge, output_dir, rubrics_file)
                 finally:

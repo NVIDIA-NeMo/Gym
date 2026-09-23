@@ -13,7 +13,7 @@ import pytest
 from fastapi import Request
 
 from nemo_gym.judge import JudgeError
-from resources_servers.job_bench import app
+from resources_servers.job_bench import app, task_data
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
@@ -498,3 +498,25 @@ def test_unparseable_judge_response_is_scored_as_failure(monkeypatch, tmp_path: 
     scorecard, _ = server._judge(output_dir, rubrics_file)
 
     assert scorecard["normalized_score"] == 0
+
+
+def test_relative_task_paths_resolve_against_pinned_snapshot(monkeypatch, tmp_path):
+    calls = []
+
+    def snapshot_download(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    task_data.snapshot_root.cache_clear()
+    try:
+        assert task_data.resolve_task_path("dataset/jobs/task1") == tmp_path / "dataset/jobs/task1"
+        assert task_data.resolve_task_path(str(tmp_path / "local")) == tmp_path / "local"
+    finally:
+        task_data.snapshot_root.cache_clear()
+    assert calls == [
+        (
+            "JobBench/job-bench",
+            {"repo_type": "dataset", "revision": task_data.DATASET_REVISION, "allow_patterns": "dataset/**"},
+        )
+    ]
