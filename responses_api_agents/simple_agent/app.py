@@ -161,8 +161,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
+        invocation_id: str = "root",
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
@@ -369,6 +369,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             task_id=str(session.task_id) if session is not None else "unscoped",
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
+            invocation_id=f"activation-{len(session.trajectories)}" if session is not None else "root",
         )
         if session is not None:
             session.resources_cookies = dict(resources_server_cookies)

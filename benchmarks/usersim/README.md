@@ -68,6 +68,6 @@ endpoint independently without embedding provider-specific credentials or
 model names in the repository.
 
 For participant-specific SFT or custom collation, filter
-`result.invocations` by the `assistant_model` or `user_model` alias and use
-each selected invocation's exact `request` and `response`. Support-model calls
-retain separate aliases and cannot be mistaken for participant training data.
+`result.invocations` by the `assistant` or `user` role and use each selected
+invocation's exact `request` and `response`. Judge and Summary Agent calls
+retain their own roles and cannot be mistaken for participant training data.

@@ -128,6 +128,62 @@ class TestApp:
         assert closed.status_code == 200
         assert closed.json()["resources_cookies"] == {"resources-session": "episode-cookie"}
 
+    def test_agent_session_assigns_unique_activation_ids(self) -> None:
+        server, server_client = _make_agent(observability_enabled=False)
+
+        def completed_response(response_id: str) -> dict:
+            return {
+                "id": response_id,
+                "created_at": 1,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": f"{response_id}-message",
+                        "content": [{"annotations": [], "text": "ok", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        server_client.post = AsyncMock(
+            side_effect=[
+                _mock_response(completed_response("response-1")),
+                _mock_response(completed_response("response-2")),
+            ]
+        )
+        with TestClient(server.setup_webserver()) as client:
+            seeded = client.post(
+                "/v1/agent_sessions",
+                json={
+                    "episode_id": {"rollout_id": "rollout", "attempt": 0},
+                    "task_id": {"taskset": "usersim:example", "task_id": "task"},
+                },
+            )
+            assert seeded.status_code == 200
+            for prompt in ("first", "second"):
+                response = client.post("/v1/responses", json={"input": prompt})
+                assert response.status_code == 200
+            closed = client.post(
+                "/v1/agent_sessions/close",
+                json={
+                    "agent_session_id": seeded.json()["agent_session_id"],
+                    "episode_id": {"rollout_id": "rollout", "attempt": 0},
+                },
+            )
+
+        assert closed.status_code == 200
+        records = closed.json()["agent_observations"]["records"]
+        assert [record["invocation_id"] for record in records if record["kind"] == "agent_invocation"] == [
+            "activation-0",
+            "activation-1",
+        ]
+
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -640,10 +696,12 @@ class TestApp:
             model_url_path="/v1/responses",
             rollout_id="reasoning-rollout",
             collect_trajectory=True,
+            invocation_id="activation-2",
         )
 
         server_client.post.assert_awaited_once()
         assert response.usage.total_tokens == 8
+        assert trajectory.invocations[0].invocation_id == "activation-2"
         assert [item.type for item in response.output] == ["reasoning"]
         assert trajectory.invocations[0].status == "incomplete"
         assert len(trajectory.turns) == 1
