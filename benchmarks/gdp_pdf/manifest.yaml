@@ -1,33 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: gdp_pdf
-# Initial manifest composition version, not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
-description: >-
-  GDP.pdf professional reasoning over PDFs, scored by mean criterion pass rate over five attempts per task.
+description: GDP.pdf professional reasoning over PDFs, scored by mean criterion pass
+  rate over five attempts per task.
 modality: multimodal
 licensing: MIT
-# Integration authors from the introducing config commits.
 authors:
-  - Cheng-Ping Hsieh
+- Cheng-Ping Hsieh
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
 resources_server: gdp_pdf
 agent_server: gdp_pdf_agent
-model_server: policy_model
-prompt_source: prepared
 datasets:
-  - name: gdp_pdf
-    type: benchmark
-    jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
-    prepare_script: benchmarks/gdp_pdf/prepare.py
-    num_repeats: 5
-# Gym evaluation split; upstream splits are described separately.
+- name: gdp_pdf
+  type: benchmark
+  jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
+  prepare_script: benchmarks/gdp_pdf/prepare.py
+  num_repeats: 5
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: prepared
 lifecycle: active

@@ -1,31 +1,31 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "graphwalks/config_n3_1m"
-version: "0.1.0"
+name: graphwalks/config_n3_1m
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "../config_n3_1m.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "other"
-description: "GraphWalks BFS frontier and parent-node retrieval scored by node-set F1. Uses the Nemotron-3-Super tokenizer with a 1048576 token cap."
-modality: "text"
-licensing: "MIT"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: GraphWalks BFS frontier and parent-node retrieval scored by node-set
+  F1. Uses the Nemotron-3-Super tokenizer with a 1048576 token cap.
+modality: text
+licensing: MIT
 authors:
-  - "Cheng-Ping Hsieh"
+- Cheng-Ping Hsieh
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "graphwalks"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+config_path: ../config_n3_1m.yaml
+resources_server: graphwalks
+agent_server: simple_agent
 datasets:
-  - name: "graphwalks_n3_1m"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/graphwalks/data/graphwalks_n3_1m_benchmark.jsonl"
-    prepare_script: "benchmarks/graphwalks/prepare_n3_1m.py"
-    num_repeats: 1
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: graphwalks_n3_1m
+  type: benchmark
+  jsonl_fpath: benchmarks/graphwalks/data/graphwalks_n3_1m_benchmark.jsonl
+  prepare_script: benchmarks/graphwalks/prepare_n3_1m.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

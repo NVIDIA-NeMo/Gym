@@ -1,34 +1,31 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: swebench/verified/opencode
-# Initial catalog composition version; not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
-config_path: ../opencode.yaml
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: >-
-  SWE-bench verified test-split software engineering tasks using prepared repair prompts, a sandboxed
-  OpenCode agent, and binary patch-resolution scoring.
+description: SWE-bench verified test-split software engineering tasks using prepared
+  repair prompts, a sandboxed OpenCode agent, and binary patch-resolution scoring.
 modality: text
 licensing: unknown
-# Contributor attribution follows the NVIDIA source headers.
 authors:
-  - NVIDIA NeMo Gym contributors
+- NVIDIA NeMo Gym contributors
 reward:
-  range: [0, 1]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
-prompt_source: prepared
+config_path: ../opencode.yaml
 resources_server: swebench
 agent_server: opencode_sandboxed_agent
-model_server: policy_model
 datasets:
-  - name: swebench_verified
-    type: benchmark
-    jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
-    prepare_script: benchmarks/swebench/verified/prepare.py
-    num_repeats: 3
+- name: swebench_verified
+  type: benchmark
+  jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+  prepare_script: benchmarks/swebench/verified/prepare.py
+  num_repeats: 3
+model_server: policy_model
 canonical_split: test
+prompt_source: prepared
 lifecycle: active

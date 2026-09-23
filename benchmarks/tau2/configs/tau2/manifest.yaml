@@ -1,34 +1,31 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: tau2/configs/tau2
-# Initial catalog composition version; not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
-config_path: ../tau2.yaml
 integration_profile: external-agent-loop
 domain: agent
-description: >-
-  Tau benchmark tasks with a native agent loop, simulated user, tool execution, and task-completion reward.
-  Profile: tau2.
+description: 'Tau benchmark tasks with a native agent loop, simulated user, tool execution,
+  and task-completion reward. Profile: tau2.'
 modality: text
 licensing: unknown
-# Contributor attribution follows the NVIDIA source headers.
 authors:
-  - NVIDIA NeMo Gym contributors
+- NVIDIA NeMo Gym contributors
 reward:
-  range: [0, 1]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
-prompt_source: agent
-resources_server: null
+config_path: ../tau2.yaml
 agent_server: tau2
-model_server: policy_model
 datasets:
-  - name: tau2
-    type: benchmark
-    jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
-    prepare_script: benchmarks/tau2/prepare.py
-    num_repeats: 8
+- name: tau2
+  type: benchmark
+  jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
+  prepare_script: benchmarks/tau2/prepare.py
+  num_repeats: 8
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: agent
 lifecycle: active
+resources_server: null

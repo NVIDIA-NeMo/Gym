@@ -1,31 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "ifeval"
-version: "0.1.0"
+name: ifeval
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "config.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "instruction_following"
-description: "IFEval prompt-level strict instruction following with binary all-instructions grading."
-modality: "text"
-licensing: "Apache-2.0"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: instruction_following
+description: IFEval prompt-level strict instruction following with binary all-instructions
+  grading.
+modality: text
+licensing: Apache-2.0
 authors:
-  - "arti4nvj"
+- arti4nvj
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "instruction_following"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+resources_server: instruction_following
+agent_server: simple_agent
 datasets:
-  - name: "ifeval"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/ifeval/data/ifeval_benchmark.jsonl"
-    prepare_script: "benchmarks/ifeval/prepare.py"
-    num_repeats: 1
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: ifeval
+  type: benchmark
+  jsonl_fpath: benchmarks/ifeval/data/ifeval_benchmark.jsonl
+  prepare_script: benchmarks/ifeval/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -1,31 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "graphwalks"
-version: "0.1.0"
+name: graphwalks
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "config.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "other"
-description: "GraphWalks BFS frontier and parent-node retrieval scored by node-set F1."
-modality: "text"
-licensing: "MIT"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: GraphWalks BFS frontier and parent-node retrieval scored by node-set
+  F1.
+modality: text
+licensing: MIT
 authors:
-  - "laszkiewiczp"
+- laszkiewiczp
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "graphwalks"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+resources_server: graphwalks
+agent_server: simple_agent
 datasets:
-  - name: "graphwalks"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/graphwalks/data/graphwalks_benchmark.jsonl"
-    prepare_script: "benchmarks/graphwalks/prepare.py"
-    num_repeats: 1
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: graphwalks
+  type: benchmark
+  jsonl_fpath: benchmarks/graphwalks/data/graphwalks_benchmark.jsonl
+  prepare_script: benchmarks/graphwalks/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

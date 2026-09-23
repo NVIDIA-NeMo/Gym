@@ -369,6 +369,11 @@ def dump_manifest(manifest: EnvironmentManifest | Mapping[str, Any]) -> str:
         except ValidationError as error:
             raise _validation_error(Path("<memory>"), error) from error
     data = manifest.model_dump(mode="json", exclude_none=True)
+    # Keep existing scaffold/sync output stable; extensions are authored only when needed.
+    if manifest.config_path == "config.yaml":
+        data.pop("config_path")
+    if manifest.prompt_source == PromptSource.TEMPLATE:
+        data.pop("prompt_source")
     # Required nullable composition fields must survive a load/dump round trip.
     data["resources_server"] = manifest.resources_server
     return yaml.safe_dump(

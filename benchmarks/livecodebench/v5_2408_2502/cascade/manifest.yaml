@@ -1,33 +1,32 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "livecodebench/v5_2408_2502/cascade"
-version: "0.1.0"
+name: livecodebench/v5_2408_2502/cascade
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "../cascade.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "coding"
-description: "LiveCodeBench release_v5, August 2024 through February 2025, scored by code_gen unit tests with the Cascade prompt."
-modality: "text"
-licensing: "unknown"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: LiveCodeBench release_v5, August 2024 through February 2025, scored by
+  code_gen unit tests with the Cascade prompt.
+modality: text
+licensing: unknown
 authors:
-  - "bxyu-nvidia"
+- bxyu-nvidia
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "code_gen"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "template"
+determinism: unknown
+config_path: ../cascade.yaml
+resources_server: code_gen
+agent_server: simple_agent
 datasets:
-  - name: "livecodebench_v5_cascade"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/livecodebench/v5_2408_2502/data/livecodebench_v5_cascade_validation.jsonl"
-    prepare_script: "benchmarks/livecodebench/v5_2408_2502/prepare_cascade.py"
-    prompt_config: "benchmarks/livecodebench/prompts/cascade.yaml"
-    num_repeats: 3
-canonical_split: "benchmark"
-standard_prompt_config: "benchmarks/livecodebench/prompts/cascade.yaml"
-lifecycle: "active"
+- name: livecodebench_v5_cascade
+  type: benchmark
+  jsonl_fpath: benchmarks/livecodebench/v5_2408_2502/data/livecodebench_v5_cascade_validation.jsonl
+  prepare_script: benchmarks/livecodebench/v5_2408_2502/prepare_cascade.py
+  prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
+lifecycle: active

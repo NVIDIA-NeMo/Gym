@@ -1,24 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: longbench_v2/config_n3_1m
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: LongBench-v2 multiple-choice questions filtered to at most 1048576 context tokens using the Nemotron-3-Super
-  tokenizer.
+description: LongBench-v2 multiple-choice questions filtered to at most 1048576 context
+  tokens using the Nemotron-3-Super tokenizer.
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
 reward:
   range:
-  - 0
-  - 1
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
+config_path: ../config_n3_1m.yaml
 resources_server: mcqa
 agent_server: simple_agent
 datasets:
@@ -32,5 +30,3 @@ model_server: policy_model
 canonical_split: benchmark
 standard_prompt_config: benchmarks/longbench_v2/prompts/default.yaml
 lifecycle: active
-config_path: ../config_n3_1m.yaml
-prompt_source: template

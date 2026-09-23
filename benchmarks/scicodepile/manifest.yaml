@@ -1,0 +1,32 @@
+name: scicodepile
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: The 200-task executable SciCodePile stratum, with unmodified HumanEval-style
+  prompts and binary test-execution rewards.
+modality: text
+licensing: Apache-2.0
+authors:
+- Rima Shahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: scicodepile_benchmark_simple_agent
+resources_server: scicodepile
+agent_server: simple_agent
+datasets:
+- name: scicodepile
+  type: benchmark
+  jsonl_fpath: benchmarks/scicodepile/data/scicodepile_benchmark.jsonl
+  prepare_script: benchmarks/scicodepile/prepare.py
+  prompt_config: benchmarks/scicodepile/prompts/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: train
+standard_prompt_config: benchmarks/scicodepile/prompts/default.yaml
+lifecycle: active

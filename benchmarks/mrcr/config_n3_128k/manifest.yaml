@@ -1,31 +1,31 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "mrcr/config_n3_128k"
-version: "0.1.0"
+name: mrcr/config_n3_128k
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "../config_n3_128k.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "other"
-description: "MRCR multi-round coreference resolution with prefix-gated SequenceMatcher grading. Uses the Nemotron-3-Super tokenizer with a 131072 token cap."
-modality: "text"
-licensing: "MIT"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: MRCR multi-round coreference resolution with prefix-gated SequenceMatcher
+  grading. Uses the Nemotron-3-Super tokenizer with a 131072 token cap.
+modality: text
+licensing: MIT
 authors:
-  - "laszkiewiczp"
+- laszkiewiczp
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "mrcr"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+config_path: ../config_n3_128k.yaml
+resources_server: mrcr
+agent_server: simple_agent
 datasets:
-  - name: "mrcr_n3_128k"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/mrcr/data/mrcr_n3_128k_benchmark.jsonl"
-    prepare_script: "benchmarks/mrcr/prepare_n3_128k.py"
-    num_repeats: 1
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: mrcr_n3_128k
+  type: benchmark
+  jsonl_fpath: benchmarks/mrcr/data/mrcr_n3_128k_benchmark.jsonl
+  prepare_script: benchmarks/mrcr/prepare_n3_128k.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

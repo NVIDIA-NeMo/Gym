@@ -1,0 +1,31 @@
+name: moldetox
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Toxicity-aware molecular editing on task3_smiles_gen_single, scored by
+  exact match after canonical SMILES normalization.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- Rima Shahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: moldetox_benchmark_simple_agent
+resources_server: moldetox
+agent_server: simple_agent
+datasets:
+- name: moldetox
+  type: benchmark
+  jsonl_fpath: benchmarks/moldetox/data/moldetox_benchmark.jsonl
+  prepare_script: benchmarks/moldetox/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

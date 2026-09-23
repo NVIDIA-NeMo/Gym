@@ -22,6 +22,24 @@ from nemo_gym.environment.manifest import (
 REPO_ROOT = Path(__file__).parents[2]
 
 
+def test_dump_preserves_existing_benchmark_manifest_format() -> None:
+    path = REPO_ROOT / "benchmarks/gpqa/manifest.yaml"
+    assert dump_manifest(load_manifest(path)) == path.read_text()
+
+
+def test_dump_preserves_nondefault_composition_extensions() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(config_path="../variant.yaml", dataset_owner="selected_agent", prompt_source="prepared")
+    raw.pop("standard_prompt_config")
+    raw["datasets"][0].pop("prompt_config")
+    manifest = EnvironmentManifest.model_validate(raw)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert dumped["config_path"] == "../variant.yaml"
+    assert dumped["dataset_owner"] == "selected_agent"
+    assert dumped["prompt_source"] == "prepared"
+    assert EnvironmentManifest.model_validate(dumped) == manifest
+
+
 def test_migration_defaults_and_metadata() -> None:
     manifest = EnvironmentManifest.model_validate(_manifest())
     assert manifest.prompt_source == "template"

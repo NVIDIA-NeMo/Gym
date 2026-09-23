@@ -1,33 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: lmarena_v3
-# Initial manifest composition version, not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: rlhf
-description: >-
-  LMArena proxy v3 chat evaluation against baseline responses with pairwise judge verdicts.
+description: LMArena proxy v3 chat evaluation against baseline responses with pairwise
+  judge verdicts.
 modality: text
 licensing: unknown
-# Integration authors from the introducing config commits.
 authors:
-  - Julien Veron Vialard
+- Julien Veron Vialard
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
 resources_server: arena
 agent_server: simple_agent
-model_server: policy_model
-prompt_source: prepared
 datasets:
-  - name: lmarena_v3
-    type: benchmark
-    jsonl_fpath: benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl
-    prepare_script: benchmarks/lmarena_v3/prepare.py
-    num_repeats: 1
-# Gym evaluation split; upstream splits are described separately.
+- name: lmarena_v3
+  type: benchmark
+  jsonl_fpath: benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl
+  prepare_script: benchmarks/lmarena_v3/prepare.py
+  num_repeats: 1
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: prepared
 lifecycle: active

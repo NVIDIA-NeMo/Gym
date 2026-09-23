@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: nemotron_3.5_super/benchmark_configs/hle_no_tools
 version: 0.1.0
 experimental: true
@@ -14,10 +11,11 @@ authors:
 - fsiino-nvidia
 reward:
   range:
-  - 0
-  - 1
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
+config_path: ../hle_no_tools.yaml
 resources_server: equivalence_llm_judge
 agent_server: simple_agent
 datasets:
@@ -31,5 +29,3 @@ model_server: policy_model
 canonical_split: benchmark
 standard_prompt_config: benchmarks/hle/prompts/default.yaml
 lifecycle: active
-config_path: ../hle_no_tools.yaml
-prompt_source: template

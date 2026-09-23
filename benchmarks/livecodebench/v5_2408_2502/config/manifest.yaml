@@ -1,33 +1,32 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "livecodebench/v5_2408_2502/config"
-version: "0.1.0"
+name: livecodebench/v5_2408_2502/config
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "../config.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "coding"
-description: "LiveCodeBench release_v5, August 2024 through February 2025, scored by code_gen unit tests."
-modality: "text"
-licensing: "unknown"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: LiveCodeBench release_v5, August 2024 through February 2025, scored by
+  code_gen unit tests.
+modality: text
+licensing: unknown
 authors:
-  - "George Armstrong"
+- George Armstrong
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "code_gen"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "template"
+determinism: unknown
+config_path: ../config.yaml
+resources_server: code_gen
+agent_server: simple_agent
 datasets:
-  - name: "livecodebench_v5"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/livecodebench/v5_2408_2502/data/livecodebench_v5_validation.jsonl"
-    prepare_script: "benchmarks/livecodebench/v5_2408_2502/prepare.py"
-    prompt_config: "benchmarks/prompts/eval/livecodebench/default_reasoning.yaml"
-    num_repeats: 3
-canonical_split: "benchmark"
-standard_prompt_config: "benchmarks/prompts/eval/livecodebench/default_reasoning.yaml"
-lifecycle: "active"
+- name: livecodebench_v5
+  type: benchmark
+  jsonl_fpath: benchmarks/livecodebench/v5_2408_2502/data/livecodebench_v5_validation.jsonl
+  prepare_script: benchmarks/livecodebench/v5_2408_2502/prepare.py
+  prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
+lifecycle: active

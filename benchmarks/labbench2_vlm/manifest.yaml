@@ -1,33 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: labbench2_vlm
-# Initial manifest composition version, not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: >-
-  LabBench2 scientific figure, table, and protocol questions across five tags with binary judge scoring.
+description: LabBench2 scientific figure, table, and protocol questions across five
+  tags with binary judge scoring.
 modality: multimodal
 licensing: CC-BY-SA-4.0
-# Integration authors from the introducing config commits.
 authors:
-  - Sergey Kolchenko
+- Sergey Kolchenko
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
 resources_server: labbench2_vlm
 agent_server: labbench2_vlm_agent
-model_server: policy_model
-prompt_source: prepared
 datasets:
-  - name: labbench2_vlm
-    type: benchmark
-    jsonl_fpath: benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl
-    prepare_script: benchmarks/labbench2_vlm/prepare.py
-    num_repeats: 3
-# Gym evaluation split; upstream splits are described separately.
+- name: labbench2_vlm
+  type: benchmark
+  jsonl_fpath: benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl
+  prepare_script: benchmarks/labbench2_vlm/prepare.py
+  num_repeats: 3
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: prepared
 lifecycle: active

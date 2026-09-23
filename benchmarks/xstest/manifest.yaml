@@ -1,31 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "xstest"
-version: "0.1.0"
+name: xstest
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "config.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "safety"
-description: "XSTest exaggerated refusal evaluation using the WildGuard judge on safe and unsafe prompts."
-modality: "text"
-licensing: "unknown"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: safety
+description: XSTest exaggerated refusal evaluation using the WildGuard judge on safe
+  and unsafe prompts.
+modality: text
+licensing: unknown
 authors:
-  - "bxyu-nvidia"
+- bxyu-nvidia
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "xstest"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+resources_server: xstest
+agent_server: simple_agent
 datasets:
-  - name: "xstest"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/xstest/data/xstest_benchmark.jsonl"
-    prepare_script: "benchmarks/xstest/prepare.py"
-    num_repeats: 4
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: xstest
+  type: benchmark
+  jsonl_fpath: benchmarks/xstest/data/xstest_benchmark.jsonl
+  prepare_script: benchmarks/xstest/prepare.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

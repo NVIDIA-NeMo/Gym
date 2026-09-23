@@ -1,31 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Version identifies this initial manifest composition, not the upstream dataset release.
-name: "mrcr"
-version: "0.1.0"
+name: mrcr
+version: 0.1.0
 experimental: true
-kind: "benchmark"
-config_path: "config.yaml"
-integration_profile: "custom-gym-verifier"
-domain: "other"
-description: "MRCR multi-round coreference resolution with prefix-gated SequenceMatcher grading."
-modality: "text"
-licensing: "MIT"
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: MRCR multi-round coreference resolution with prefix-gated SequenceMatcher
+  grading.
+modality: text
+licensing: MIT
 authors:
-  - "Marta Stepniewska-Dziubinska"
+- Marta Stepniewska-Dziubinska
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
-determinism: "unknown"
-resources_server: "mrcr"
-agent_server: "simple_agent"
-model_server: "policy_model"
-prompt_source: "prepared"
+determinism: unknown
+resources_server: mrcr
+agent_server: simple_agent
 datasets:
-  - name: "mrcr"
-    type: "benchmark"
-    jsonl_fpath: "benchmarks/mrcr/data/mrcr_benchmark.jsonl"
-    prepare_script: "benchmarks/mrcr/prepare.py"
-    num_repeats: 4
-canonical_split: "benchmark"
-lifecycle: "active"
+- name: mrcr
+  type: benchmark
+  jsonl_fpath: benchmarks/mrcr/data/mrcr_benchmark.jsonl
+  prepare_script: benchmarks/mrcr/prepare.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

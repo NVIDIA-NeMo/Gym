@@ -1,33 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: browsecomp
-# Initial manifest composition version, not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: >-
-  BrowseComp web research with an independent answer judge; default preparation selects 400 tasks with seed 42.
+description: BrowseComp web research with an independent answer judge; default preparation
+  selects 400 tasks with seed 42.
 modality: text
 licensing: Apache-2.0
-# Integration authors from the introducing config commits.
 authors:
-  - bxyu-nvidia
+- bxyu-nvidia
 reward:
-  range: [0.0, 1.0]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
 resources_server: browsecomp_advanced_harness
 agent_server: browsecomp_agent
-model_server: policy_model
-prompt_source: prepared
 datasets:
-  - name: browsecomp
-    type: benchmark
-    jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark.jsonl
-    prepare_script: benchmarks/browsecomp/prepare.py
-    num_repeats: 1
-# Gym evaluation split; upstream splits are described separately.
+- name: browsecomp
+  type: benchmark
+  jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark.jsonl
+  prepare_script: benchmarks/browsecomp/prepare.py
+  num_repeats: 1
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: prepared
 lifecycle: active

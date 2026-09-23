@@ -1,24 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: hle_verified/config_vision
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: HLE-Verified Gold and Revision subsets including image questions, with prepared inputs and LLM-as-a-judge
-  grading.
+description: HLE-Verified Gold and Revision subsets including image questions, with
+  prepared inputs and LLM-as-a-judge grading.
 modality: text, image
 licensing: unknown
 authors:
 - fsiino-nvidia
 reward:
   range:
-  - 0
-  - 1
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
+config_path: ../config_vision.yaml
 resources_server: equivalence_llm_judge
 agent_server: simple_agent
 datasets:
@@ -29,6 +27,5 @@ datasets:
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-lifecycle: active
-config_path: ../config_vision.yaml
 prompt_source: prepared
+lifecycle: active

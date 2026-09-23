@@ -1,24 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: brokenarxiv_0526/config_with_system
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's 0-2 judge rubric; system-prompt
-  variant.
+description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's
+  0-2 judge rubric; system-prompt variant.
 modality: text
 licensing: unknown
 authors:
 - wedu-nvidia
 reward:
   range:
-  - 0
-  - 1
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
+config_path: ../config_with_system.yaml
 resources_server: false_statement_judge
 agent_server: simple_agent
 datasets:
@@ -32,5 +30,3 @@ model_server: policy_model
 canonical_split: benchmark
 standard_prompt_config: benchmarks/brokenarxiv_0526/prompts/with_system.yaml
 lifecycle: active
-config_path: ../config_with_system.yaml
-prompt_source: template

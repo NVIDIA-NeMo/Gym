@@ -1,33 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: toolsandbox
-# Initial catalog composition version; not an upstream dataset release.
 version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: >-
-  ToolSandbox scenario-driven stateful tool use with a simulated user and milestone similarity reward in [0,
-  1], zero when a minefield is hit.
+description: ToolSandbox scenario-driven stateful tool use with a simulated user and
+  milestone similarity reward in [0, 1], zero when a minefield is hit.
 modality: text
 licensing: CC-BY-NC-4.0
-# Contributor attribution follows the NVIDIA source headers.
 authors:
-  - NVIDIA NeMo Gym contributors
+- NVIDIA NeMo Gym contributors
 reward:
-  range: [0, 1]
+  range:
+  - 0.0
+  - 1.0
   higher_is_better: true
 determinism: unknown
-prompt_source: agent
 resources_server: toolsandbox
 agent_server: toolsandbox_agent
-model_server: policy_model
 datasets:
-  - name: toolsandbox
-    type: benchmark
-    jsonl_fpath: benchmarks/toolsandbox/data/toolsandbox_benchmark.jsonl
-    prepare_script: benchmarks/toolsandbox/prepare.py
-    num_repeats: 1
+- name: toolsandbox
+  type: benchmark
+  jsonl_fpath: benchmarks/toolsandbox/data/toolsandbox_benchmark.jsonl
+  prepare_script: benchmarks/toolsandbox/prepare.py
+  num_repeats: 1
+model_server: policy_model
 canonical_split: benchmark
+prompt_source: agent
 lifecycle: active
