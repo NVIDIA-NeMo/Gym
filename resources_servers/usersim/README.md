@@ -105,11 +105,10 @@ Server while the Environment Server forwards one shared Resources session
 cookie.
 
 The agents also have independent model-server references:
-`user_policy_model` and `assistant_policy_model`. Judge, summary, and
-API-response calls use a third `simulation_support_model` reference. All three
-inherit the standard `policy_*` settings by default, while their role-specific
-`user_policy_*`, `assistant_policy_*`, and `simulation_support_*` settings can
-select different endpoints or models.
+`user_policy_model` and `assistant_policy_model`. Resources-owned tool-result
+synthesis uses `tool_simulation_model`, while probe scoring uses
+`probe_scorer_model`. These references can share a Model Server with another
+role when they use the same provider and model.
 
 The runnable example demonstrates three idempotent endpoints:
 
