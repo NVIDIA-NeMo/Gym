@@ -523,6 +523,7 @@ main_job_id=$(
         --comment="$SLURM_COMMENT" \
         --exclusive \
         --segment=$SEGMENT \
+        ${NODELIST:+--nodelist="$NODELIST"} \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
