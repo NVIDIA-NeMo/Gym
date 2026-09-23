@@ -546,6 +546,66 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(
     assert by_task[1]["ng_trajectory"] == failures[1]["ng_trajectory"]
 
 
+@pytest.mark.parametrize("newest", ["saved_answer", "agent_failure", "no_answer"])
+@pytest.mark.parametrize("interrupted", [1, 2])
+async def test_judge_only_restart_stops_at_the_newest_recorded_outcome(
+    runner_config, monkeypatch, newest, interrupted
+):
+    from nemo_gym.rollout_store import RolloutStore
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "5")
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        assert kwargs["url_path"] == "/verify"  # Judge-only recovery must never request generation.
+        assert row["task"] == 0 and row["response"] == {"id": "new-answer"}
+        assert row["_ng_attempt_index"] == 2 + interrupted
+        return FakeResponse(200, {"reward": 1.0, "response": row["response"]})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    monkeypatch.setattr(reverification, "setup_server_client", lambda: client)
+    monkeypatch.setattr(reverification, "_build_agent_to_resources_server_mapping", lambda _: {"my_agent": "rs"})
+    monkeypatch.setattr(reverification, "raise_for_status", collection.raise_for_status)
+    monkeypatch.setattr(reverification, "get_response_json", collection.get_response_json)
+    monkeypatch.setattr(reverification, "get_exporters", list)
+    output = Path(runner_config.output_jsonl_fpath)
+    rows = [failing_row(0) | {"task": 0}]
+    source = Path(runner_config.input_jsonl_fpath)
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(5)[0]
+        for index in range(2 + interrupted):
+            store.record_dispatch(row | {"_ng_attempt_index": index})
+        store.record_outcome(row | {"_ng_failure_class": "judge_failed", "response": {"id": "old-answer"}})
+        outcome = row | {
+            "_ng_attempt_index": 1,
+            "_ng_failure_class": "agent_run_error" if newest == "agent_failure" else "judge_failed",
+        }
+        if newest == "saved_answer":
+            outcome["response"] = {"id": "new-answer"}
+        store.record_outcome(outcome)
+    before = RolloutStore.read(output).coverage()
+    config = reverification.RolloutReverificationConfig(
+        materialized_inputs_jsonl_fpath=str(runner_config.materialized_jsonl_fpath),
+        rollouts_jsonl_fpath=str(output),
+        output_jsonl_fpath=str(output),
+        judge_failed_only=True,
+        append=True,
+        disable_aggregation=True,
+    )
+    helper = reverification.RolloutReverificationHelper()
+    if newest == "saved_answer":
+        [recovered] = await helper.run_from_config(config)
+        assert recovered["response"] == {"id": "new-answer"} and recovered["reward"] == 1.0
+        assert client.post.await_count == 1
+        assert RolloutStore.read(output).coverage()["successful"] == 1
+    else:
+        with pytest.warns(UserWarning, match="Skipping judge"):
+            assert await helper.run_from_config(config) == []
+        client.post.assert_not_awaited()
+        assert RolloutStore.read(output).coverage() == before
+
+
 @pytest.mark.parametrize("retry_failure", [False, True])
 @pytest.mark.parametrize("workers", [1, 2])
 async def test_resume_preserves_health_and_isolates_failed_attempt(runner_config, monkeypatch, retry_failure, workers):

@@ -23,8 +23,10 @@ import json
 import os
 import stat
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from uuid import uuid4
 
 from omegaconf import OmegaConf
@@ -214,24 +216,31 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def atomic_write_json(path: Path, value: dict) -> None:
+@contextmanager
+def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
+    """Replace a file after a successful write, retaining its sharing permissions."""
     temporary = None
     try:
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         # Exclusive creation honors the caller's umask. Rewrites retain existing
         # sharing permissions instead of inheriting NamedTemporaryFile's 0600.
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        with os.fdopen(descriptor, "wb") as file:
             if path.exists():
                 os.fchmod(file.fileno(), stat.S_IMODE(path.stat().st_mode))
-            json.dump(value, file, indent=2, allow_nan=False)
-            file.write("\n")
+            yield file
             file.flush()
             os.fsync(file.fileno())
         temporary.replace(path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def atomic_write_json(path: Path, value: dict) -> None:
+    """Publish JSON metadata without exposing a partial rewrite to readers."""
+    with atomic_output_file(path) as file:
+        file.write((json.dumps(value, indent=2, allow_nan=False) + "\n").encode("utf-8"))
 
 
 class RunManifest(BaseModel):

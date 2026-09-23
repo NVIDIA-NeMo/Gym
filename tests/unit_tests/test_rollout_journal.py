@@ -385,10 +385,12 @@ async def test_aggregation_preserves_existing_target_recovery_artifacts(run, mon
         assert RolloutStore.read(target).selected("success")[0]["response"] == {"id": "keep-me"}
 
 
-async def test_aggregation_can_replace_a_plain_projection_without_recovery_history(run, monkeypatch):
+@pytest.mark.parametrize("alias", [False, True])
+async def test_aggregation_can_replace_a_plain_projection_without_recovery_history(run, monkeypatch, alias):
     from unittest.mock import AsyncMock
 
     import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollout_health as health
 
     source, _, rows = run
     with writer(run) as history:
@@ -396,14 +398,68 @@ async def test_aggregation_can_replace_a_plain_projection_without_recovery_histo
         result = save(run, history, rows[0], reward=1.0)
     target = source.with_name("combined.jsonl")
     target.write_bytes(orjson.dumps(result | {"reward": 0.0}) + b"\n")
+    target.chmod(0o640)
+    destination = target
+    if alias:
+        destination = target.with_name("alias.jsonl")
+        destination.symlink_to(target)
     monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     config = collection.RolloutAggregationConfig(
-        input_glob=str(source), output_jsonl_fpath=str(target), disable_health_check=True
+        input_glob=str(source), output_jsonl_fpath=str(destination), disable_health_check=True
     )
     for _ in range(2):
+        [indexed] = health._index_jsonl([destination])
         await collection.RolloutAggregationHelper().run_from_config(config)
         assert list(read_records(target)) == [result]
-        assert coverage_path_for(target).exists()  # A reporting snapshot alone is not recovery history.
+        assert target.stat().st_mode & 0o777 == 0o640
+        assert destination.is_symlink() == alias
+        assert health._read_record(indexed) == ({}, "rollout file was replaced after indexing")
+        assert coverage_path_for(destination).exists()  # A reporting snapshot alone is not recovery history.
+
+
+@pytest.mark.parametrize("failure", ["serialization", "publication"])
+async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, failure):
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.rollout_collection as collection
+
+    source, _, rows = run
+    with writer(run) as history:
+        for row in rows[:2]:
+            history.dispatch(row)
+            save(run, history, row, reward=1.0)
+    target = source.with_name("combined.jsonl")
+    target.write_bytes(b'{"old": true}\n')
+    before = {path.name: path.read_bytes() for path in source.parent.iterdir()}
+    dumps = orjson.dumps
+    replace = Path.replace
+
+    def serialize(row, *args, **kwargs):
+        assert target.read_bytes() == before[target.name]
+        if row["_ng_task_index"] == 1 and failure == "serialization":
+            raise TypeError("interrupted serialization")
+        return dumps(row, *args, **kwargs)
+
+    def publish(path, destination):
+        if destination == target:
+            assert target.read_bytes() == before[target.name]
+            raise OSError("interrupted publication")
+        return replace(path, destination)
+
+    monkeypatch.setattr(collection.orjson, "dumps", serialize)
+    if failure == "publication":
+        monkeypatch.setattr(Path, "replace", publish)
+    aggregate = AsyncMock()
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    with pytest.raises((TypeError, OSError), match="interrupted"):
+        await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(
+                input_glob=str(source), output_jsonl_fpath=str(target), disable_health_check=True
+            )
+        )
+    assert {path.name: path.read_bytes() for path in source.parent.iterdir()} == before
+    aggregate.assert_not_called()
 
 
 @pytest.mark.parametrize("masked", [False, True])

@@ -23,6 +23,7 @@ import os
 import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
+from itertools import chain
 from pathlib import Path
 
 import orjson
@@ -308,28 +309,34 @@ class RolloutStore:
     def reverification_failures(self, max_attempts: int) -> list[dict]:
         """Find saved judge inputs without changing the latest attempt's status.
 
-        An interrupted judge retry has no outcome of its own. Only in that
-        unknown state, reuse the newest prior judge failure with a saved answer.
+        Skip interrupted attempts, but stop at the newest recorded outcome.
+        An interruption must not make an answer from an older outcome eligible again.
         Eligibility, terminality, and the retry budget still use the latest state.
         """
         eligible = [logical_rollout_id(row) for row in self.pending(max_attempts)]
         unknown = {identity for identity in eligible if self._state.disposition(identity) == "unknown"}
-        prior: dict[str, list[tuple[int, RolloutRecord]]] = {}
-        for (identity, attempt), outcome in self._state.payloads.items():
-            if identity in unknown and outcome.failure_class == "judge_failed":
-                prior.setdefault(identity, []).append((attempt, outcome.record))
+        newest_known: dict[str, int] = {}
+        for identity, attempt in chain(self._state.payloads, self._state.omitted):
+            newest_known[identity] = max(attempt, newest_known.get(identity, -1))
         rows = []
         for identity in eligible:
-            latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
-            if latest is not None:
-                if latest.failure_class == "judge_failed":
-                    rows.append(latest.record.read())
-                continue
-            for _, record in sorted(prior.get(identity, []), key=lambda item: item[0], reverse=True):
-                row = record.read()
-                if isinstance(row.get("response"), dict):
-                    rows.append(row)
-                    break
+            attempt = newest_known.get(identity)
+            outcome = self._state.payloads.get((identity, attempt))
+            if outcome is not None and outcome.failure_class == "judge_failed" and not outcome.terminal:
+                # The pairing step reports/skips missing responses for both known
+                # and interrupted latest attempts. Never search past this outcome.
+                rows.append(outcome.record.read())
+            elif identity in unknown and identity in self._state.latest:
+                reason = (
+                    "no outcome has been recorded"
+                    if attempt is None
+                    else f"the newest recorded outcome (attempt {attempt}) is not a retryable judge failure"
+                )
+                warnings.warn(
+                    f"Skipping judge-only recovery for rollout {identity}: {reason}. "
+                    "No agent request was made. Resume rollout collection separately to retry the agent.",
+                    stacklevel=2,
+                )
         return rows
 
     def for_reverification(self, payloads: list[dict]) -> list[dict]:

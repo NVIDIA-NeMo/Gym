@@ -61,11 +61,10 @@ def test_judge_retry_inputs_use_history_without_replacing_latest_status(prepared
         attempts = [row | {"_ng_attempt_index": i} for i in range(4)]
         for attempt in attempts:
             store.record_dispatch(attempt)
-        for index in [1, 0, 2]:  # Arrival order differs from attempt order; attempt 2 has no saved answer.
-            result = attempts[index] | {"_ng_failure_class": "judge_failed"}
-            if index < 2:
-                result["response"] = {"id": f"answer-{index}"}
-            store.record_outcome(result)
+        for index in [2, 0, 1]:  # Arrival order differs from attempt order.
+            store.record_outcome(
+                attempts[index] | {"_ng_failure_class": "judge_failed", "response": {"id": f"answer-{index}"}}
+            )
         if latest == "omitted":
             store.record_omission(attempts[3], "Intentionally skipped")
         elif latest == "success":
@@ -84,8 +83,8 @@ def test_judge_retry_inputs_use_history_without_replacing_latest_status(prepared
     failures = reader.failures()
     payloads = reader.reverification_failures(4 if latest == "exhausted" else 5)
     if latest == "unknown":
-        assert len(payloads) == 1 and payloads[0]["response"] == {"id": "answer-1"}
-        assert payloads[0]["_ng_attempt_index"] == 1
+        assert len(payloads) == 1 and payloads[0]["response"] == {"id": "answer-2"}
+        assert payloads[0]["_ng_attempt_index"] == 2
         [allocated] = reader.for_reverification([row | {"response": payloads[0]["response"]}])
         assert allocated["_ng_attempt_index"] == 4
     elif latest == "no_answer":
@@ -94,6 +93,45 @@ def test_judge_retry_inputs_use_history_without_replacing_latest_status(prepared
     else:
         assert payloads == []
     assert reader.coverage() == coverage and reader.failures() == failures
+    assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("known", ["agent_failure", "no_answer", "terminal", "omitted", "success", "none"])
+@pytest.mark.parametrize("interrupted", [1, 2])
+def test_interruption_does_not_revive_an_older_judge_answer(prepared_run, known, interrupted):
+    from nemo_gym.rollout_reverification import _yield_inputs_and_rollouts_paired
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(5)[0]
+        for index in range(2 + interrupted):
+            store.record_dispatch(row | {"_ng_attempt_index": index})
+        if known != "none":
+            store.record_outcome(row | {"_ng_failure_class": "judge_failed", "response": {"id": "old-answer"}})
+            newer = row | {"_ng_attempt_index": 1}
+            if known == "omitted":
+                store.record_omission(newer, "Do not reuse the earlier answer")
+            elif known == "success":
+                store.record_outcome(newer | {"reward": 1.0, "response": {"id": "completed"}})
+            else:
+                store.record_outcome(
+                    newer
+                    | {
+                        "_ng_failure_class": "agent_run_error" if known == "agent_failure" else "judge_failed",
+                        "_ng_failure_terminal": known == "terminal",
+                    }
+                )
+    reader = RolloutStore.read(output)
+    before = snapshot(output)
+    coverage = reader.coverage()
+    with pytest.warns(UserWarning, match="Skipping judge"):
+        candidates = reader.reverification_failures(5)
+        pairs = list(
+            _yield_inputs_and_rollouts_paired(materialized_path_for(output), output, selected_rollouts=candidates)
+        )
+    assert pairs == []
+    assert reader.disposition(row) == "unknown"
+    assert reader.coverage() == coverage
     assert snapshot(output) == before
 
 

@@ -193,6 +193,12 @@ attempts in the same journal before sending verifier requests. Recovered results
 rules as collection and aggregation. Terminal failures and exhausted attempt budgets are respected. Full reverification
 uses a separate output file so that changed scores cannot overwrite the original run's history.
 
+If a judge retry was interrupted before saving an outcome, judge-only recovery skips that attempt and looks back to
+the newest recorded outcome. It reuses an answer only when that outcome is a nonterminal judge failure with a saved
+response. It does not search past a newer agent failure, omitted outcome, or judge failure without a response to reuse
+an older answer. Such rows are reported and skipped; judge-only recovery never automatically reruns the agent.
+To generate another answer, resume rollout collection separately, subject to the run's retry budget and terminal state.
+
 Judge failures with a saved answer retain that answer for reverification. When training-token capture is enabled,
 Gym also attempts to reconstruct its recorded token IDs before writing the failure sidecar. This diagnostic evidence
 does not turn the failure into a scored training sample, and its capture source is not retired by failure persistence.

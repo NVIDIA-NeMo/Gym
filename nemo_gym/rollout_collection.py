@@ -97,6 +97,7 @@ from nemo_gym.rollout_recovery import (
 )
 from nemo_gym.rollout_recovery import (
     RunManifest,
+    atomic_output_file,
     atomic_write_json,
     manifest_path_for,
 )
@@ -2436,7 +2437,9 @@ class RolloutAggregationHelper(BaseModel):
 
         if config.merge_shards:
             print(f"Merging shards into {output_fpath}")
-            with output_fpath.open("wb") as out:
+            # Readers indexed against the old file must detect replacement rather
+            # than read rewritten bytes at stale offsets. Preserve symlink targets.
+            with atomic_output_file(output_fpath.resolve()) as out:
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
