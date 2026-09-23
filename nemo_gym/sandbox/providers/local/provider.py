@@ -108,7 +108,8 @@ class LocalProvider:
                 self._shell,
                 "-c",
                 command,
-                cwd=str(cwd or inst["workspace"]),
+                # Relative paths are workspace-relative, as in upload_file/download_file.
+                cwd=str(inst["workspace"] / cwd if cwd else inst["workspace"]),
                 env={**os.environ, **inst["env"], **(env or {})},
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
