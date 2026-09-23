@@ -40,7 +40,7 @@ class AgentDojoFamilyAgentConfig(BaseResponsesAPIAgentConfig):
     # behaviour of waiting forever. See `run` for why waiting forever is not always safe.
     rollout_timeout_seconds: float | None = None
     # Abandoned rollouts leave a thread behind that cannot be cancelled, so a process that has
-    # accumulated this many exits and lets the campaign runner start a clean stack.
+    # accumulated this many exits, and `gym eval run --resume` restarts from a clean stack.
     max_abandoned_rollouts: int = 2
     default_defense: str | None = None
     system_message: str | None = None
@@ -247,9 +247,9 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
 
         A defense can hand the harness a program that does not terminate -- CaMeL interprets
         model-generated Python and imposes no step or time budget of its own -- and because
-        rollouts are serialized, one of those stops the cell for good rather than costing a
-        single row. Observed on Kimi K3: one `shopping` rollout held a core at 98% for over
-        half an hour, hundreds of interpreter frames deep, while the cell sat at six rows.
+        rollouts are serialized, one of those would stall the whole run rather than cost a
+        single row. Such a rollout can hold a core at full load indefinitely, hundreds of
+        interpreter frames deep, with no sign of failure from outside.
 
         The row is masked, never scored. Nothing ran to completion, so there is no evidence
         the task succeeded, and calling it secure because no injected action was seen would
@@ -257,8 +257,8 @@ class AgentDojoFamilyAgent(SimpleResponsesAPIAgent):
 
         `asyncio.wait_for` cannot cancel a CPU-bound thread, so the abandoned rollout keeps
         burning a core until the process ends. That is why the process ends: after
-        `max_abandoned_rollouts` it exits and the campaign runner starts a clean stack, which
-        `--resume` rejoins with this row already recorded, so the hang is not retried forever.
+        `max_abandoned_rollouts` it exits, Gym shuts the stack down, and a rerun with `--resume`
+        starts a clean stack with this row already recorded, so the hang is not retried forever.
         The exit is deferred so this response reaches the collector first.
         """
         self._abandoned_rollouts += 1

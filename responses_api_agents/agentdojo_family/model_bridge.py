@@ -182,10 +182,10 @@ class NeMoGymAgentDojoLLM(OpenAILLM):
     costs nothing and ``query`` below still owns every policy call.
 
     The alternative -- handing upstream a real ``openai.OpenAI`` pointed at the serving
-    endpoint -- would make this the one treatment in the grid that bypasses the model server:
-    no token accounting, no per-rollout attribution, the OpenAI SDK's httpx transport that
-    this repo bans at concurrency, and no `developer`->`system` rewrite, which the Qwen
-    deployment rejects outright. ``self.client`` is the proxy instead, so `tool_filter`'s
+    endpoint -- would make this the one defense that bypasses the model server: no token
+    accounting, no per-rollout attribution, the OpenAI SDK's httpx transport that this repo
+    bans at concurrency, and no `developer`->`system` rewrite, which some OpenAI-compatible
+    servers (Qwen3.5 on SGLang, for one) reject outright. ``self.client`` is the proxy instead, so `tool_filter`'s
     `client.chat.completions.create` lands on the same path as every other call.
     """
 
