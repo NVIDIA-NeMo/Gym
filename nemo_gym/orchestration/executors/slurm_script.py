@@ -361,6 +361,10 @@ def _build_ray_command(service: RayServiceConfig) -> str:
     cmd = "ray start --block"
     if service.mode == "head":
         cmd += f" --head --port {service.port}"
+    elif service.head is not None:
+        # Double-quoted, not shlex-quoted: the head's address is only known once
+        # Slurm places the job, and build_sbatch_script exports it under this name.
+        cmd += f' --address "${ray_head_address_var(service.head)}"'
     else:
         cmd += f" --address {shlex.quote(str(service.address))}"
     if service.num_cpus is not None:
@@ -373,7 +377,32 @@ def _build_ray_command(service: RayServiceConfig) -> str:
         # command reads the way the config does.
         resources = {k: int(v) if v.is_integer() else v for k, v in service.resources.items()}
         cmd += " --resources=" + shlex.quote(json.dumps(resources, sort_keys=True))
+    if service.extra_args:
+        cmd += " " + service.extra_args
     return cmd
+
+
+def ray_head_address_var(head_service: str) -> str:
+    """The env var build_sbatch_script exports with a ray head service's host:port."""
+    return f"GYM_RAY_ADDRESS_{bash_var(head_service)}"
+
+
+def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig) -> str:
+    """Export every ray head service's address, resolved from the node Slurm gave it.
+
+    A worker or the driver in another step can then join it without knowing,
+    when the config is written, which host the job will land on.
+    """
+    heads = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig) and s.mode == "head"}
+    if not heads:
+        return ""
+    offsets = _pool_offsets(compute)
+    lines = ['gym_ray_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))']
+    for name, service in heads.items():
+        index = offsets[service.node_pool][0] if service.node_pool else 0
+        ip = f"$(getent hosts ${{gym_ray_nodes[{index}]}} | awk '{{print $1}}')"
+        lines.append(f'export {ray_head_address_var(name)}="{ip}:{service.port}"')
+    return "\n".join(lines)
 
 
 _BUILDERS = {
@@ -546,10 +575,15 @@ def build_sbatch_script(
         pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
     ]
 
-    ray_prelude = (
-        render_ray_prelude()
-        if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
-        else ""
+    ray_prelude = "\n".join(
+        block
+        for block in (
+            render_ray_prelude()
+            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
+            else "",
+            _render_ray_head_addresses(config, compute),
+        )
+        if block
     )
 
     observed = otel_active(config)
