@@ -436,8 +436,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     await original_sandbox.stop()
                 except Exception:
                     print("Failed to stop agent sandbox", format_exc(), file=sys.stderr)
-                self._session_id_to_sandbox.pop(session_id, None)
-                self._session_id_to_pristine_untracked.pop(session_id, None)
+                else:
+                    # Keep the live handle if destruction failed so native close can retry.
+                    self._session_id_to_sandbox.pop(session_id, None)
+                    self._session_id_to_pristine_untracked.pop(session_id, None)
 
     async def verify(
         self,

@@ -136,7 +136,8 @@ class TestSanity:
         )
         assert state.sandbox is sandbox
         assert state.workdir == "/app"
-        assert state.session_dir.endswith("/session")
+        assert state.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
+        assert len(state.session_dir.rsplit("/", 1)[-1]) == 32
         assert sandbox.exec.await_count == 2
         assert sandbox.upload.await_count == 3
 
@@ -243,7 +244,7 @@ class TestSanity:
             ),
         )
 
-        with pytest.raises(ValueError, match="already closed"):
+        with pytest.raises(HTTPException, match="already closed"):
             await hermes.seed_agent_session(request, body)
 
 
@@ -258,6 +259,7 @@ class TestSandboxSessionCleanup:
         hermes._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
         state = HermesAgentSessionState(
             request=AgentSeedSessionRequest(
+                agent_session_id="session",
                 episode_id=EpisodeId(rollout_id="rollout"),
                 task_id=TaskId(taskset="test", task_id="task"),
             ),
@@ -420,6 +422,7 @@ async def test_sandbox_relay_preserves_template_overrides_in_gym_metadata(
     sandbox.pty.create = AsyncMock(return_value=AsyncMock())
     state = HermesAgentSessionState(
         request=AgentSeedSessionRequest(
+            agent_session_id="session",
             episode_id=EpisodeId(rollout_id="rollout", attempt=2),
             task_id=TaskId(taskset="test", task_id="task"),
         ),

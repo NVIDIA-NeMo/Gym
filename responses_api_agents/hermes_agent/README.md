@@ -90,10 +90,35 @@ hermes_agent:
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
 
-Note: Native EnvironmentServer sessions run Hermes inside the Resources-owned task sandbox.
-Use `enabled_toolsets: [terminal]`, one agent-server worker, and a Linux sandbox with PTY support.
+Native EnvironmentServer sessions run Hermes inside a sandbox. They borrow the Resources-owned
+task sandbox when supplied, or create an agent-owned sandbox from `sandbox_provider` and
+`sandbox_config`. SWE-bench Pro uses the borrowed path. Use one agent-server worker and a Linux
+sandbox with PTY support; the benchmark recipe enables `[terminal]`.
 Each session runs once and must confirm process cleanup before verification. Close receipts are
 process-local; configure the retry window to cover response timeouts and backoff. Other sessions
 cannot evict receipts early, and expired sessions return 409 without falling back to the host.
 Native requests support text input and instructions; output limits apply per model call, and
 unsupported settings return 422. Response usage is still zero pending aggregation support.
+
+
+For native SWE-bench Pro collection, use
+[`hermes_native.yaml`](../../benchmarks/swebench/pro/hermes_native.yaml).
+It explicitly selects `single_agent_turn` and taskset routing; `hermes_episode.yaml`
+retains its upstream legacy behavior. Supply `policy_model`, `sandbox`, and
+`swebench_pro_hermes_native_agent.responses_api_agents.hermes_agent.model` in your
+model/provider configuration. Load the same composition when starting servers and
+collecting; `--no-serve` does not inherit routing settings from the running head:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py prepared.jsonl native.jsonl
+gym env start --config benchmarks/swebench/pro/hermes_native.yaml --config model-provider.yaml
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/hermes_native.yaml --config model-provider.yaml \
+  -i native.jsonl -o rollouts.jsonl
+```
+
+EnvironmentServer assigns session IDs before seeding and sends cleanup after a lost
+seed response. Identical retries share a session; mismatched requests and closed IDs
+are rejected. Abandoned sessions expire after `session_lifetime_seconds` (default 21600);
+failed cleanup retains its handle for a retry. Close receipts expire separately from
+closed-ID tombstones, which remain for at least the lifetime/retry horizon.

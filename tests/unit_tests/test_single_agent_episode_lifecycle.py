@@ -3,6 +3,7 @@
 
 import asyncio
 from http.cookies import SimpleCookie
+from pathlib import Path
 
 import orjson
 import pytest
@@ -10,21 +11,22 @@ from aiohttp import ClientConnectionError
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-from environment_servers.single_agent.app import (
-    SingleAgentEnvironmentServer,
-    SingleAgentEnvironmentServerConfig,
+from environment_servers.single_agent_turn.app import (
+    SingleAgentTurnEnvironmentServer,
+    SingleAgentTurnEnvironmentServerConfig,
     _is_retryable_dependency_error,
 )
 from nemo_gym.base_resources_server import ResourcesVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.single_agent_episode_types import (
-    SingleAgentEpisodeRequest,
-    SingleAgentEpisodeResponse,
-    SingleAgentTaskInput,
+from nemo_gym.single_agent_turn_types import (
+    SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
 )
 
 
@@ -74,6 +76,17 @@ class _Client(ServerClient):
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
+        if url_path == "/seed_session" and "resources_session_id" in response.body.decode():
+            data = orjson.loads(response.body)
+            data["resources_session_id"] = kwargs["json"].resources_session_id
+            response.body = orjson.dumps(data)
+        elif (
+            url_path in ("/v1/agent_sessions", "/v1/agent_sessions/close")
+            and "agent_session_id" in response.body.decode()
+        ):
+            data = orjson.loads(response.body)
+            data["agent_session_id"] = kwargs["json"].agent_session_id
+            response.body = orjson.dumps(data)
         return response
 
     def _resolve_base_url(self, server_name: str) -> str:
@@ -82,7 +95,7 @@ class _Client(ServerClient):
 
 def _environment(
     *, token_capture: bool = False, resources_tool_transports: tuple[str, ...] = ()
-) -> tuple[SingleAgentEnvironmentServer, _Client]:
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
             "resources": {"resources_servers": {"test": {"host": "resources", "port": 8000, "entrypoint": "app.py"}}},
@@ -138,7 +151,7 @@ def _environment(
             _Response({"resources_session_id": "resources-session"}),
         ],
     )
-    config = SingleAgentEnvironmentServerConfig(
+    config = SingleAgentTurnEnvironmentServerConfig(
         name="environment",
         host="environment",
         port=8002,
@@ -149,15 +162,15 @@ def _environment(
         default_episode_timeout_seconds=10,
         cleanup_timeout_seconds=10,
     )
-    return SingleAgentEnvironmentServer(config=config, server_client=client), client
+    return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
 
 
-def _request() -> SingleAgentEpisodeRequest:
-    return SingleAgentEpisodeRequest(
+def _request() -> SingleAgentTurnRequest:
+    return SingleAgentTurnRequest(
         episode_id=EpisodeId(rollout_id="rollout", attempt=2),
         task=MaterializedTask(
             task_id=TaskId(taskset="source", task_id="task"),
-            task_input=SingleAgentTaskInput(
+            task_input=SingleAgentTurnTaskInput(
                 responses_create_params={"input": "task"},
                 task_data={"instance_id": "task"},
             ),
@@ -256,7 +269,7 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     adapter_module = None
     if result_path == "flat-adapter":
         adapter_module = pytest.importorskip(
-            "environment_servers.single_agent_legacy.app", reason="Flat-row adapter is a separate upstream PR"
+            "environment_servers.single_agent_turn_legacy.app", reason="Flat-row adapter is a separate upstream PR"
         )
     environment, client = _environment()
     observations = {
@@ -278,7 +291,7 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     client.responses[4] = _Response(verification_body)
 
     result = await environment.run_request(_request())
-    result = SingleAgentEpisodeResponse.model_validate_json(result.model_dump_json())
+    result = SingleAgentTurnResponse.model_validate_json(result.model_dump_json())
     assert result.result.verification.mask_sample is mask_sample
     assert result.result.verification.reward == 1.0
     assert result.result.verification.model_extra["benchmark_field"] == "preserved"
@@ -287,7 +300,7 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert result.result.agent_observations == AgentObservationBundle.model_validate(observations)
     if adapter_module is None:
         return
-    adapter = adapter_module.SingleAgentLegacyEnvironmentServer(config=environment.config, server_client=client)
+    adapter = adapter_module.SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
     legacy = adapter._legacy_result(result)
     assert legacy["mask_sample"] is mask_sample
     assert legacy["reward"] == 1.0
@@ -354,7 +367,7 @@ async def test_agent_close_failure_prevents_verification_and_unwind_retries(*, r
 
 async def test_admission_timeout_is_retryable_without_starting_sessions() -> None:
     environment, client = _environment()
-    environment = SingleAgentEnvironmentServer(
+    environment = SingleAgentTurnEnvironmentServer(
         config=environment.config.model_copy(update={"max_concurrent_episodes": 1, "queue_timeout_seconds": 0.01}),
         server_client=client,
     )
@@ -397,7 +410,7 @@ async def test_resources_close_failure_preserves_verification(
     client.responses = [*responses[:5], RuntimeError("resources close failed"), retry_response]
 
     result = await environment.run_request(_request())
-    result = SingleAgentEpisodeResponse.model_validate_json(result.model_dump_json())
+    result = SingleAgentTurnResponse.model_validate_json(result.model_dump_json())
 
     assert result.failure is None
     assert result.episode_id == _request().episode_id
@@ -506,10 +519,10 @@ async def test_interrupted_activation_closes_agent_before_resources(
 
 async def test_legacy_compatibility_is_a_separate_environment_deployment() -> None:
     adapter_module = pytest.importorskip(
-        "environment_servers.single_agent_legacy.app", reason="Flat-row adapter is a separate upstream PR"
+        "environment_servers.single_agent_turn_legacy.app", reason="Flat-row adapter is a separate upstream PR"
     )
     environment, client = _environment()
-    adapter = adapter_module.SingleAgentLegacyEnvironmentServer(config=environment.config, server_client=client)
+    adapter = adapter_module.SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
     result = await adapter.run_legacy(
         {
             "_ng_task_index": 3,
@@ -535,3 +548,24 @@ def test_dependency_failure_messages_are_bounded() -> None:
 def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(TimeoutError()) is True
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+
+
+def test_hermes_native_recipe_resolves_to_session_environment():
+    recipe = Path(__file__).parents[2] / "benchmarks/swebench/pro/hermes_native.yaml"
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths([str(recipe)])
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    assert config.environment_routing_mode == "taskset"
+    environment_name = config.environment_server_routes["swebench_pro:smoke"]
+    environment = SingleAgentTurnEnvironmentServerConfig(
+        name=environment_name,
+        host="localhost",
+        port=8000,
+        **OmegaConf.to_container(config[environment_name].environment_servers.single_agent_turn, resolve=True),
+    )
+    agent = config[environment.agent_server.name].responses_api_agents.hermes_agent
+    assert agent.num_workers == 1
+    assert agent.resources_server.name == environment.resources_server.name
+    assert agent.model_server.name == "policy_model"
+    assert config[environment.resources_server.name].resources_servers.swebench_pro.allowed_agents == ["hermes_agent"]
