@@ -411,7 +411,8 @@ def _build_router_command(
         f" --decode-policy {shlex.quote(router.decode_policy)}"
         " --vllm-pd-disaggregation"
         f"{endpoints}"
-        f" --host $(hostname)"
+        # All interfaces: the driver and the health probe reach it over localhost.
+        " --host 0.0.0.0"
         f" --port {router.port}"
         f" --intra-node-data-parallel-size {router.intra_node_data_parallel_size}"
         f" --request-timeout-secs {router.request_timeout_secs}"
