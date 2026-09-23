@@ -1,0 +1,25 @@
+# Chain to the ToolAlignBench resources server config, which defines the verifier and the harness.
+config_paths:
+  - resources_servers/toolalignbench/configs/toolalignbench.yaml
+
+# `_inherit_from` isolates this benchmark's wiring, so the overrides below don't leak into other
+# consumers of the toolalignbench server.
+toolalignbench_benchmark_resources_server:
+  _inherit_from: toolalignbench
+
+toolalignbench_benchmark_agent:
+  _inherit_from: toolalignbench_agent
+  responses_api_agents:
+    toolalignbench_agent:
+      resources_server:
+        name: toolalignbench_benchmark_resources_server
+      datasets:
+      - name: toolalignbench
+        type: benchmark
+        jsonl_fpath: benchmarks/toolalignbench/data/toolalignbench_benchmark.jsonl
+        prepare_script: benchmarks/toolalignbench/prepare.py
+        prompt_config: benchmarks/toolalignbench/prompts/default.yaml
+        # Upstream runs 5 repeats per episode (TEST_RUNS_PER_MODEL).
+        num_repeats: 5
+        # Benchmark documents are CC BY 4.0 per the upstream dataset card; the code is MIT.
+        license: CC-BY-4.0
