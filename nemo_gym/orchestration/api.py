@@ -80,6 +80,12 @@ class BaseServiceConfig(_StrictModel):
     container: str
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
+    # Name of a node pool in the placed compute's `node_pools`. Pins this service to
+    # that pool's slice of the allocation instead of letting it land wherever srun
+    # starts, which is how two services get nodes of their own -- a scorer or judge
+    # that cannot share a GPU with the policy, or a prefill/decode split. Pools take
+    # contiguous node ranges in declaration order. None means the whole allocation.
+    node_pool: str | None = None
     health_check: HealthCheckConfig | None = None
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -152,6 +158,28 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
 
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
+    # "head" starts a cluster; "worker" joins the one at `address`. A worker is how a
+    # second node joins the driver's Ray cluster and offers its GPUs to actors the
+    # benchmark schedules (e.g. a scorer that runs off the policy's node).
+    mode: Literal["head", "worker"] = "head"
+    # Required for mode="worker": the head's host:port.
+    address: str | None = None
+    # Head only; ignored by a worker, which takes the port from `address`.
+    port: int = 6379
+    # Custom Ray resources this node advertises, e.g. {"extra_gpu": 4}. A benchmark
+    # asks for these by name rather than by num_gpus when it manages device placement
+    # itself.
+    resources: dict[str, float] = {}
+    num_cpus: int | None = None
+    num_gpus: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "RayServiceConfig":
+        if self.mode == "worker" and not self.address:
+            raise ValueError("A ray service with mode='worker' needs `address` set to the head's host:port.")
+        if self.mode == "head" and self.address:
+            raise ValueError("A ray service with mode='head' starts its own cluster; remove `address`.")
+        return self
 
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
@@ -256,12 +284,8 @@ class SubmitConfig(_StrictModel):
         total_nodes = (
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
-        is_multi_node = total_nodes > 1
-        gpus_per_node_values = (
-            [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
-            if isinstance(compute, SlurmComputeConfig)
-            else []
-        )
+
+        pool_names = set(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else set()
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -272,25 +296,42 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if service.node_pool is not None and service.node_pool not in pool_names:
+                raise ValueError(
+                    f"Service '{service_name}' node_pool '{service.node_pool}' does not match any node pool of "
+                    f"compute '{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
+                )
+
             if not isinstance(service, VllmServiceConfig):
                 continue
 
-            is_ray_serve = effective_ray_serve(service, total_nodes, gpus_per_node_values)
+            # A pinned service is sized against its own pool, not the whole job: one node of a
+            # ten-node allocation is a single-node deployment with that pool's GPUs, and judging
+            # it by the allocation total both mis-builds the command and mis-reports idle GPUs.
+            service_pools = (
+                {service.node_pool: compute.node_pools[service.node_pool]}
+                if service.node_pool is not None and isinstance(compute, SlurmComputeConfig)
+                else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
+            )
+            service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
+            service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+
+            is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
 
             if (
-                is_multi_node
+                service_nodes > 1
                 and service.number_of_instances > 1
-                and service.number_of_instances % total_nodes != 0
+                and service.number_of_instances % service_nodes != 0
                 and not is_ray_serve
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
-                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
+                    f"be evenly divisible by the number of nodes ({service_nodes}) for multi-node data-parallel "
                     "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
             self._validate_vllm_gpu_footprint(
-                service_name, service, total_nodes, compute, gpus_per_node_values, is_ray_serve
+                service_name, service, service_nodes, service_pools, service_gpus, is_ray_serve
             )
 
         if self.driver.policy_model is not None:
@@ -322,7 +363,7 @@ class SubmitConfig(_StrictModel):
         service_name: str,
         service: "VllmServiceConfig",
         total_nodes: int,
-        compute: "SlurmComputeConfig",
+        node_pools: dict[str, "NodePool"],
         gpus_per_node_values: list[int],
         is_ray_serve: bool,
     ) -> None:
@@ -335,9 +376,7 @@ class SubmitConfig(_StrictModel):
         if total_nodes > 1 and is_ray_serve:
             # Ray Serve's placement-group scheduler packs the aggregate footprint across the cluster.
             gpus_needed = tp_pp * service.number_of_instances
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size} x "
@@ -360,9 +399,7 @@ class SubmitConfig(_StrictModel):
         elif total_nodes > 1:
             # Single instance's TP/PP footprint spans the whole allocation via the ray backend.
             gpus_needed = tp_pp
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size}"
