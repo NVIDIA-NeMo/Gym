@@ -17,7 +17,7 @@ from nemo_gym.base_environment_server import BaseEnvironmentServer
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from resources_servers.usersim.types import UserSimEpisodeRequest, UserSimTaskInput
+from resources_servers.usersim.episode_contracts import UserSimEpisodeRequest, UserSimTaskInput
 
 
 class _Cookie:
