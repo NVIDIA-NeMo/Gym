@@ -29,6 +29,16 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors.otel import (
+    COLLECTOR_HEALTH_PORT,
+    COLLECTOR_SERVICE_NAME,
+    FINAL_SCRAPE_GRACE_SECONDS,
+    GYM_TELEMETRY_EXTRA,
+    SHUTDOWN_WAIT_SECONDS,
+    collector_config_path,
+    driver_telemetry_env,
+    otel_active,
+)
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -116,18 +126,25 @@ def _resolve_env(env: dict[str, str]) -> str:
 
 def _render_service_command(
     name: str,
-    container: str,
+    container: str | None,
     command: str,
     env: dict[str, str] | None = None,
     mounts: list[str] | None = None,
     nodes: int | None = None,
     ntasks: int | None = None,
     pre_command: str = "",
+    workdir: str | None = None,
+    single_node: bool = False,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
-    node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
+    if single_node:
+        # Pin to one node of a multi-node allocation; without it srun fans the step out to every node.
+        node_flags = " --nodes=1 --ntasks=1"
+    else:
+        node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
+    workdir_flag = f" --container-workdir={shlex.quote(workdir)}" if workdir else ""
     if pre_command:
         # Wrapped in one shell so export/unset statements in pre_command are
         # visible to the exec'd command; shlex.quote keeps the whole thing one
@@ -137,9 +154,15 @@ def _render_service_command(
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
+    # Without a container the command runs directly on the node: no image, mounts or workdir flags.
+    container_flags = (
+        f" --no-container-mount-home{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)}"
+        if container is not None
+        else ""
+    )
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -323,6 +346,65 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
+def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool) -> str:
+    """The collector's srun step. Started before the model services so the scrape covers their
+    startup.
+
+    Runs on exactly one node, the batch host. That is the first node of the allocation, which is
+    also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
+    so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
+    container the job directory is mounted for the config and the local `otel/*.jsonl` output; on
+    the node it is simply there, so no mounts or workdir are passed.
+    """
+    obs = config.otel
+    command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
+    container_kwargs = (
+        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
+        if obs.container is not None
+        else {}
+    )
+    return _render_service_command(
+        COLLECTOR_SERVICE_NAME,
+        obs.container,
+        command,
+        env={
+            obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}",
+            "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
+        },
+        single_node=is_multi_node,
+        **container_kwargs,
+    )
+
+
+def _render_collector_health_check(config: SubmitConfig) -> str:
+    return render_health_check(
+        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.otel.health_check_timeout_seconds
+    )
+
+
+def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> str:
+    """Run after the driver: one more scrape interval so the final counters are seen, then a
+    graceful stop, keeping the driver's exit code.
+
+    The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
+    `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
+    interrupt; neither reaches the collector, so its final batch would be lost.
+    """
+    pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
+    # Anchored to the binary: the srun that launched it carries the same `--config <path>` on its
+    # own command line, and a TERM to srun makes Slurm kill the step before the flush completes.
+    binary = re.escape(config.otel.binary)
+    pattern = shlex.quote(f"^{binary} --config {re.escape(str(collector_config_path(remote_bench_dir)))}")
+    return (
+        "DRIVER_RC=$?\n"
+        f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
+        f'pkill -TERM -u "$USER" -f -- {pattern} || true\n'
+        f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
+        f"kill -TERM {pid} 2>/dev/null || true\n"
+        "exit $DRIVER_RC"
+    )
+
+
 def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
     total_ntasks = sum(pool.nodes * pool.ntasks_per_node for pool in compute.node_pools.values())
@@ -365,29 +447,37 @@ def build_sbatch_script(
         else ""
     )
 
+    observed = otel_active(config)
+
     service_commands = "\n\n".join(
-        _render_service_command(
-            name,
-            service.container,
-            _build_service_command(service, total_nodes, gpus_per_node_values),
-            service.env or None,
-            service.mounts or None,
-            # Only services that actually span multiple nodes need the whole allocation's --nodes/
-            # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
-            # on a single node regardless of how many nodes the overall job spans).
-            nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-            ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-            pre_command=service.pre_command,
-        )
-        for name, service in config.services.items()
+        ([_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node)] if observed else [])
+        + [
+            _render_service_command(
+                name,
+                service.container,
+                _build_service_command(service, total_nodes, gpus_per_node_values),
+                service.env or None,
+                service.mounts or None,
+                # Only services that actually span multiple nodes need the whole allocation's --nodes/
+                # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
+                # on a single node regardless of how many nodes the overall job spans).
+                nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+                ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+                pre_command=service.pre_command,
+            )
+            for name, service in config.services.items()
+        ]
     )
 
     health_checks = "\n\n".join(
-        render_health_check(
-            name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
-        )
-        for name, service in config.services.items()
-        if service.health_check
+        ([_render_collector_health_check(config)] if observed else [])
+        + [
+            render_health_check(
+                name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
+            )
+            for name, service in config.services.items()
+            if service.health_check
+        ]
     )
 
     gi = config.driver.gym_install
@@ -411,9 +501,24 @@ def build_sbatch_script(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
+        extras=(GYM_TELEMETRY_EXTRA,) if observed else (),
     )
     prepare_command = ""
-    driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
+    # Gym's own Lens instrumentation is switched on through the driver's environment and pointed
+    # at the collector; anything the config sets explicitly wins.
+    driver_env = (
+        {
+            **driver_telemetry_env(
+                remote_bench_dir.parent.name,
+                config.otel.gym_span_groups,
+                logs=config.otel.gym_logs,
+            ),
+            **config.driver.env,
+        }
+        if observed
+        else config.driver.env
+    )
+    driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
     # The driver writes everything relative to the job directory -- `output_path`
     # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
@@ -432,6 +537,8 @@ def build_sbatch_script(
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
+    if observed:
+        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

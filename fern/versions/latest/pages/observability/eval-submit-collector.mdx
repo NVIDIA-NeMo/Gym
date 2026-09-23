@@ -1,0 +1,79 @@
+---
+title: "Collector for Submitted Jobs"
+description: "gym eval submit runs an OpenTelemetry Collector beside every benchmark job."
+position: 9
+---
+
+`gym eval submit` adds an OpenTelemetry Collector to every benchmark job it renders. The collector
+scrapes the model services' Prometheus metrics, receives OTLP from anything in the job, stamps a
+per-run identity on the data, and ships it to the OTLP/HTTP endpoint the deployment configures.
+It is on by default and needs three site-specific values.
+
+## Configure
+
+```yaml
+otel:
+  enabled: true                       # default
+  endpoint: https://otlp.example.com  # OTLP/HTTP ingest; required when enabled
+  service_name: my-eval-service       # service.name resource attribute the backend routes by; required
+  token_env: OTEL_TOKEN      # env var in the submitting shell holding the bearer token
+  binary: /shared/otelcol-contrib     # static collector binary reachable on the compute nodes
+  container: null                     # optional image instead of the host binary
+  component: gym-vllm                 # display name for the scraped engine metrics
+  gym_span_groups: default,verify     # Gym span groups switched on in the job (add `sandbox` for sandboxed benchmarks)
+  gym_logs: true                      # ship Gym's Python logging as OTel logs too
+  gpu_metrics_port: 9400              # dcgm-exporter on the node; null to skip
+  node_metrics_port: 9100             # node_exporter on the node; null to skip
+  scrape_interval_seconds: 15
+  health_check_timeout_seconds: 300
+```
+
+The block is named `otel` because it configures the OpenTelemetry Collector only; Gym's rollout
+evidence (`observability_enabled`) and the in-process SDK (`telemetry.enabled`, `NEMO_GYM_OTEL_*`)
+are separate settings. A deployment usually puts `endpoint`, `service_name`, `token_env` and `binary` in a shared cluster
+fragment; user configs rarely need to mention the block. Set `enabled: false` to opt a run out. A job
+without a model service still gets a collector, because Gym's own servers produce telemetry.
+
+The submit fails before staging anything when `enabled` is true and `endpoint` or `service_name` is
+unset, or when the token variable is missing from the submitting shell. The error names the key to set.
+
+## What runs
+
+The collector is the first `srun --overlap` step of the sbatch script and must answer its health
+check before the services start. By default it runs as a host process from `binary`; the upstream
+collector image is distroless and cannot start under enroot, so use `container` only with an image
+that has a shell.
+
+The driver is installed with the `telemetry` extra and started with the environment that switches
+Gym's Lens instrumentation on and points it at the collector (`NEMO_GYM_OTEL_ENABLED`,
+`NEMO_GYM_OTEL_RUN_ID` set to the gym job id, `NEMO_GYM_OTEL_SPAN_GROUPS`, `NEMO_GYM_OTEL_LOGS_ENABLED`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`). Every Gym server the driver starts inherits it, so one trace spans the
+agent, model and resources servers of a rollout. An explicit value in `driver.env` wins.
+
+After the driver exits, the script waits one scrape interval so the final counters are collected,
+signals the collector process (not its `srun`), waits for a clean shutdown, and exits with the
+driver's return code.
+
+## What is exported
+
+| Source | How | Notes |
+| --- | --- | --- |
+| Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics` | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive |
+| `dcgm-exporter`, `node_exporter` | Prometheus scrape on the node when the ports are set | per-GPU activity, memory and power; CPU, memory, network |
+| Gym's servers (nemo-lens) | OTLP on `localhost:4317` (gRPC) and `:4318` (HTTP) | `gym.rollout.duration_ms`, `gym.verify.*`, FastAPI request metrics, one trace per rollout, log records with trace ids; see [Metrics](/main/observability/metrics) and [Span Groups](/main/observability/span-groups) |
+| Spans, as metrics | `span_metrics` connector | every span becomes a duration histogram and a call counter (`traces_span_metrics_*`) keyed by span name, producer and, for sandboxes, provider, so sandbox start/exec latency and error rates need no metric of their own |
+
+Every batch carries resource attributes the dashboards filter on: `user`, `run_id` (the gym job id),
+`slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity
+and `service.name.override` to the producer's display name: each Gym server keeps its own name
+(`nemo-gym/<server>`) and the scraped engine carries `component`.
+
+Everything exported is also written to `<job dir>/otel/{metrics,traces,logs}.jsonl`, so a run can be
+inspected without backend access. The rendered collector configuration is at
+`<job dir>/otel/collector.yaml`; `gym eval submit --resolve-only` prints it without submitting.
+
+## The token
+
+The bearer token is read from the submitting shell, exported into the remote shell that runs
+`sbatch`, and referenced from the collector configuration as `${env:<token_env>}`. It is not written
+to the job directory, the sbatch script or the resolved config.
