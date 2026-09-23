@@ -21,9 +21,11 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict
@@ -372,14 +374,28 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def _extract_model_patch(self, session_id: str, base_commit: str) -> str:
         original_sandbox = self._session_id_to_sandbox[session_id]
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
+        patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
             result = await original_sandbox.exec(
-                f"git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                f" > {quote(patch_path)}"
             )
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "git diff failed")
-            return drop_patch_sections(result.stdout or "", pristine_untracked)
+            # Exec logs may omit line terminators, corrupting a valid diff. File
+            # transfer also preserves CRLF within hunks and no-newline markers.
+            with TemporaryDirectory(prefix="nemo-gym-swebench-pro-") as directory:
+                local_patch = Path(directory) / "model.diff"
+                await original_sandbox.download(patch_path, local_patch)
+                patch = local_patch.read_bytes().decode("utf-8", errors="replace")
+            return drop_patch_sections(patch, pristine_untracked)
         finally:
+            try:
+                cleanup = await original_sandbox.exec(f"rm -f -- {quote(patch_path)}")
+                if cleanup.return_code != 0:
+                    print(f"Failed to remove agent patch file: {cleanup.stderr}", file=sys.stderr)
+            except Exception:
+                print("Failed to remove agent patch file", format_exc(), file=sys.stderr)
             try:
                 await original_sandbox.stop()
             except Exception:
