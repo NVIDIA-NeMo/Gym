@@ -714,6 +714,8 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
     assert not agent._closed_sandbox_sessions
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
     with pytest.raises(HTTPException) as stale_seed:
         await agent.seed_agent_session(request, seed())
     assert stale_seed.value.status_code == 409
@@ -774,7 +776,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     clock[0] += agent.config.session_close_retry_window_seconds
     request.session.clear()
-    await agent.seed_agent_session(request, seed())
+    await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "fresh-session"}))
     assert not agent._closed_sandbox_sessions
 
 
@@ -937,6 +939,12 @@ async def test_malformed_session_markers_cannot_fall_back_to_host(setup, marker)
             await agent.run(request, CodexAgentRunRequest(responses_create_params={"input": "task"}))
         assert error.value.status_code == 409
         legacy.assert_not_awaited()
+    with pytest.raises(HTTPException) as error:
+        await agent.seed_agent_session(request, seed())
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException) as error:
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seed().agent_session_id)))
+    assert error.value.status_code == 409
     sandbox.pty.create.assert_not_awaited()
 
 
@@ -1051,12 +1059,14 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
 
 async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
     agent, sandbox = setup
+    agent.config.session_lifetime_seconds = 20
     clock = [100.0]
     monkeypatch.setattr("responses_api_agents.codex_agent.app.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     body = seed()
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
-    receipt = await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
+    stale_request = Request({"type": "http", "session": {}})
+    receipt = await agent.close_agent_session(stale_request, close)
     assert receipt.agent_session_id == body.agent_session_id
     with pytest.raises(HTTPException) as error:
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
@@ -1065,7 +1075,18 @@ async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
     clock[0] = 110.0
     agent._expire_closed_agent_sessions()
     assert not agent._closed_sandbox_sessions
+    with pytest.raises(HTTPException, match="already closed"):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
+    clock[0] = 120.0
+    agent._expire_closed_agent_sessions()
+    assert not agent._closed_sandbox_session_ids
     assert not agent._session_locks
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(stale_request, close)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.seed_agent_session(stale_request, body)
 
 
 async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):
