@@ -12,10 +12,10 @@ user_policy_api_key: ${policy_api_key}
 user_policy_model_name: ${policy_model_name}
 user_policy_uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
 
-judge_policy_base_url: ${policy_base_url}
-judge_policy_api_key: ${policy_api_key}
-judge_policy_model_name: ${policy_model_name}
-judge_policy_uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
+judge_base_url: ${policy_base_url}
+judge_api_key: ${policy_api_key}
+judge_model_name: ${policy_model_name}
+judge_uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
 
 summary_policy_base_url: ${policy_base_url}
 summary_policy_api_key: ${policy_api_key}
@@ -47,14 +47,14 @@ user_policy_model:
       uses_reasoning_parser: ${user_policy_uses_reasoning_parser}
       return_token_id_information: false
 
-judge_policy_model:
+judge_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${judge_policy_base_url}
-      api_key: ${judge_policy_api_key}
-      model: ${judge_policy_model_name}
-      uses_reasoning_parser: ${judge_policy_uses_reasoning_parser}
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      uses_reasoning_parser: ${judge_uses_reasoning_parser}
       return_token_id_information: false
 
 summary_policy_model:
@@ -92,7 +92,7 @@ usersim:
         name: tool_simulation_model
       probe_scorer_model:
         type: responses_api_models
-        name: judge_policy_model
+        name: judge_model
       personas_locales:
       - en_US
       probe_mix:
@@ -145,7 +145,7 @@ usersim_judge:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: judge_policy_model
+        name: judge_model
       resources_server:
         type: resources_servers
         name: usersim
