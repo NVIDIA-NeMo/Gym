@@ -41,7 +41,7 @@ COLLECTOR_CONFIG_NAME = "collector.yaml"
 COLLECTOR_HEALTH_PORT = 13133
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
-# Gym's optional-dependency group that brings nemo-lens; installed in the driver when observability
+# Gym's optional-dependency group that brings nemo-lens; installed in the driver when the collector
 # is active so Gym's own servers emit into the collector.
 GYM_TELEMETRY_EXTRA = "telemetry"
 

@@ -510,8 +510,8 @@ def build_sbatch_script(
         {
             **driver_telemetry_env(
                 remote_bench_dir.parent.name,
-                config.observability.gym_span_groups,
-                logs=config.observability.gym_logs,
+                config.otel.gym_span_groups,
+                logs=config.otel.gym_logs,
             ),
             **config.driver.env,
         }

@@ -125,7 +125,7 @@ def _submit_config(tmp_path, benchmarks):
             "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
             "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
             "job": {"output_path": str(tmp_path / "jobs")},
-            "observability": {"enabled": False},
+            "otel": {"enabled": False},
         }
     )
 
