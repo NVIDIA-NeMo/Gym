@@ -427,6 +427,51 @@ async def test_worker_service_request_is_routed_through_coordinator(
         await coordinator.stop()
 
 
+@pytest.mark.asyncio
+async def test_service_reply_is_not_blocked_by_checkpoint_state_application(
+    sock_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker socket reader must stay live while its cut is in progress."""
+    entered_cut = asyncio.Event()
+    finish_cut = asyncio.Event()
+
+    async def handle(worker_id: str, operation: str, payload: dict):
+        del worker_id, operation, payload
+        return {"claimed": True}
+
+    limiter = AdmissionLimiter()
+
+    async def blocked_prepare(*args, **kwargs):
+        del args, kwargs
+        entered_cut.set()
+        await finish_cut.wait()
+        return True
+
+    monkeypatch.setattr(limiter, "prepare_generation_cut", blocked_prepare)
+    coordinator = AdmissionCoordinator(
+        sock_dir / "control.sock",
+        expected_workers=1,
+        service_handler=handle,
+    )
+    await coordinator.start()
+    agent = WorkerAdmissionAgent(coordinator.socket_path, "worker-1", limiter)
+    try:
+        await agent.start()
+        await coordinator.close_admission("ckpt-1")
+        await asyncio.wait_for(entered_cut.wait(), timeout=1.0)
+
+        result = await asyncio.wait_for(
+            agent.service_client().request("claim_generation_cut", {}),
+            timeout=0.5,
+        )
+        assert result == {"claimed": True}
+    finally:
+        finish_cut.set()
+        await agent.stop()
+        await coordinator.stop()
+
+
 @pytest.mark.parametrize("interruption", ["timeout", "cancel"])
 @pytest.mark.asyncio
 async def test_interrupted_cut_claim_is_released_while_worker_stays_connected(
