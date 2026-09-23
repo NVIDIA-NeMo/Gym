@@ -31,7 +31,11 @@ say.
 | `benign_utility` | clean selectors |
 | `utility_under_attack` | attacked selectors |
 | `attack_success_rate` | attacked selectors |
-| `scored_rollout_count`, `masked_rollout_count` | all |
+| `scored_rollout_count`, `masked_rollout_count` | all rows the agent is given |
+
+Under `gym eval run` and `gym eval aggregate`, Gym removes masked rows before calling the agent's metrics and reports
+them itself as `coverage/masked_rollouts` and `coverage/measured_rollouts`; read the masked count there, since
+`agentdyn/masked_rollout_count` is 0 on that path. The rates agree either way.
 
 **Masked rollouts leave the denominator.** A rollout is masked (`mask_sample: true`) when the adapter could not
 obtain a result: the model server failed the request, the upstream pipeline raised, or the rollout exceeded

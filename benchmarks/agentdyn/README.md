@@ -42,8 +42,8 @@ gym env start --benchmark agentdyn --model-type vllm_model \
 ```
 
 Read `agentdyn/benign_utility`, `agentdyn/utility_under_attack` and `agentdyn/attack_success_rate` from the aggregate
-metrics. They are computed after masked rollouts leave the denominator; `agentdyn/masked_rollout_count` says how many
-did.
+metrics. They are computed after masked rollouts leave the denominator; Gym's `coverage/masked_rollouts` says how many
+did. (Gym removes masked rows before the agent's own metrics run, so `agentdyn/masked_rollout_count` reads 0 there.)
 
 Two operational notes:
 
