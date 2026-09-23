@@ -226,7 +226,7 @@ class _ConversationBridge:
         tools: Sequence[Any] | None,
     ) -> SimpleNamespace:
         role = _INVOCATION_ROLE_BY_ALIAS[alias]
-        base_params = self.task.agent_responses_create_params.get(role)
+        base_params = self.task.responses_create_params.get(role)
         if base_params is None:
             base_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
         values = base_params.model_dump(mode="json", exclude_none=True)
