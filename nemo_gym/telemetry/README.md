@@ -42,6 +42,7 @@ hole in the middle of a distributed trace.
 | `setup.py` | Lifecycle: `configure_telemetry_env` (orchestrator), `init_telemetry` (per server process), `get_telemetry`, `shutdown_telemetry`. |
 | `span_groups.py` | `GymSpanGroup` — Gym's groups and the `default` / `per_rollout` / `all` presets. |
 | `metrics.py` | Wrapper over nemo-lens's `gym.*` instruments, with a stated position on each. |
+| `memory.py` | Centralized host and logical-server process-tree memory sampling. |
 | `_fallbacks.py` | The single import point for instrumentation primitives. |
 
 ## Two rules worth knowing before you edit
@@ -83,6 +84,8 @@ nemo-lens's `record_gym_metrics` records **without attributes** at the pinned co
 would merge every endpoint of every server type into one histogram. The FastAPI
 instrumentor's `http.server.request.duration`, dimensioned by route/method/status, is used
 instead. `gym.servers.active` is a gauge and is written by the orchestrator only.
+
+Memory metrics are Gym-owned because nemo-lens has no instrument for a logical server and all of its descendants. The orchestrator owns the server root PIDs, so one sampler can report stable per-server RSS/PSS alongside host-wide capacity and pressure.
 
 Reward and accuracy numbers do **not** belong here. They are experiment telemetry (W&B's
 job), not application telemetry — see
