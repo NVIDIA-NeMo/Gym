@@ -96,25 +96,25 @@ policy_model:
       num_workers: 16
 
 # TODO @bxyu-nvidia: Remove these overrides to turn on various benchmarks after we do batched eval studies. This is a placeholder for container build.
-swebench_verified_opencode_sandboxed_agent:
+swebench_verified_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
-swebench_multilingual_opencode_sandboxed_agent:
+swebench_multilingual_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
-deepswe_opencode_sandboxed_agent:
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
 terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
     terminus_2_sandboxed_agent:
       datasets: []
-swebench_pro_opencode_sandboxed_agent:
+swebench_pro_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
 
 ########################################

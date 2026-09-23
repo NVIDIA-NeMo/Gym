@@ -305,7 +305,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            "responses_api_agents.opencode_agent.legacy.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
 
@@ -320,7 +320,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            "responses_api_agents.opencode_agent.legacy.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(
@@ -339,7 +339,7 @@ class TestSandboxModelUrl:
         """sandbox_model_base_url is for providers whose boxes have their own address."""
         agent = make_agent(tmp_path, sandbox_model_base_url="http://sandbox-gw:7000/v1")
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            "responses_api_agents.opencode_agent.legacy.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(type(agent), "base_url_for_run", lambda self, base_url, body: f"{base_url}/ng-rollout/xyz")
@@ -353,7 +353,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            "responses_api_agents.opencode_agent.legacy.get_server_url",
             lambda name: "http://10.0.0.5:9000",
         )
 
@@ -366,9 +366,9 @@ class TestSandboxModelUrl:
         means the URL rewrite silently never runs and the harness talks to itself."""
         import inspect
 
-        from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
+        from responses_api_agents.opencode_agent.legacy import LegacyOpenCodeAgent
 
         mine = inspect.signature(VibenchAgent._create_opencode_config)
-        base = inspect.signature(OpenCodeSandboxedAgent._create_opencode_config)
+        base = inspect.signature(LegacyOpenCodeAgent._create_opencode_config)
         assert list(mine.parameters) == list(base.parameters)
         assert inspect.iscoroutinefunction(VibenchAgent._create_opencode_config)

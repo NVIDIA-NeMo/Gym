@@ -70,9 +70,8 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
-    with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
-        agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    agent._local_runtime_ready = True
     return agent
 
 
@@ -546,10 +545,11 @@ class TestConfigYaml:
         compile(app_path.read_text(), str(app_path), "exec")
 
     def test_config_yaml_parses(self) -> None:
-        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_local_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "opencode"
+        assert inner["execution_mode"] == "local"

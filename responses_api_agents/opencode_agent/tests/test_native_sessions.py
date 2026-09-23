@@ -18,8 +18,8 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
-from responses_api_agents.opencode_sandboxed_agent.sandbox import OpenCodeSandboxResult
+from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxResult
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -128,8 +128,9 @@ def setup():
         {"policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}}
     )
     client._build_server_base_url.return_value = "http://model.example:9000"
-    config = OpenCodeSandboxedAgentConfig(
-        name="pi",
+    config = OpenCodeAgentConfig(
+        name="opencode",
+        execution_mode="sandbox",
         host="localhost",
         port=8001,
         entrypoint="app.py",
@@ -139,18 +140,19 @@ def setup():
         resources_server={"type": "resources_servers", "name": "resources"},
         sandbox_provider="unused",
         sandbox_config={},
-        sandbox_timeout=30,
-        opencode_max_context_window=32000,
+        timeout=30,
+        context_window=32000,
         session_close_timeout_seconds=1,
     )
-    module = "responses_api_agents.opencode_sandboxed_agent.app"
+    module = "responses_api_agents.opencode_agent.app"
     with (
+        patch(f"{module}.ensure_opencode", side_effect=AssertionError("Native sessions must not install on the host")),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
         patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
     ):
-        agent = OpenCodeSandboxedAgent(config=config, server_client=client)
+        agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
 
 
@@ -343,7 +345,7 @@ def test_instructions_and_text_parts_reach_opencode(setup):
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.monotonic", lambda: 100.0)
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -372,7 +374,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -394,7 +396,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -435,7 +437,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -448,7 +450,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
 def test_close_retry_window_must_be_positive_and_finite(setup, window):
     agent, _ = setup
     with pytest.raises(ValidationError):
-        OpenCodeSandboxedAgentConfig(**(agent.config.model_dump() | {"session_close_retry_window_seconds": window}))
+        OpenCodeAgentConfig(**(agent.config.model_dump() | {"session_close_retry_window_seconds": window}))
 
 
 async def test_unknown_launch_outcome_fails_closed(setup):
@@ -510,13 +512,13 @@ def test_native_usage_restores_cached_and_reasoning_tokens_across_subagents():
             {"role": "user"},
         ]
     }
-    usage = OpenCodeSandboxedAgent._native_usage(export)
+    usage = OpenCodeAgent._native_usage(export)
     assert usage.input_tokens == 24
     assert usage.output_tokens == 11
     assert usage.total_tokens == 35
     assert usage.input_tokens_details.cached_tokens == 6
     assert usage.output_tokens_details.reasoning_tokens == 3
-    assert OpenCodeSandboxedAgent._native_usage({"messages": []}) is None
+    assert OpenCodeAgent._native_usage({"messages": []}) is None
 
 
 @pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
@@ -733,12 +735,12 @@ async def test_resolved_workdir_check_runs_before_session_files_are_created(setu
 
 @pytest.mark.parametrize("marker", [None, "", [], {}, 0, "closed-session"])
 async def test_native_markers_block_legacy_run_and_responses(setup, marker):
-    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentRunRequest
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentRunRequest
 
     agent, sandbox = setup
     request = Request({"type": "http", "session": {"nemo_gym_opencode_native_session": marker}})
     with pytest.raises(HTTPException) as error:
-        await agent.run(request, OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": "task"}))
+        await agent.run(request, OpenCodeAgentRunRequest(responses_create_params={"input": "task"}))
     assert error.value.status_code == 409
     with pytest.raises(HTTPException) as error:
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
