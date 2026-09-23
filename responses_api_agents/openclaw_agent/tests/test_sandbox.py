@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,7 +18,7 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig
+from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxResult
 
 
@@ -223,6 +224,9 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
             observations = closed.json()["agent_observations"]
             assert observations["source"] == "openclaw"
             assert "no_sandbox_runtime" not in [gap["code"] for gap in observations["gaps"]]
+            # Interrupted auxiliary calls need not persist a compaction event,
+            # so a plain transcript cannot establish full usage coverage either.
+            assert "auxiliary_model_usage_unavailable" in [gap["code"] for gap in observations["gaps"]]
             assert len(observations["records"][0]["model_calls"]) == 2
     assert not agent._sandbox_sessions
     assert agent._local_setup_task is None
@@ -685,6 +689,133 @@ def test_usage_sums_cache_writes_and_failed_calls(setup):
     assert response.json()["usage"]["input_tokens"] == 21
     assert response.json()["usage"]["output_tokens"] == 5
     assert response.json()["usage"]["total_tokens"] == 26
+
+
+def test_rewritten_transcript_and_cli_mirror_count_each_model_call_once(setup):
+    agent, sandbox = setup
+    # Scalar usage from the real Ansible run: eight main calls, three rewritten
+    # copies, then a CLI mirror of all main-call usage. Auxiliary compaction
+    # calls (2505 input / 839 output) are not represented in this transcript.
+    counters = [(4817, 27), (8072, 26), (10442, 27), (13697, 27), (9838, 26), (12208, 27), (15463, 27), (18718, 27)]
+    transcript = [
+        {
+            "type": "message",
+            "id": f"entry-{index}",
+            "parentId": f"entry-{index - 1}" if index else None,
+            "message": {
+                "role": "assistant",
+                "api": "openai-completions",
+                "responseId": f"call-{index}",
+                "content": [
+                    {"type": "toolCall", "id": f"tool-{index}", "name": "read", "arguments": {"path": "/app/a"}}
+                ],
+                "usage": {"input": input_tokens, "output": output_tokens, "cacheRead": 0, "cacheWrite": 0},
+                "stopReason": "toolUse",
+            },
+        }
+        for index, (input_tokens, output_tokens) in enumerate(counters)
+    ]
+    for index in (1, 2, 3):
+        rewritten = deepcopy(transcript[index])
+        rewritten["id"] = f"rewritten-{index}"
+        transcript.append(rewritten)
+    transcript.extend(
+        [
+            {
+                "type": "compaction",
+                "tokensBefore": 22737,
+                "summary": "Partial task history",
+                "firstKeptEntryId": "entry-0",
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "api": "openai-completions",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "Context overflow recovery exhausted",
+                    "usage": {"input": 0, "output": 0},
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "api": "cli",
+                    "content": [{"type": "text", "text": "Context overflow recovery exhausted"}],
+                    "stopReason": "stop",
+                    "usage": {"input": 93255, "output": 214, "cacheRead": 0, "cacheWrite": 0},
+                },
+            },
+        ]
+    )
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"]["message"] == "Context overflow recovery exhausted"
+        assert body["usage"]["input_tokens"] == 93255
+        assert body["usage"]["output_tokens"] == 214
+        assert body["usage"]["total_tokens"] == 93469
+        assert sum(item["type"] == "function_call" for item in body["output"]) == 11
+        assert body["output"][-1]["content"][0]["text"] == "Context overflow recovery exhausted"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    observations = closed.json()["agent_observations"]
+    invocation = observations["records"][0]
+    assert invocation["status"] == "failed"
+    assert len(invocation["model_calls"]) == 8
+    assert sum(item["type"] == "function_call" for item in invocation["conversation"]) == 11
+    assert any(record["kind"] == "context_compaction" for record in observations["records"])
+    gaps = {gap["code"] for gap in observations["gaps"]}
+    assert "auxiliary_model_usage_unavailable" in gaps
+    assert "agent_conversation_branching_unavailable" in gaps
+    assert "model_call_usage_identity_unavailable" in gaps
+
+
+@pytest.mark.parametrize("conflict", ["content", "usage"])
+def test_conflicting_response_id_usage_is_excluded_and_reported(setup, conflict):
+    agent, sandbox = setup
+    transcript = [json.loads(line) for line in events().splitlines()]
+    collision = deepcopy(transcript[0])
+    if conflict == "content":
+        collision["message"]["content"][0]["thinking"] = "Different call, same ID and usage"
+    else:
+        collision["message"]["usage"]["input"] += 1
+    transcript.insert(1, collision)
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["usage"]["input_tokens"] == 5
+        assert body["usage"]["output_tokens"] == 2
+        assert sum(item["type"] == "function_call" for item in body["output"]) == 2
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    gaps = closed.json()["agent_observations"]["gaps"]
+    assert any(gap["code"] == "model_call_usage_identity_ambiguous" and "call-1" in gap["detail"] for gap in gaps)
+
+
+@pytest.mark.parametrize("missing_id", [None, "", " ", 42])
+def test_missing_response_ids_do_not_deduplicate_distinct_calls(missing_id):
+    message = {"role": "assistant", "content": "Repeated output", "usage": {"input": 7, "output": 3}}
+    if missing_id is not None:
+        message["responseId"] = missing_id
+    messages = [message, deepcopy(message)]
+    before = deepcopy(messages)
+    selected, gaps = _unique_usage_messages(messages)
+    assert selected == messages
+    assert len(selected) == 2
+    assert sum(message["usage"]["input"] for message in selected) == 14
+    assert len(gaps) == 2
+    assert {gap.code for gap in gaps} == {"model_call_usage_identity_unavailable"}
+    assert messages == before
 
 
 async def test_two_sessions_keep_workspaces_model_routes_and_observations_separate(setup):

@@ -138,8 +138,15 @@ Native request support is deliberately explicit:
   local CLI behavior and configuration.
 
 Responses retain reasoning, tool calls/results, final or partial text, and terminal failure status.
-Usage sums all retained assistant model calls, including cache reads/writes and failed final calls;
-missing per-call usage and unavailable reasoning-token details are reported as observation gaps.
+Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
+Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
+messages carrying cumulative usage do not count again or override the model's terminal status.
+Conflicting messages with the same response ID are excluded with an accounting gap. Records without
+response IDs count separately with an identity gap, since their duplication cannot be established.
+Auxiliary model calls, such as compaction, are absent from the transcript. A coverage gap is always
+reported because interrupted compaction need not leave an event. Totals therefore need not equal
+all backend calls. Missing per-call usage and
+unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
 A timeout returns partial output as `incomplete`; model errors remain `failed` even when a useful
 patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.

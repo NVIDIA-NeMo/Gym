@@ -151,6 +151,39 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     }
 
 
+def _unique_usage_messages(
+    assistants: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[ObservationGap]]:
+    # OpenClaw rewrites transcript branches by appending the original messages
+    # again. Entry IDs change, but the provider response ID and message do not.
+    identified: dict[str, dict[str, Any]] = {}
+    ambiguous: set[str] = set()
+    unidentified = []
+    gaps = []
+    for message in assistants:
+        response_id = message.get("responseId")
+        if not isinstance(response_id, str) or not response_id.strip():
+            unidentified.append(message)
+            gaps.append(
+                ObservationGap(
+                    code="model_call_usage_identity_unavailable",
+                    detail="Usage counted per transcript record; missing response ID prevents rewrite deduplication",
+                )
+            )
+        elif response_id not in identified:
+            identified[response_id] = message
+        elif message != identified[response_id]:
+            ambiguous.add(response_id)
+    for response_id in sorted(ambiguous):
+        gaps.append(
+            ObservationGap(
+                code="model_call_usage_identity_ambiguous",
+                detail=f"Conflicting transcript messages for response ID {response_id}; usage excluded from totals",
+            )
+        )
+    return [message for key, message in identified.items() if key not in ambiguous] + unidentified, gaps
+
+
 def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input: bool = False) -> list[Any]:
     """Convert OpenClaw session events into Gym conversation items."""
     output_items: list[Any] = []
@@ -734,9 +767,23 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if event.get("type") == "message"
             and isinstance(event.get("message"), dict)
             and event["message"].get("role") == "assistant"
+            # The pinned CLI can append a synthetic final-text mirror with
+            # aggregate run usage and stopReason="stop". It is neither another
+            # model call nor evidence that the underlying call succeeded.
+            and event["message"].get("api") != "cli"
         ]
+        usage_messages, identity_gaps = _unique_usage_messages(assistants)
+        gaps.extend(identity_gaps)
+        # Auxiliary summarization can consume tokens and then abort before a
+        # compaction event is written, so absent events do not prove coverage.
+        gaps.append(
+            ObservationGap(
+                code="auxiliary_model_usage_unavailable",
+                detail="Transcript has no auxiliary-call usage counters; totals cover observed assistant calls only",
+            )
+        )
         input_tokens = output_tokens = cached_tokens = 0
-        for message in assistants:
+        for message in usage_messages:
             usage = message.get("usage")
             if not isinstance(usage, dict):
                 gaps.append(ObservationGap(code="model_call_usage_unavailable"))
@@ -754,8 +801,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 value = usage.get(name)
                 return value if type(value) is int and value >= 0 else 0
 
-            # OpenClaw/Pi input excludes cache reads and writes. Sum every
-            # assistant call, including failed final calls, rather than envelope last-call totals.
+            # OpenClaw/Pi input excludes cache reads and writes. Count distinct
+            # observed calls, including failed calls, without adding CLI aggregate mirrors.
             input_tokens += count("input") + count("cacheRead") + count("cacheWrite")
             output_tokens += count("output")
             cached_tokens += count("cacheRead")
