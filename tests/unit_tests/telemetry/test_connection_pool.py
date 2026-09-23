@@ -135,7 +135,7 @@ async def test_per_host_limit_records_queue_wait(traces, monkeypatch):
     assert len(queued) == 2
     assert all(span.attributes["nemo.gym.http.connection_pool.queue_events"] >= 1 for span in queued)
     assert all(span.attributes["nemo.gym.http.connection_pool.queue_duration_ms"] > 0 for span in queued)
-    assert all(span.attributes["nemo.gym.http.connection_pool.pressure"] == "unknown" for span in queued)
+    assert all(span.attributes["nemo.gym.http.connection_pool.pressure"] == "per_host" for span in queued)
 
 
 async def test_total_limit_records_queue_across_destinations(traces, monkeypatch):
@@ -160,8 +160,8 @@ async def test_cancelled_queue_wait_is_recorded(traces, monkeypatch):
     queue_started = asyncio.Event()
     original_queued = server_utils._ConnectionQueueTraceContext.queued
 
-    def queued_callback(context):
-        original_queued(context)
+    def queued_callback(context, pressure="unknown"):
+        original_queued(context, pressure)
         queue_started.set()
 
     monkeypatch.setattr(server_utils._ConnectionQueueTraceContext, "queued", queued_callback)
@@ -188,20 +188,79 @@ async def test_cancelled_queue_wait_is_recorded(traces, monkeypatch):
     assert cancelled_span.attributes["nemo.gym.http.connection_pool.queue_duration_ms"] > 0
 
 
-async def test_queue_telemetry_failure_does_not_change_response(traces, monkeypatch):
-    async def delayed(_request):
-        await asyncio.sleep(0.02)
-        return web.json_response({"ok": True})
+async def test_queue_telemetry_failure_is_swallowed_without_retrying(traces, monkeypatch):
+    """A raising telemetry hook must not alter the response, and must not cost an extra attempt.
 
+    The previous version of this test only counted CLIENT spans, which the pre-existing retry
+    loop produces either way; it passed with the whole feature reverted.
+    """
+    response = SimpleNamespace(status=200)
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs)
+        context = server_utils._CONNECTION_QUEUE_TRACE_CONTEXT.get()
+        context.queued("per_host")
+        return response
+
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=request))
     monkeypatch.setattr(
         server_utils._ConnectionQueueTraceContext,
-        "queued",
+        "released",
         lambda _self: (_ for _ in ()).throw(RuntimeError("telemetry failed")),
     )
-    async with _serve(delayed) as url, _client(monkeypatch, limit=1, limit_per_host=1):
-        await asyncio.gather(_get(url), _get(url))
 
-    assert len(_client_spans(traces)) == 2
+    actual = await server_utils.request("GET", "http://example.test/work")
+
+    assert actual is response
+    # The failure must be swallowed where it happens, not retried around.
+    assert len(calls) == 1
+    span = _client_spans(traces)[0]
+    assert span.attributes["http.response.status_code"] == 200
+
+
+async def test_total_limit_pressure_is_attributed(traces, monkeypatch):
+    """A wait caused by the aggregate limit is reported as `total`, not `per_host`."""
+    release = asyncio.Event()
+
+    async def blocked(_request):
+        await release.wait()
+        return web.json_response({"ok": True})
+
+    # limit_per_host far above limit, so only the aggregate limit can bind.
+    async with _serve(blocked) as url, _client(monkeypatch, limit=1, limit_per_host=50):
+        occupying = asyncio.create_task(_get(url))
+        await asyncio.sleep(0.05)
+        waiting = asyncio.create_task(_get(url))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(occupying, waiting)
+
+    queued = [s for s in _client_spans(traces) if s.attributes["nemo.gym.http.connection_pool.queued"]]
+    assert queued
+    assert all(s.attributes["nemo.gym.http.connection_pool.pressure"] == "total" for s in queued)
+
+
+async def test_attributes_are_omitted_when_callbacks_are_not_installed(traces, monkeypatch):
+    """An uninstrumented session must not claim `queued=False`, which is indistinguishable
+    from a genuinely unqueued request."""
+    response = SimpleNamespace(status=200)
+
+    async def request(**_kwargs):
+        return response
+
+    # A real ClientSession with no trace configs, unlike the SimpleNamespace doubles elsewhere.
+    session = ClientSession(connector=TCPConnector(limit=1), trace_configs=[])
+    session.request = request  # type: ignore[method-assign]
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+    try:
+        assert await server_utils.request("GET", "http://example.test/work") is response
+    finally:
+        await session.close()
+
+    span = _client_spans(traces)[0]
+    assert "nemo.gym.http.connection_pool.queued" not in span.attributes
+    assert "nemo.gym.http.connection_pool.pressure" not in span.attributes
 
 
 async def test_retries_share_one_span_and_accumulate_queue_waits(traces, monkeypatch):

@@ -17,6 +17,7 @@ import logging
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
@@ -625,6 +626,61 @@ class TestServerUtils:
         assert "intended per-worker concurrency 3 exceeds effective total limit 2" in caplog.text
         assert "intended per-host concurrency 2 exceeds effective per-host limit 1" in caplog.text
         assert "aggregate intended per-host concurrency 8" in caplog.text
+
+    def test_per_host_report_and_warning_respect_the_total_clamp(
+        self,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """aiohttp serves min(limit, limit_per_host), so a large per-host limit is not reachable.
+
+        Reporting the configured value instead of the enforced one hid real oversubscription:
+        with limit=64/workers=4 a host can only reach 16, however large limit_per_host is.
+        """
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=64,
+            global_aiohttp_connector_limit_per_host=1024,
+            global_aiohttp_intended_concurrency_per_host=1000,
+        )
+        capacity = _connection_pool_capacity(cfg, workers=4)
+        monkeypatch.setattr(nemo_gym.server_utils, "_ephemeral_port_capacity", lambda: None)
+        nemo_gym.server_utils._REPORTED_CONNECTION_POOL_CAPACITIES.clear()
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.server_utils"):
+            _report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        # effective_per_host is clamped to effective_total (16), not the configured 256.
+        assert "effective_per_host=16" in visible_report
+        assert "configured_per_host=256" in visible_report
+        assert "realized_aggregate_per_host=64" in visible_report
+        assert "intended per-host concurrency 250 exceeds effective per-host limit 16" in caplog.text
+
+    async def test_retry_cap_bounds_internal_callers(self, monkeypatch: MonkeyPatch) -> None:
+        """`_max_connection_retries` must bound the loop for internal callers too.
+
+        The attempt counter used to be incremented only for non-internal callers, so an internal
+        caller hitting repeated generic errors retried forever.
+        """
+        attempts = 0
+
+        async def request(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=request)
+        )
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        with raises(RuntimeError, match="boom"):
+            await nemo_gym.server_utils._request_with_retries(
+                "GET", "http://example.test/work", _internal=True, _max_connection_retries=3
+            )
+
+        assert 3 == attempts
 
     async def test_connection_pool_telemetry_is_not_installed_when_disabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)

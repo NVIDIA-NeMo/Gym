@@ -387,12 +387,16 @@ def _report_connection_pool_capacity(
 
     file_descriptors = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
     ephemeral_ports = _ephemeral_port_capacity()
+    # aiohttp's `_available_connections` returns min(total_remain, per_host_remain), so a single
+    # host can never exceed the total limit however large `limit_per_host` is configured.
+    enforced_per_host = min(total, per_host)
     capacity_message = (
         f"aiohttp connection pool capacity: workers={workers} "
         f"aggregate_total={cfg.global_aiohttp_connector_limit} "
         f"aggregate_per_host={cfg.global_aiohttp_connector_limit_per_host} "
-        f"effective_total={total} effective_per_host={per_host} "
-        f"realized_aggregate_total={total * workers} realized_aggregate_per_host={per_host * workers} "
+        f"effective_total={total} effective_per_host={enforced_per_host} "
+        f"configured_per_host={per_host} "
+        f"realized_aggregate_total={total * workers} realized_aggregate_per_host={enforced_per_host * workers} "
         f"intended_per_worker={intended} intended_per_host_per_worker={intended_per_host} "
         f"file_descriptor_soft_limit={file_descriptors} ephemeral_ports_per_destination={ephemeral_ports}"
     )
@@ -404,9 +408,9 @@ def _report_connection_pool_capacity(
     warnings = []
     if intended is not None and intended > total:
         warnings.append(f"intended per-worker concurrency {intended} exceeds effective total limit {total}")
-    if intended_per_host is not None and intended_per_host > per_host:
+    if intended_per_host is not None and intended_per_host > enforced_per_host:
         warnings.append(
-            f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {per_host}"
+            f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {enforced_per_host}"
         )
     if intended is not None and file_descriptors != resource.RLIM_INFINITY and intended >= file_descriptors:
         warnings.append(
@@ -439,11 +443,13 @@ class _ConnectionQueueTraceContext:
         self.started_at: Optional[float] = None
         self.duration_ms = 0.0
         self.count = 0
+        self.pressures: set[str] = set()
 
-    def queued(self) -> None:
+    def queued(self, pressure: str = "unknown") -> None:
         if self.started_at is not None:
             return
         self.started_at = time.perf_counter()
+        self.pressures.add(pressure)
 
     def released(self) -> None:
         if self.started_at is None:
@@ -452,6 +458,15 @@ class _ConnectionQueueTraceContext:
         self.count += 1
         self.started_at = None
         self.update_span()
+
+    def pressure(self) -> str:
+        """Which connector limit caused the waits, as a bounded enum."""
+        if not self.count:
+            return "none"
+        known = self.pressures - {"unknown"}
+        if len(known) > 1:
+            return "mixed"
+        return next(iter(known)) if known else "unknown"
 
     def update_span(self) -> None:
         if self.span is None:
@@ -462,8 +477,7 @@ class _ConnectionQueueTraceContext:
                 "nemo.gym.http.connection_pool.queued": self.count > 0,
                 "nemo.gym.http.connection_pool.queue_events": self.count,
                 "nemo.gym.http.connection_pool.queue_duration_ms": self.duration_ms,
-                # aiohttp's public queue callbacks do not expose which connector limit caused the wait.
-                "nemo.gym.http.connection_pool.pressure": "unknown" if self.count else "none",
+                "nemo.gym.http.connection_pool.pressure": self.pressure(),
             },
         )
 
@@ -473,30 +487,62 @@ _CONNECTION_QUEUE_TRACE_CONTEXT: ContextVar[Optional[_ConnectionQueueTraceContex
 )
 
 
+def _connector_pressure(session: Any) -> str:
+    """Classify which connector limit caused a queue wait.
+
+    aiohttp's queue callbacks carry no params, but the connector decides in
+    `BaseConnector._available_connections` that the *total* limit binds when no aggregate
+    slots remain, and the per-host limit otherwise. `limit` is public; `_acquired` is not,
+    so fall back to "unknown" if aiohttp's internals move.
+    """
+    connector = getattr(session, "connector", None)
+    limit = getattr(connector, "limit", None)
+    acquired = getattr(connector, "_acquired", None)
+    if not limit or acquired is None:
+        return "unknown"
+    return "total" if limit - len(acquired) <= 0 else "per_host"
+
+
+async def _on_connection_queued_start(session, _trace_config_ctx, _params) -> None:
+    context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
+    if context is None:
+        return
+    try:
+        context.queued(_connector_pressure(session))
+    except Exception:
+        logger.debug("Failed to start aiohttp connection-queue telemetry", exc_info=True)
+
+
+async def _on_connection_queued_end(_session, _trace_config_ctx, _params) -> None:
+    context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
+    if context is None:
+        return
+    try:
+        context.released()
+    except Exception:
+        logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
+
+
 def _connection_queue_trace_config() -> TraceConfig:
     trace_config = TraceConfig()
-
-    async def queued_start(_session, _trace_config_ctx, _params) -> None:
-        context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
-        if context is None:
-            return
-        try:
-            context.queued()
-        except Exception:
-            logger.debug("Failed to start aiohttp connection-queue telemetry", exc_info=True)
-
-    async def queued_end(_session, _trace_config_ctx, _params) -> None:
-        context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
-        if context is None:
-            return
-        try:
-            context.released()
-        except Exception:
-            logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
-
-    trace_config.on_connection_queued_start.append(queued_start)
-    trace_config.on_connection_queued_end.append(queued_end)
+    trace_config.on_connection_queued_start.append(_on_connection_queued_start)
+    trace_config.on_connection_queued_end.append(_on_connection_queued_end)
     return trace_config
+
+
+def _queue_telemetry_installed(client: Any) -> bool:
+    """Whether the live session actually carries the queue callbacks.
+
+    The trace configs are fixed when the session is built while the span-group gate is re-read
+    per request, so an enabled-late caller would otherwise emit `queued=False` for requests that
+    really did wait. Derived from the session rather than a module flag so it stays true for any
+    session, however it was constructed.
+    """
+    trace_configs = getattr(client, "_trace_configs", None)
+    if trace_configs is None:
+        # Not a real ClientSession (test double); keep the caller's prior behavior.
+        return True
+    return any(_on_connection_queued_start in tc.on_connection_queued_start for tc in trace_configs)
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
@@ -638,20 +684,28 @@ async def _traced_request(
             }
             safe_set_span_attributes(span, attributes)
 
-        queue_context = _ConnectionQueueTraceContext(span)
-        queue_context.update_span()
-        token = _CONNECTION_QUEUE_TRACE_CONTEXT.set(queue_context)
-        try:
+        # Without callbacks installed, omit the attributes rather than assert `queued=False`,
+        # which a consumer could not tell apart from a genuinely unqueued request.
+        installed = _queue_telemetry_installed(get_global_aiohttp_client())
+        queue_context = _ConnectionQueueTraceContext(span) if installed else None
+        if queue_context is None:
             response = await _request_with_retries(
                 method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
             )
-        finally:
-            # A cancellation while queued does not receive aiohttp's queued-end callback.
+        else:
+            queue_context.update_span()
+            token = _CONNECTION_QUEUE_TRACE_CONTEXT.set(queue_context)
             try:
-                queue_context.released()
-            except Exception:
-                logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
-            _CONNECTION_QUEUE_TRACE_CONTEXT.reset(token)
+                response = await _request_with_retries(
+                    method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+                )
+            finally:
+                # A cancellation while queued does not receive aiohttp's queued-end callback.
+                try:
+                    queue_context.released()
+                except Exception:
+                    logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
+                _CONNECTION_QUEUE_TRACE_CONTEXT.reset(token)
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
@@ -756,7 +810,10 @@ Sleeping 0.5s and retrying...
                 if num_tries >= MAX_NUM_TRIES:
                     raise e
 
-                num_tries += 1
+            # Counted for every caller: when this lived inside the `not _internal` branch an
+            # internal caller left `num_tries` at 1, so `_max_connection_retries` never tripped
+            # and the loop ran forever.
+            num_tries += 1
 
             await asyncio.sleep(0.5)
 
