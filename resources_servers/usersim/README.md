@@ -43,7 +43,7 @@ selectors and optional per-alias Responses API overrides:
     "seed": 1042,
     "probe_type": "general_open_ended"
   },
-  "model_responses_create_params": {}
+  "agent_responses_create_params": {}
 }
 ```
 
@@ -100,11 +100,10 @@ their model-visible results remain ordered inside `response.output`.
 
 ## Participant tools and shared state
 
-User and Assistant tools are configured independently in
-`model_responses_create_params.user_model.tools` and
-`model_responses_create_params.assistant_model.tools`. Both SimpleAgent
-instances execute their own tool loops against this Resources Server while the
-Environment Server forwards one shared Resources session cookie.
+Probe tools are resolved by the Resources Server and exposed only to the
+Assistant Agent. Each Agent executes its own tool loop against this Resources
+Server while the Environment Server forwards one shared Resources session
+cookie.
 
 The agents also have independent model-server references:
 `user_policy_model` and `assistant_policy_model`. Judge, summary, and

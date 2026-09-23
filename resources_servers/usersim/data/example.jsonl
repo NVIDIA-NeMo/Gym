@@ -1,1 +1,1 @@
-{"task_id":{"taskset":"usersim:example","task_id":"1042"},"task_input":{"sampling":{"locale":"en_US","seed":1042,"probe_type":"general_open_ended"},"model_responses_create_params":{"user_model":{"input":[]},"assistant_model":{"input":[]}}}}
+{"task_id":{"taskset":"usersim:example","task_id":"1042"},"task_input":{"sampling":{"locale":"en_US","seed":1042,"probe_type":"general_open_ended"},"agent_responses_create_params":{}}}

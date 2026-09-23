@@ -6,7 +6,7 @@
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
@@ -17,7 +17,8 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 
 
-USERSIM_MODEL_ALIASES = frozenset({"user_model", "assistant_model", "judge_model", "summary_model"})
+UserSimAgentAlias = Literal["user_model", "assistant_model", "judge_model", "summary_model"]
+USERSIM_AGENT_ALIASES = frozenset({"user_model", "assistant_model", "judge_model", "summary_model"})
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
@@ -79,14 +80,9 @@ class UserSimTaskInput(BaseModel):
 
     sampling: UserSimSamplingRequest
     probe_data: dict[str, Any] = Field(default_factory=dict)
-    model_responses_create_params: dict[str, NeMoGymResponseCreateParamsNonStreaming] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def reject_unknown_model_aliases(self) -> "UserSimTaskInput":
-        unknown = set(self.model_responses_create_params) - USERSIM_MODEL_ALIASES
-        if unknown:
-            raise ValueError(f"model_responses_create_params contains unknown aliases: {sorted(unknown)}")
-        return self
+    agent_responses_create_params: dict[UserSimAgentAlias, NeMoGymResponseCreateParamsNonStreaming] = Field(
+        default_factory=dict
+    )
 
 
 class ResolvedUserSimContext(BaseModel):
