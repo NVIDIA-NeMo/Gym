@@ -1400,3 +1400,34 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
     await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
     assert not agent._sandbox_sessions
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("marker", [None, [], {}, 7])
+async def test_seed_rejects_malformed_native_cookie_before_connecting(setup, marker):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {"nemo_gym_openclaw_sandbox_session": marker}})
+    with pytest.raises(HTTPException, match="Invalid OpenClaw session marker"):
+        await agent.seed_agent_session(request, seed())
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_retention(setup, monkeypatch):
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: clock[0])
+    agent.config.session_lifetime_seconds = 10
+    agent.config.session_close_retry_window_seconds = 5
+    request = Request({"type": "http", "session": {}})
+    body = seed()
+    await agent.seed_agent_session(request, body)
+    close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    await agent.close_agent_session(request, close)
+    clock[0] = 111.0
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.close_agent_session(request, close)
+    with pytest.raises(HTTPException, match="expired"):
+        await agent.seed_agent_session(request, body)
+    assert not agent._closed_sandbox_sessions
+    assert not agent._sandbox_sessions
+    assert not agent._session_locks
+    sandbox.disconnect.assert_awaited_once()

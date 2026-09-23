@@ -485,6 +485,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         self._expire_closed_agent_sessions()
         session_id = body.agent_session_id
         previous = request.session.get(_SANDBOX_SESSION_KEY)
+        if _SANDBOX_SESSION_KEY in request.session and not isinstance(previous, str):
+            raise HTTPException(409, "Invalid OpenClaw session marker")
         if previous != session_id and previous in self._sandbox_sessions:
             raise HTTPException(409, "OpenClaw cookie belongs to another active session")
         async with self._session_lock(session_id):
@@ -497,6 +499,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 if state.closing:
                     raise HTTPException(409, "OpenClaw session is closing")
             else:
+                if previous == session_id:
+                    raise HTTPException(409, "OpenClaw session cookie has expired")
                 try:
                     state = await self._initialize_agent_session_state(session_id, body)
                 except BaseException:
@@ -644,6 +648,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "OpenClaw close receipt has expired")
             state = self._sandbox_sessions.get(session_id)
             if state is None:
+                if cookie is not None:
+                    raise HTTPException(409, "OpenClaw close receipt has expired")
                 result = AgentCloseSessionResponse(agent_session_id=session_id)
             else:
                 if body.episode_id != state.seed.episode_id:
