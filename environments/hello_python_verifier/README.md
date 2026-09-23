@@ -6,6 +6,8 @@ Hello Python Verifier lets you score an agent's work with familiar Python code a
 
 Python is useful when scoring relies on existing validation code, structured data, or domain libraries that would be awkward to use from a shell script. A task defines one scoring entry point with either `tests/test.sh` or `tests/verifier.py`. For a Python verifier, NeMo Gym calls the file's `verify()` function and uses the number it returns as the reward. NeMo Gym handles the shell launcher and reward files.
 
+For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
+
 ## In this example
 
 `tests/verifier.py` checks whether the agent created `hello-gym.txt` with the expected contents. The verifier returns `1.0` when the file matches and `0.0` when it is missing or incorrect.

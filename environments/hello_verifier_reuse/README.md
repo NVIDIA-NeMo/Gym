@@ -10,6 +10,8 @@ NeMo Gym packages the referenced code with each materialized task so the resulti
 
 Prototype dependency: This example uses the proposed `nemo_gym.verifiers.files` API. That core module must be added and tested in the separate runtime implementation before this example can run.
 
+For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
+
 ## In this example
 
 This example is one dataset with two complete task directories at its root:

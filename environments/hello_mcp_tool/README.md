@@ -6,6 +6,8 @@ Hello MCP Tool lets you give an agent a tool it needs for a task without changin
 
 A task can declare required tools through the Model Context Protocol (MCP). NeMo Gym checks that the selected agent and sandbox can provide those tools before the run starts. MCP gives tasks a standard way to describe and connect them.
 
+For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
+
 ## In this example
 
 - `task.toml` declares the `hello-tools` MCP server as a task requirement.

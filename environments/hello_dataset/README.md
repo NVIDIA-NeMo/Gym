@@ -6,6 +6,8 @@ Hello Dataset helps you organize related tasks so they can be selected and run t
 
 Harbor calls a runnable collection of tasks a dataset. In a local dataset, each immediate subdirectory is one complete task. Tasks can belong to the same dataset without sharing instructions, environments, assets, or scoring logic.
 
+For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
+
 ## In this example
 
 - `hello/` asks for one greeting file.

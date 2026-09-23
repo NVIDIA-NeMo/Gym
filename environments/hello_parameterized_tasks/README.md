@@ -6,6 +6,8 @@ Hello Parameterized Tasks helps you add and update many similarly structured tas
 
 Parameterized tasks keep the common task files in one place and store the values that vary in one JSONL record per task. NeMo Gym validates the records and creates a self-contained task directory for each one before execution. The generated tasks form a dataset that can be selected and run together. Values used only for scoring do not need to appear in the agent's instruction.
 
+For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
+
 ### Examples suited to JSONL
 
 JSONL works well when one shared task definition can turn every row into an instruction and score the result. Common examples include:

@@ -6,6 +6,15 @@ Hello World gives you a minimal starting point for creating your first NeMo Gym 
 
 A directory task keeps the instruction, execution environment, scoring logic, and resource requirements together, making the complete task easy to inspect, share, and run. NeMo Gym adopts Harbor's task format for directory tasks, so compatible Harbor tasks can run directly in NeMo Gym.
 
+### Terms used in these examples
+
+- **Task:** One complete unit of work, including its instruction, software environment, resource requirements, and verification.
+- **Instruction:** What the agent is asked to do.
+- **Software environment:** The tools and dependencies available to the agent. For this task, `environment/Dockerfile` defines that environment.
+- **Sandbox:** An isolated running instance of the software environment, created by a provider such as Docker.
+- **Verifier:** The code that scores the agent's work.
+- **Reward:** The numeric result returned by the verifier.
+
 ## In this example
 
 - `instruction.md` asks the agent to create one text file.
@@ -27,6 +36,17 @@ gym eval run environments/hello_world \
 ```
 
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
+
+### What NeMo Gym starts
+
+NeMo Gym separates an evaluation into services so the model, agent harness, task state and scoring, and rollout workflow can be changed or scaled independently.
+
+For this tutorial and the common task-authoring workflow, you can treat these services as implementation details. You define the task and select a compatible agent, model, and sandbox; the CLI composes the services for you automatically. You only need to work with individual services for custom runtime behavior or advanced deployments. Here's what's happening behind the scenes:
+
+- The **Environment Server** coordinates setup, agent execution, verification, and cleanup for each rollout.
+- The **Agent Server** runs the agent harness.
+- The **Model Server** provides inference.
+- The **Resources Server** makes task-defined tools, state, and verification capabilities available at runtime.
 
 ## Check the result
 
