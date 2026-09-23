@@ -300,3 +300,68 @@ async def test_tool_filter_routes_its_selection_call_through_the_model_server() 
     assert filter_payload["temperature"] == 0.0
     policy_payload = server_client.post.await_args_list[1].kwargs["json"]
     assert sorted(tool["function"]["name"] for tool in policy_payload["tools"]) == ["read_file", "send_money"]
+
+
+#: The tools banking/user_task_0's completed trajectory calls (`_safe_banking_responses`).
+BANKING_USER_TASK_0_TOOLS = ["read_file", "send_money"]
+
+
+def _tool_filter_model(selection: str, *, then_tools: bool = True):
+    """Answer upstream tool_filter's selection call with `selection`, then replay the trajectory or just answer."""
+    trajectory = iter(_safe_banking_responses() if then_tools else [_http_response(_model_response())])
+    selection_requests: list[dict] = []
+
+    def respond(*args, **kwargs) -> MagicMock:
+        if kwargs["json"].get("tool_choice") == "none":
+            selection_requests.append(kwargs["json"])
+            reply = _model_response()
+            reply["choices"][0]["message"]["content"] = selection
+            return _http_response(reply)
+        return next(trajectory)
+
+    return respond, selection_requests
+
+
+async def test_tool_filter_selection_is_recorded_and_offered_every_tool() -> None:
+    agent, server_client = _agent()
+    respond, selection_requests = _tool_filter_model(", ".join(BANKING_USER_TASK_0_TOOLS))
+    server_client.post = AsyncMock(side_effect=respond)
+
+    result = await agent.run(_request(attacked=False).model_copy(update={"defense": "tool_filter"}))
+
+    # The adapter hands the serving stack the full tool list; a server that drops it for
+    # tool_choice="none" is the failure the recorded selection exists to expose.
+    assert len(selection_requests) == 1
+    offered = {tool["function"]["name"] for tool in selection_requests[0]["tools"]}
+    assert offered > set(BANKING_USER_TASK_0_TOOLS)
+    assert result.tool_filter_kept_tools == BANKING_USER_TASK_0_TOOLS
+    assert result.utility is True
+    later_calls = [call.kwargs["json"] for call in server_client.post.await_args_list][1:]
+    assert later_calls
+    assert all(
+        {tool["function"]["name"] for tool in call["tools"]} == set(BANKING_USER_TASK_0_TOOLS) for call in later_calls
+    )
+
+
+async def test_tool_filter_that_names_no_real_tool_reports_an_empty_selection() -> None:
+    agent, server_client = _agent()
+    # What a server that strips tools under tool_choice="none" produced in practice: an invented name.
+    respond, _ = _tool_filter_model("web_search", then_tools=False)
+    server_client.post = AsyncMock(side_effect=respond)
+
+    result = await agent.run(_request(attacked=False).model_copy(update={"defense": "tool_filter"}))
+
+    assert result.mask_sample is False
+    assert result.tool_filter_kept_tools == []
+    assert result.utility is False
+    assert server_client.post.await_args_list[-1].kwargs["json"]["tools"] == []
+    metrics = agent.compute_metrics([[result.model_dump()]])
+    assert metrics["agentdojo/tool_filter_empty_selection_rate"] == 1.0
+    assert "agentdojo/tool_filter_empty_selection_rate" in agent.get_key_metrics(metrics)
+
+
+def test_empty_selection_rate_is_absent_without_tool_filter() -> None:
+    agent, _ = _agent()
+    metrics = agent.compute_metrics([[{"utility": True, "attack_success": False, "injection_task_id": None}]])
+
+    assert "agentdojo/tool_filter_empty_selection_rate" not in metrics
