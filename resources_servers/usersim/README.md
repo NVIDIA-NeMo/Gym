@@ -33,12 +33,11 @@ instruction when the panel is absent or does not match its manifest.
 
 The episode uses separate contracts for each lifecycle. Static protocol and
 population settings live in YAML. A benchmark dataset row contains only task
-selectors and optional per-alias Responses API overrides:
+selectors and optional per-role Agent request parameters:
 
 ```json
 {
-  "responses_create_params": {"input": []},
-  "usersim_sampling": {
+  "sampling": {
     "locale": "en_US",
     "seed": 1042,
     "probe_type": "general_open_ended"
@@ -139,10 +138,10 @@ The YAML config owns static population and probe policy:
 
 Each dataset row owns dynamic task identity:
 
-- `usersim_sampling.locale`
-- `usersim_sampling.seed`
-- optional `usersim_sampling.probe_type`
-- focal and optional per-alias Responses API parameters
+- `sampling.locale`
+- `sampling.seed`
+- optional `sampling.probe_type`
+- optional per-role `agent_responses_create_params`
 
 Changing the dataset version selects a different prepared-panel cache path.
 
