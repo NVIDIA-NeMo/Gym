@@ -27,6 +27,8 @@ def test_requested_version_controls_checkout_and_cache(tmp_path):
         git("add", "version")
         git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", version)
         commits.append(git("rev-parse", "HEAD"))
+    # Older Git upload-pack only permits SHA fetches for advertised refs.
+    git("tag", "original", commits[0])
     git("tag", "experiment", commits[1])
 
     scripts = tmp_path / "scripts" / "hermes_sandboxed_agent"
