@@ -175,11 +175,16 @@ def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
     prepare_cmd: str | None,
+    command: str | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
     When either gym_install or prepare is needed, wraps everything in a single
     bash -c so prepare and run happen in the same srun step and container.
+
+    `command` replaces the `gym eval run` invocation for a benchmark whose harness
+    is not Gym's own runner. It is emitted verbatim, so it may be a multi-line
+    script; everything before it (the install, and prepare) is unchanged.
     """
     preamble: list[str] = []
 
@@ -207,10 +212,16 @@ def render_driver_entrypoint(
     if prepare_cmd:
         preamble.append(prepare_cmd)
 
-    if not preamble:
-        return '"${GYM_CMD[@]}"'
+    if command is None:
+        if not preamble:
+            return '"${GYM_CMD[@]}"'
+        preamble.append('exec "$@"')
+        body = "\n    ".join(["set -euo pipefail", *preamble])
+        body = escape_for_single_quoted_block(body)
+        return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
 
-    preamble.append('exec "$@"')
-    body = "\n    ".join(["set -euo pipefail", *preamble])
+    # No GYM_CMD array to hand over: the command IS the final statement, so there
+    # is nothing to `exec "$@"` and no trailing `-- "${GYM_CMD[@]}"`.
+    body = "\n    ".join(["set -euo pipefail", *preamble, command])
     body = escape_for_single_quoted_block(body)
-    return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
+    return f"bash -c '\n    {body}\n'"

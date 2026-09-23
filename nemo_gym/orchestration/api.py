@@ -196,6 +196,22 @@ class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
+    # harness is not Gym's own runner -- one that provisions external machines and
+    # drives Gym from there, for instance. `prepare` still runs first, and the
+    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # API key (when driver.policy_model is set) so the script can reach the served
+    # model without repeating its address.
+    command: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> "BenchmarkRunConfig":
+        if self.command is not None and self.run:
+            raise ValueError(
+                "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
+                "`command` replaces. Fold those settings into the command, or drop it."
+            )
+        return self
 
 
 class GymInstallConfig(_StrictModel):

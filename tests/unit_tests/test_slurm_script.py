@@ -1565,3 +1565,122 @@ def test_gym_install_runs_from_the_install_root():
     assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
     # The only `cd` is into the clone -- nothing else may move cwd.
     assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')
+
+
+# ---------------------------------------------------------------------------
+# driver command
+# ---------------------------------------------------------------------------
+
+
+def _command_config(tmp_path, command, **driver):
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": {
+                    "type": "vllm",
+                    "container": "img",
+                    "model": "/ckpt",
+                    "port": 8000,
+                    "served_model_name": "super",
+                    "tensor_parallel_size": 4,
+                }
+            },
+            "compute": {
+                "hsg": {
+                    "type": "slurm",
+                    "account": "acct",
+                    "node_pools": {"gpu": {"partition": "batch", "nodes": 1, "gpus_per_node": 4}},
+                }
+            },
+            "driver": {
+                "container": "efb:latest",
+                "policy_model": "policy",
+                "benchmarks": {"osworld": {"command": command}},
+                **driver,
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _render_command(tmp_path, command, **driver):
+    config = _command_config(tmp_path, command, **driver)
+    return build_sbatch_script(
+        config,
+        "osworld",
+        config.driver.benchmarks["osworld"],
+        config.compute["hsg"],
+        tmp_path / "jobs" / "x" / "osworld",
+    )
+
+
+def test_a_command_replaces_the_gym_run_invocation(tmp_path):
+    script = _render_command(tmp_path, "run-the-harness --flag")
+
+    assert "GYM_CMD" not in script
+    assert "gym eval run" not in script
+    assert "run-the-harness --flag" in script
+
+
+def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
+    # These replace the run arguments the command no longer receives; without them
+    # the script has no way to find the served model or the job directory.
+    bench_dir = tmp_path / "jobs" / "x" / "osworld"
+    script = _render_command(tmp_path, "harness")
+
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert "NEMO_GYM_POLICY_BASE_URL=http://localhost:8000/v1" in script
+    assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
+    assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
+
+
+def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
+    script = _render_command(tmp_path, "harness", env={"AWS_ACCESS_KEY_ID": "lit:AKIAFAKE"})
+
+    assert "AWS_ACCESS_KEY_ID=AKIAFAKE" in script
+    assert "NEMO_GYM_BENCH_DIR=" in script
+
+
+def test_a_command_still_runs_prepare_first(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "efb:latest",
+                "benchmarks": {
+                    "osworld": {"prepare": {"config_paths": ["benchmarks/osworld/config.yaml"]}, "command": "harness"}
+                },
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "osworld", config.driver.benchmarks["osworld"], config.compute["hsg"], tmp_path / "jobs" / "osworld"
+    )
+
+    prepare_at = script.index("gym eval prepare")
+    assert prepare_at < script.index("harness")
+
+
+def test_a_multi_line_command_survives_quoting(tmp_path):
+    command = "set -- harness --name 'a b'\nexec \"$@\""
+    script = _render_command(tmp_path, command)
+
+    assert "--name '\"'\"'a b'\"'\"'" in script
+    assert 'exec "$@"' in script
+
+
+def test_a_benchmark_cannot_set_both_command_and_run(tmp_path):
+    with pytest.raises(ValueError, match="`command` replaces"):
+        SubmitConfig.model_validate(
+            {
+                "services": {},
+                "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+                "driver": {
+                    "container": "efb:latest",
+                    "benchmarks": {"osworld": {"command": "harness", "run": {"split": "benchmark"}}},
+                },
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
