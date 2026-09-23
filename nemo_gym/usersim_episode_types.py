@@ -100,6 +100,7 @@ class ResolvedUserSimContext(BaseModel):
     seed: int
     personas_dataset_version: str
     personas_panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    usersim_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
 
 
 class UserSimSeedResponse(ResourcesSeedSessionResponse):
