@@ -17,6 +17,7 @@ pool_sandboxed_agent:
 
       pool_version: v1.0.16
       remote_pool_binary_path: null
+      local_pool_binary_path: null
       pool_model: dummy_model
       pool_max_context_window: 262144
       pool_extra_args: []

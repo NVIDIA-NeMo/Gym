@@ -51,3 +51,5 @@ The `pool exec -o json` event stream is converted into Responses output items an
 By default the agent downloads the installer from `downloads.poolside.ai` inside the sandbox and
 installs `pool_version`. For sandboxes without egress, mount a Linux binary for the sandbox
 architecture and set `remote_pool_binary_path`.
+For task images without `curl`, set `local_pool_binary_path` to a binary on the Gym host; the agent
+uploads it into each sandbox.

@@ -83,6 +83,8 @@ class PoolSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 
     pool_version: str = "latest"
     remote_pool_binary_path: Optional[str] = None
+    # Pool binary on the Gym host, uploaded into each sandbox (for images without curl).
+    local_pool_binary_path: Optional[str] = None
     pool_model: str = "dummy_model"
     pool_max_context_window: int
     pool_extra_args: List[str] = Field(default_factory=list)
@@ -215,6 +217,8 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         return self.base_url_for_run(base_url=base_url, body=await request.json()) + "/v1"
 
     def _install_command(self, home: str) -> str:
+        if self.config.local_pool_binary_path:
+            return f"chmod 0755 {home}/bin/pool"
         if self.config.remote_pool_binary_path:
             return (
                 f"mkdir -p {home}/bin && install -m 0755 {quote(self.config.remote_pool_binary_path)} {home}/bin/pool"
@@ -366,7 +370,9 @@ class PoolSandboxedAgent(SimpleResponsesAPIAgent):
         home = f"/tmp/nemo-gym-pool-{uuid4().hex}"
         base_url = await self._model_base_url(request)
 
-        await sandbox.exec(command=f"mkdir -p {home}")
+        await sandbox.exec(command=f"mkdir -p {home}/bin")
+        if self.config.local_pool_binary_path:
+            await sandbox.upload(self.config.local_pool_binary_path, f"{home}/bin/pool")
         uploads = {"prompt.txt": query, "agent_config.json": json.dumps(self._pool_agent_config(base_url))}
         for remote_name, content in uploads.items():
             with tempfile.NamedTemporaryFile("w", suffix=remote_name, delete=False) as local_file:
