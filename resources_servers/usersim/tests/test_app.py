@@ -19,7 +19,7 @@ from resources_servers.usersim.app import (
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
 )
-from resources_servers.usersim.types import UserSimTaskInput
+from resources_servers.usersim.episode_contracts import UserSimTaskInput
 
 
 PERSONAS = [
