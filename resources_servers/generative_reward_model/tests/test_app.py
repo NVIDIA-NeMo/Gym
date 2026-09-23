@@ -387,3 +387,94 @@ class TestGenerativeRewardModelApp:
 
         assert res.reward == approx(-50.0)
         assert res.format_correct == approx(0.0)
+
+    # --- Regression: perfectly scored rubrics must still count toward the mean ---
+
+    async def test_perfect_rubrics_count_toward_the_mean(self, config) -> None:
+        """A rubric predicted perfectly contributes 0.0 to the mean, it is not dropped from it.
+
+        Dropping zero-penalty rubrics shrinks the denominator as the policy improves, which made
+        the rubric term flat: one wrong rubric of five scored the same as five wrong of five.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        rs = GenerativeRewardModelResourcesServer(config=config, server_client=server_mock)
+
+        gt_rubrics = [{"rubric_id": i, "ranking": 1.0} for i in range(1, 6)]
+        # Four rubrics exactly right, one off by 4 on ranking.
+        rubric_evals = [_rubric(i, 3, 3, 5.0 if i == 1 else 1.0) for i in range(1, 6)]
+        body = self._make_verify_request(
+            response_text=_make_output(rubric_evals, _overall(3, 3, 3)),
+            gt_overall={},
+            gt_rubric_scores=gt_rubrics,
+        )
+        res = await rs.verify(body)
+
+        # rubric penalties = [2.0*4, 0, 0, 0, 0]; mean over ALL five = 8/5 = 1.6
+        # reward = -(rubric_weight * 1.6) = -(0.5 * 1.6) = -0.8
+        assert res.reward == approx(-0.8)
+
+    async def test_rubric_penalty_scales_with_how_many_are_wrong(self, config) -> None:
+        """More wrong rubrics must cost strictly more; the old code was flat across all counts."""
+        server_mock = MagicMock(spec=ServerClient)
+        rs = GenerativeRewardModelResourcesServer(config=config, server_client=server_mock)
+
+        gt_rubrics = [{"rubric_id": i, "ranking": 1.0} for i in range(1, 6)]
+        rewards = []
+        for num_wrong in range(0, 6):
+            rubric_evals = [_rubric(i, 3, 3, 5.0 if i <= num_wrong else 1.0) for i in range(1, 6)]
+            body = self._make_verify_request(
+                response_text=_make_output(rubric_evals, _overall(3, 3, 3)),
+                gt_overall={},
+                gt_rubric_scores=gt_rubrics,
+            )
+            rewards.append((await rs.verify(body)).reward)
+
+        assert rewards[0] == approx(0.0)
+        assert rewards[5] == approx(-4.0)
+        # Strictly decreasing: fixing any rubric must improve the reward.
+        assert all(a > b for a, b in zip(rewards, rewards[1:])), rewards
+
+    async def test_improving_one_rubric_never_lowers_the_reward(self, config) -> None:
+        """Monotonicity: the old mean-over-imperfect-only made fixing a rubric score worse."""
+        server_mock = MagicMock(spec=ServerClient)
+        rs = GenerativeRewardModelResourcesServer(config=config, server_client=server_mock)
+
+        gt_rubrics = [{"rubric_id": 1, "ranking": 1.0}, {"rubric_id": 2, "ranking": 1.0}]
+
+        async def reward_for(ranking_2: float) -> float:
+            rubric_evals = [
+                _rubric(1, 3, 3, 5.0),
+                _rubric(2, 3, 3, ranking_2),
+            ]
+            body = self._make_verify_request(
+                response_text=_make_output(rubric_evals, _overall(3, 3, 3)),
+                gt_overall={},
+                gt_rubric_scores=gt_rubrics,
+            )
+            return (await rs.verify(body)).reward
+
+        slightly_off = await reward_for(2.0)  # rubric 2 off by 1
+        exactly_right = await reward_for(1.0)  # rubric 2 correct
+        assert exactly_right > slightly_off
+
+    # --- Regression: duplicate rubric IDs must not slip past the match check ---
+
+    async def test_duplicate_rubric_ids_are_a_parse_failure(self, config) -> None:
+        """Repeating a rubric_id collapses in the lookup dict, so count the raw predictions."""
+        server_mock = MagicMock(spec=ServerClient)
+        rs = GenerativeRewardModelResourcesServer(config=config, server_client=server_mock)
+
+        # Ground truth has a single rubric; the verdict answers it twice, wrong then right.
+        rubric_evals = [
+            _rubric(1, 3, 3, 5.0),
+            _rubric(1, 3, 3, 1.0),
+        ]
+        body = self._make_verify_request(
+            response_text=_make_output(rubric_evals, _overall(3, 3, 3)),
+            gt_overall={},
+            gt_rubric_scores=[{"rubric_id": 1, "ranking": 1.0}],
+        )
+        res = await rs.verify(body)
+
+        assert res.reward == approx(config.parse_failure_penalty)
+        assert res.format_correct == approx(0.0)

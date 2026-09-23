@@ -126,8 +126,11 @@ class GenerativeRewardModelResourcesServer(SimpleResourcesServer):
             gt_by_id = {r["rubric_id"]: r for r in gt_rubrics}
             pred_by_id = {r.rubric_id: r for r in scores.rubric_scores}
 
-            # Predicted rubrics must match GT exactly: same count, same IDs
-            if len(pred_by_id) != len(gt_by_id) or set(pred_by_id.keys()) != set(gt_by_id.keys()):
+            # Predicted rubrics must match GT exactly: same count, same IDs. Count the raw
+            # predictions, not pred_by_id -- that dict has already collapsed duplicate IDs, so
+            # comparing its length would let a verdict that repeats a rubric_id (scoring only
+            # the last copy) pass as if it matched.
+            if len(scores.rubric_scores) != len(gt_by_id) or set(pred_by_id.keys()) != set(gt_by_id.keys()):
                 return self._fail(body)
 
             score_errors = []
@@ -136,19 +139,26 @@ class GenerativeRewardModelResourcesServer(SimpleResourcesServer):
             for rid, gt in gt_by_id.items():
                 pred = pred_by_id[rid]
                 penalty = 0.0
+                scored = False
                 if gt.get("score_1") is not None:
                     s1_err = abs(gt["score_1"] - pred.score_1)
                     score_errors.append(s1_err)
                     penalty += cfg.score_weight * s1_err
+                    scored = True
                 if gt.get("score_2") is not None:
                     s2_err = abs(gt["score_2"] - pred.score_2)
                     score_errors.append(s2_err)
                     penalty += cfg.score_weight * s2_err
+                    scored = True
                 if gt.get("ranking") is not None:
                     r_err = abs(gt["ranking"] - pred.ranking)
                     ranking_errors.append(r_err)
                     penalty += cfg.ranking_weight * r_err
-                if penalty > 0:
+                    scored = True
+                # Append on `scored`, not `penalty > 0`: a perfectly predicted rubric scores 0.0
+                # and must still count toward the mean. Excluding it shrinks the denominator as
+                # the policy improves, so fixing one rubric of several could lower the reward.
+                if scored:
                     rubric_penalties.append(penalty)
 
             if rubric_penalties:
