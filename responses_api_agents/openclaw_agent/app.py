@@ -814,7 +814,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     ObservationGap(code="model_call_usage_unavailable", detail="Harness reported only zero counters")
                 )
             cache_read = usage.get("cacheRead")
-            if type(cache_read) is not int or cache_read < 0:
+            # The pinned provider defaults unavailable backend cache details to
+            # zero, so only positive counts retain measurement provenance.
+            if type(cache_read) is not int or cache_read <= 0:
                 gaps.append(ObservationGap(code="cached_token_usage_unavailable"))
                 cached_tokens = None
             elif cached_tokens is not None:
@@ -832,7 +834,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # The legacy envelope parser defaults missing counters to zero.
             # Native totals retain valid subtotals without coercing malformed cache values.
             cache_read = raw_usage.get("cacheRead")
-            cached_tokens = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            cached_tokens = cache_read if type(cache_read) is int and cache_read > 0 else None
             input_count, output_count = raw_usage.get("input"), raw_usage.get("output")
             input_tokens = input_count if type(input_count) is int and input_count >= 0 else 0
             output_tokens = output_count if type(output_count) is int and output_count >= 0 else 0
