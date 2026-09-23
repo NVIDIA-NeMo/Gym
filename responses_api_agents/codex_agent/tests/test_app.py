@@ -687,6 +687,13 @@ class TestParseExecJsonl:
         assert items == []
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
+        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+
+    @pytest.mark.parametrize("details", [{}, {"cached_input_tokens": 0, "reasoning_output_tokens": 0}])
+    def test_legacy_optional_usage_defaults_are_unchanged(self, details) -> None:
+        _, usage = parse_exec_jsonl(_event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details}))
+        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["input_tokens"] == 7 and usage["output_tokens"] == 3
 
     def test_agent_message(self) -> None:
         line = _item_completed({"id": "item_1", "type": "agent_message", "text": "hello"})

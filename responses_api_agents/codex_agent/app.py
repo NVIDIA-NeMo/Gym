@@ -157,20 +157,30 @@ def _mcp_result_text(item: dict[str, Any]) -> str:
 
 
 def parse_exec_jsonl(
-    stdout: str, *, structured_reasoning: bool = False, include_partial: bool = False
+    stdout: str,
+    *,
+    structured_reasoning: bool = False,
+    include_partial: bool = False,
+    conservative_usage_details: bool = False,
 ) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
     Codex emits ``item.completed`` events for each unit of work (assistant messages, reasoning,
     shell commands, MCP tool calls, file changes, ...) and a terminal ``turn.completed`` carrying
-    token usage summed over every model call in the turn. Tool-shaped items are mapped to a
+    its available aggregate token usage; failed stream attempts can be omitted even after a
+    successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent).
+    message inside ``<think>`` tags (mirroring the Claude Code agent). Native callers use
+    ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
+    counters to zero: only positive integers establish measured details in this artifact.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
     metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
+    if conservative_usage_details:
+        metadata.update(cached_input_tokens=None, reasoning_tokens=None)
+    usage_seen = False
     errors: list[str] = []
     unfinished: dict[str, dict[str, Any]] = {}
 
@@ -208,8 +218,20 @@ def parse_exec_jsonl(
             usage = event.get("usage") or {}
             metadata["input_tokens"] += int(usage.get("input_tokens") or 0)
             metadata["output_tokens"] += int(usage.get("output_tokens") or 0)
-            metadata["cached_input_tokens"] += int(usage.get("cached_input_tokens") or 0)
-            metadata["reasoning_tokens"] += int(usage.get("reasoning_output_tokens") or 0)
+            for source, target in (
+                ("cached_input_tokens", "cached_input_tokens"),
+                ("reasoning_output_tokens", "reasoning_tokens"),
+            ):
+                value = usage.get(source)
+                if conservative_usage_details:
+                    # Zero is ambiguous in Codex JSONL, not a known backend measurement.
+                    if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
+                        metadata[target] = None
+                    else:
+                        metadata[target] = (metadata[target] or 0) + value
+                else:
+                    metadata[target] += int(value or 0)
+            usage_seen = True
             continue
 
         if etype == "turn.failed":
@@ -728,7 +750,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     continue
             parse_events.append(event)
         output, usage = parse_exec_jsonl(
-            "\n".join(json.dumps(event) for event in parse_events), structured_reasoning=True, include_partial=True
+            "\n".join(json.dumps(event) for event in parse_events),
+            structured_reasoning=True,
+            include_partial=True,
+            conservative_usage_details=True,
         )
         if (startup_warnings or compaction_warnings) and usage.get("errors"):
             usage["errors"] = [*startup_warnings, *compaction_warnings, *usage["errors"]]
@@ -749,14 +774,29 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="model_call_join_key_unavailable", detail="CLI events omit model response IDs"),
-            ObservationGap(code="reasoning_token_usage_unavailable"),
             ObservationGap(code="subagent_hierarchy_unavailable"),
             ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
         ]
-        if not completed:
-            gaps.append(ObservationGap(code="partial_model_usage_unavailable"))
+        for field, code in (
+            ("cached_input_tokens", "cached_token_usage_unavailable"),
+            ("reasoning_tokens", "reasoning_token_usage_unavailable"),
+        ):
+            if usage[field] is None:
+                gaps.append(ObservationGap(code=code, detail="CLI detail counters are absent or defaulted to zero"))
+        stream_errors = [event for _, event in events if event.get("type") == "error"]
+        if not completed or stream_errors:
+            gaps.append(
+                ObservationGap(
+                    code="partial_model_usage_unavailable",
+                    detail=(
+                        "CLI totals may omit model calls interrupted by stream errors, including recovered retries"
+                        if stream_errors
+                        else "CLI emitted no turn.completed usage"
+                    ),
+                )
+            )
         if failure is not None:
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
         if not events:
