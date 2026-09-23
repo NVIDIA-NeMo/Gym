@@ -228,6 +228,23 @@ def test_metrics_with_only_masked_rollouts() -> None:
     }
 
 
+def test_benchmark_selectors_match_the_pinned_upstream_suites() -> None:
+    import re
+
+    from agentdojo.task_suite.load_suites import get_suites
+
+    from benchmarks.agentdojo.prepare import SUITE_TASKS
+
+    number = lambda task_id: int(re.sub(r"\D", "", task_id))  # noqa: E731
+    upstream = {
+        name: (len(suite.user_tasks), tuple(sorted(number(task_id) for task_id in suite.injection_tasks)))
+        for name, suite in get_suites("v1.2.2").items()
+    }
+    assert upstream == SUITE_TASKS
+    for name, suite in get_suites("v1.2.2").items():
+        assert sorted(number(task_id) for task_id in suite.user_tasks) == list(range(len(suite.user_tasks)))
+
+
 def test_defense_set_matches_the_pinned_upstream_registry() -> None:
     assert sorted(get_args(AgentDojoDefense)) == sorted(DEFENSES)
 

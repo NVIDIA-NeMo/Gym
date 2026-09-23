@@ -10,11 +10,14 @@ from typing import Any
 
 
 BENCHMARK_VERSION = "v1.2.2"
-SUITE_COUNTS = {
-    "banking": (16, 9),
-    "slack": (21, 5),
-    "travel": (20, 7),
-    "workspace": (40, 14),
+# (user task count, injection task numbers) per suite, as `get_suite("v1.2.2", name)` registers
+# them at the pinned commit. User tasks are numbered from 0 in every suite; injection tasks are
+# not: slack's are 1-5. The agent's tests check this table against upstream.
+SUITE_TASKS: dict[str, tuple[int, tuple[int, ...]]] = {
+    "banking": (16, tuple(range(9))),
+    "slack": (21, tuple(range(1, 6))),
+    "travel": (20, tuple(range(7))),
+    "workspace": (40, tuple(range(14))),
 }
 OUTPUT_PATH = Path(__file__).resolve().parent / "data" / "agentdojo_benchmark.jsonl"
 
@@ -50,7 +53,7 @@ def _row(
 
 def prepare() -> Path:
     rows: list[dict[str, Any]] = []
-    for suite_name, (user_count, injection_count) in SUITE_COUNTS.items():
+    for suite_name, (user_count, injection_numbers) in SUITE_TASKS.items():
         for user_index in range(user_count):
             user_task_id = f"user_task_{user_index}"
             rows.append(_row(suite=suite_name, user_task_id=user_task_id))
@@ -60,7 +63,7 @@ def prepare() -> Path:
                     user_task_id=user_task_id,
                     injection_task_id=f"injection_task_{injection_index}",
                 )
-                for injection_index in range(injection_count)
+                for injection_index in injection_numbers
             )
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

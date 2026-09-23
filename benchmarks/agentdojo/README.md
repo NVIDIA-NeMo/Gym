@@ -14,13 +14,13 @@ under the `important_instructions` attack.
 | Suite | User tasks | Injection tasks | Clean rows | Attacked rows |
 | --- | ---: | ---: | ---: | ---: |
 | banking | 16 | 9 | 16 | 144 |
-| slack | 21 | 5 | 21 | 105 |
+| slack | 21 | 5 (numbered 1–5) | 21 | 105 |
 | travel | 20 | 7 | 20 | 140 |
 | workspace | 40 | 14 | 40 | 560 |
 | **total** | **97** | **35** | **97** | **949** |
 
-1,046 rows; sha256 `bdfe2031e63aa11d7d00cd7c356c9258388d9b478aa058f120ed2f2c9c3a0cd5`. The counts match
-`get_suites("v1.2.2")` at the pinned commit. Rows carry task ids only; upstream loads each prompt and environment.
+1,046 rows; sha256 `e59fd9b9894bfd6eed7a706d165721778dd4820c4af2ca68635f4430726f27f8`. The counts match
+`get_suites("v1.2.2")` at the pinned commit, and the agent tests check the task ids against it. Rows carry task ids only; upstream loads each prompt and environment.
 `prepare.py` needs no network and no AgentDojo install.
 
 ## Arms
