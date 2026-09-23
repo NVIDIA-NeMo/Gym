@@ -382,8 +382,19 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
         }
         assert config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server.name == "gpt-5_2-2025-12-11"
         # Check the resolved consumer bindings, not just unused model definitions.
-        reference = OmegaConf.load(ROOT / BENCHMARK / "eval_container_config.yaml")
-        reference.nv_inference_api_key = "fixture-key"
+        reference = parser.parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.create(
+                    {
+                        "config_paths": [str(BENCHMARK / "eval_container_config.yaml")],
+                        "nv_inference_api_key": "fixture-key",
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
         reference.judge_model = OmegaConf.load(ROOT / "resources_servers/arena/configs/lmarena_v2.yaml").judge_model
         bindings = [
             (config.tau2_benchmark_agent.responses_api_agents.tau2.user_model_server, "gpt-5_2-2025-12-11"),
@@ -415,10 +426,17 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
                 assert models[backend][prefix + field] == expected_models[backend][prefix + field]
             assert models[backend][prefix + "api_key"] == "fixture-key"
         assert "aalcr_batch_judge" not in config
+        # Inheritance renames HLE's shared model instead of launching a second judge server.
+        assert "hle_benchmark_equivalence_judge_model" not in config
+        assert "hle_batch_judge" not in reference
         for name in ("hle_batch_judge", "genrm_model"):
             model = config[name].responses_api_models.openai_model
             assert model.max_concurrent_requests == 32
             assert "reasoning_effort" not in model.get("extra_body", {})
+        assert reference.genrm_model.responses_api_models.openai_model.max_concurrent_requests == 16
+        banking = config["gpt-5_4-mini-2026-03-17"].responses_api_models.openai_model
+        assert banking.extra_body == {"reasoning_effort": "medium"}
+        assert "max_output_tokens" in reference["gpt-5_4-mini-2026-03-17"].responses_api_models.openai_model.extra_body
         # GPT-4o's structured verdict must match the labels consumed by the scorer.
         hle = config.hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge
         hle_reference = OmegaConf.load(ROOT / BENCHMARK / "benchmark_configs/hle_no_tools.yaml")
@@ -428,6 +446,34 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
         for field in ("judge_responses_create_params", "judge_equal_label", "judge_not_equal_label"):
             assert hle[field] == hle_reference[field]
         assert hle.judge_endpoint_max_concurrency == 32
+        assert hle.response_extract_regex is None
+        assert hle_reference.judge_endpoint_max_concurrency == 64
+        assert hle_reference.response_extract_regex is not None
+
+
+def test_shared_model_endpoints_only_define_model_connections() -> None:
+    """Sharing auxiliary models must not pull build-only settings or benchmarks into a run."""
+    shared = OmegaConf.load(ROOT / BENCHMARK / "shared_model_endpoints.yaml")
+    expected_models = {
+        "gpt-5_2-2025-12-11": ("openai_model", "openai/openai/gpt-5.2"),
+        "gpt-5_4-mini-2026-03-17": ("openai_model", "azure/openai/gpt-5.4-mini"),
+        "Qwen3-235B-A22B-Instruct-2507-FP8": ("vllm_model", "nvidia/qwen/qwen-235b"),
+        "hle_benchmark_equivalence_judge_model": ("openai_model", "azure/openai/gpt-4o"),
+        "genrm_model": ("openai_model", "gcp/google/gemini-3-flash-preview"),
+    }
+    assert set(shared) == set(expected_models)
+    for name, (backend, model) in expected_models.items():
+        prefix = "openai_" if backend == "openai_model" else ""
+        assert OmegaConf.to_container(shared[name], resolve=False) == {
+            "responses_api_models": {
+                backend: {
+                    "entrypoint": "app.py",
+                    f"{prefix}model": model,
+                    f"{prefix}base_url": "https://inference-api.nvidia.com/v1",
+                    f"{prefix}api_key": "${nv_inference_api_key}",
+                }
+            }
+        }
 
 
 def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch) -> None:

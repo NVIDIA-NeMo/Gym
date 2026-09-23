@@ -5,6 +5,7 @@
 config_paths:
   - benchmarks/nemotron_3.5_super/core_text.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
 
 num_samples_in_parallel: 512
 num_repeats:
@@ -27,38 +28,18 @@ policy_model:
         top_p: 0.95
 
 nv_inference_api_key: ${oc.env:NV_INFERENCE_API_KEY}
-# Inherit Tau2's GPT-5.2 user and AA-LCR's Qwen judge bindings.
-gpt-5_2-2025-12-11:
-  responses_api_models:
-    openai_model:
-      openai_base_url: https://inference-api.nvidia.com/v1
-      openai_api_key: ${nv_inference_api_key}
-      openai_model: openai/openai/gpt-5.2
-Qwen3-235B-A22B-Instruct-2507-FP8:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      base_url: https://inference-api.nvidia.com/v1
-      api_key: ${nv_inference_api_key}
-      model: nvidia/qwen/qwen-235b
-
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
-      openai_base_url: https://inference-api.nvidia.com/v1
-      openai_api_key: ${nv_inference_api_key}
-      openai_model: azure/openai/gpt-5.4-mini
       extra_body:
         _delete_key: max_output_tokens
         reasoning_effort: medium
 
 hle_batch_judge:
+  # Rename the shared instance, preserving existing batch overrides without an extra server.
+  _inherit_from: hle_benchmark_equivalence_judge_model
   responses_api_models:
     openai_model:
-      entrypoint: app.py
-      openai_base_url: https://inference-api.nvidia.com/v1
-      openai_api_key: ${nv_inference_api_key}
-      openai_model: azure/openai/gpt-4o
       max_concurrent_requests: 32
 hle_equivalence_llm_judge_resources_server:
   resources_servers:
@@ -100,10 +81,6 @@ hle_equivalence_llm_judge_simple_agent:
 genrm_model:
   responses_api_models:
     openai_model:
-      entrypoint: app.py
-      openai_base_url: https://inference-api.nvidia.com/v1
-      openai_api_key: ${nv_inference_api_key}
-      openai_model: gcp/google/gemini-3-flash-preview
       max_concurrent_requests: 32
 omniscience_omniscience_resources_server:
   resources_servers:
