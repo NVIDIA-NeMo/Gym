@@ -24,7 +24,6 @@ override-dependencies = [
     # Role-local repairs for legacy OSWorld dependency metadata.
     "grpcio-status==1.71.2",
     "protobuf==5.29.6",
-    "numpy>=2.1,<2.5",
 ]
 exclude-dependencies = [
     "fasttext-wheel",

@@ -11,9 +11,10 @@ tenacity>=9.1.4
 # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
 # 83e85344 plus generic per-instance remote_docker, proxy/runtime, and explicit
 # setup/evaluator contracts. This revision preserves the canonical task configs.
+# Its Python-conditional NumPy/OpenCV metadata supports Python 3.13 directly.
 # Use an archive because uv recursively initializes git submodules, while
 # optional SurferH submodules are not needed here.
-osworld @ https://github.com/JeffPengCoder/OSWorld/archive/0a65076f6f686588697343da59295cefc6bb7e56.tar.gz
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5.tar.gz
 
 numkong==7.7.0
 docker==7.1.0
