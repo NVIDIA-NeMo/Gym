@@ -19,13 +19,8 @@ def _write_parquet(path: Path) -> None:
 
 def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output_path = tmp_path / "usersim.jsonl"
-    example_path = tmp_path / "example.jsonl"
-    example_path.write_text(
-        '{"task_id":{"taskset":"usersim:example","task_id":"1042"},'
-        '"task_input":{"sampling":{"locale":"en_US","seed":1042}}}\n'
-    )
+    source_rows = [json.loads(line) for line in prepare_module.EXAMPLE_FPATH.read_text().splitlines() if line.strip()]
     monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", output_path)
-    monkeypatch.setattr(prepare_module, "EXAMPLE_FPATH", example_path)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -39,7 +34,10 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
     result = prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
 
     assert result == output_path.absolute()
-    assert json.loads(output_path.read_text())["task_id"]["taskset"] == "usersim:benchmark"
+    prepared_rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert len(source_rows) == len(prepared_rows) == 13
+    assert {row["task_id"]["task_id"] for row in prepared_rows} == {row["task_id"]["task_id"] for row in source_rows}
+    assert all(row["task_id"]["taskset"] == "usersim:benchmark" for row in prepared_rows)
     command, kwargs = calls[0]
     assert command[:6] == ["/bin/usersim", "panel", "--locale", "en_US", "--num-personas", "1"]
     assert "env" not in kwargs
