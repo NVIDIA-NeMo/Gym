@@ -125,7 +125,7 @@ service endpoints, status, and cleanup.
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
-commit `0a65076f6f686588697343da59295cefc6bb7e56`, as declared in
+commit `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5`, as declared in
 [`requirements.txt`](requirements.txt). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, logging hardening, VLC gateway-auth fallback, the per-environment
@@ -133,6 +133,12 @@ provider contract, opt-in setup/evaluator return-code semantics, and the
 restricted-guest Chrome ownership fix without rewriting canonical OSWorld task
 configs. Gym supplies orchestration and the
 worker control plane; OSWorld remains independent of Gym.
+
+The fork declares NumPy/OpenCV requirements by Python version: Python 3.12
+retains NumPy 1.26/OpenCV 4.8, while Python 3.13 uses NumPy 2.1+ and
+NumPy-2-compatible OpenCV 4.10.0.84+. Gym's role-local ranges further select
+the supported runtime. No NumPy override is needed to bypass OSWorld metadata;
+both this agent and the resources server consume the same source revision.
 
 The dependency is consumed as a commit-addressed source archive so uv does not
 initialize optional OSWorld submodules. Gym does not mutate the installed
