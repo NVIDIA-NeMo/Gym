@@ -97,8 +97,7 @@ class ResolvedUserSimContext(BaseModel):
     locale: str
     seed: int
     personas_dataset_version: str
-    personas_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    personas_panel_seed: int
+    personas_panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class UserSimSeedResponse(ResourcesSeedSessionResponse):
