@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import base64
+import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -265,6 +268,80 @@ class TestStrictComparisonTrials:
         dumped = response.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
         assert dumped["_ng_failure_terminal"] is True
+
+    @pytest.mark.parametrize("existing_dir", [False, True])
+    @pytest.mark.parametrize(
+        "stage,enabled,task_ids,missing,expected_loss",
+        [
+            (1, True, ["task-1"], "eval", True),
+            (0, True, ["task-1"], "eval", False),
+            (None, True, ["task-1"], "eval", False),
+            (2, True, ["task-1"], "eval", False),
+            (1, False, ["task-1"], "eval", False),
+            (1, True, [], "eval", False),
+            (1, True, ["different-task"], "eval", False),
+            (1, True, ["task-1"], "reference", False),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_missing_eval_loss_requires_stage_one_and_explicit_task(
+        self, tmp_path, stage, enabled, task_ids, missing, expected_loss, existing_dir
+    ) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=False)
+        if existing_dir:
+            Path(body.deliverables_dir).mkdir(parents=True, exist_ok=True)
+        server.config.count_eval_missing_as_loss = enabled
+        server.config.missing_eval_task_ids = task_ids
+        body.stage_index = stage
+        with patch("resources_servers.gdpval.comparison.run_trials") as judge:
+            response = await server.verify(body)
+        judge.assert_not_called()
+        if expected_loss:
+            assert response.total_losses == 4
+            assert response.total_wins == response.total_ties == 0
+            assert response.loss is True
+            assert response.reward == 0.0
+            assert response.judge_response["manual_imputation"] == "eval_missing_as_loss"
+            assert response.per_reference["reference"]["losses"] == 4
+            assert "_ng_failure_class" not in response.model_dump()
+        else:
+            assert response.model_dump()["_ng_failure_class"] == f"{missing}_missing"
+            assert "manual_imputation" not in response.judge_response
+
+    @pytest.mark.parametrize("marker", ["null", "{}"])
+    @pytest.mark.asyncio
+    async def test_existing_finish_marker_is_judged_with_loss_policy(self, tmp_path, marker) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+        server.config.count_eval_missing_as_loss = True
+        server.config.missing_eval_task_ids = [body.task_id]
+        body.stage_index = 1
+
+        (Path(body.deliverables_dir) / "finish_params.json").write_text(marker)
+        response = await self._verify_with_trials(
+            server,
+            body,
+            {"win_count_a": 1, "win_count_b": 3, "tie_count": 0, "task_count": 4, "invalid_count": 0},
+        )
+        assert response.total_wins == 3
+        assert response.total_losses == 1
+        assert "manual_imputation" not in response.judge_response
+
+    @pytest.mark.parametrize("transport", [False, True])
+    @pytest.mark.asyncio
+    async def test_loss_policy_preserves_judge_failures(self, tmp_path, transport) -> None:
+        from resources_servers.gdpval.app import TransportIneligibleError
+
+        server, body = self._comparison_server_and_body(tmp_path, strict=False)
+        server.config.count_eval_missing_as_loss = True
+        server.config.missing_eval_task_ids = [body.task_id]
+        body.stage_index = 1
+        if transport:
+            response = await self._verify_with_trials(server, body, [TransportIneligibleError("attachment limit")])
+            assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
+            assert "manual_imputation" not in response.judge_response
+        else:
+            with pytest.raises(RuntimeError, match="all 1 judge matchup"):
+                await self._verify_with_trials(server, body, [RuntimeError("judge API unavailable")])
 
     @pytest.mark.asyncio
     async def test_default_is_non_strict_for_backward_compatibility(self, tmp_path) -> None:
@@ -624,6 +701,73 @@ class TestApp:
         dumped = resp.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
         assert dumped["_ng_failure_terminal"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("from_eval", [None, False, True])
+    @pytest.mark.parametrize("has_inputs", [False, True])
+    @pytest.mark.parametrize("media_mode", ["native_pdf", "images_and_text"])
+    async def test_verify_comparison_prepared_benchmark_inputs(
+        self, tmp_path, monkeypatch, from_eval, has_inputs, media_mode
+    ) -> None:
+        from resources_servers.gdpval import comparison
+
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        for directory, text in ((eval_dir, "candidate model output"), (ref_dir, "reference model output")):
+            directory.mkdir(parents=True)
+            (directory / "finish_params.json").write_text("{}")
+            (directory / "submission.txt").write_text(text)
+        if has_inputs:
+            for directory in (eval_dir, ref_dir):
+                (directory / "reference_files" / "asset").mkdir(parents=True)
+            original = ref_dir / "reference_files" / "asset" / "clip.mp4"
+            original.write_bytes(b"x" * 4097)
+            prepared = eval_dir / "reference_files" / "asset" / "clip.mp4.mp4"
+            prepared.write_bytes(b"prepared video")
+            (prepared.parent / "notes.txt").write_text("original benchmark input notes")
+        monkeypatch.setattr(comparison, "MAX_FILE_BYTES_FOR_JUDGE", 4096)
+        extra = {} if from_eval is None else {"judge_reference_files_from_eval": from_eval}
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            judge_reference_files_recursive=True,
+            strict_comparison_trials=True,
+            judge_panel=[{"name": "video", "handles_video": True, "media_mode": media_mode}],
+            **extra,
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="BOXED[B]"))]
+        monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda _: "http://localhost:9999")
+        monkeypatch.setattr("openai.OpenAI", lambda **_: client)
+
+        response = await server.verify(_verify_request(deliverables_dir=str(eval_dir)))
+
+        if has_inputs and not from_eval:
+            assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
+            client.chat.completions.create.assert_not_called()
+            return
+        assert response.judge_response["total_judged"] == 4
+        assert response.judge_response["total_invalid"] == 0
+        assert client.chat.completions.create.call_count == 4
+        for call in client.chat.completions.create.call_args_list:
+            content = call.kwargs["messages"][0]["content"]
+            start = content.index({"type": "text", "text": comparison.REFERENCES_OPEN}) + 1
+            end = content.index({"type": "text", "text": comparison.REFERENCES_CLOSE})
+            inputs = content[start:end]
+            if has_inputs:
+                encoded_inputs = json.dumps(inputs)
+                assert "original benchmark input notes" in encoded_inputs
+                assert base64.b64encode(b"prepared video").decode() in encoded_inputs
+                assert "asset/clip.mp4.mp4" in encoded_inputs
+            else:
+                assert inputs == [{"type": "text", "text": "None"}]
+            assert "model output" not in json.dumps(inputs)
+            prompt = json.dumps(content)
+            assert "candidate model output" in prompt
+            assert "reference model output" in prompt
+            assert "attachment omitted" not in prompt
+            assert "oversize:" not in prompt
 
     @pytest.mark.asyncio
     async def test_verify_comparison_iterates_all_ref_repeats(self, tmp_path) -> None:
@@ -1456,6 +1600,45 @@ class TestMultiReference:
         assert staged["comparison/stage_0/eval_elo"] == unstaged["comparison/eval_elo"]
         # Untagged run carries no stage_* keys at all.
         assert not any(k.startswith("comparison/stage_") for k in unstaged)
+
+    @pytest.mark.asyncio
+    async def test_imputed_loss_coverage_is_separate_from_judgments(self) -> None:
+        from nemo_gym.config_types import AggregateMetricsRequest
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"ref": {"deliverables_dir": "/tmp/ref", "elo": 1000.0}},
+        )
+        rows = []
+        for index, (stage, wins, losses, imputed) in enumerate([(0, 2, 2, False), (1, 3, 1, False), (1, 0, 4, True)]):
+            rows.append(
+                {
+                    "_ng_task_index": index,
+                    "_ng_rollout_index": 0,
+                    "task_id": f"t{index}",
+                    "stage_index": stage,
+                    "expected_final_stage_index": 1,
+                    "expected_stage_row_count": 1 if stage == 0 else 2,
+                    "reward": wins / 4,
+                    "total_wins": wins,
+                    "total_losses": losses,
+                    "total_ties": 0,
+                    "per_reference": {"ref": {"wins": wins, "losses": losses, "ties": 0}},
+                    "judge_response": {"manual_imputation": "eval_missing_as_loss"} if imputed else {},
+                    "response": {},
+                }
+            )
+        metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+        assert metrics["comparison/stage_0/judged_tasks"] == 1
+        assert metrics["comparison/stage_0/imputed_loss_tasks"] == 0
+        assert metrics["comparison/stage_1/num_tasks"] == 2
+        assert metrics["comparison/stage_1/judged_tasks"] == 1
+        assert metrics["comparison/stage_1/judged_votes"] == 4
+        assert metrics["comparison/stage_1/imputed_loss_tasks"] == 1
+        assert metrics["comparison/stage_1/imputed_loss_votes"] == 4
+        assert metrics["comparison/final_stage_complete"] == 1
+        assert metrics["comparison/eval_elo"] == pytest.approx(calculate_mle_elo([(1000.0, 3, 5, 0)])[0])
 
     def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
         """The declared final stage supplies the headline when its fit is usable."""

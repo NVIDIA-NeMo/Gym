@@ -954,6 +954,12 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "deliverable set produced by an earlier run without paying the rollout cost again. "
         "Mutually exclusive with execute_only.",
     )
+    count_eval_missing_as_loss: bool = Field(
+        default=False,
+        description="In judge-only Stage 1, forward explicitly listed missing candidate tasks to /verify. "
+        "The resources server must independently enable the same loss policy.",
+    )
+    missing_eval_task_ids: List[str] = Field(default_factory=list)
     rerun_incomplete: bool = Field(
         default=False,
         description="Task re-run mode. When True, the per-task cache under "
@@ -1401,10 +1407,14 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
             if self.config.judge_only:
                 # Judge-only mode: do NOT run the agent. Score the pre-existing
-                # cached deliverables at ``deliverables_dir``. A task whose
-                # deliverable directory is missing can't be scored — report it
-                # as skipped (terminal; re-dispatch won't create the files).
-                if deliverables_dir is None or not Path(deliverables_dir).is_dir():
+                # cached deliverables. Missing directories are skipped unless
+                # the Stage 1 policy explicitly permits forwarding this task.
+                allow_missing = (
+                    self.config.count_eval_missing_as_loss
+                    and body_dict.get("stage_index") == 1
+                    and task_id in self.config.missing_eval_task_ids
+                )
+                if (deliverables_dir is None or not Path(deliverables_dir).is_dir()) and not allow_missing:
                     task_info = self.task_strategy.extract_task_info(existing_metadata)
                     reason = (
                         f"judge_only: no cached deliverables at {deliverables_dir}"
@@ -1666,6 +1676,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # after the environment fault is repaired.
                 print(f"[stirrup] ignoring cached failure-classed verify result: {cache_path}", flush=True)
                 return None
+            judge_response = cached.get("judge_response")
+            if isinstance(judge_response, dict) and judge_response.get("manual_imputation"):
+                # Recheck policy, stage and artifacts instead of replaying an
+                # automatic loss after a missing candidate has been repaired.
+                return None
             return cached
         except Exception as exc:
             print(f"[stirrup] warning: could not read cached verify result {cache_path}: {exc}", flush=True)
@@ -1691,6 +1706,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         if verify_result.get(NG_FAILURE_CLASS_KEY):
             # Failures are retry state, not judgements; persisting one would
             # make _read_cached_verify replay it forever on re-judging runs.
+            return
+        judge_response = verify_result.get("judge_response")
+        if isinstance(judge_response, dict) and judge_response.get("manual_imputation"):
             return
         try:
             import json as _json
