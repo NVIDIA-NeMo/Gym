@@ -1,0 +1,18 @@
+anyswe:
+  resources_servers:
+    anyswe:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Grades SWE task patches hermetically in fresh sandboxes with the official SWE-bench evaluation scripts.
+      value: Software engineering agent capabilities.
+      max_pass_to_pass: 20
+      eval_timeout: 1800
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            protocol: http
+            use_server_proxy: true
+            request_timeout_s: 1800
