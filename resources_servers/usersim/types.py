@@ -17,9 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 
 
-USERSIM_MODEL_ALIASES = frozenset(
-    {"user_model", "assistant_model", "api_response_model", "judge_model", "summary_model"}
-)
+USERSIM_MODEL_ALIASES = frozenset({"user_model", "assistant_model", "judge_model", "summary_model"})
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
@@ -135,25 +133,17 @@ class UserSimSimulationResult(BaseModel):
 
 
 class UserSimInvocation(BaseModel):
-    """One ordered UserSim model alias activation."""
+    """One ordered UserSim participant or support-model activation."""
 
     model_config = ConfigDict(extra="forbid")
 
     sequence: int = Field(ge=0)
-    alias: str
-    executor: Literal["agent", "model"]
+    role: Literal["user", "assistant", "judge", "summary"]
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
     observations: AgentObservationBundle | None = None
     state_after: dict[str, Any] | None = None
     termination_reason: str | None = None
-
-    @field_validator("alias")
-    @classmethod
-    def validate_alias(cls, alias: str) -> str:
-        if alias not in USERSIM_MODEL_ALIASES:
-            raise ValueError(f"unknown UserSim model alias: {alias}")
-        return alias
 
 
 class UserSimVerificationInput(BaseModel):
