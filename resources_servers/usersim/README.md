@@ -111,10 +111,10 @@ session cookie selects that episode's allowlist, simulated state, and verifier
 evidence, so another episode cannot call or mutate those tools.
 
 The four Agents have independent model-server references:
-`user_policy_model`, `assistant_policy_model`, `judge_policy_model`, and
+`user_policy_model`, `assistant_policy_model`, `judge_model`, and
 `summary_policy_model`. Resources-owned tool-result synthesis uses
 `tool_simulation_model`, while native probe scoring uses
-`probe_scorer_model`, which references `judge_policy_model` by default.
+`probe_scorer_model`, which references `judge_model` by default.
 These references can share a Model Server when they use the same provider and
 model. `/close_session` removes the resolved scenario and mutable runtime state.
 
