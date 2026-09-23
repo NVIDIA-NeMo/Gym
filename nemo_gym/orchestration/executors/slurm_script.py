@@ -35,7 +35,7 @@ from nemo_gym.orchestration.executors.otel import (
     FINAL_SCRAPE_GRACE_SECONDS,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
-    observability_active,
+    otel_active,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
@@ -354,7 +354,7 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, i
     container the job directory is mounted for the config and the local `otel/*.jsonl` output; on
     the node it is simply there, so no mounts or workdir are passed.
     """
-    obs = config.observability
+    obs = config.otel
     command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
     container_kwargs = (
         {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
@@ -376,7 +376,7 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, i
 
 def _render_collector_health_check(config: SubmitConfig) -> str:
     return render_health_check(
-        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.observability.health_check_timeout_seconds
+        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.otel.health_check_timeout_seconds
     )
 
 
@@ -391,7 +391,7 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
     pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
     # Anchored to the binary: the srun that launched it carries the same `--config <path>` on its
     # own command line, and a TERM to srun makes Slurm kill the step before the flush completes.
-    binary = re.escape(config.observability.binary)
+    binary = re.escape(config.otel.binary)
     pattern = shlex.quote(f"^{binary} --config {re.escape(str(collector_config_path(remote_bench_dir)))}")
     return (
         "DRIVER_RC=$?\n"
@@ -445,7 +445,7 @@ def build_sbatch_script(
         else ""
     )
 
-    observed = observability_active(config)
+    observed = otel_active(config)
 
     service_commands = "\n\n".join(
         ([_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node)] if observed else [])

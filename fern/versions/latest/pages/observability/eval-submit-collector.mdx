@@ -12,11 +12,11 @@ It is on by default and needs three site-specific values.
 ## Configure
 
 ```yaml
-observability:
+otel:
   enabled: true                       # default
   endpoint: https://otlp.example.com  # OTLP/HTTP ingest; required when enabled
   service_name: my-eval-service       # service.name resource attribute the backend routes by; required
-  token_env: OBSERVABILITY_TOKEN      # env var in the submitting shell holding the bearer token
+  token_env: OTEL_TOKEN      # env var in the submitting shell holding the bearer token
   binary: /shared/otelcol-contrib     # static collector binary reachable on the compute nodes
   container: null                     # optional image instead of the host binary
   component: gym-vllm                 # display name for the scraped engine metrics
@@ -26,7 +26,9 @@ observability:
   health_check_timeout_seconds: 300
 ```
 
-A deployment usually puts `endpoint`, `service_name`, `token_env` and `binary` in a shared cluster
+The block is named `otel` because it configures the OpenTelemetry Collector only; Gym's rollout
+evidence (`observability_enabled`) and the in-process SDK (`telemetry.enabled`, `NEMO_GYM_OTEL_*`)
+are separate settings. A deployment usually puts `endpoint`, `service_name`, `token_env` and `binary` in a shared cluster
 fragment; user configs rarely need to mention the block. Set `enabled: false` to opt a run out. A job
 without a model service gets no collector.
 

@@ -27,7 +27,7 @@ from nemo_gym.orchestration.executors.connection import Connection, get_connecti
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
-    observability_active,
+    otel_active,
     render_collector_config,
     resolve_token,
     validate_destination,
@@ -156,7 +156,7 @@ class SlurmExecutor(BaseExecutor):
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
         token = None
-        if observability_active(config):
+        if otel_active(config):
             validate_destination(config)
             token = resolve_token(config)
         now = utc_now()
@@ -172,9 +172,7 @@ class SlurmExecutor(BaseExecutor):
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
                 conn.copy(staging, remote_run_dir)
-                token_export = (
-                    [f"export {config.observability.token_env}={shlex.quote(token)}"] if token is not None else []
-                )
+                token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(
                     token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
@@ -233,7 +231,7 @@ class SlurmExecutor(BaseExecutor):
             print(f"[dry-run] sbatch script for benchmark: {name}")
             print(f"{'=' * 60}")
             print(script)
-            if observability_active(config):
+            if otel_active(config):
                 print(f"\n{'=' * 60}")
                 print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
                 print(f"{'=' * 60}")
@@ -247,7 +245,7 @@ class SlurmExecutor(BaseExecutor):
             (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             (bench_dir / "job.sh").write_text(script)
-            if observability_active(config):
+            if otel_active(config):
                 (bench_dir / COLLECTOR_DIR).mkdir()
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
                     render_collector_config(config, name, remote_run_dir / name)

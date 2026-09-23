@@ -29,7 +29,7 @@ from nemo_gym.orchestration.executors.otel import (
     OTLP_GRPC_PORT,
     OTLP_HTTP_PORT,
     collector_config_path,
-    observability_active,
+    otel_active,
     render_collector_config,
     resolve_token,
     scrape_targets,
@@ -48,10 +48,10 @@ def _config(**overrides):
         "compute": {"cluster-a": {"type": "slurm", "account": "acct", "hostname": None}},
         "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {}}},
         "job": {"output_path": "/remote/jobs"},
-        "observability": {"endpoint": "https://otlp.example.com", "service_name": "my-registered-service"},
+        "otel": {"endpoint": "https://otlp.example.com", "service_name": "my-registered-service"},
     }
-    if "observability" in overrides:
-        overrides = {**overrides, "observability": {**base["observability"], **overrides["observability"]}}
+    if "otel" in overrides:
+        overrides = {**overrides, "otel": {**base["otel"], **overrides["otel"]}}
     return SubmitConfig.model_validate({**base, **overrides})
 
 
@@ -70,31 +70,31 @@ def _fixed_user(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_observability_is_on_by_default():
-    assert _config().observability.enabled is True
+def test_otel_is_on_by_default():
+    assert _config().otel.enabled is True
 
 
-def test_observability_can_be_disabled():
-    assert _config(observability={"enabled": False}).observability.enabled is False
+def test_otel_can_be_disabled():
+    assert _config(otel={"enabled": False}).otel.enabled is False
 
 
-def test_observability_rejects_unknown_fields():
+def test_otel_rejects_unknown_fields():
     with pytest.raises(ValidationError):
-        _config(observability={"enabld": False})
+        _config(otel={"enabld": False})
 
 
-def test_observability_rejects_invalid_token_env_name():
+def test_otel_rejects_invalid_token_env_name():
     with pytest.raises(ValidationError, match="token_env"):
-        _config(observability={"token_env": "not a var"})
+        _config(otel={"token_env": "not a var"})
 
 
-def test_observability_is_part_of_the_resolved_config():
+def test_otel_is_part_of_the_resolved_config():
     dumped = _config().model_dump(mode="json")
-    assert dumped["observability"]["service_name"] == "my-registered-service"
-    assert dumped["observability"]["token_env"] == "OBSERVABILITY_TOKEN"
+    assert dumped["otel"]["service_name"] == "my-registered-service"
+    assert dumped["otel"]["token_env"] == "OTEL_TOKEN"
 
 
-def test_observability_has_no_destination_by_default():
+def test_otel_has_no_destination_by_default():
     bare = SubmitConfig.model_validate(
         {
             "services": {},
@@ -103,9 +103,9 @@ def test_observability_has_no_destination_by_default():
             "job": {"output_path": "/remote"},
         }
     )
-    assert bare.observability.enabled is True
-    assert bare.observability.endpoint is None
-    assert bare.observability.service_name is None
+    assert bare.otel.enabled is True
+    assert bare.otel.endpoint is None
+    assert bare.otel.service_name is None
 
 
 # ---------------------------------------------------------------------------
@@ -126,30 +126,28 @@ def test_scrape_targets_are_the_model_services():
 
 def test_inactive_without_a_model_service():
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
-    assert not observability_active(_config(services={}, driver=driver))
-    assert not observability_active(
-        _config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver)
-    )
+    assert not otel_active(_config(services={}, driver=driver))
+    assert not otel_active(_config(services={"head": {"type": "ray", "container": "ray:latest"}}, driver=driver))
 
 
 def test_inactive_when_disabled():
-    assert not observability_active(_config(observability={"enabled": False}))
+    assert not otel_active(_config(otel={"enabled": False}))
 
 
 def test_resolve_token_reads_the_submitting_env(monkeypatch):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     assert resolve_token(_config()) == "secret-token"
 
 
 def test_resolve_token_honours_token_env(monkeypatch):
-    monkeypatch.delenv("OBSERVABILITY_TOKEN", raising=False)
+    monkeypatch.delenv("OTEL_TOKEN", raising=False)
     monkeypatch.setenv("MY_TOKEN", "other")
-    assert resolve_token(_config(observability={"token_env": "MY_TOKEN"})) == "other"
+    assert resolve_token(_config(otel={"token_env": "MY_TOKEN"})) == "other"
 
 
 def test_resolve_token_missing_names_the_variable(monkeypatch):
-    monkeypatch.delenv("OBSERVABILITY_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="OBSERVABILITY_TOKEN"):
+    monkeypatch.delenv("OTEL_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="OTEL_TOKEN"):
         resolve_token(_config())
 
 
@@ -181,7 +179,7 @@ def test_collector_scrapes_the_node_exporters_by_default_and_can_skip_them():
     assert by_job["node"]["static_configs"][0]["targets"] == ["localhost:9100"]
     assert by_job["dcgm"]["scrape_interval"] == "15s"
 
-    off = _config(observability={"gpu_metrics_port": None, "node_metrics_port": 9200})
+    off = _config(otel={"gpu_metrics_port": None, "node_metrics_port": 9200})
     jobs = {s["job_name"]: s for s in _rendered(off)["receivers"]["prometheus"]["config"]["scrape_configs"]}
     assert "dcgm" not in jobs
     assert jobs["node"]["static_configs"][0]["targets"] == ["localhost:9200"]
@@ -245,14 +243,14 @@ def test_collector_routes_via_service_name_and_token_attribute():
     attrs = _attrs(doc)
     assert attrs["service.name"] == ("my-registered-service", "upsert")
     assert attrs["service.name.override"] == ("gym-vllm", "insert")
-    assert attrs["Authorization"] == ("${env:OBSERVABILITY_TOKEN}", "upsert")
+    assert attrs["Authorization"] == ("${env:OTEL_TOKEN}", "upsert")
     exporter = doc["exporters"]["otlp_http/managed"]
     assert exporter["endpoint"] == "https://otlp.example.com"
-    assert exporter["headers"]["Authorization"] == "Bearer ${env:OBSERVABILITY_TOKEN}"
+    assert exporter["headers"]["Authorization"] == "Bearer ${env:OTEL_TOKEN}"
 
 
 def test_collector_token_reference_follows_token_env():
-    doc = _rendered(_config(observability={"token_env": "MY_TOKEN"}))
+    doc = _rendered(_config(otel={"token_env": "MY_TOKEN"}))
     assert _attrs(doc)["Authorization"][0] == "${env:MY_TOKEN}"
     assert doc["exporters"]["otlp_http/managed"]["headers"]["Authorization"] == "Bearer ${env:MY_TOKEN}"
 
@@ -278,7 +276,7 @@ def test_collector_exposes_a_health_check():
 
 
 def test_collector_config_never_contains_the_token_value(monkeypatch):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     assert "secret-token" not in render_collector_config(_config(), "scicode", BENCH_DIR)
 
 
@@ -325,7 +323,7 @@ def test_script_runs_the_collector_on_the_node_by_default():
 
 
 def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
-    config = _config(observability={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
+    config = _config(otel={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
     line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
     assert "--container-image=/shared/images/otelcol.sqsh" in line
     assert "--no-container-mount-home" in line
@@ -336,15 +334,15 @@ def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_
 
 
 def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkeypatch):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
-    assert "OBSERVABILITY_TOKEN=${OBSERVABILITY_TOKEN}" in line
+    assert "OTEL_TOKEN=${OTEL_TOKEN}" in line
     assert "SLURM_JOB_ID=${SLURM_JOB_ID}" in line
     assert "secret-token" not in line
 
 
 def test_script_honours_a_binary_path_on_shared_storage():
-    config = _config(observability={"binary": "/shared/tools/otelcol-contrib"})
+    config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
     line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
     assert " /shared/tools/otelcol-contrib --config " in line
     assert "--container" not in line
@@ -372,7 +370,7 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
 
 
 def test_script_has_no_collector_when_disabled():
-    script = _script(_config(observability={"enabled": False}))
+    script = _script(_config(otel={"enabled": False}))
     assert "otel_collector" not in script
     assert "DRIVER_RC" not in script
 
@@ -408,11 +406,11 @@ def _executor_config(tmp_path, **overrides):
 
 
 def test_submit_fails_before_staging_when_the_token_is_missing(tmp_path, monkeypatch):
-    monkeypatch.delenv("OBSERVABILITY_TOKEN", raising=False)
+    monkeypatch.delenv("OTEL_TOKEN", raising=False)
     conn = _FakeConnection([])
     _install(monkeypatch, conn, tmp_path)
 
-    with pytest.raises(ValueError, match="OBSERVABILITY_TOKEN"):
+    with pytest.raises(ValueError, match="OTEL_TOKEN"):
         SlurmExecutor().run(_executor_config(tmp_path))
 
     assert conn.commands == []
@@ -420,21 +418,21 @@ def test_submit_fails_before_staging_when_the_token_is_missing(tmp_path, monkeyp
 
 
 def test_submit_fails_when_the_destination_is_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     config = _executor_config(tmp_path)
-    config.observability.endpoint = None
-    with pytest.raises(ValueError, match="observability.endpoint"):
+    config.otel.endpoint = None
+    with pytest.raises(ValueError, match="otel.endpoint"):
         SlurmExecutor().run(config, dry_run=True)
 
 
 def test_dry_run_fails_when_the_token_is_missing(tmp_path, monkeypatch):
-    monkeypatch.delenv("OBSERVABILITY_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="OBSERVABILITY_TOKEN"):
+    monkeypatch.delenv("OTEL_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="OTEL_TOKEN"):
         SlurmExecutor().run(_executor_config(tmp_path), dry_run=True)
 
 
 def test_dry_run_prints_the_collector_config(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     SlurmExecutor().run(_executor_config(tmp_path), dry_run=True)
     out = capsys.readouterr().out
     assert "otel/collector.yaml for benchmark: scicode" in out
@@ -443,7 +441,7 @@ def test_dry_run_prints_the_collector_config(tmp_path, monkeypatch, capsys):
 
 
 def test_submit_stages_the_collector_config_and_exports_the_token_only_to_the_shell(tmp_path, monkeypatch):
-    monkeypatch.setenv("OBSERVABILITY_TOKEN", "secret-token")
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
     _install(monkeypatch, conn, tmp_path)
 
@@ -457,16 +455,16 @@ def test_submit_stages_the_collector_config_and_exports_the_token_only_to_the_sh
     assert "secret-token" not in (Path(record.run_dir) / RESOLVED_CONFIG_NAME).read_text()
 
     commands = conn.commands[0]
-    assert commands[0] == "export OBSERVABILITY_TOKEN=secret-token"
+    assert commands[0] == "export OTEL_TOKEN=secret-token"
     assert commands[1].startswith("out=$(sbatch --parsable ")
 
 
-def test_submit_without_observability_neither_stages_nor_exports(tmp_path, monkeypatch):
-    monkeypatch.delenv("OBSERVABILITY_TOKEN", raising=False)
+def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
+    monkeypatch.delenv("OTEL_TOKEN", raising=False)
     conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
     _install(monkeypatch, conn, tmp_path)
 
-    record = SlurmExecutor().run(_executor_config(tmp_path, observability={"enabled": False}))
+    record = SlurmExecutor().run(_executor_config(tmp_path, otel={"enabled": False}))
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
     assert not conn.commands[0][0].startswith("export ")

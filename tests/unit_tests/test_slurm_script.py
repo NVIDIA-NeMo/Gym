@@ -1133,7 +1133,7 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
 
 
 def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
-    """Services get no mounts unless configured. The driver and the observability
+    """Services get no mounts unless configured. The driver and the OTel
     collector are the exceptions and always mount the job directory, because that
     is where their artifacts go -- see
     test_driver_can_write_its_artifacts_into_the_job_directory."""

@@ -54,29 +54,29 @@ def scrape_targets(config: SubmitConfig) -> dict[str, int]:
     }
 
 
-def observability_active(config: SubmitConfig) -> bool:
+def otel_active(config: SubmitConfig) -> bool:
     """Whether a collector step is added to this job: enabled, and there is something to scrape."""
-    return config.observability.enabled and bool(scrape_targets(config))
+    return config.otel.enabled and bool(scrape_targets(config))
 
 
 def validate_destination(config: SubmitConfig) -> None:
-    """Enabled observability needs somewhere to send to; a bare default config has none."""
-    missing = [k for k in ("endpoint", "service_name") if getattr(config.observability, k) is None]
+    """An enabled collector needs somewhere to send to; a bare default config has none."""
+    missing = [k for k in ("endpoint", "service_name") if getattr(config.otel, k) is None]
     if missing:
         raise ValueError(
-            f"Observability is enabled but observability.{' and observability.'.join(missing)} is not set. "
-            "Set them for this deployment, or set `observability.enabled: false`."
+            f"The OTel collector is enabled but otel.{' and otel.'.join(missing)} is not set. "
+            "Set them for this deployment, or set `otel.enabled: false`."
         )
 
 
 def resolve_token(config: SubmitConfig) -> str:
     """The ingest token from the submitting environment; a missing one fails the submit."""
-    name = config.observability.token_env
+    name = config.otel.token_env
     token = os.environ.get(name)
     if not token:
         raise ValueError(
-            f"Observability is enabled but {name!r} is not set in the submitting shell's environment. "
-            f"Export the ingest token as {name}, or set `observability.enabled: false`."
+            f"The OTel collector is enabled but {name!r} is not set in the submitting shell's environment. "
+            f"Export the ingest token as {name}, or set `otel.enabled: false`."
         )
     return token
 
@@ -102,7 +102,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     `SubmissionRecord.cluster` records. Values only known inside the job (`SLURM_JOB_ID`, the
     token) are left as `${env:...}` for the collector to expand at startup.
     """
-    obs = config.observability
+    obs = config.otel
     otel_dir = remote_bench_dir / COLLECTOR_DIR
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"

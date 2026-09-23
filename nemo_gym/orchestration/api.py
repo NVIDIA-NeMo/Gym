@@ -238,7 +238,7 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
-class ObservabilityConfig(_StrictModel):
+class OtelConfig(_StrictModel):
     """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
     Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
     both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
@@ -257,7 +257,7 @@ class ObservabilityConfig(_StrictModel):
     endpoint: str | None = None
     # Env var holding the ingest bearer token on the machine running `gym eval submit`. Read at
     # submit time and forwarded into the job's environment; never written into the job directory.
-    token_env: str = "OBSERVABILITY_TOKEN"
+    token_env: str = "OTEL_TOKEN"
     # Sent as the `service.name` resource attribute: the identity the backend routes the token by.
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
@@ -274,7 +274,7 @@ class ObservabilityConfig(_StrictModel):
     @classmethod
     def _validate_token_env(cls, v: str) -> str:
         if not _ENV_VAR_NAME_RE.match(v):
-            raise ValueError(f"observability.token_env: {v!r} is not a valid environment variable name")
+            raise ValueError(f"otel.token_env: {v!r} is not a valid environment variable name")
         return v
 
     @field_validator("scrape_interval_seconds", "health_check_timeout_seconds")
@@ -290,7 +290,7 @@ class SubmitConfig(_StrictModel):
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
-    observability: ObservabilityConfig = ObservabilityConfig()
+    otel: OtelConfig = OtelConfig()
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
