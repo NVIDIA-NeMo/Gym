@@ -58,7 +58,7 @@ the undefended pipeline. Pipelines are built by upstream's `AgentPipeline.from_c
 
 | Defense | What upstream does | Notes |
 | --- | --- | --- |
-| `tool_filter` | one extra policy call (temperature 0, `tool_choice="none"`) chooses the tools the task needs; the rest are removed | the extra call goes through the Gym model server like every other call |
+| `tool_filter` | one extra policy call (temperature 0, `tool_choice="none"`) chooses the tools the task needs; the rest are removed | the extra call goes through the Gym model server like every other call. It only works where the deployment still shows the model its tool definitions under `tool_choice="none"`; some serving stacks drop them, the filter then names no real tool, and every task runs with an empty tool set. Check with one request before reading a `tool_filter` score |
 | `transformers_pi_detector` | `protectai/deberta-v3-base-prompt-injection-v2` classifies each tool result and replaces a flagged one with a redaction notice | needs `torch` and `transformers` (installed with the `agentdojo[transformers]` extra) and downloads the classifier from the Hugging Face Hub on first use; runs on CPU when CUDA is absent |
 | `spotlighting_with_delimiting` | wraps tool results in `<< >>` and tells the model not to follow instructions inside them | prompt-only |
 | `repeat_user_prompt` | repeats the user task after every tool result | prompt-only |
@@ -81,8 +81,11 @@ A per-row `defense` value takes precedence.
   reject the `developer` role.
 - `rollout_timeout_seconds` (default none) abandons and masks a rollout that does not finish. Upstream's tool loop
   already stops after 15 iterations.
-- Sampling: upstream sends `temperature or NOT_GIVEN`, so its nominal `temperature=0.0` is never sent and the
-  deployment default applies. Rows leave temperature unset to match; setting one is an evaluation variant.
+- Sampling: the adapter forwards only the sampling a run sets. Pass `--temperature 0.0` to `gym eval run`: it is
+  upstream's nominal setting and the one the published baselines use. Without it every call uses the deployment's
+  default temperature, which is undisclosed and varies run to run. Upstream's own OpenAI adapter sends
+  `temperature or NOT_GIVEN`, so its literal request omits the 0.0; leaving temperature unset reproduces that
+  request, not a deterministic run.
 
 ## Running
 
@@ -91,7 +94,7 @@ gym eval prepare --benchmark agentdojo          # 1,046 rows, see benchmarks/age
 gym env start --config benchmarks/agentdojo/config.yaml --config <model server config>
 gym eval run --no-serve --config benchmarks/agentdojo/config.yaml --config <model server config> \
     --agent agentdojo_benchmark --input benchmarks/agentdojo/data/agentdojo_benchmark.jsonl \
-    --output results/agentdojo.jsonl --num-repeats 1
+    --output results/agentdojo.jsonl --num-repeats 1 --temperature 0.0
 ```
 
 The first start builds the agent's own virtual environment, which installs AgentDojo and `torch`.
@@ -100,9 +103,10 @@ The first start builds the agent's own virtual environment, which installs Agent
 
 `data/example.jsonl` holds five clean rows (`banking/user_task_0`, `slack/user_task_0`, `travel/user_task_0`,
 `workspace/user_task_0`, `banking/user_task_1`), byte-identical to the corresponding rows of the prepared benchmark.
-`data/example_rollouts.jsonl` holds their rollouts from `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, served
-through `inference_provider` with `uses_reasoning_parser: true`, undefended: utility 4/5, no masked rows.
-`banking/user_task_0` read the bill but did not make the payment.
+`data/example_rollouts.jsonl` holds their rollouts, copied unmodified from the undefended
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` baseline (served through `inference_provider` with
+`uses_reasoning_parser: true`, `--temperature 0.0`): utility 4/5, no masked rows. `_ng_task_index` is the row's index in
+the baseline shard it came from. `banking/user_task_0` did not complete the payment.
 
 ## Tests
 
