@@ -10,9 +10,9 @@ user_policy_base_url: ${policy_base_url}
 user_policy_api_key: ${policy_api_key}
 user_policy_model_name: ${policy_model_name}
 
-simulation_support_base_url: ${policy_base_url}
-simulation_support_api_key: ${policy_api_key}
-simulation_support_model_name: ${policy_model_name}
+tool_simulation_base_url: ${policy_base_url}
+tool_simulation_api_key: ${policy_api_key}
+tool_simulation_model_name: ${policy_model_name}
 
 assistant_policy_model:
   responses_api_models:
@@ -32,13 +32,13 @@ user_policy_model:
       model: ${user_policy_model_name}
       return_token_id_information: false
 
-simulation_support_model:
+tool_simulation_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${simulation_support_base_url}
-      api_key: ${simulation_support_api_key}
-      model: ${simulation_support_model_name}
+      base_url: ${tool_simulation_base_url}
+      api_key: ${tool_simulation_api_key}
+      model: ${tool_simulation_model_name}
       return_token_id_information: false
 
 usersim:
@@ -51,12 +51,12 @@ usersim:
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
       usersim_revision: 693865d7b33c3d96283a9742703c8c89413a9d2b
-      api_response_model:
+      tool_simulation_model:
         type: responses_api_models
-        name: simulation_support_model
-      judge_model:
+        name: tool_simulation_model
+      probe_scorer_model:
         type: responses_api_models
-        name: simulation_support_model
+        name: tool_simulation_model
       personas_locales:
       - en_US
       probe_mix:
@@ -118,13 +118,13 @@ usersim_environment:
         name: usersim
       judge_model:
         type: responses_api_models
-        name: simulation_support_model
+        name: tool_simulation_model
       summary_model:
         type: responses_api_models
-        name: simulation_support_model
+        name: tool_simulation_model
       api_response_model:
         type: responses_api_models
-        name: simulation_support_model
+        name: tool_simulation_model
       resources_tool_transports:
         - direct_http
       max_turns: 6

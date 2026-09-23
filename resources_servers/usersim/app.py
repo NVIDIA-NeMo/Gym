@@ -94,8 +94,8 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
-    api_response_model: ModelServerRef | None = None
-    judge_model: ModelServerRef | None = None
+    tool_simulation_model: ModelServerRef | None = None
+    probe_scorer_model: ModelServerRef | None = None
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     probe_mix: dict[str, float] = Field(
         default_factory=lambda: {
@@ -499,19 +499,19 @@ class UserSimResourcesServer(SimpleResourcesServer):
         from usersim.engine.core.behavioral import compute_behavioral_profile, get_conversation_language
         from usersim.engine.core.episode_runtime import ProbeEpisodeRuntime
 
-        if scenario.probe_type == "tool_calling" and self.config.api_response_model is None:
-            raise ValueError("tool_calling requires resources api_response_model configuration")
+        if scenario.probe_type == "tool_calling" and self.config.tool_simulation_model is None:
+            raise ValueError("tool_calling requires resources tool_simulation_model configuration")
         models = {}
-        if self.config.api_response_model is not None:
+        if self.config.tool_simulation_model is not None:
             models["api_response_model"] = _ResourcesModelFacade(
                 self,
-                self.config.api_response_model,
+                self.config.tool_simulation_model,
                 event_loop,
             )
-        if self.config.judge_model is not None:
+        if self.config.probe_scorer_model is not None:
             models["judge_model"] = _ResourcesModelFacade(
                 self,
-                self.config.judge_model,
+                self.config.probe_scorer_model,
                 event_loop,
             )
         data = {
@@ -563,11 +563,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
         }
         if seeded.runtime is not None:
             scorer_models = {alias: model for alias, model in seeded.runtime.models.items() if alias == "judge_model"}
-        elif self.config.judge_model is not None:
+        elif self.config.probe_scorer_model is not None:
             scorer_models = {
                 "judge_model": _ResourcesModelFacade(
                     self,
-                    self.config.judge_model,
+                    self.config.probe_scorer_model,
                     asyncio.get_running_loop(),
                 )
             }
