@@ -120,11 +120,8 @@ def _text_from_openclaw_payloads(envelope: dict[str, Any]) -> str:
     return final.strip() if isinstance(final, str) else ""
 
 
-def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
-    envelope = _decode_last_json_dict_suffix(stdout)
-    if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
-
+def _openclaw_output_items(envelope: dict[str, Any]) -> list[Any]:
+    """Read envelope text independently of optional numeric usage metadata."""
     text = _text_from_openclaw_payloads(envelope)
     output_items: list[Any] = []
     if text:
@@ -137,6 +134,14 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
                 type="message",
             )
         )
+    return output_items
+
+
+def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
+    envelope = _decode_last_json_dict_suffix(stdout)
+    if not envelope:
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    output_items = _openclaw_output_items(envelope)
 
     meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
     agent_meta = meta.get("agentMeta") if isinstance(meta.get("agentMeta"), dict) else {}
@@ -755,9 +760,20 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if getattr(item, "role", None) not in {"user", "system", "developer"}
         ]
         try:
-            fallback, _ = parse_openclaw_output(stdout)
+            envelope = _decode_last_json_dict_suffix(stdout) or {}
+            fallback = _openclaw_output_items(envelope)
         except (TypeError, ValueError, AttributeError):
             fallback = []
+            envelope = {}
+            gaps.append(ObservationGap(code="agent_stdout_unparseable"))
+        meta = envelope.get("meta")
+        agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
+        raw_usage = agent_meta.get("usage") if isinstance(agent_meta, dict) else None
+        raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+        if any(
+            value is not None and (type(value) is not int or value < 0)
+            for value in (raw_usage.get(name) for name in ("input", "output", "cacheRead"))
+        ):
             gaps.append(ObservationGap(code="agent_stdout_unparseable"))
         if not output:
             output = fallback
@@ -815,11 +831,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if not assistants:
             # The legacy envelope parser defaults missing counters to zero.
             # Native totals retain valid subtotals without coercing malformed cache values.
-            envelope = _decode_last_json_dict_suffix(stdout) or {}
-            meta = envelope.get("meta")
-            agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
-            raw_usage = agent_meta.get("usage") if isinstance(agent_meta, dict) else None
-            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
             cache_read = raw_usage.get("cacheRead")
             cached_tokens = cache_read if type(cache_read) is int and cache_read >= 0 else None
             input_count, output_count = raw_usage.get("input"), raw_usage.get("output")
