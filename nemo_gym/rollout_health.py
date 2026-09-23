@@ -94,6 +94,9 @@ def _process_pool_chunksize(item_count: int, workers: int) -> int:
 
 def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
     with open(line.path, "rb") as handle:
+        stat = os.fstat(handle.fileno())
+        if (stat.st_dev, stat.st_ino) != line.file_identity:
+            return {}, "rollout file was replaced after indexing"
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
     try:
@@ -247,6 +250,7 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
         store = RolloutStore.read(path, import_legacy=False)
         if store is not None:
             for record in store.selected_records("success").values():
+                assert record.file_identity is not None  # Captured by the store's index scan.
                 slices.append(
                     _LineSlice(
                         path=str(record.path),
@@ -255,11 +259,14 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                         ordinal=ordinal,
                         source_index=source_index,
                         line_number=record.line_number,
+                        file_identity=record.file_identity,
                     )
                 )
                 ordinal += 1
             continue
         with path.open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            file_identity = (stat.st_dev, stat.st_ino)
             line_number = 0
             while True:
                 offset = handle.tell()
@@ -277,6 +284,7 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                         ordinal=ordinal,
                         source_index=source_index,
                         line_number=line_number,
+                        file_identity=file_identity,
                     )
                 )
                 ordinal += 1

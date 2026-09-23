@@ -51,6 +51,52 @@ def snapshot(output):
     return {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
 
 
+@pytest.mark.parametrize(
+    "latest", ["unknown", "terminal", "omitted", "success", "agent_failure", "no_answer", "exhausted"]
+)
+def test_judge_retry_inputs_use_history_without_replacing_latest_status(prepared_run, latest):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(5)[0]
+        attempts = [row | {"_ng_attempt_index": i} for i in range(4)]
+        for attempt in attempts:
+            store.record_dispatch(attempt)
+        for index in [1, 0, 2]:  # Arrival order differs from attempt order; attempt 2 has no saved answer.
+            result = attempts[index] | {"_ng_failure_class": "judge_failed"}
+            if index < 2:
+                result["response"] = {"id": f"answer-{index}"}
+            store.record_outcome(result)
+        if latest == "omitted":
+            store.record_omission(attempts[3], "Intentionally skipped")
+        elif latest == "success":
+            store.record_outcome(attempts[3] | {"response": {"id": "completed"}, "reward": 1.0})
+        elif latest in {"terminal", "agent_failure", "no_answer"}:
+            store.record_outcome(
+                attempts[3]
+                | {
+                    "_ng_failure_class": "agent_run_error" if latest == "agent_failure" else "judge_failed",
+                    "_ng_failure_terminal": latest == "terminal",
+                }
+            )
+    reader = RolloutStore.read(output)
+    before = snapshot(output)
+    coverage = reader.coverage()
+    failures = reader.failures()
+    payloads = reader.reverification_failures(4 if latest == "exhausted" else 5)
+    if latest == "unknown":
+        assert len(payloads) == 1 and payloads[0]["response"] == {"id": "answer-1"}
+        assert payloads[0]["_ng_attempt_index"] == 1
+        [allocated] = reader.for_reverification([row | {"response": payloads[0]["response"]}])
+        assert allocated["_ng_attempt_index"] == 4
+    elif latest == "no_answer":
+        assert len(payloads) == 1 and "response" not in payloads[0]
+        assert payloads[0]["_ng_attempt_index"] == 3  # Do not substitute an older answer for a known latest failure.
+    else:
+        assert payloads == []
+    assert reader.coverage() == coverage and reader.failures() == failures
+    assert snapshot(output) == before
+
+
 @pytest.mark.parametrize("interruption", ["outcome_event", "fsync"])
 def test_flushed_payload_survives_interrupted_commit(prepared_run, monkeypatch, interruption):
     output, prepare = prepared_run
@@ -71,7 +117,7 @@ def test_flushed_payload_survives_interrupted_commit(prepared_run, monkeypatch, 
 
     monkeypatch.setattr(RolloutJournal, "_event", event)
     if interruption == "fsync":
-        monkeypatch.setattr(persistence, "os", SimpleNamespace(fsync=fsync))
+        monkeypatch.setattr(persistence, "os", SimpleNamespace(fsync=fsync, fstat=persistence.os.fstat))
     with pytest.raises(OSError, match="interrupted"):
         with store:
             row = store.pending(3)[0]

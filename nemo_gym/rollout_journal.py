@@ -20,6 +20,7 @@ therefore be recovered even if the collector died before journaling its outcome.
 The greatest dispatched attempt index wins, independent of arrival order.
 """
 
+import os
 import warnings
 from collections import Counter
 from collections.abc import Iterator
@@ -81,6 +82,7 @@ class RolloutRecord:
     length: int
     line_number: int = 0
     legacy_attempt_index: int | None = None
+    file_identity: tuple[int, int] | None = None
 
     def read(self) -> dict:
         """Read this record with its effective legacy attempt identity."""
@@ -108,9 +110,11 @@ def _indexed_records(path: Path) -> Iterator[tuple[RolloutRecord, dict]]:
     if not path.exists():
         return
     with path.open("rb") as file:
+        stat = os.fstat(file.fileno())
+        file_identity = (stat.st_dev, stat.st_ino)
         offset = 0
         for number, raw in enumerate(file, 1):
-            record = RolloutRecord(path, offset, len(raw), number)
+            record = RolloutRecord(path, offset, len(raw), number, file_identity=file_identity)
             offset += len(raw)
             if not raw.strip():
                 continue

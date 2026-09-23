@@ -57,7 +57,7 @@ from nemo_gym.rollout_collection import (
     _rollout_for_export,
     _rollout_request_debug_summary,
 )
-from nemo_gym.rollout_journal import RUN_ID_KEY, logical_rollout_id
+from nemo_gym.rollout_journal import RUN_ID_KEY
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.server_utils import (
@@ -980,10 +980,9 @@ class RolloutReverificationHelper(BaseModel):
                     skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
                 rollout_predicate = _recovery_rollout_predicate(skip_keys)
                 if store is not None:
-                    eligible = {logical_rollout_id(row) for row in store.pending(_get_max_rollout_attempts())}
-                    # Use normalized selected attempts, not raw sidecar lines: legacy
-                    # import can assign/reassign attempt indices without rewriting payloads.
-                    selected_rollouts = [row for row in store.failures() if logical_rollout_id(row) in eligible]
+                    # An unknown judge retry may still have a saved answer in an
+                    # earlier failure. Reuse it only as input to a new attempt.
+                    selected_rollouts = store.reverification_failures(_get_max_rollout_attempts())
 
             payloads_to_reverify = _prepare_payloads(
                 materialized_inputs_jsonl_fpath,

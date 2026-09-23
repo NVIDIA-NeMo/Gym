@@ -839,22 +839,29 @@ async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_con
     assert str(collection.failures_path_for(output)) in printed
 
 
-async def test_cancelled_reverify_append_stops_requests_before_closing_journal(runner_config, monkeypatch):
+@pytest.mark.parametrize("max_attempts", [2, 3])
+async def test_cancelled_reverify_append_stops_requests_before_closing_journal(
+    runner_config, monkeypatch, max_attempts
+):
     from nemo_gym.rollout_store import RolloutStore
 
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(max_attempts))
     started, stopped = asyncio.Event(), asyncio.Event()
     verify_requests = []
+    interrupted = True
 
     async def post(**kwargs):
         row = kwargs["json"]
         if kwargs["url_path"] == "/verify":
             verify_requests.append(row)
+            if not interrupted:
+                return FakeResponse(200, {"reward": 1.0, "response": row["response"]})
             started.set()
             try:
                 await asyncio.Future()
             finally:
                 stopped.set()
-        result = {"reward": 0, "response": {}}
+        result = {"reward": 0, "response": {"id": f"answer-{row['task']}"}}
         if row["task"] != 0:
             result["_ng_failure_class"] = "judge_failed"
         return FakeResponse(200, result)
@@ -882,6 +889,19 @@ async def test_cancelled_reverify_append_stops_requests_before_closing_journal(r
     assert stopped.is_set() and len(verify_requests) == 1
     coverage = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()
     assert (coverage["attempts"], coverage["successful"], coverage["failed"], coverage["unknown"]) == (4, 1, 1, 1)
+    interrupted = False
+    results = await reverification.RolloutReverificationHelper().run_from_config(config)
+    retried = verify_requests[1:]
+    expected_tasks = [2] if max_attempts == 2 else [1, 2]
+    assert [row["task"] for row in retried] == expected_tasks
+    assert all(row["response"] == {"id": f"answer-{row['task']}"} for row in retried)
+    assert all(row["_ng_attempt_index"] == (2 if row["task"] == 1 else 1) for row in retried)
+    assert len(results) == 1 + len(expected_tasks)
+    coverage = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()
+    assert coverage["unknown"] == int(max_attempts == 2)
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/run") == 3
+    assert await reverification.RolloutReverificationHelper().run_from_config(config) == results
+    assert len(verify_requests) == 1 + len(expected_tasks)
 
 
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])

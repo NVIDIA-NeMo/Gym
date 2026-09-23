@@ -337,6 +337,75 @@ def test_killed_worker_leaves_durable_unknown_attempt(run):
             process.join()
 
 
+@pytest.mark.parametrize("companion", ["manifest", "journal", "materialized", "failures", "all"])
+@pytest.mark.parametrize("alias", [False, True])
+async def test_aggregation_preserves_existing_target_recovery_artifacts(run, monkeypatch, companion, alias):
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.rollout_store import RolloutStore
+
+    source, _, rows = run
+    with writer(run) as history:
+        history.dispatch(rows[0])
+        save(run, history, rows[0], reward=1.0)
+    target = source.with_name("combined.jsonl")
+    target_rows = [dict(rows[0], _ng_task_index=99)]
+    manifest = RunManifest.create(source, target_rows, {}, {})
+    with RolloutStore.start_or_resume(target, lambda: (target_rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 0.5, "response": {"id": "keep-me"}})
+    companions = {
+        "manifest": manifest_path_for(target),
+        "journal": journal_path_for(target),
+        "materialized": materialized_path_for(target),
+        "failures": failures_path_for(target),
+    }
+    if companion != "all":
+        for name, path in companions.items():
+            if name != companion:
+                path.unlink()
+    destination = target
+    if alias:
+        destination = target.with_name("alias.jsonl")
+        destination.symlink_to(target)
+    before = {path.name: path.read_bytes() for path in source.parent.iterdir() if path.is_file()}
+    aggregate = AsyncMock()
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    with pytest.raises(ConfigError, match="recovery artifacts"):
+        await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(
+                input_glob=str(source), output_jsonl_fpath=str(destination), disable_health_check=True
+            )
+        )
+    assert {path.name: path.read_bytes() for path in source.parent.iterdir() if path.is_file()} == before
+    aggregate.assert_not_called()
+    if companion == "all":
+        assert RolloutStore.read(target).selected("success")[0]["response"] == {"id": "keep-me"}
+
+
+async def test_aggregation_can_replace_a_plain_projection_without_recovery_history(run, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.rollout_collection as collection
+
+    source, _, rows = run
+    with writer(run) as history:
+        history.dispatch(rows[0])
+        result = save(run, history, rows[0], reward=1.0)
+    target = source.with_name("combined.jsonl")
+    target.write_bytes(orjson.dumps(result | {"reward": 0.0}) + b"\n")
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    config = collection.RolloutAggregationConfig(
+        input_glob=str(source), output_jsonl_fpath=str(target), disable_health_check=True
+    )
+    for _ in range(2):
+        await collection.RolloutAggregationHelper().run_from_config(config)
+        assert list(read_records(target)) == [result]
+        assert coverage_path_for(target).exists()  # A reporting snapshot alone is not recovery history.
+
+
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])
 @pytest.mark.parametrize("merge_shards", [False, True])

@@ -77,6 +77,7 @@ from nemo_gym.rollout_journal import (
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
+    materialized_path_for,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -2383,6 +2384,24 @@ class RolloutAggregationHelper(BaseModel):
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+        output_fpath = Path(config.output_jsonl_fpath)
+        if config.merge_shards:
+            if output_fpath.resolve() in {Path(path).resolve() for path in input_paths}:
+                raise ConfigError("Merged output must not overwrite a source rollout artifact or its attempt history.")
+            # A merged projection cannot inherit another run's recovery history.
+            # Inspect both names when the destination is a symlink to a saved run.
+            for target in {output_fpath, output_fpath.resolve()}:
+                for companion in (
+                    manifest_path_for(target),
+                    journal_path_for(target),
+                    materialized_path_for(target),
+                    failures_path_for(target),
+                ):
+                    if companion.exists() or companion.is_symlink():
+                        raise ConfigError(
+                            f"Merged output has existing recovery artifacts ({companion}); "
+                            "choose a new output path to preserve the saved run."
+                        )
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
@@ -2413,12 +2432,9 @@ class RolloutAggregationHelper(BaseModel):
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
         results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
 
-        output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         if config.merge_shards:
-            if output_fpath.resolve() in {Path(path).resolve() for path in input_paths}:
-                raise ConfigError("Merged output must not overwrite a source rollout artifact or its attempt history.")
             print(f"Merging shards into {output_fpath}")
             with output_fpath.open("wb") as out:
                 for r in results:

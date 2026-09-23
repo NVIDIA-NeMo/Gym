@@ -262,7 +262,8 @@ class RolloutStore:
         self._state.check_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
         raw = orjson.dumps(result) + b"\n"
-        record = RolloutRecord(Path(file.name), file.tell(), len(raw))
+        stat = os.fstat(file.fileno())
+        record = RolloutRecord(Path(file.name), file.tell(), len(raw), file_identity=(stat.st_dev, stat.st_ino))
         file.write(raw)
         file.flush()
         if sync:
@@ -303,6 +304,33 @@ class RolloutStore:
     def failures(self) -> list[dict]:
         """Latest failure payloads, including terminal skips classified as omitted."""
         return self.selected("failure") + self.selected("omitted")
+
+    def reverification_failures(self, max_attempts: int) -> list[dict]:
+        """Find saved judge inputs without changing the latest attempt's status.
+
+        An interrupted judge retry has no outcome of its own. Only in that
+        unknown state, reuse the newest prior judge failure with a saved answer.
+        Eligibility, terminality, and the retry budget still use the latest state.
+        """
+        eligible = [logical_rollout_id(row) for row in self.pending(max_attempts)]
+        unknown = {identity for identity in eligible if self._state.disposition(identity) == "unknown"}
+        prior: dict[str, list[tuple[int, RolloutRecord]]] = {}
+        for (identity, attempt), outcome in self._state.payloads.items():
+            if identity in unknown and outcome.failure_class == "judge_failed":
+                prior.setdefault(identity, []).append((attempt, outcome.record))
+        rows = []
+        for identity in eligible:
+            latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
+            if latest is not None:
+                if latest.failure_class == "judge_failed":
+                    rows.append(latest.record.read())
+                continue
+            for _, record in sorted(prior.get(identity, []), key=lambda item: item[0], reverse=True):
+                row = record.read()
+                if isinstance(row.get("response"), dict):
+                    rows.append(row)
+                    break
+        return rows
 
     def for_reverification(self, payloads: list[dict]) -> list[dict]:
         """Allocate new attempt identities without dispatching or changing files."""
