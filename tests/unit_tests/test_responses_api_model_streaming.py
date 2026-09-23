@@ -586,6 +586,31 @@ class TestSynthesizeSSE:
         assert len(completed["output"]) == 1
 
     @pytest.mark.parametrize(
+        "status,details,error",
+        [
+            ("incomplete", {"reason": "max_output_tokens"}, None),
+            ("incomplete", {"reason": "content_filter"}, None),
+            ("failed", None, {"code": "server_error", "message": "Backend failed"}),
+        ],
+    )
+    def test_unsuccessful_terminal_preserves_partial_reasoning_and_usage(self, status, details, error) -> None:
+        partial = {**_message_item("Partial answer"), "status": "incomplete"}
+        response = _build_response([ITEM_FIXTURES["reasoning"], partial]).model_dump(mode="json")
+        response.update(status=status, incomplete_details=details, error=error)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            f"response.{status}",
+        ]
+        assert events[1]["item"] == response["output"][0]
+        assert events[2]["item"]["status"] == "incomplete"
+        assert events[-1]["response"] == response
+        assert response == original
+
+    @pytest.mark.parametrize(
         "details,expected",
         [
             (
@@ -707,6 +732,13 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _IncompleteModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response([ITEM_FIXTURES["reasoning"]]).model_dump(mode="json")
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return NeMoGymResponse.model_validate(response)
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -716,6 +748,19 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
+        client, _ = _client(_IncompleteModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": "task"})
+        assert response.status_code == 200
+        assert "event: response.completed" not in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["type"] == "response.incomplete"
+        terminal = events[-1]["response"]
+        assert terminal["status"] == "incomplete"
+        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["usage"]["total_tokens"] == 10
+        assert terminal["output"][0]["summary"][0]["text"] == "thinking"
+
     def test_streaming_codex_reasoning_replay_keeps_history(self) -> None:
         client, server = _client(_EchoModel)
         reasoning = {
