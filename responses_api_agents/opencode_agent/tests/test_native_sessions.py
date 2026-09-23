@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException, Request
@@ -24,6 +25,7 @@ from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxResult
 
 def seed() -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
+        agent_session_id=f"opencode-test-{uuid4().hex}",
         episode_id=EpisodeId(rollout_id="opencode-smoke", attempt=2),
         task_id=TaskId(taskset="swe-pro", task_id="task"),
         sandbox_access={
@@ -881,3 +883,94 @@ def test_close_response_cookie_blocks_legacy_run(setup):
         response = client.post("/run", json={"responses_create_params": {"input": "task"}})
         assert response.status_code == 409
     agent.server_client.post.assert_not_called()
+
+
+async def test_caller_assigned_seed_is_serialized_and_binds_all_inputs(setup):
+    agent, sandbox = setup
+    body = seed()
+    first_request = Request({"type": "http", "session": {}})
+    retry_request = Request({"type": "http", "session": {}})
+    first, retry = await asyncio.gather(
+        agent.seed_agent_session(first_request, body), agent.seed_agent_session(retry_request, body)
+    )
+    assert first.agent_session_id == retry.agent_session_id == body.agent_session_id
+    assert sandbox.exec.await_count == 2
+    changed = body.model_copy(deep=True)
+    changed.sandbox_access.workdir = "/different"
+    with pytest.raises(HTTPException, match="different seed inputs"):
+        await agent.seed_agent_session(retry_request, changed)
+    await agent.close_agent_session(
+        Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    )
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_close_without_seed_cookie_blocks_delayed_seed(setup):
+    agent, sandbox = setup
+    body = seed()
+    request = Request({"type": "http", "session": {}})
+    close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    assert (await agent.close_agent_session(request, close)).agent_session_id == body.agent_session_id
+    with pytest.raises(HTTPException, match="already closed"):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    sandbox.exec.assert_not_awaited()
+    sandbox.disconnect.assert_not_awaited()
+
+
+async def test_close_waits_for_inflight_seed_even_without_cookie(setup):
+    agent, sandbox = setup
+    body = seed()
+    entered, release = asyncio.Event(), asyncio.Event()
+    initialize = agent._initialize_agent_session_state
+
+    async def delayed_initialize(*args):
+        entered.set()
+        await release.wait()
+        return await initialize(*args)
+
+    with patch.object(agent, "_initialize_agent_session_state", delayed_initialize):
+        seeded = asyncio.create_task(agent.seed_agent_session(Request({"type": "http", "session": {}}), body))
+        await entered.wait()
+        closed = asyncio.create_task(
+            agent.close_agent_session(
+                Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(body.agent_session_id))
+            )
+        )
+        await asyncio.sleep(0)
+        assert not closed.done()
+        release.set()
+        await seeded
+        await closed
+    assert not agent._native_sessions
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("fail_cleanup", [False, True])
+async def test_abandoned_session_expires_and_failed_cleanup_stays_closed_to_activation(setup, fail_cleanup):
+    agent, sandbox = setup
+    agent.config.session_lifetime_seconds = 0.01
+    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}})
+    body = seed()
+    await agent.seed_agent_session(request, body)
+    if fail_cleanup:
+        sandbox.disconnect.side_effect = RuntimeError("provider unavailable")
+    expiry = agent._native_session_expiry_tasks[body.agent_session_id]
+    await asyncio.wait_for(asyncio.shield(expiry), 2)
+    sandbox.disconnect.assert_awaited_once()
+    assert bool(agent._native_sessions) is fail_cleanup
+    with pytest.raises(HTTPException):
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    if fail_cleanup:
+        sandbox.disconnect.side_effect = None
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
+
+
+async def test_caller_session_id_is_never_used_as_a_filesystem_path(setup):
+    agent, sandbox = setup
+    body = seed().model_copy(update={"agent_session_id": "../../outside; echo untrusted"})
+    request = Request({"type": "http", "session": {}})
+    await agent.seed_agent_session(request, body)
+    state = agent._native_sessions[body.agent_session_id]
+    assert Path(state.directory).parent == Path("/tmp/nemo-gym-opencode-sessions")
+    assert body.agent_session_id not in state.directory
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))

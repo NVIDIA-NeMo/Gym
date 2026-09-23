@@ -21,6 +21,7 @@ opencode_agent:
       context_window: 262144
       timeout: 10800
       setup_timeout: 600
+      session_lifetime_seconds: 21600
       session_close_timeout_seconds: 30
       session_close_retry_window_seconds: 300
 

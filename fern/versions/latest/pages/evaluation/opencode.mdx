@@ -31,19 +31,21 @@ Resources implementation that supports native sessions and returns `SandboxAcces
 SWE-bench Pro implements that Resources contract. The model server's advertised
 address must be reachable from inside the task sandbox.
 
-The [native SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/configs/opencode_agent_swebench_pro_native.yaml)
-provides those bindings. Add your model and sandbox provider configurations when
-starting the servers. This composition targets the native episode API and deliberately
-has no flat-row `datasets` entry.
+The [native SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/opencode_native.yaml)
+provides those bindings and selects `environment_routing_mode: taskset`. It routes
+`swebench_pro:smoke` tasks to the `swebench_pro_opencode` EnvironmentServer. Add your
+model and sandbox provider configurations when starting the servers. The earlier
+`opencode_agent_swebench_pro_native.yaml` path includes this composition and preserves
+its direct API deployment alias.
 
 ```yaml
 config_paths:
-  - environment_servers/single_agent/configs/single_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
   - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
 
-single_agent_environment_server:
+single_agent_turn:
   environment_servers:
-    single_agent:
+    single_agent_turn:
       agent_server:
         type: responses_api_agents
         name: opencode_agent
@@ -65,11 +67,35 @@ opencode_agent:
       setup_timeout: 900
 ```
 
-Submit a `SingleAgentEpisodeRequest` to **EnvironmentServer `/run`**. Its `task.task_input`
-contains `responses_create_params` and the Resources-specific `task_data`. The episode
-identity carries `rollout_id` and `attempt`. Existing flat rows used by `gym eval run`
-are not native episode requests; changing an agent name does not migrate those rows
-or their Resources lifecycle.
+For native collection, materialize prepared SWE-bench Pro rows and run the collector
+against the started composition:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
+    benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+    /tmp/swebench_pro_native.jsonl
+
+gym env start \
+    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --input /tmp/swebench_pro_native.jsonl \
+    --output results/opencode-native.jsonl
+```
+
+Add a reachable model endpoint and sandbox provider to the deployment configuration.
+The materializer's default taskset is `swebench_pro:smoke`; a different taskset needs a
+matching `environment_server_routes` entry. Each materialized row has `task_id` and
+`task_input`, with prompt controls under `task_input.responses_create_params` and
+benchmark data under `task_input.task_data`. Grader data never enters the agent prompt.
+Do not use `--agent` or `--agent-type` to route these native rows.
+
+The collector wraps each row in a `SingleAgentTurnRequest` and calls **EnvironmentServer
+`/run`**. Direct API clients can submit the same request with explicit `episode_id`
+(`rollout_id` and `attempt`) and `task`. The EnvironmentServer calls the agent's
+attempt-qualified `/v1/responses`, never its legacy `/run`.
 
 EnvironmentServer seeds Resources, opens the agent session, activates it once, closes
 the agent, verifies the task, and closes Resources. The agent calls the Gym model
@@ -106,9 +132,13 @@ Session close requires a positive cleanup receipt, removal of adapter files, and
 disconnect before verification proceeds. Unknown launch outcomes and unconfirmed
 cleanup fail closed and retain state for retries. Successful close receipts remain
 available for `session_close_retry_window_seconds` (300 seconds by default).
-State is process-local, so native mode requires one worker. Failed sessions need owner
-recovery or process restart; there is no cross-worker crash recovery. This process
-cleanup prevents verification races and is not a security boundary against hostile code.
+Caller-assigned session IDs are idempotent for identical seed inputs. Close accepts an
+explicit ID without a cookie when the seed response is lost, and closing an unknown ID
+blocks a delayed seed. Session files use independent random paths. Abandoned sessions
+expire after `session_lifetime_seconds` (21600 by default); failed cleanup retains the
+closing state and logs the failure so activation stays blocked. State is process-local,
+so native mode requires one worker and there is no cross-worker crash recovery. This
+process cleanup prevents verification races and is not a security boundary against hostile code.
 
 Text, reasoning, tool results, partial output, and usage are recovered from OpenCode's
 SQLite session tree. Auxiliary calls not persisted as assistant messages can remain
@@ -132,8 +162,10 @@ does not use the agent's legacy `sandbox_provider` or `sandbox_config` fields.
 `setup_timeout` bounds native runtime installation.
 
 The existing SWE-bench Verified/Multilingual/Pro, DeepSWE, and Terminal Bench 2.1
-flat-row recipes explicitly select `legacy_sandbox` until their collection paths are
-migrated. ViBench uses the compatibility implementation in `opencode_agent.legacy`
+flat-row recipes explicitly select `legacy_sandbox` and are fronted by a compatibility
+EnvironmentServer that still delegates orchestration to agent `/run`. Use
+`swebench/pro/opencode_native` for native SWE-bench Pro collection. ViBench uses the
+compatibility implementation in `opencode_agent.legacy`
 because it owns and harvests its build sandbox. This keeps the package name stable
 while those lifecycles migrate; the compatibility bridge is outside the native path.
 
@@ -147,8 +179,9 @@ gym eval run \
     --model-type vllm_model
 ```
 
-The resulting instance is `terminal_bench_2_1_opencode_agent`. The native default is
-intended for EnvironmentServer composition, not for swapping into a flat-row collector.
+The resulting instance is `terminal_bench_2_1_opencode_agent`. The native default requires
+taskset-routed EnvironmentServer composition and materialized rows; an agent-only swap
+does not migrate the Resources lifecycle.
 
 Local callers retain `model_server=None` with custom OpenCode provider configuration,
 or can bind a Gym model server. OpenCode is installed lazily on the first local

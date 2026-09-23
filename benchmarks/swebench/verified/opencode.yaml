@@ -33,4 +33,4 @@ swebench_verified_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: swebench_verified_opencode_sandboxed_agent
+        name: swebench_verified_opencode_agent

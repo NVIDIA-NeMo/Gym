@@ -28,4 +28,4 @@ terminal_bench_2_1_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: terminal_bench_2_1_opencode_sandboxed_agent
+        name: terminal_bench_2_1_opencode_agent

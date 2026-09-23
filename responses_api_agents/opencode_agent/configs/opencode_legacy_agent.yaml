@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Compatibility profile for existing flat-row agent /run benchmark recipes.
-# Resources native sessions and EnvironmentServer are not used by this profile.
+# A compatibility EnvironmentServer delegates to agent /run; native sessions are not used.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
