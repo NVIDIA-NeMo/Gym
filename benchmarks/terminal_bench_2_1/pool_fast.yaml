@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/terminal_bench_2_1/pool.yaml
+
+terminal_bench_2_1_pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      sandbox_timeout: 3600
+      # TB 2.1 images lack curl, so upload a pre-downloaded Linux pool binary instead.
+      local_pool_binary_path: ${oc.env:POOL_BINARY_PATH,null}
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 1

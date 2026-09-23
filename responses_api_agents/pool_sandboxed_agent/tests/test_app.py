@@ -16,6 +16,8 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pool_sandboxed_agent.app import (
@@ -96,6 +98,25 @@ def test_build_command_installs_and_runs_pool_under_its_own_home() -> None:
     assert f"-f {home}/prompt.txt --verbose" in command
     assert f"> {home}/events.jsonl" in command
     assert 'echo "pool run finished rc=$?"' in command
+
+
+@pytest.mark.parametrize(
+    "remote_path, local_path, expected",
+    [
+        (None, None, 'curl -fsSL -o "$installer"'),
+        ("/mnt/pool", None, "install -m 0755 /mnt/pool /tmp/pool-home/bin/pool"),
+        ("/mnt/pool", "/opt/pool", "chmod 0755 /tmp/pool-home/bin/pool"),
+    ],
+)
+def test_install_command_by_binary_source(remote_path: str | None, local_path: str | None, expected: str) -> None:
+    agent = _agent()
+    agent.config.remote_pool_binary_path = remote_path
+    agent.config.local_pool_binary_path = local_path
+
+    command = agent._install_command("/tmp/pool-home")
+
+    assert expected in command
+    assert ("curl" in command) == (remote_path is None and local_path is None)
 
 
 def test_pool_agent_config_is_non_streaming_and_scales_compaction() -> None:
