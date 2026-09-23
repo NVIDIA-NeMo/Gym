@@ -43,12 +43,15 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
+      - name: Merge current main for PR validation
+        run: ./scripts/ci/merge_current_main.sh
+
       - name: Classify changes
         id: changes
         uses: ./.github/actions/classify-changes
         with:
           base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
-          force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}
+          force-run-all: ${{ inputs.base-ref == '' }}
 
   # Core library unit tests (run once on a full run) + the changed-servers path. The full
   # server suite is sharded into the parallel `server-suite` matrix below.
@@ -63,6 +66,10 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Merge current main for PR validation
+        run: ./scripts/ci/merge_current_main.sh
 
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
@@ -145,6 +152,10 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Merge current main for PR validation
+        run: ./scripts/ci/merge_current_main.sh
 
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
