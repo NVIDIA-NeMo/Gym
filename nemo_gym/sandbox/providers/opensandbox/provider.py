@@ -2081,16 +2081,13 @@ class OpenSandboxProvider:
                     raise
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
-        stop_error: Exception | None = None
-        try:
-            await self._await_sdk_operation(
-                kill_ignore_missing,
-                operation="kill",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=self._operations.close_timeout_s,
-            )
-        except Exception as e:
-            stop_error = e
+        # If termination fails, keep the SDK handle usable for the owner's retry.
+        await self._await_sdk_operation(
+            kill_ignore_missing,
+            operation="kill",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._operations.close_timeout_s,
+        )
 
         close_error: Exception | None = None
         try:
@@ -2108,14 +2105,6 @@ class OpenSandboxProvider:
                 e,
             )
 
-        if stop_error is not None:
-            if close_error is not None:
-                raise RuntimeError(
-                    "Failed to stop and close OpenSandbox sandbox "
-                    f"{handle.sandbox_id!r}: stop_error={stop_error!r}, "
-                    f"close_error={close_error!r}"
-                ) from stop_error
-            raise stop_error
         if renewal_error is not None:
             raise RuntimeError(
                 f"OpenSandbox lifetime renewal failed for sandbox {handle.sandbox_id!r}"

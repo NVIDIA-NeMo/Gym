@@ -597,31 +597,27 @@ class AsyncSandbox:
     async def stop(self) -> None:
         if self._closed:
             return
-        try:
-            if self._handle is not None and not self._stopped:
-                # A failed close leaves the sandbox started so a later stop() retries it (the
-                # compose group relies on this); the count follows the same rule and drops only
-                # once the provider has actually released the sandbox.
-                if is_span_group_enabled(GymSpanGroup.SANDBOX):
-                    with managed_span(
-                        GymSpanGroup.SANDBOX,
-                        "gym.sandbox.stop",
-                        **{
-                            "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
-                            "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        },
-                    ):
-                        await self._provider.close(self._handle)
-                else:
+        # A failed remote stop is retryable. Do not close its client or mark the
+        # wrapper closed until the provider confirms container teardown.
+        if self._handle is not None and not self._stopped:
+            if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                with managed_span(
+                    GymSpanGroup.SANDBOX,
+                    "gym.sandbox.stop",
+                    **{
+                        "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                    },
+                ):
                     await self._provider.close(self._handle)
-                self._stopped = True
-                if self._counted_active:
-                    self._counted_active = False
-                    record_sandbox_active(-1, provider=self._telemetry_provider_name())
-        finally:
-            if self._owns_provider:
-                await self._provider.aclose()
-                self._closed = True
+            else:
+                await self._provider.close(self._handle)
+            self._stopped = True
+            if self._counted_active:
+                self._counted_active = False
+                record_sandbox_active(-1, provider=self._telemetry_provider_name())
+        if self._owns_provider:
+            await self._provider.aclose()
         self._closed = True
 
     async def disconnect(self) -> None:

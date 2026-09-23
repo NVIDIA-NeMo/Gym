@@ -1398,7 +1398,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         async def close(self) -> None:
             raise RuntimeError("close failed")
 
-    with pytest.raises(RuntimeError, match="Failed to stop and close"):
+    with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-2",

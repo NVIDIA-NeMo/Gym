@@ -12,6 +12,20 @@ test to pass.
 
 ## Prepare data
 
+For a Hermes rollout using this resources server, see the
+[sandboxed Hermes launch instructions](../../responses_api_agents/hermes_sandboxed_agent/README.md).
+The agent uses the same task preparation and verifier as OpenCode. Command-based
+agents can request `create_pty=false` at `/seed_session`; the default still creates
+a terminal. Connectable providers also return `sandbox_descriptor`, and agents
+can release an abandoned task through the cookie-scoped `/close_session` endpoint.
+
+Optional local SIFs must have provenance manifests produced by
+`python -m resources_servers.swebench_pro.image_cache`. Set `image_template` to
+`/cache/sifs/{image_digest_hex}.sif`; the helper names files by the pinned digest.
+Before starting a container, the server checks the original registry URI and
+the SIF checksum against the manifest. Seed and verify responses include
+`image_provenance`; the registry path remains unchanged when no template is set.
+
 ```bash
 uv run python benchmarks/swebench/pro/prepare.py
 ```
