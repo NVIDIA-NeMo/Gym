@@ -27,3 +27,21 @@ The Archipelago image is reused when present. If it is missing and automatic bui
 configured pinned Archipelago commit and builds the SIF once. The lightweight Stirrup runtime is pinned in
 `stirrup-requirements.txt`, built once inside that image, and cached under `deps/`; it does not vendor either source
 repository into Gym.
+
+## Fixed-port worlds and network isolation
+
+Some world images start their gateway and MCP servers on fixed ports (for example 8000 and 8100-8107). Several
+rollouts on one node then collide in the shared network namespace. Give each sandbox its own namespace:
+
+```bash
+++apex_agent_apptainer_extra_start_args='[--net,"--network=none",--containall,--cleanenv,--writable-tmpfs,--fakeroot]'
+```
+
+Unprivileged Apptainer only offers the `none` network, so the sandbox loses its route to the model server, and the
+Stirrup client runs inside the sandbox. With `policy_egress_relay: auto` (the default) the agent enables the relay when
+the apptainer start arguments contain `--net` or a `--network` option (`always` and `never` force it), opens
+a unix socket on the host that forwards to the model server, binds it into the sandbox at `/egress/policy.sock`, and
+`run_stirrup_rollout` points the client at a loopback listener that forwards to that socket. Unix sockets ignore
+network namespaces, so no other configuration is needed. Only plain-HTTP model endpoints are supported. Tools that
+need the internet (EDGAR, web search) do not work in an isolated sandbox; keep the default shared network for those
+worlds.
