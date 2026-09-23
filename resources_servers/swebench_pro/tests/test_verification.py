@@ -228,6 +228,9 @@ def _make_repo(path: Path) -> str:
     (path / "src").mkdir(parents=True)
     (path / "src" / "sorted.js").write_text("module.exports = OLD;\n")
     _git(path, "init", "-q", ".")
+    # Tests copy this repository; background maintenance must not race that snapshot.
+    _git(path, "config", "maintenance.auto", "false")
+    _git(path, "config", "gc.auto", "0")
     _git(path, "config", "user.email", "t@example.com")
     _git(path, "config", "user.name", "t")
     _git(path, "add", "-A")
