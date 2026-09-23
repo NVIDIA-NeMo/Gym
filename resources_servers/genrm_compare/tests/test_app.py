@@ -897,7 +897,7 @@ class TestGenRMCompareResourcesServer:
         assert cohort.phase == "failed"
         assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
-    async def test_input_materialization_failure_preserves_registered_waiter(self, config, monkeypatch: MonkeyPatch):
+    async def test_input_materialization_failure_releases_legacy_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         run_compare = AsyncMock(return_value=([1.0, 2.0], {}, [], []))
@@ -915,16 +915,25 @@ class TestGenRMCompareResourcesServer:
             raise ValueError("response conversion failed")
 
         monkeypatch.setattr(server, "_comparison_response", fail_model_dump)
-        with pytest.raises(ValueError, match="response conversion failed"):
+        with pytest.raises(HTTPException) as error:
             await server.verify(self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503 and "response conversion failed" in error.value.detail
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(first, 0.5)
+        assert error.value.status_code == 503 and "fresh _ng_group_id" in error.value.detail
         run_compare.assert_not_awaited()
-        assert cohort.phase == "collecting" and list(cohort.members) == [0]
-        assert cohort.collection_timeout_task is not None
-        assert not first.done() and not cohort.members[0].waiters[0].done()
+        assert cohort.phase == "failed" and list(cohort.members) == [0]
+        assert cohort.collection_timeout_task is None
+        assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
 
         monkeypatch.setattr(server, "_comparison_response", convert)
-        second = await server.verify(self._verify_request(1, task_index=26))
-        assert [(await first).reward, second.reward] == [1.0, 2.0]
+        with pytest.raises(HTTPException) as error:
+            await server.verify(self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503
+        recovered = await asyncio.gather(
+            *(server.verify(self._verify_request(i, task_index=26, group_id="fresh-conversion")) for i in range(2))
+        )
+        assert [result.reward for result in recovered] == [1.0, 2.0]
         run_compare.assert_awaited_once()
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):

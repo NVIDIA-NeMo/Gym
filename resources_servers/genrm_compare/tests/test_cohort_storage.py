@@ -120,17 +120,23 @@ async def test_compact_cohort_preserves_all_scoring_inputs_and_response_echo(ser
 
 
 @pytest.mark.parametrize("size", [2, 16])
-async def test_each_arrival_is_compacted_once_without_a_full_comparison_dump(server, monkeypatch, size):
+async def test_only_new_members_are_compacted_and_history_is_converted_once(server, monkeypatch, size):
     server.config.num_rollouts_per_prompt = size
     requests = [training_member(i) for i in range(size)]
     started, release = asyncio.Event(), asyncio.Event()
     dump_modes, compact_ids = [], []
     original_dump = NeMoGymResponse.model_dump
     original_compact = server._comparison_response
+    original_history = genrm._input_to_conversation_history
+    history_calls = []
 
     def dump(self, **kwargs):
         dump_modes.append(kwargs.get("mode", "python"))
         return original_dump(self, **kwargs)
+
+    def history(messages):
+        history_calls.append(messages)
+        return original_history(messages)
 
     def compact(response):
         compact_ids.append(response.id)
@@ -143,6 +149,7 @@ async def test_each_arrival_is_compacted_once_without_a_full_comparison_dump(ser
 
     monkeypatch.setattr(NeMoGymResponse, "model_dump", dump)
     monkeypatch.setattr(server, "_comparison_response", compact)
+    monkeypatch.setattr(genrm, "_input_to_conversation_history", history)
     server._run_single_comparison = judge
     tasks = [asyncio.create_task(server.verify(body)) for body in requests]
     await asyncio.wait_for(started.wait(), 1)
@@ -152,7 +159,8 @@ async def test_each_arrival_is_compacted_once_without_a_full_comparison_dump(ser
     await asyncio.gather(*tasks, duplicate)
     await server.verify(requests[0])
     assert dump_modes == ["json"] * (size + 2)
-    assert compact_ids == [r.response.id for r in requests] + [requests[0].response.id] * 2
+    assert compact_ids == [r.response.id for r in requests]
+    assert len(history_calls) == 1
 
 
 async def test_training_token_change_still_conflicts_with_identical_text(server):
@@ -231,7 +239,7 @@ async def test_count_eviction_uses_completion_order_and_protects_active_attempts
     await a
     server._prune_terminal_cohorts()
     assert [c.group_id for c in server._verify_cohorts.values()] == ["a"]
-    assert not server._active_group_cohorts
+    assert server._active_group_count == 0
 
 
 async def test_expired_active_watermark_does_not_block_expiry_of_later_completed_group(server, clock):
@@ -261,16 +269,16 @@ def test_pruning_all_active_watermarks_does_not_scan_or_evict_them(server, clock
         key = str(i)
         cohort = genrm._CohortState(prompt_digest="prompt", key=key, group_id=key)
         server._verify_cohorts[key] = cohort
-        server._active_group_cohorts[key] = cohort
-        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt", clock[0])
+        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt", clock[0], cohort)
+        server._active_group_count += 1
     if expired:
         clock[0] += 11
     server._latest_group_attempts = NoScanOrder(server._latest_group_attempts)
     server._prune_terminal_cohorts()
-    assert len(server._verify_cohorts) == len(server._active_group_cohorts) == 4097
+    assert len(server._verify_cohorts) == server._active_group_count == 4097
     assert len(server._latest_group_attempts) == 4097
     server._verify_cohorts.clear()
-    server._active_group_cohorts.clear()
+    server._active_group_count = 0
     server._latest_group_attempts.clear()
 
 
@@ -279,12 +287,17 @@ def assert_cohort_indices_match(server):
     assert server._terminal_cohorts == {
         key: cohort for key, cohort in cohorts.items() if cohort.phase in ("completed", "failed")
     }
-    assert server._active_group_cohorts == {
+    active = {
+        key: watermark.active_cohort
+        for key, watermark in server._latest_group_attempts.items()
+        if watermark.active_cohort is not None
+    }
+    assert active == {
         cohort.group_id: cohort
         for cohort in cohorts.values()
         if cohort.group_id is not None and cohort.phase in ("collecting", "evaluating")
     }
-    assert server._active_group_cohorts.keys() <= server._latest_group_attempts.keys()
+    assert server._active_group_count == len(active)
 
 
 async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, clock):
@@ -310,7 +323,7 @@ async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, c
     clock[0] += 1
     expiring = asyncio.create_task(server.verify(member(0, group="expire")))
     await asyncio.sleep(0)
-    cohort = server._active_group_cohorts["expire"]
+    cohort = server._latest_group_attempts["expire"].active_cohort
     await server._expire_collecting_cohort(cohort.key, cohort, 0)
     with pytest.raises(HTTPException):
         await expiring
@@ -323,7 +336,7 @@ async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, c
     server._prune_terminal_cohorts()
     assert not server._verify_cohorts
     assert not server._terminal_cohorts
-    assert not server._active_group_cohorts
+    assert server._active_group_count == 0
     assert not server._latest_group_attempts
 
 
@@ -345,36 +358,29 @@ async def test_attempt_bump_refreshes_watermark_order_for_expiry(server, clock):
     await first
 
 
-async def test_supersession_does_not_refail_a_terminal_cohort_from_stale_index(server):
+async def test_new_attempt_preserves_completed_record_and_owns_active_watermark(server):
     server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
     await complete(server, "a")
-    cohort = next(iter(server._verify_cohorts.values()))
-    server._active_group_cohorts["a"] = cohort
-    await server._supersede_older_group_attempts(group_id="a", new_attempt=1)
-    assert cohort.phase == "completed"
-    assert (await server.verify(member(0, group="a"))).reward == 3
-    server._active_group_cohorts.pop("a")
-
-
-async def test_invalid_terminal_index_entry_does_not_poison_later_cleanup(server, clock):
-    server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    waiting = asyncio.create_task(server.verify(member(0, group="active")))
+    completed = next(iter(server._verify_cohorts.values()))
+    first = asyncio.create_task(server.verify(member(0, group="a", attempt=1)))
     await asyncio.sleep(0)
-    active = server._active_group_cohorts["active"]
-    server._terminal_cohorts[active.key] = active
-    await complete(server, "done")
-    clock[0] += 11
-    server._prune_terminal_cohorts()
-    assert not server._terminal_cohorts
-    assert list(server._verify_cohorts.values()) == [active]
-    assert list(server._latest_group_attempts) == ["active"]
-    await server.verify(member(1, group="active"))
-    assert (await waiting).reward == 3
+    assert completed.phase == "completed" and completed.rewards == {0: 3.0, 1: 3.0}
+    active = server._latest_group_attempts["a"].active_cohort
+    assert active is not completed and active.group_attempt == 1
+    assert_cohort_indices_match(server)
+    await server.verify(member(1, group="a", attempt=1))
+    await first
+    assert_cohort_indices_match(server)
 
 
-@pytest.mark.parametrize("conversion", ["response", "history"])
-async def test_first_conversion_failure_does_not_create_any_cohort(server, monkeypatch, conversion):
+@pytest.mark.parametrize("conversion,existing_peer", [("response", False), ("history", False), ("response", True)])
+async def test_conversion_failure_fails_identified_group_and_releases_peers(
+    server, monkeypatch, conversion, existing_peer
+):
+    peer = asyncio.create_task(server.verify(member(0))) if existing_peer else None
+    if peer is not None:
+        await asyncio.sleep(0)
+
     def fail(*args):
         raise ValueError("bad request conversion")
 
@@ -382,11 +388,18 @@ async def test_first_conversion_failure_does_not_create_any_cohort(server, monke
         monkeypatch.setattr(server, "_comparison_response", fail)
     else:
         monkeypatch.setattr(genrm, "_input_to_conversation_history", fail)
-    with pytest.raises(ValueError, match="bad request conversion"):
-        await server.verify(member(0))
-    assert not server._verify_cohorts and not server._terminal_cohorts
-    assert not server._latest_group_attempts and not server._active_group_cohorts
-    assert not server._cohort_tasks
+    with pytest.raises(HTTPException) as error:
+        await server.verify(member(1 if existing_peer else 0))
+    assert error.value.status_code == 503 and "bad request conversion" in error.value.detail
+    if peer is not None:
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(peer, 0.5)
+        assert error.value.status_code == 503
+    cohort = next(iter(server._verify_cohorts.values()))
+    assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
+    assert_cohort_indices_match(server)
+    assert server._active_group_count == 0
+    assert cohort.collection_timeout_task is None and cohort.evaluation_task is None
 
 
 @pytest.mark.parametrize("stage", ["collection", "evaluation"])
@@ -418,7 +431,7 @@ async def test_task_start_failure_releases_registered_waiters_and_closes_corouti
         assert all(waiter.done() for waiter in waiters)
         assert len(rejected) == 1 and inspect.getcoroutinestate(rejected[0]) == inspect.CORO_CLOSED
         assert_cohort_indices_match(server)
-        assert not server._active_group_cohorts
+        assert server._active_group_count == 0
         for cohort in server._verify_cohorts.values():
             assert cohort.phase == "failed"
             assert all(m.response_obj is None and not m.waiters for m in cohort.members.values())

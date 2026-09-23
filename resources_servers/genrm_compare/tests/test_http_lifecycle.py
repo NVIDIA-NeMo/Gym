@@ -175,9 +175,9 @@ async def run(services, index, *, group="group", attempt=0):
     return result.status, await result.json()
 
 
-async def test_conversion_failure_keeps_http_peer_waiting_for_valid_replacement(services, monkeypatch):
-    async def verify(index):
-        payload = member(index).model_dump(mode="json", by_alias=True)
+async def test_conversion_failure_releases_http_peer_and_requires_new_attempt(services, monkeypatch):
+    async def verify(index, *, attempt=0):
+        payload = member(index, attempt=attempt).model_dump(mode="json", by_alias=True)
         payload["response"]["output"] = [
             {
                 "id": f"message-{index}",
@@ -203,11 +203,15 @@ async def test_conversion_failure_keeps_http_peer_waiting_for_valid_replacement(
         return original(response)
 
     monkeypatch.setattr(services.resource, "_comparison_response", fail_one)
-    status, _ = await verify(1)
-    assert status == 500
-    assert cohort.phase == "collecting" and list(cohort.members) == [0] and not first.done()
+    status, body = await verify(1)
+    assert status == 503 and "injected conversion failure" in body["detail"]
+    peer_status, peer_body = await asyncio.wait_for(first, 0.5)
+    assert peer_status == 503 and "injected conversion failure" in peer_body["detail"]
+    assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
+    assert services.resource._active_group_count == 0 and services.judge_calls == 0
     monkeypatch.setattr(services.resource, "_comparison_response", original)
-    results = await asyncio.gather(first, *(verify(i) for i in range(1, 4)))
+    assert (await verify(1))[0] == 503
+    results = await asyncio.gather(*(verify(i, attempt=1) for i in range(4)))
     assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
     assert services.judge_calls == 4
 
@@ -230,7 +234,7 @@ async def test_judge_task_start_failure_releases_all_http_waiters(services, monk
         assert "GenRM cohort task startup failed: RuntimeError: injected task startup failure" in body
     assert len(failures) == 1 and services.judge_calls == 0
     cohort = next(iter(services.resource._verify_cohorts.values()))
-    assert cohort.phase == "failed" and not services.resource._active_group_cohorts
+    assert cohort.phase == "failed" and services.resource._active_group_count == 0
     assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
 
 
