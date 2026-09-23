@@ -146,7 +146,7 @@ def _request() -> UserSimEpisodeRequest:
             task_id=TaskId(taskset="usersim:example", task_id="task"),
             task_input=UserSimTaskInput(
                 sampling={"locale": "en_US", "seed": 42},
-                agent_responses_create_params={
+                responses_create_params={
                     "user": {"input": [], "temperature": 0.8},
                     "assistant": {"input": [], "temperature": 0.2},
                     "judge": {"input": []},
