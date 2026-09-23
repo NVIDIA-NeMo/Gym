@@ -119,6 +119,7 @@ class _BaseExternalCaptureHandler(ABC):
         if context is None or not context.external_staging:
             return
         context.external_commit_coords = response_payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        context.external_worker_response_seen = True
         _strip_capture_transport_fields(response_payload)
 
     async def finalize_response(self, served_payload: dict[str, Any]) -> None:
@@ -137,6 +138,11 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             # UNRESOLVED — the ledger already carries this call's poison row.
+            return
+        if not context.external_worker_response_seen:
+            # Guard and context-overflow completions have no worker acknowledgement.
+            # Leave the call uncommitted for the middleware to record, without
+            # treating a synthetic completion as a lost worker acknowledgement.
             return
         try:
             await self._finalize_admitted_response(

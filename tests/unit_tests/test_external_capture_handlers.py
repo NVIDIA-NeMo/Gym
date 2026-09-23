@@ -304,6 +304,37 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
         _assert_poisoned(manifest, context, payload, case.expected_failure)
 
 
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+@pytest.mark.parametrize("previous_worker_response", [False, True])
+async def test_handler_leaves_synthetic_completion_uncommitted(handler_cls, previous_worker_response) -> None:
+    handler = handler_cls()
+    if previous_worker_response:
+        previous_context = _root_context(InMemoryLineageStore())
+        payload = _transport_payload()
+        payload["ng_commit_coords"] = _staged_coords()
+        await _prepare_and_finalize(handler, previous_context, payload)
+        assert previous_context.committed
+
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    token = set_token_sink(context)
+    try:
+        # Sending a request does not imply that a worker completion arrived:
+        # context-overflow errors are converted into synthetic completions.
+        handler.prepare_request({})
+        await handler.finalize_response(
+            {"id": "synthetic", "choices": [{"message": {"role": "assistant", "content": None}}]}
+        )
+    finally:
+        reset_token_sink(token)
+
+    assert not context.committed
+    manifest = await store.manifest("rollout-1")
+    assert manifest["records"] == []
+    assert manifest["failures"] == []
+
+
 class _FaultyLedger(InMemoryLineageStore):
     """Ledger whose writes can be made to raise, to exercise the poison fallback paths."""
 
